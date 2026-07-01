@@ -72,6 +72,41 @@ Decisions made by the project owner (2026-07-01):
 | 3 | Legacy interop | **All must-haves for v1**: Telnet/ANSI BBS access, Hotline protocol compatibility (real Hotline clients can connect), and message syndication (FidoNet + QWK + NNTP). The **RabbitHole-native protocol remains the flagship** — comprehensive, modern, best-in-class. |
 | 4 | Federation | **First-class from day one** — the data model, identity, and protocol are federated by design; server-to-server sync ships as a core wave, not an afterthought. |
 
+Follow-up decisions (2026-07-01, round 2):
+
+| # | Decision | Choice |
+|---|----------|--------|
+| 5 | Native port | **4653** (H-O-L-E on a phone keypad); web/WS 4654, tracker 4655 |
+| 6 | Zmodem over telnet | **Yes** — Wave 6 |
+| 7 | Door games | **Yes** — Wave 6 (DOOR32.SYS + telnet/PTY bridge) |
+| 8 | Themed naming | **Yes** — Wonderland/burrow naming across features & binaries (see §2.1 glossary) |
+| 9 | Public infrastructure | **Yes** — the project runs a default public tracker/directory, pre-configured in clients (user-removable) |
+| 10 | GUI platform order | **Desktop first, then mobile** (current wave order) |
+| 11 | Wave order | **Confirmed as planned** |
+| 12 | Reticulum | **Added** — Wave 14 (mesh/off-grid transport + LXMF bridge) |
+| 13 | Theming | **Added** — light/dark + client theme packs + server-published theme bundles (§9.11) |
+| — | License | Still open (owner deciding — §16) |
+| — | E2EE timing | Default Wave 13 stands unless owner pulls it earlier (§16) |
+
+### 2.1 Naming glossary (themed)
+
+| Thing | Name | Binary / identifier |
+|---|---|---|
+| Server daemon | **Burrow** — "run your own burrow" | `burrow` (`apps/server`) |
+| Client CLI | rabbit | `rabbit` (`apps/cli`) |
+| Client TUI | rabbit TUI | `rabbit-tui` (`apps/tui`) |
+| Native GUI app | RabbitHole | `RabbitHole` (Tauri) |
+| Tracker + directory | **Looking Glass** | `looking-glass` (`apps/tracker`) |
+| Swarm subsystem | **The Warren** | `crates/swarm` |
+| Request system | **Wishing Well** | family in RHP |
+| Invisible presence | **Cheshire mode** | presence state |
+| Share links | rabbit links | `rabbit://` |
+| Federation peering | **Tunnels** | S2S channels |
+| Flagship public directory | **The Looking Glass** (project-run) | domain TBD |
+
+Naming stays evocative but never obscures function — every themed name pairs with a
+plain description in UI and docs.
+
 Derived defaults (revisable, flagged in [§16](#16-open-questions--defaults)):
 
 - Primary transport QUIC (quinn + rustls), mandatory WebSocket fallback for browsers.
@@ -150,9 +185,9 @@ rabbithole/
 │  ├─ cli/                       # rabbit — clap CLI client
 │  ├─ tui/                       # rabbit-tui — ratatui client
 │  ├─ gui/                       # RabbitHole — Tauri v2 app (desktop + mobile)
-│  ├─ server/                    # rabbithole-server — headless daemon (quinn + axum)
+│  ├─ server/                    # burrow — headless daemon (quinn + axum)
 │  ├─ server-tui/                # sysop console (local or remote-admin over RHP)
-│  └─ tracker/                   # rabbithole-tracker — directory/tracker service
+│  └─ tracker/                   # looking-glass — directory/tracker service
 └─ docs/ Dockerfile dist-workspace.toml tauri.conf.json
 ```
 
@@ -362,11 +397,14 @@ peers can require key continuity.
 
 1. **`.well-known/rabbithole/server`** — signed JSON: endpoints, ports, versions,
    key fingerprints, capabilities, guest policy. Authoritative bootstrap.
-2. **Trackers** (`apps/tracker`, Hotline heritage modernized): servers register signed
-   descriptors with heartbeats; clients browse; categories + rich metadata (name,
-   description, topics, user count, region, federation openness, uptime). Trackers
-   gossip registrations to each other. Also speaks the **legacy Hotline tracker
-   protocol** on 5498 so old clients can browse (§10.2).
+2. **Trackers — Looking Glass** (`apps/tracker`, Hotline heritage modernized): servers
+   register signed descriptors with heartbeats; clients browse; categories + rich
+   metadata (name, description, topics, user count, region, federation openness,
+   uptime). Trackers gossip registrations to each other. Also speaks the **legacy
+   Hotline tracker protocol** on 5498 so old clients can browse (§10.2).
+   **The project runs a flagship public instance ("The Looking Glass", domain TBD)**
+   pre-configured in all clients as the default server browser — user-removable, and
+   any operator can run their own; the pre-config is a convenience, not a dependency.
 3. **Global directory** — aggregating index over tracker gossip + `.well-known` crawl,
    with health metrics and optional catalog/topic search. Index, not authority:
    everything it serves is server-signed and verifiable.
@@ -507,14 +545,43 @@ peers can require key continuity.
   declined); voting; claim workflow; fulfillment links the delivered file/board;
   notifications to requester; admin curation.
 
-### 9.11 Administration
+### 9.11 Theming & appearance
+
+**Client-side themes (all rich clients: GUI, web, TUI where applicable):**
+- **Light/dark mode**: follows the OS preference by default, manually overridable;
+  every UI surface (Leptos SPA in Tauri/web, TUI palettes) ships both.
+- **Theme packs**: named token sets (colors, fonts, spacing, sounds, chrome density).
+  Built-ins: *Clean* (modern default, light+dark), *Retro* (CP437 fonts, scanline
+  accents, 16-color ANSI palette), *High Contrast* (accessibility). User themes are
+  token files, shareable — not arbitrary CSS.
+- Design tokens are defined once in `ui-web` and mirrored into the TUI palette so a
+  theme means the same thing on every surface.
+
+**Server-published theming ("inner theming"):**
+- A server publishes a signed, content-addressed **theme bundle** clients apply while
+  connected: logo (raster + ANSI variants), login/welcome banner art, accent color
+  tokens, custom file/board/room icon set, room & board header art, optional sound
+  set, optional CP437 display font hint for the retro theme.
+- Delivered in the welcome bundle (§5.3) and cached by hash; updates push live.
+- **Safety rails**: bundles are structured data (tokens + size-capped, format-limited
+  assets) — never executable content or arbitrary styles; clients enforce contrast
+  minimums, may downscale assets, and users can cap ("minimal server theming") or
+  disable server theming entirely per server or globally. Server theming layers *on
+  top of* the user's light/dark and theme-pack choice, adjusting accents and imagery
+  rather than replacing the whole UI.
+- Legacy surfaces get the projection for free: the telnet BBS uses the ANSI logo/
+  banner variants; Hotline compat maps the icon set to classic icon IDs.
+- Admin UX: theme editor panel in the web admin (upload assets, pick accents, live
+  preview across light/dark/retro).
+
+### 9.12 Administration
 
 - **Everything remotable over RHP** (family 7) with per-op capability bits + audit log:
   live config editing (typed schema, validated, hot-reload where safe), account/class
   CRUD, bans, kicks (with cannot-be-kicked bit), broadcast, room/board/area management,
   transfer monitor, federation peering management, tracker registration, radio control,
   legacy-surface toggles, backup trigger, metrics view.
-- Surfaces: server CLI (`rabbithole-server ctl …`), sysop TUI (connection monitor,
+- Surfaces: server CLI (`burrow ctl …`), sysop TUI (connection monitor,
   server history — KDX), **web admin** (same Leptos app, admin routes), and the native
   client's admin panels (authorized users administer from any client — per prompt).
 - Server history/audit: connections, transfers, admin actions, federation events.
@@ -633,12 +700,12 @@ All adapters project the same core objects; none get their own data model.
 | Client TUI | `apps/tui` | full experience in ratatui: rooms, boards, files, transfers, radio, art viewer |
 | Client GUI | `apps/gui` | Tauri v2; Leptos UI; desktop macOS/Win/Linux + iOS/iPadOS/Android; native notifications, tray/menubar presence, background audio (mobile plugins) |
 | Client web | served by server | same Leptos SPA over WS transport; installable PWA |
-| Server daemon | `apps/server` | headless; quinn + axum + legacy listeners |
-| Server CLI | `rabbithole-server ctl` | local socket or remote RHP admin |
+| Server daemon | `apps/server` (`burrow`) | headless; quinn + axum + legacy listeners |
+| Server CLI | `burrow ctl` | local socket or remote RHP admin |
 | Server TUI | `apps/server-tui` | sysop console: monitor, history, config, moderation |
 | Server web admin | served by server | same Leptos SPA, admin routes, capability-gated |
 | Server native GUI | Tauri wrapper over admin routes | menu-bar/systray app bundling the daemon for "run a server from your desktop" (Hotline spirit) |
-| Tracker | `apps/tracker` | native directory + legacy HTRK compat |
+| Tracker | `apps/tracker` (`looking-glass`) | native directory + legacy HTRK compat |
 
 UI design language: **clean, minimal, robust** (per prompt) with an optional retro
 theme layer (CP437 fonts, scanline accents) — modern by default, nostalgic on demand.
@@ -702,6 +769,7 @@ W0 ─▶ W1 ─▶ W2 ─▶ W3 ─▶ W4 ─▶ W5(swarm)
             │             │        └──▶ W10(syndication: NNTP→FTN→QWK)
             │             └──▶ W11(radio)
             └────────────────────────────▶ W13(E2EE, moderation+, polish, 1.0)
+                                               └──▶ W14(Reticulum — post-1.0)
 ```
 
 ### Wave 0 — Foundations
@@ -730,7 +798,8 @@ W0 ─▶ W1 ─▶ W2 ─▶ W3 ─▶ W4 ─▶ W5(swarm)
 - Multiple/ad-hoc/private chat rooms, invites, moderation ops.
 - DMs: threads, offline queueing, attachments (size-capped), receipts, notifications.
 - Welcome screen composition + keyword registry; sounds (client-side).
-- TUI client v1 (login, chat, who, DMs); shared `screen` crate begun.
+- Server **theme bundle** v1 (signed, content-addressed: logo, banner, accents, icon set) published in the welcome bundle.
+- TUI client v1 (login, chat, who, DMs); shared `screen` crate begun; light/dark TUI palettes.
 - Server TUI v1 (monitor, config, accounts); remote admin family live.
 
 ### Wave 3 — Message bases & offline
@@ -777,7 +846,8 @@ W0 ─▶ W1 ─▶ W2 ─▶ W3 ─▶ W4 ─▶ W5(swarm)
 
 ### Wave 8 — Web & desktop GUI
 *[W2–W4 for feature surface; W5 for transfer UI; parallel with W6/W7]*
-- `ui-web` Leptos SPA: auth, welcome, rooms, DMs, boards, files (upload/download via WS+fetch), transfers, member directory, profiles, keyword bar, art rendering (canvas), themes (clean default + retro).
+- `ui-web` Leptos SPA: auth, welcome, rooms, DMs, boards, files (upload/download via WS+fetch), transfers, member directory, profiles, keyword bar, art rendering (canvas).
+- Theming (§9.11): design tokens; **light/dark** (OS-follow + override); theme packs (Clean, Retro, High Contrast); **server theme bundle application** with safety rails + user caps; theme editor in web admin.
 - Served embedded web client + **web admin** routes (config, accounts/classes, moderation, monitors, federation & radio panels as those land).
 - Tauri v2 desktop shell: core linked in-process, QUIC transport, native notifications, tray presence, deep links (`rabbit://`), auto-update.
 - Server native GUI wrapper (menubar/systray + bundled daemon).
@@ -788,7 +858,8 @@ W0 ─▶ W1 ─▶ W2 ─▶ W3 ─▶ W4 ─▶ W5(swarm)
 - Board flood-fill: subscriptions, ihave/pull, seen-set, tombstones, per-peer reputation/rate limits, defederation.
 - Cross-server identity attestation; `persona@server` display + verification.
 - Cross-server file search (signed catalogs, pull fan-out, dedupe by hash); swarm federated sources live.
-- `.well-known/rabbithole/server`; tracker service full (signed descriptors, heartbeats, categories, gossip); directory index + health; client server-browser UI.
+- `.well-known/rabbithole/server`; Looking Glass full (signed descriptors, heartbeats, categories, gossip); directory index + health; client server-browser UI.
+- **Deploy the flagship public Looking Glass** (project-run, domain TBD) and pre-configure it in clients (removable).
 
 ### Wave 10 — Syndication (NNTP → FTN → QWK)
 *[W3 (boards, dupe subsystem); W9 helpful but not required]*
@@ -815,6 +886,30 @@ W0 ─▶ W1 ─▶ W2 ─▶ W3 ─▶ W4 ─▶ W5(swarm)
 - Rate limiting/gating everywhere (governor), mCaptcha option, invite trees.
 - Security review pass (RUSTSEC audit, fuzz coverage goals, pen-test checklist), performance pass (load harness: 10k sessions/server target), accessibility pass, i18n scaffolding.
 - 1.0: docs site, sample "flagship" community server config, migration/backup guides.
+
+### Wave 14 — Reticulum & off-grid mesh (post-1.0 / 1.1)
+*[W3 (events/dupe store), W9 (federation), W13 (stable protocol)]*
+
+[Reticulum](https://reticulum.network) (RNS) is a cryptography-first, self-configuring
+mesh networking stack that runs over almost any medium — LoRa radios, packet radio,
+serial, TCP tunnels, I2P — with delay-tolerant, store-and-forward messaging (LXMF).
+It is the spiritual successor to FidoNet's store-and-forward model, which makes it a
+natural late-stage transport for RabbitHole's append-only, signed-event architecture.
+
+- **Spike**: evaluate Rust RNS implementations (e.g. `reticulum-rs`) for maturity vs
+  bridging to the reference Python stack via a gateway sidecar; pick an approach.
+- **RNS transport adapter**: expose a Burrow as a Reticulum *destination* — the `net`
+  Transport trait gains an RNS impl (or a bridge daemon) carrying a constrained RHP
+  profile (control + text surfaces; no bulk transfer over LoRa-class links).
+- **LXMF bridge**: DMs ↔ LXMF messages (delay-tolerant delivery to/from NomadNet and
+  LXMF clients); board posts ↔ LXMF propagation nodes for off-grid syndication —
+  reusing the same dupe/seen subsystem as FTN/NNTP.
+- **Delay-tolerant federation**: Tunnels (S2S flood-fill) over RNS links with
+  bandwidth-aware batching — a burrow on a mountain with a LoRa radio can carry a
+  community's boards.
+- **rabbit links with RNS destination hashes**; Looking Glass listings may advertise
+  an RNS destination alongside IP endpoints.
+- Deployment docs for LoRa/packet-radio nodes; power/bandwidth budgets.
 
 ---
 

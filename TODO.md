@@ -36,7 +36,7 @@
 - [ ] Presence registry actor; who's-online query + pushes
 - [ ] Public chat (lobby), server agreement gate, MOTD
 - [ ] `rabbit` CLI: login, who, chat, JSON output mode
-- [ ] `rabbithole-server ctl`: config get/set, account create, local admin socket
+- [ ] `burrow ctl`: config get/set, account create, local admin socket
 - [ ] Config system: TOML + env overrides + hot-reload-where-safe
 - [ ] `tracing` + audit-log skeleton
 
@@ -54,8 +54,9 @@
 - [ ] DM attachments (server-config max size, content-addressed)
 - [ ] Notifications: protocol pushes + client-side sounds (optional, tasteful)
 - [ ] Welcome screen composer (widgets: MOTD, unread, who, featured, ticker)
+- [ ] Server theme bundle v1 (signed, content-addressed: logo, banner art, accent tokens, icon set) in welcome bundle
 - [ ] Keyword registry + `/go` fuzzy teleport
-- [ ] TUI client v1: login, chat, who, DMs (`screen` crate begun)
+- [ ] TUI client v1: login, chat, who, DMs (`screen` crate begun); light/dark palettes
 - [ ] Server TUI v1: connection monitor, config, accounts
 - [ ] Remote admin protocol family live (capability-gated + audited)
 
@@ -133,7 +134,11 @@
 
 - [ ] `ui-web` Leptos SPA: auth, welcome, rooms, DMs, boards, member directory, profiles, keyword bar
 - [ ] Files UI: browse, upload/download (WS + fetch), transfer queue
-- [ ] Art rendering (canvas) + themes (clean default, retro optional)
+- [ ] Art rendering (canvas)
+- [ ] Design tokens; **light/dark mode** (OS-follow + manual override) across all rich clients
+- [ ] Theme packs: Clean (default), Retro (CP437/scanlines/ANSI palette), High Contrast; shareable token files
+- [ ] Server theme bundle application (accents, icons, art, sounds) w/ safety rails (structured tokens only, contrast minimums, user cap/disable)
+- [ ] Theme editor panel in web admin (upload assets, accents, live light/dark/retro preview)
 - [ ] Embedded web client served by server; installable PWA
 - [ ] Web admin routes: config, accounts/classes, moderation, monitors (federation/radio panels as they land)
 - [ ] Tauri v2 desktop: core in-process, QUIC transport, native notifications, tray/menubar presence, `rabbit://` deep links, auto-update
@@ -150,8 +155,9 @@
 - [ ] Cross-server identity attestation (`persona@server`, key continuity)
 - [ ] Cross-server file search: signed catalogs, pull fan-out, blake3 dedupe; swarm federated sources live
 - [ ] `.well-known/rabbithole/server` (signed descriptor)
-- [ ] Tracker: signed descriptors, heartbeats, categories, tracker-to-tracker gossip
+- [ ] Looking Glass tracker: signed descriptors, heartbeats, categories, tracker-to-tracker gossip
 - [ ] Directory index (health/uptime, verifiable-not-authoritative); client server-browser UI
+- [ ] Deploy flagship public **Looking Glass** (project-run, domain TBD); pre-configure in clients (user-removable)
 - [ ] 3-server CI testnet: partition/rejoin, dupe-storm tests
 
 ## Wave 10 — Syndication (NNTP → FTN → QWK)
@@ -210,6 +216,16 @@
 - [ ] Accessibility pass (web/GUI); i18n scaffolding
 - [ ] Backups: snapshot + restore tested; migration guides
 - [ ] 1.0: docs site complete, flagship sample server config, launch
+
+## Wave 14 — Reticulum & off-grid mesh (post-1.0 / 1.1)
+*Depends on: W3, W9, W13*
+
+- [ ] Spike: `reticulum-rs` maturity vs Python RNS gateway sidecar → decision
+- [ ] RNS transport adapter: Burrow as a Reticulum destination; constrained RHP profile (control + text; no bulk over LoRa-class links)
+- [ ] LXMF bridge: DMs ↔ LXMF (delay-tolerant, NomadNet-compatible); boards ↔ LXMF propagation nodes (shared dupe subsystem)
+- [ ] Delay-tolerant Tunnels (S2S flood-fill) over RNS with bandwidth-aware batching
+- [ ] rabbit links w/ RNS destination hashes; Looking Glass entries may advertise RNS destinations
+- [ ] LoRa/packet-radio deployment docs (power/bandwidth budgets)
 
 ---
 
