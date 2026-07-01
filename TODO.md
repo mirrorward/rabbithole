@@ -14,7 +14,7 @@
 
 - [ ] Cargo workspace scaffold: all `crates/*` + `apps/*` stubs compile
 - [ ] CI: fmt + clippy + test matrix (Linux/macOS/Windows) + wasm build check
-- [ ] Licensing (dual MIT/Apache-2.0), README, CONTRIBUTING, rustfmt/clippy config
+- [ ] Licensing (⛔ owner deciding — see PLAN §16), README, CONTRIBUTING, rustfmt/clippy config
 - [ ] `proto`: RHP frame (version/kind/family/type/id/error/payload), postcard framing, error model
 - [ ] `proto`: version negotiation + capability flags; `#[non_exhaustive]` discipline
 - [ ] `docs/protocol/` skeleton — spec is a deliverable
@@ -108,7 +108,10 @@
 - [ ] `screen` crate: ratatui → socket backend (CP437/ANSI mode + UTF-8 mode)
 - [ ] Telnet codec: IAC state machine, ECHO/SGA/BINARY/NAWS(resize)/TTYPE, 0xFF doubling, loop-safe negotiation
 - [ ] BBS surface: login, welcome art, who, boards (read/post), chat, DMs, keyword nav
-- [ ] File browse + HTTP-link handoff (Zmodem deferred)
+- [ ] File browse + HTTP-link handoff
+- [ ] Zmodem transfers over telnet: download, then upload; ZRPOS resume; tested against SyncTERM/NetRunner/qodem
+- [ ] Door games: DOOR32.SYS (+DOOR.SYS/DORINFO1.DEF) dropfiles; telnet/PTY bridge (no fd inheritance); door menu + per-door ACLs + time limits
+- [ ] Legacy security-level projection (RBAC → 0–255 SL + flags) for dropfiles
 - [ ] finger (79): empty = who list; user = profile+presence+.plan; /W; **forwarding refused**; output caps; per-persona opt-out
 - [ ] Legacy-surface class restrictions + per-listener toggles
 

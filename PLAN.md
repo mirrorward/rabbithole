@@ -162,8 +162,9 @@ One tokio runtime; one listener task per enabled surface; all funnel into `serve
 
 | Listener | Default port | Protocol |
 |---|---|---|
-| RHP native | **4573/udp** (QUIC) + **4573/tcp** (TLS fallback) | flagship |
-| HTTP/WS | **4580** | embedded web client, web admin, WS transport, `.well-known`, rabbit links |
+| RHP native | **4653/udp** (QUIC) + **4653/tcp** (TLS fallback) | flagship — 4653 spells **H-O-L-E** on a phone keypad |
+| HTTP/WS | **4654** | embedded web client, web admin, WS transport, `.well-known`, rabbit links |
+| Tracker (native) | **4655** | directory service (`apps/tracker`) |
 | Telnet | 23 (or 2323 unprivileged) | BBS surface |
 | finger | 79 | presence |
 | NNTP | 119 / 563 (TLS) | reader + peering |
@@ -532,8 +533,14 @@ All adapters project the same core objects; none get their own data model.
 - Full-screen BBS UI = ratatui widget tree rendered through a custom backend that
   serializes to the socket as CP437+ANSI (or UTF-8 for modern terminals, chosen by
   TTYPE/negotiation). Same widgets power the local TUI app — one BBS look, two doors.
-- Surface: login, welcome/art, who, boards (read/post), files (browse + Zmodem
-  download later-wave, HTTP link handoff first), chat rooms, DMs, keyword nav.
+- Surface: login, welcome/art, who, boards (read/post), files (browse + **Zmodem**
+  transfer + HTTP link handoff), chat rooms, DMs, keyword nav.
+- **Zmodem**: ZRLE/CRC32 framing, streaming with error recovery, ZRPOS resume —
+  native file transfer for retro terminals (SyncTERM, NetRunner, qodem).
+- **Door games**: dropfile generation (DOOR32.SYS primary; DOOR.SYS/DORINFO1.DEF
+  for older doors) + a telnet/PTY bridge to spawn doors safely (no raw fd
+  inheritance — the ENiGMA½ model); door menu with per-door ACLs, node numbers,
+  time limits; RBAC projected to a legacy security level (0–255) + flags.
 - Guest + account login; legacy surface class restrictions apply.
 
 ### 10.2 Hotline compatibility (`legacy-hotline`)
@@ -755,7 +762,9 @@ W0 ─▶ W1 ─▶ W2 ─▶ W3 ─▶ W4 ─▶ W5(swarm)
 *[W2 (chat/DM), W3 (boards); W4 optional for file menus]*
 - `art` crate: CP437 tables, ANSI/SGR parser+renderer, SAUCE, ANSImation; PNG thumbnailer.
 - `screen` crate: ratatui→socket backend (CP437/ANSI + UTF-8 modes).
-- Telnet codec + negotiation state machine; full-screen BBS: login, welcome art, who, boards, chat, DMs, keyword nav; file browse + HTTP-link handoff (Zmodem later, optional).
+- Telnet codec + negotiation state machine; full-screen BBS: login, welcome art, who, boards, chat, DMs, keyword nav; file browse + HTTP-link handoff.
+- **Zmodem file transfer** on the telnet surface (download first, then upload): ZRLE/CRC32 framing, streaming with error recovery, resume (ZRPOS) — so real retro terminals (SyncTERM, NetRunner, qodem) transfer files natively.
+- **Door games**: external program support via dropfiles (DOOR32.SYS primary; DOOR.SYS/DORINFO1.DEF for older doors) with a **telnet/PTY bridge** (no raw fd inheritance — portability + safety, the ENiGMA½ model); per-door config, node numbers, time limits; legacy **security-level projection** (RBAC → 0–255 SL + flags) so doors get sane values.
 - finger server (who + profile + .plan); presence projections.
 
 ### Wave 7 — Hotline compatibility
@@ -813,15 +822,15 @@ W0 ─▶ W1 ─▶ W2 ─▶ W3 ─▶ W4 ─▶ W5(swarm)
 
 Flagged for review — each has a working default so nothing blocks:
 
-| # | Question | Default |
-|---|----------|---------|
-| 1 | Project license | Dual MIT/Apache-2.0 (Rust convention) |
-| 2 | Default native port | 4573 (unassigned, mnemonic "H-O-L-E"-ish); confirm or pick a vanity number |
-| 3 | iroh vs hand-rolled quinn for swarm NAT layer | **Spike both in W5**; default iroh if its endpoint model coexists with our quinn listener |
-| 4 | Zmodem file transfer on the telnet surface | Deferred/optional (HTTP link handoff first) |
-| 5 | Door-game support (DOOR32.SYS + telnet bridge) | Not in v1 waves; natural W13+ follow-on, telnet surface makes it cheap |
+| # | Question | Status |
+|---|----------|--------|
+| 1 | Project license | **OPEN — owner deciding.** Candidates: MIT/Apache-2.0 dual (max adoption), AGPL-3.0 server + MIT clients (prevents closed server forks), MPL-2.0 (file-level middle ground) |
+| 2 | Default native port | **DECIDED: 4653** — spells H-O-L-E on a phone keypad; web/WS 4654, tracker 4655 (IANA-unassigned range, all configurable) |
+| 3 | iroh vs hand-rolled quinn for swarm NAT layer | **Spike both in W5** (rationale in PLAN review thread); default iroh if its endpoint model coexists with our quinn listener |
+| 4 | Zmodem on the telnet surface | **DECIDED: yes** — in Wave 6 |
+| 5 | Door-game support (DOOR32.SYS + telnet/PTY bridge) | **DECIDED: yes** — in Wave 6 |
 | 6 | Persona cap per account | 5 (server-configurable) |
-| 7 | E2EE DM timing | W13 (after federation stabilizes) — pull earlier if demanded |
+| 7 | E2EE DM timing | Default W13 (rationale in PLAN review thread) — owner may pull earlier |
 | 8 | Postgres support | Behind repository trait; implement when a deployment needs it |
 | 9 | Server-hosted IRC bridge (KDX had one) | Out of scope for 1.0; protocol families leave room |
 | 10 | Matrix/ActivityPub bridges | Out of scope for 1.0; federation model doesn't preclude adapters |
