@@ -1,0 +1,18 @@
+[package]
+name = "burrow"
+description = "The RabbitHole server daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rabbithole-proto.workspace = true
+rabbithole-net.workspace = true
+rabbithole-server-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "rabbithole-art"
+description = "CP437 and ANSI/SGR parsing and rendering, SAUCE metadata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

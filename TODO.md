@@ -5,26 +5,26 @@
 > dependency edges shown in PLAN.md §15. ⛔ = do not start until PLAN.md is
 > reviewed and approved by the project owner.
 
-**Status: ⛔ AWAITING PLAN REVIEW — no implementation yet.**
+**Status: APPROVED 2026-07-01 — Wave 0 complete; Wave 1 is next.**
 
 ---
 
 ## Wave 0 — Foundations
 *Depends on: — (first wave)*
 
-- [ ] Cargo workspace scaffold: all `crates/*` + `apps/*` stubs compile
-- [ ] CI: fmt + clippy + test matrix (Linux/macOS/Windows) + wasm build check
-- [ ] Licensing (⛔ owner deciding — see PLAN §16), README, CONTRIBUTING, rustfmt/clippy config
-- [ ] `proto`: RHP frame (version/kind/family/type/id/error/payload), postcard framing, error model
-- [ ] `proto`: version negotiation + capability flags; `#[non_exhaustive]` discipline
-- [ ] `docs/protocol/` skeleton — spec is a deliverable
-- [ ] `identity`: Ed25519 keygen/sign/verify; Argon2id (m=64MiB,t=3,p=1, PHC, rehash-on-login)
-- [ ] `identity`: opaque session tokens; TOTP (RFC 6238) + hashed recovery codes
-- [ ] `net`: `Transport` trait; quinn (QUIC/TLS1.3) impl; tokio-tungstenite (WS) impl
-- [ ] `net`: rustls setup; ACME (`rustls-acme`) + self-signed w/ fingerprint pinning
-- [ ] Storage: `Repository` traits; sqlx/SQLite (WAL) + rusqlite skeletons; migration harness
-- [ ] Content-addressed blob store (blake3 pathing, refcount GC)
-- [ ] `core` / `server-core` skeletons: Command/Event API, event bus (tokio broadcast)
+- [x] Cargo workspace scaffold: all `crates/*` + `apps/*` stubs compile
+- [x] CI: fmt + clippy + test matrix (Linux/macOS/Windows) + wasm build check
+- [ ] Licensing (⛔ owner still deciding — see PLAN §16); README ✅, CONTRIBUTING ✅, rustfmt/clippy config ✅
+- [x] `proto`: RHP frame (version/kind/family/type/id/error/payload), postcard framing, error model
+- [x] `proto`: version negotiation + capability flags; `#[non_exhaustive]` discipline
+- [x] `docs/protocol/` skeleton — spec is a deliverable
+- [x] `identity`: Ed25519 keygen/sign/verify; Argon2id (m=64MiB,t=3,p=1, PHC, rehash-on-login)
+- [x] `identity`: opaque session tokens; TOTP (RFC 6238) + hashed recovery codes
+- [x] `net`: `Transport` trait; quinn (QUIC/TLS1.3) impl; tokio-tungstenite (WS) impl
+- [x] `net`: rustls setup; ACME (`rustls-acme`) + self-signed w/ fingerprint pinning
+- [x] Storage: `Repository` traits; sqlx/SQLite (WAL) + rusqlite skeletons; migration harness
+- [x] Content-addressed blob store (blake3 pathing, refcount GC)
+- [x] `core` / `server-core` skeletons: Command/Event API, event bus (tokio broadcast)
 
 ## Wave 1 — Vertical slice: a server you can talk to
 *Depends on: W0*

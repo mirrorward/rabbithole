@@ -1,0 +1,16 @@
+[package]
+name = "rabbithole-proto"
+description = "RabbitHole Protocol (RHP) wire types, framing, and version negotiation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]

@@ -1,0 +1,10 @@
+[package]
+name = "rabbithole-audio"
+description = "Audio decode/playback and Opus streaming for radio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

@@ -1,0 +1,22 @@
+[package]
+name = "rabbithole-identity"
+description = "Keys, signatures, password hashing, session tokens, and TOTP for RabbitHole"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+ed25519-dalek.workspace = true
+argon2.workspace = true
+blake3.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+totp-rs.workspace = true
+data-encoding.workspace = true
+hex.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "rabbithole-core"
+description = "Client-side domain core: the Command/Event API every frontend drives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rabbithole-proto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[features]
+default = []

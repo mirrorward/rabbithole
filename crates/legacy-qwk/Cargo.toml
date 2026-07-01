@@ -1,0 +1,10 @@
+[package]
+name = "rabbithole-legacy-qwk"
+description = "QWK/QWKE offline mail packets: packer, REP ingest, MBF floats"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

@@ -1,0 +1,10 @@
+[package]
+name = "rabbithole-screen"
+description = "Shared terminal screen layer: ratatui widgets with a socket-serializable backend (TUI + telnet BBS)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

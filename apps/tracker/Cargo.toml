@@ -1,0 +1,10 @@
+[package]
+name = "looking-glass"
+description = "Looking Glass: the RabbitHole tracker/directory service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

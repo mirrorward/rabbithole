@@ -1,0 +1,10 @@
+[package]
+name = "rabbithole-swarm"
+description = "The Warren — swarm file distribution: manifests, chunk scheduling, Bao-verified multi-source transfer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

@@ -1,0 +1,10 @@
+[package]
+name = "rabbithole-legacy-hotline"
+description = "Hotline protocol compatibility: transactions, HTXF, FFO, HTRK tracker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

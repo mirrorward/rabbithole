@@ -1,0 +1,10 @@
+[package]
+name = "rabbithole-ui-web"
+description = "Leptos wasm SPA: client UI, embedded web client, and web admin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

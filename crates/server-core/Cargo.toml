@@ -1,0 +1,16 @@
+[package]
+name = "rabbithole-server-core"
+description = "Server domain logic: sessions, presence, permissions, and the event bus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rabbithole-proto.workspace = true
+rabbithole-identity.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

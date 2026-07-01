@@ -1,0 +1,27 @@
+[package]
+name = "rabbithole-net"
+description = "RabbitHole transports: QUIC (quinn) primary + WebSocket fallback behind one trait"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rabbithole-proto.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rcgen.workspace = true
+tokio-tungstenite.workspace = true
+blake3.workspace = true
+hex.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

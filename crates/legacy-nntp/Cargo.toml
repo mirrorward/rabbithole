@@ -1,0 +1,10 @@
+[package]
+name = "rabbithole-legacy-nntp"
+description = "NNTP server codec and message-base projections"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

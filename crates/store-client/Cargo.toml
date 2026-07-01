@@ -1,0 +1,15 @@
+[package]
+name = "rabbithole-store-client"
+description = "Client-side local store: rusqlite with versioned migrations (offline mode, transfer queue)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
