@@ -43,23 +43,29 @@ Frame {
 
 ## Families
 
+Numbers are the `Family` constants in `frame.rs`. `Family` is a `u8` newtype,
+not a Rust enum, so unknown families still decode.
+
 | # | Family | Content |
 |---|---|---|
-| 0 | session | hello, auth, keepalive, resume |
-| 1 | presence | roster, buddy lists, states (Cheshire mode) |
+| 0 | session | hello, auth (password/guest/resume/register), keepalive, personas, 2FA, welcome/theme/keyword |
+| 1 | presence | roster, buddy lists, states (Cheshire mode), profiles, directory |
 | 2 | chat | rooms |
 | 3 | dm | direct messages |
 | 4 | board | message bases |
-| 5 | file | areas, metadata, transfers |
+| 5 | file | areas, metadata, transfers (20+), small blobs (100+) |
 | 6 | swarm | the Warren |
 | 7 | admin | remote administration |
-| 8 | federation | Tunnels (S2S) |
-| 9 | radio | stations |
+| 8 | federation | Tunnels (S2S) — **server-to-server only**, on a dedicated QUIC endpoint (default port **4655**); never spoken on a client connection. See [`federation.md`](federation.md) |
+| 9 | radio | stations — **reserved**; no messages defined yet (the radio surface today is the legacy ICY listener, see [`../legacy-surfaces.md`](../legacy-surfaces.md)) |
 | 10 | wishing-well | requests |
 
 ## Error codes
 
 `BadRequest, Unauthenticated, Forbidden, NotFound, AlreadyExists,
 RateLimited, Internal, VersionMismatch, Unsupported, TooLarge,
-SessionExpired, Unavailable, Other(u16)` — non-exhaustive; unknown codes must
-be treated as generic failures.
+SessionExpired, Unavailable, TotpRequired, Kicked, Other(u16)` —
+non-exhaustive; unknown codes decode as `Other` and must be treated as
+generic failures. `TotpRequired`: credentials were valid but the account has
+2FA enrolled and no (or a wrong) code was supplied. `Kicked`: the session was
+disconnected by an operator.

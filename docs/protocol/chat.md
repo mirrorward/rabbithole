@@ -35,6 +35,7 @@ ad-hoc, and private rooms arrive in Wave 2 using these same messages.
 | 16 | RoomInvited | Push | `room`, `from` |
 | 17 | RoomTopicSet | Request | creator or CHAT_MODERATE |
 | 18 | RoomKick | Request | creator or CHAT_MODERATE; `ban` blocks rejoin; creators can't be kicked → target gets `RoomKicked` |
+| 19 | RoomInfoReply | Reply (to 12/13) | `room: RoomInfo` {name, category, topic, private, member_count, created_by} |
 | 20 | RoomKicked | Push | `room`, `banned` |
 | 21/22 | RoomMembersRequest → RoomMemberList | Request/Reply | private rooms require membership |
 

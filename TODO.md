@@ -212,7 +212,7 @@
 - [ ] App Store (TestFlight) + Play (.aab) packaging, signing, privacy manifests, entitlements
 - [~] `dist` release automation (CLI/TUI/server): archives, installers, Homebrew — `.github/workflows/release.yml` (tag-triggered cross-platform binary archives + checksums + GitHub Release) and `scripts/release.sh` landed; installers/Homebrew tap pending
 - [x] Docker images (multi-stage → slim) + docker-compose; systemd unit; install docs — `Dockerfile` + `.dockerignore` + `docker-compose.yml` + hardened `contrib/burrow.service` + `docs/deployment.md` (accurate to real bins/ports/env vars)
-- [ ] Versioned protocol docs published (docs site)
+- [~] Versioned protocol docs published (docs site) — the spec itself is current in-repo (see W-Continuous lockstep line); publishing to a docs site is the remaining step
 
 ## Wave 13 — Hardening & 1.0
 *Depends on: all*
@@ -240,7 +240,7 @@
 
 ## Continuous tracks (every wave)
 
-- [ ] Protocol spec kept in lockstep with implementation (`docs/protocol/`)
+- [~] Protocol spec kept in lockstep with implementation (`docs/protocol/`) — full drift audit vs `crates/proto` (7 mismatches fixed incl. the file.md BulkPreamble mis-typed as frame 30, missing session personas/TOTP/Register groups, presence directory 10–13, blob 100–103); new `federation.md` (S2S wire + catalog sync + attestation, wire-today vs model-only marked) and `docs/legacy-surfaces.md` (12-surface operator matrix: ports, toggles, min-roles, rate classes, deferrals); README family table (RADIO 9 reserved, FEDERATION 8 S2S-only). Ongoing discipline: re-audit with each proto change
 - [ ] Golden-file + fuzz tests accompany every codec
 - [ ] CHANGELOG + semver discipline on `proto`
 - [ ] Mobile cross-compile smoke in CI from W0 (front-load NDK pain)

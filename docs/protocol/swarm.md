@@ -1,10 +1,11 @@
 # RHP Swarm Family (6)
 
-Status: **Wave 5 in progress** — the coordinator surface (advertise,
-find-sources, TTL soft state), capability tokens, and the Bao-verified
-peer wire are live; the multi-source scheduler and NAT traversal land in
-later slices. Manifests, `rabbit://` links, `CapToken`, and the peer
-wire itself live in the `rabbithole-swarm` crate.
+Status: **Wave 5** — the coordinator surface (advertise, find-sources,
+TTL soft state), capability tokens, the Bao-verified peer wire, and the
+multi-source work-stealing scheduler are live; NAT traversal (hole
+punching + server relay fallback) is still pending. Manifests,
+`rabbit://` links, `CapToken`, and the peer wire itself live in the
+`rabbithole-swarm` crate.
 
 | type | name | direction | payload |
 |---|---|---|---|

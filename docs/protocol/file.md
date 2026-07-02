@@ -7,10 +7,8 @@ the persistent client queue (W4.3). Bytes are content-addressed in the blob
 store.
 
 Small-blob transfer (avatars, banners, theme assets) shares this family at
-**types 100+** (see [`blob`](../../crates/proto/src/blob.rs)); the file
-library uses the low type numbers. Large-file streaming with resume is
-**Wave 4.2** — until then, uploads/downloads ride the control stream inline
-(server caps them well under the 1 MiB frame limit).
+**types 100+** (below); the file library uses types 1-19 and the transfer
+engine 20-42.
 
 | type | name | direction | payload |
 |---|---|---|---|
@@ -27,6 +25,16 @@ library uses the low type numbers. Large-file streaming with resume is
 | 17/6 | RateFile → NodeReply | Request/Reply | 1..5, one per account; FILE_DOWNLOAD |
 | 18/6 | AliasCreate → NodeReply | Request/Reply | link to an existing node; FILE_MANAGE |
 | 19 | FileAdded | Push | `area`, `id` — broadcast so listings/search stay live |
+
+## Small blobs (types 100+, Wave 2)
+
+Avatars, banners, and theme assets — things comfortably under the 1 MiB
+frame cap — ride the control stream inline:
+
+| type | name | direction | payload |
+|---|---|---|---|
+| 100/101 | BlobPut → BlobRef | Request/Reply | `purpose` (enum: Avatar / Banner / ThemeAsset — servers enforce per-purpose size caps, `avatar_max_bytes`/`banner_max_bytes`), `bytes` → `id: [u8;32]` (blake3) or `TooLarge` |
+| 102/103 | BlobGet → BlobData | Request/Reply | `id: [u8;32]` → `bytes` or `NotFound` |
 
 ## The tree
 
@@ -57,14 +65,14 @@ resumable, integrity-checked way. Messages (types 20-42):
 
 | type | name | direction | payload |
 |---|---|---|---|
-| 20/21 | TransferOpen → TransferTicket | Request/Reply | download `node_id`, or upload dest + `size`/`root`; ticket has `transfer_id`, `server_have`, `token` |
-| 22/21 | TransferResume → TransferTicket | Request/Reply | re-authorize after reconnect; re-reports `server_have` |
-| 23 | UploadFinish | Request → `NodeReply` | verify staged blake3 == root, commit to blob store, record node |
-| 24 | TransferAbort | Request → ack | drop ticket + staging |
-| 25/26 | FolderManifestRequest → FolderManifest | Request/Reply | whole subtree in one round trip (pipelining) |
-| 30 | BulkPreamble | (stream) | length-prefixed first bytes on a dedicated QUIC bulk stream |
-| 40/41 | FileChunkRequest → FileChunk | Request/Reply | ranged download (WS / control-stream path) |
-| 42 | FileChunkPut | Request → ack | ranged upload |
+| 20/21 | TransferOpen → TransferTicket | Request/Reply | open: `direction` (0 down / 1 up), download `node_id`, or upload dest (`area`/`parent`/`name`/`mime`/`comment`) + `size`/`root`; ticket: `transfer_id`, `root`, `size`, `server_have`, `token: [u8;16]`, `supports_bulk: bool` |
+| 22/21 | TransferResume → TransferTicket | Request/Reply | `transfer_id`, `token`, `local_have` — re-authorize after reconnect; re-reports `server_have` |
+| 23 | UploadFinish | Request → `NodeReply` | `transfer_id` — verify staged blake3 == root, commit to blob store, record node |
+| 24 | TransferAbort | Request → ack | `transfer_id` — drop ticket + staging |
+| 25/26 | FolderManifestRequest → FolderManifest | Request/Reply | `area`, `path?` → whole subtree in one round trip; entries {node_id, rel_path, root, size, mime} |
+| — | BulkPreamble | (stream, **not a frame**) | first bytes on a dedicated QUIC bulk stream: a length-prefixed postcard `{transfer_id, token, offset, direction}` binding the raw stream to a ticket. It carries no message-type number — it never rides the control framing |
+| 40/41 | FileChunkRequest → FileChunk | Request/Reply | `transfer_id`, `offset`, `len` → `{transfer_id, offset, last, bytes}` — ranged download (WS / control-stream path) |
+| 42 | FileChunkPut | Request → ack | `{transfer_id, offset, last, bytes}` — ranged upload |
 
 **Transports.** On QUIC, `Connection::bulk()` yields a `BulkStreams` handle:
 the client opens a dedicated bi-stream, writes a length-prefixed

@@ -6,8 +6,8 @@ append-only signed post events, threading, read pointers, moderation.
 | type | name | direction | payload |
 |---|---|---|---|
 | 1/2 | BoardListRequest → BoardList | Request/Reply | tree nodes {slug, title, kind (0 cat/1 bundle/2 board), parent, unread} |
-| 3/4 | ThreadListRequest → ThreadList | Request/Reply | `board`, `limit`; summaries {root PostView, replies, last_activity} newest first |
-| 5/6 | ThreadRequest → ThreadPosts | Request/Reply | full thread (root + descendants, oldest first) |
+| 3/4 | ThreadListRequest → ThreadList | Request/Reply | `board`, `limit` (clamped to 200); summaries {root PostView, replies, last_activity} newest first |
+| 5/6 | ThreadRequest → ThreadPosts | Request/Reply | `root`, `limit` (clamped to 1000); full thread (root + descendants, oldest first) |
 | 7/8 | PostCreate → PostReply | Request/Reply | `board`, optional `parent`, subject/body/mime; needs BOARD_POST |
 | 9/8 | PostEdit → PostReply | Request/Reply | author or BOARD_MODERATE |
 | 10 | PostDelete | Request | tombstone; author or BOARD_MODERATE |
