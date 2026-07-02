@@ -35,6 +35,8 @@ pub fn ThemeToggle() -> impl IntoView {
 /// the shared session (context) while switching routes.
 #[component]
 pub fn Nav() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let is_admin = app.is_admin;
     view! {
         <nav class="rh-nav">
             <A href="/lobby">"Lobby"</A>
@@ -43,6 +45,9 @@ pub fn Nav() -> impl IntoView {
             <A href="/directory">"Directory"</A>
             <A href="/files">"Files"</A>
             <A href="/art">"Art"</A>
+            <Show when=move || is_admin.get() fallback=|| ()>
+                <A href="/admin">"Admin"</A>
+            </Show>
         </nav>
     }
 }
@@ -62,9 +67,12 @@ pub fn StatusBar() -> impl IntoView {
         }
     };
     let status = move || state.with(|s| s.status.clone());
+    let conn_label = move || state.with(|s| s.conn.label());
     let dot_class = move || {
-        if state.with(|s| s.connected) {
+        if state.with(|s| s.conn.is_live()) {
             "rh-dot on"
+        } else if state.with(|s| s.conn.is_pending()) {
+            "rh-dot pending"
         } else {
             "rh-dot off"
         }
@@ -72,6 +80,7 @@ pub fn StatusBar() -> impl IntoView {
     view! {
         <header class="rh-header">
             <span class=dot_class></span>
+            <span class="rh-conn">{conn_label}</span>
             <span class="rh-title">{title}</span>
             <span class="rh-status">{status}</span>
             <span class="rh-spacer"></span>
@@ -98,10 +107,15 @@ pub fn Login() -> impl IntoView {
             endpoint: endpoint.get(),
             pinned_fingerprint: None,
         });
+        // The seeded host handle carries the admin capability; everyone else
+        // signs in as a regular member. A real transport would derive this from
+        // the session's capability set in the `HelloAck`.
+        let is_admin = who == "rabbit";
         app.dispatch(Command::SignIn {
             login: who,
             password: String::new(),
         });
+        app.set_admin(is_admin);
         app.refresh_who();
         navigate("/lobby", Default::default());
     };
@@ -760,6 +774,195 @@ pub fn ArtCanvas(#[prop(into)] bytes: Vec<u8>) -> impl IntoView {
     }
 
     view! { <canvas node_ref=node width=w height=h class="rh-art"></canvas> }
+}
+
+/// The web-admin console: server config, accounts & classes, and a moderation
+/// panel. Gated behind the session's admin capability ([`AppState::is_admin`]);
+/// the nav entry that reaches it is likewise gated in [`Nav`].
+#[component]
+pub fn Admin() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let is_admin = app.is_admin;
+    let admin = app.admin;
+    // Load the seeded console data whenever the capability is present.
+    create_effect(move |_| {
+        if is_admin.get() {
+            app.load_classes();
+            app.load_accounts();
+            app.load_config();
+        }
+    });
+    let status = move || admin.with(|a| a.status.clone());
+
+    view! {
+        <StatusBar/>
+        <Show
+            when=move || is_admin.get()
+            fallback=|| view! {
+                <div class="rh-body">
+                    <section class="rh-panel">
+                        <p class="rh-empty">"You do not have admin access."</p>
+                    </section>
+                </div>
+            }
+        >
+            <div class="rh-admin-status">{status}</div>
+            <div class="rh-body rh-admin">
+                <section class="rh-panel">
+                    <AdminConfigPanel/>
+                    <AdminModerationPanel/>
+                </section>
+                <section class="rh-panel">
+                    <AdminAccountsPanel/>
+                    <AdminClassesPanel/>
+                </section>
+            </div>
+        </Show>
+    }
+}
+
+/// Server-config editor: one row per known key with a Save action.
+#[component]
+fn AdminConfigPanel() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let admin = app.admin;
+    view! {
+        <h2 class="rh-panel-title">"Server config"</h2>
+        <ul class="rh-tree">
+            <For
+                each=move || admin.with(|a| a.config.clone())
+                key=|c| c.key.clone()
+                children=move |c| {
+                    let key = c.key.clone();
+                    let draft = create_rw_signal(c.value.clone());
+                    let save_key = key.clone();
+                    let save = move |_| app.set_config(&save_key, &draft.get());
+                    view! {
+                        <li class="rh-tree-item rh-config-row">
+                            <span class="rh-config-key">{key}</span>
+                            <input
+                                class="rh-input"
+                                prop:value=move || draft.get()
+                                on:input=move |ev| draft.set(event_target_value(&ev))
+                            />
+                            <button class="rh-btn small" on:click=save>"Save"</button>
+                        </li>
+                    }
+                }
+            />
+        </ul>
+    }
+}
+
+/// Moderation: broadcast a notice, kick a session, mint an invite.
+#[component]
+fn AdminModerationPanel() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let notice = create_rw_signal(String::new());
+    let session = create_rw_signal(String::new());
+
+    let send_notice = move |_| {
+        let text = notice.get();
+        if text.trim().is_empty() {
+            return;
+        }
+        app.broadcast(&text);
+        notice.set(String::new());
+    };
+    let do_kick = move |_| {
+        if let Ok(id) = session.get().trim().parse::<u64>() {
+            app.kick(id);
+            session.set(String::new());
+        }
+    };
+    let do_invite = move |_| app.create_invite(86_400);
+
+    view! {
+        <h2 class="rh-panel-title">"Moderation"</h2>
+        <div class="rh-toolbar">
+            <input
+                class="rh-input"
+                placeholder="Broadcast a notice\u{2026}"
+                prop:value=move || notice.get()
+                on:input=move |ev| notice.set(event_target_value(&ev))
+            />
+            <button class="rh-btn small" on:click=send_notice>"Broadcast"</button>
+        </div>
+        <div class="rh-toolbar">
+            <input
+                class="rh-input"
+                placeholder="Session id to kick\u{2026}"
+                prop:value=move || session.get()
+                on:input=move |ev| session.set(event_target_value(&ev))
+            />
+            <button class="rh-btn small" on:click=do_kick>"Kick"</button>
+        </div>
+        <div class="rh-toolbar">
+            <button class="rh-btn small" on:click=do_invite>"Create invite (24h)"</button>
+        </div>
+    }
+}
+
+/// Account directory: role/class/status per account, with an enable/disable
+/// toggle.
+#[component]
+fn AdminAccountsPanel() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let admin = app.admin;
+    let total = move || admin.with(|a| a.account_total);
+    view! {
+        <h2 class="rh-panel-title">"Accounts (" {total} ")"</h2>
+        <ul class="rh-tree">
+            <For
+                each=move || admin.with(|a| a.accounts.clone())
+                key=|a| a.id
+                children=move |a| {
+                    let login = a.login.clone();
+                    let disabled = a.disabled;
+                    let class = a.class.clone().unwrap_or_else(|| "\u{2014}".to_string());
+                    let dot = if disabled { "rh-dot off" } else { "rh-dot on" };
+                    let toggle_login = login.clone();
+                    let toggle = move |_| app.set_account_disabled(&toggle_login, !disabled);
+                    let btn_label = if disabled { "Enable" } else { "Disable" };
+                    view! {
+                        <li class="rh-tree-item rh-account-row">
+                            <span class=dot></span>
+                            <span class="rh-member-name">{login}</span>
+                            <span class="rh-member-handle">"class: "{class}</span>
+                            <span class="rh-account-role">"role "{a.role.to_string()}</span>
+                            <button class="rh-btn small" on:click=toggle>{btn_label}</button>
+                        </li>
+                    }
+                }
+            />
+        </ul>
+    }
+}
+
+/// Permission classes: name, member count, and capability mask (hex).
+#[component]
+fn AdminClassesPanel() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let admin = app.admin;
+    view! {
+        <h2 class="rh-panel-title">"Classes"</h2>
+        <ul class="rh-tree">
+            <For
+                each=move || admin.with(|a| a.classes.clone())
+                key=|c| c.name.clone()
+                children=move |c| {
+                    let mask = format!("0x{:016x}", c.base_mask);
+                    view! {
+                        <li class="rh-tree-item rh-account-row">
+                            <span class="rh-member-name">{c.name}</span>
+                            <span class="rh-member-handle">{c.members.to_string()}" members"</span>
+                            <span class="rh-file-meta">{mask}</span>
+                        </li>
+                    }
+                }
+            />
+        </ul>
+    }
 }
 
 /// The ANSI art gallery: renders a built-in sample to a canvas.

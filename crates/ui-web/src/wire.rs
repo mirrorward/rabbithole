@@ -33,10 +33,19 @@
 //!   presence event.
 //! - **chat (family 2):** [`ChatSend`] outbound and the [`ChatMessage`] push
 //!   inbound (→ [`Event::ChatMessage`]).
+//! - **file (family 5):** the [`FileCommand`]/[`FileEvent`] local vocabulary and
+//!   its [`file_command_to_frame`]/[`frame_to_file_events`] mapping (the core
+//!   api carries no file variants yet).
+//! - **admin (family 7):** the [`AdminCommand`]/[`AdminEvent`] local vocabulary
+//!   and its [`admin_command_to_frame`]/[`frame_to_admin_events`] mapping (the
+//!   core api carries no admin variants yet).
+//!
+//! Reconnect / backoff is implemented in the browser transport ([`crate::ws`])
+//! on the pure [`backoff_delay`](crate::conn::backoff_delay) schedule.
 //!
 //! # Deferred
 //!
-//! - Reconnect / backoff and session resume ([`AuthResume`] is unused here).
+//! - Session resume ([`AuthResume`] is unused here).
 //! - Binary attachments and the blob/transfer families.
 //! - The board (family 4) and DM (family 3) families: their proto messages
 //!   exist, but the api [`Command`]/[`Event`] enums carry no board/DM variants,
@@ -53,6 +62,11 @@
 use std::rc::Rc;
 
 use rabbithole_core::api::{Command, Event};
+use rabbithole_proto::admin::{
+    AccountEntry, AccountList, AccountListRequest, AccountSet, Broadcast, ClassEntry, ClassList,
+    ClassListRequest, ClassSet, ConfigApplied, ConfigGet, ConfigSet, ConfigValue, InviteCode,
+    InviteCreate, Kick,
+};
 use rabbithole_proto::chat::{ChatMessage, ChatSend};
 use rabbithole_proto::filelib::{
     AreaList, AreaListRequest, FileAdded, FileAreaView, FileContent, FileDownloadRequest,
@@ -395,6 +409,190 @@ pub fn frame_to_file_events(frame: &Frame) -> Vec<FileEvent> {
     Vec::new()
 }
 
+// ---------------------------------------------------------------------------
+// ADMIN family (family 7): classes, accounts, invites, config, moderation.
+//
+// As with the FILE family, the core [`Command`]/[`Event`] enums carry no admin
+// variants (and this crate must not modify the core), so the web admin console
+// drives a *local* admin vocabulary. The mapping mirrors [`command_to_frame`] /
+// [`frame_to_events`] exactly — pure, DOM-free, host-tested — so it plugs into
+// either transport unchanged. When the core api grows admin variants these fold
+// into the shared enums with no shape change.
+// ---------------------------------------------------------------------------
+
+/// An administration action the web console issues, mapped to an ADMIN-family
+/// request [`Frame`] by [`admin_command_to_frame`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminCommand {
+    /// List permission classes. → [`ClassList`].
+    ListClasses,
+    /// Create or update a class's capability mask. → empty ack.
+    SetClass {
+        /// Class name.
+        name: String,
+        /// Base capability mask.
+        base_mask: u64,
+    },
+    /// Page through accounts. → [`AccountList`].
+    ListAccounts {
+        /// Zero-based offset.
+        offset: u32,
+        /// Page size.
+        limit: u32,
+    },
+    /// Modify an account; each `Some` field is applied. → empty ack.
+    SetAccount {
+        /// Target login.
+        login: String,
+        /// New role, if changing.
+        role: Option<u8>,
+        /// New class, if changing.
+        class: Option<String>,
+        /// New disabled flag, if changing.
+        disabled: Option<bool>,
+    },
+    /// Mint an invite code. → [`InviteCode`].
+    CreateInvite {
+        /// Time-to-live in seconds.
+        ttl_secs: i64,
+    },
+    /// Broadcast a notice to every session. → empty ack.
+    Broadcast {
+        /// Notice text.
+        text: String,
+    },
+    /// Disconnect a session. → empty ack.
+    Kick {
+        /// Session id to disconnect.
+        session_id: u64,
+    },
+    /// Read a config key. → [`ConfigValue`].
+    GetConfig {
+        /// Config key.
+        key: String,
+    },
+    /// Set a config key. → [`ConfigApplied`].
+    SetConfig {
+        /// Config key.
+        key: String,
+        /// New value.
+        value: String,
+    },
+}
+
+/// An administration event decoded from an inbound ADMIN-family [`Frame`] by
+/// [`frame_to_admin_events`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminEvent {
+    /// The class list arrived.
+    ClassesListed(Vec<ClassEntry>),
+    /// A page of accounts arrived.
+    AccountsListed {
+        /// The accounts on this page.
+        accounts: Vec<AccountEntry>,
+        /// Total accounts across all pages.
+        total: u64,
+    },
+    /// An invite code was minted.
+    InviteCreated(InviteCode),
+    /// A config value was read.
+    ConfigLoaded {
+        /// Config key.
+        key: String,
+        /// Config value.
+        value: String,
+    },
+    /// A config change was applied (or saved pending restart).
+    ConfigApplied {
+        /// False = saved but needs a restart to take effect.
+        applied_live: bool,
+    },
+    /// A command that answers with an empty ack succeeded. Carries a
+    /// human-readable summary for the status line. Emitted by the seam (the
+    /// mock synthesises it); the wire never decodes an ack into an event, so
+    /// [`frame_to_admin_events`] does not produce this variant.
+    Ack(String),
+    /// An ADMIN request failed.
+    Failed(String),
+}
+
+/// Map an [`AdminCommand`] to the ADMIN-family request [`Frame`] that carries
+/// it.
+pub fn admin_command_to_frame(
+    command: &AdminCommand,
+    id: RequestId,
+) -> Result<Option<Frame>, ProtoError> {
+    let frame = match command {
+        AdminCommand::ListClasses => Frame::request(id, &ClassListRequest)?,
+        AdminCommand::SetClass { name, base_mask } => {
+            Frame::request(id, &ClassSet::new(name.clone(), *base_mask))?
+        }
+        AdminCommand::ListAccounts { offset, limit } => {
+            Frame::request(id, &AccountListRequest::new(*offset, *limit))?
+        }
+        AdminCommand::SetAccount {
+            login,
+            role,
+            class,
+            disabled,
+        } => {
+            let mut set = AccountSet::new(login.clone());
+            set.role = *role;
+            set.class = class.clone();
+            set.disabled = *disabled;
+            Frame::request(id, &set)?
+        }
+        AdminCommand::CreateInvite { ttl_secs } => {
+            Frame::request(id, &InviteCreate::new(*ttl_secs))?
+        }
+        AdminCommand::Broadcast { text } => Frame::request(id, &Broadcast::new(text.clone()))?,
+        AdminCommand::Kick { session_id } => Frame::request(id, &Kick::new(*session_id))?,
+        AdminCommand::GetConfig { key } => Frame::request(id, &ConfigGet::new(key.clone()))?,
+        AdminCommand::SetConfig { key, value } => {
+            Frame::request(id, &ConfigSet::new(key.clone(), value.clone()))?
+        }
+    };
+    Ok(Some(frame))
+}
+
+/// Map an inbound ADMIN-family [`Frame`] to the [`AdminEvent`]s it produces.
+///
+/// Commands whose reply is an empty ack (`SetClass`, `SetAccount`, `Broadcast`,
+/// `Kick`) decode to no event here — the ack carries no payload — matching the
+/// "tolerate messages with no api counterpart" contract. Frames from other
+/// families produce an empty vector.
+pub fn frame_to_admin_events(frame: &Frame) -> Vec<AdminEvent> {
+    if let Some(code) = frame.error {
+        return vec![AdminEvent::Failed(format!("server error: {code:?}"))];
+    }
+    if let Some(Ok(m)) = frame.decode::<ClassList>() {
+        return vec![AdminEvent::ClassesListed(m.classes)];
+    }
+    if let Some(Ok(m)) = frame.decode::<AccountList>() {
+        return vec![AdminEvent::AccountsListed {
+            accounts: m.accounts,
+            total: m.total,
+        }];
+    }
+    if let Some(Ok(m)) = frame.decode::<InviteCode>() {
+        return vec![AdminEvent::InviteCreated(m)];
+    }
+    if let Some(Ok(m)) = frame.decode::<ConfigValue>() {
+        return vec![AdminEvent::ConfigLoaded {
+            key: m.key,
+            value: m.value,
+        }];
+    }
+    if let Some(Ok(m)) = frame.decode::<ConfigApplied>() {
+        return vec![AdminEvent::ConfigApplied {
+            applied_live: m.applied_live,
+        }];
+    }
+    Vec::new()
+}
+
 impl EventClient for crate::client::MockClient {
     fn on_event(&mut self, sink: EventSink) {
         self.set_sink(sink);
@@ -713,6 +911,182 @@ mod tests {
     fn non_file_frame_yields_no_file_events() {
         let push = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
         assert!(frame_to_file_events(&push).is_empty());
+    }
+
+    #[test]
+    fn admin_list_commands_target_admin_family() {
+        for cmd in [
+            AdminCommand::ListClasses,
+            AdminCommand::ListAccounts {
+                offset: 0,
+                limit: 50,
+            },
+            AdminCommand::CreateInvite { ttl_secs: 3600 },
+            AdminCommand::Broadcast { text: "hi".into() },
+            AdminCommand::Kick { session_id: 7 },
+            AdminCommand::GetConfig {
+                key: "server.name".into(),
+            },
+        ] {
+            let frame = admin_command_to_frame(&cmd, RequestId(1))
+                .unwrap()
+                .expect("command produces a frame");
+            assert_eq!(frame.family, Family::ADMIN, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn admin_set_account_carries_optional_fields() {
+        let frame = admin_command_to_frame(
+            &AdminCommand::SetAccount {
+                login: "alice".into(),
+                role: Some(2),
+                class: Some("staff".into()),
+                disabled: Some(true),
+            },
+            RequestId(4),
+        )
+        .unwrap()
+        .expect("set-account produces a frame");
+        let decoded = frame.decode::<AccountSet>().unwrap().unwrap();
+        assert_eq!(decoded.login, "alice");
+        assert_eq!(decoded.role, Some(2));
+        assert_eq!(decoded.class.as_deref(), Some("staff"));
+        assert_eq!(decoded.disabled, Some(true));
+    }
+
+    #[test]
+    fn admin_set_class_and_config_carry_values() {
+        let class = admin_command_to_frame(
+            &AdminCommand::SetClass {
+                name: "staff".into(),
+                base_mask: 0b1010,
+            },
+            RequestId(5),
+        )
+        .unwrap()
+        .unwrap();
+        let decoded = class.decode::<ClassSet>().unwrap().unwrap();
+        assert_eq!(decoded.name, "staff");
+        assert_eq!(decoded.base_mask, 0b1010);
+
+        let cfg = admin_command_to_frame(
+            &AdminCommand::SetConfig {
+                key: "server.motd".into(),
+                value: "hello".into(),
+            },
+            RequestId(6),
+        )
+        .unwrap()
+        .unwrap();
+        let decoded = cfg.decode::<ConfigSet>().unwrap().unwrap();
+        assert_eq!(decoded.key, "server.motd");
+        assert_eq!(decoded.value, "hello");
+    }
+
+    #[test]
+    fn class_list_reply_maps_to_classes_listed() {
+        let reply = ClassList::new(vec![ClassEntry::new("admin", 0xFF, 1)]);
+        let frame = Frame::push(&reply).unwrap();
+        assert_eq!(
+            frame_to_admin_events(&frame),
+            vec![AdminEvent::ClassesListed(vec![ClassEntry::new(
+                "admin", 0xFF, 1
+            )])]
+        );
+    }
+
+    #[test]
+    fn account_list_reply_carries_total() {
+        let reply = AccountList::new(
+            vec![AccountEntry::new(
+                1,
+                "alice",
+                1,
+                Some("staff".into()),
+                false,
+            )],
+            42,
+        );
+        let frame = Frame::push(&reply).unwrap();
+        assert_eq!(
+            frame_to_admin_events(&frame),
+            vec![AdminEvent::AccountsListed {
+                accounts: vec![AccountEntry::new(
+                    1,
+                    "alice",
+                    1,
+                    Some("staff".into()),
+                    false
+                )],
+                total: 42,
+            }]
+        );
+    }
+
+    #[test]
+    fn invite_and_config_replies_map() {
+        let invite = Frame::push(&InviteCode::new("ABC123", 1_800_000_000)).unwrap();
+        assert_eq!(
+            frame_to_admin_events(&invite),
+            vec![AdminEvent::InviteCreated(InviteCode::new(
+                "ABC123",
+                1_800_000_000
+            ))]
+        );
+
+        let value = Frame::push(&ConfigValue::new("server.name", "Rabbit Lobby")).unwrap();
+        assert_eq!(
+            frame_to_admin_events(&value),
+            vec![AdminEvent::ConfigLoaded {
+                key: "server.name".into(),
+                value: "Rabbit Lobby".into(),
+            }]
+        );
+
+        let applied = Frame::push(&ConfigApplied::new(false)).unwrap();
+        assert_eq!(
+            frame_to_admin_events(&applied),
+            vec![AdminEvent::ConfigApplied {
+                applied_live: false
+            }]
+        );
+    }
+
+    #[test]
+    fn admin_ack_reply_yields_no_event() {
+        // SetAccount answers with an empty ack: framed, no error, no payload.
+        let req = admin_command_to_frame(
+            &AdminCommand::SetAccount {
+                login: "alice".into(),
+                role: None,
+                class: None,
+                disabled: Some(true),
+            },
+            RequestId(1),
+        )
+        .unwrap()
+        .unwrap();
+        let ack = Frame::ack(&req);
+        assert!(frame_to_admin_events(&ack).is_empty());
+    }
+
+    #[test]
+    fn admin_error_reply_maps_to_failed() {
+        let req = admin_command_to_frame(&AdminCommand::ListClasses, RequestId(1))
+            .unwrap()
+            .unwrap();
+        let reply = Frame::error_reply(&req, ErrorCode::Forbidden);
+        assert!(matches!(
+            frame_to_admin_events(&reply).as_slice(),
+            [AdminEvent::Failed(detail)] if detail.contains("Forbidden")
+        ));
+    }
+
+    #[test]
+    fn non_admin_frame_yields_no_admin_events() {
+        let push = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
+        assert!(frame_to_admin_events(&push).is_empty());
     }
 
     #[test]

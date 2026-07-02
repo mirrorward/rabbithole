@@ -145,7 +145,7 @@
 - [ ] Server theme bundle application (accents, icons, art, sounds) w/ safety rails (structured tokens only, contrast minimums, user cap/disable)
 - [ ] Theme editor panel in web admin (upload assets, accents, live light/dark/retro preview)
 - [ ] Embedded web client served by server; installable PWA
-- [ ] Web admin routes: config, accounts/classes, moderation, monitors (federation/radio panels as they land)
+- [~] Web admin routes: config, accounts/classes, moderation, monitors (federation/radio panels as they land) — `ui-web`: `/admin` route with config (ConfigGet/Set), accounts & classes (AccountList/Set, ClassList/Set), moderation (Kick/Broadcast); `AdminCommand`/`AdminEvent` + `admin_command_to_frame`/`frame_to_admin_events` in `wire.rs` (host-tested, mirrors FILE family), `AdminState` reducer, nav gated on `is_admin`, `MockClient::dispatch_admin`. Plus `WsClient` **reconnect/backoff** (pure host-tested `backoff_delay` capped-exponential+jitter, `ConnState` Connecting/Online/Reconnecting/Offline surfaced in StatusBar) and live **FILE-family dispatch** over the socket. Federation/radio monitor panels land with those subsystems
 - [ ] Tauri v2 desktop: core in-process, QUIC transport, native notifications, tray/menubar presence, `rabbit://` deep links, auto-update
 - [ ] Server native GUI wrapper (systray + bundled daemon)
 - [ ] Playwright E2E suite

@@ -290,6 +290,15 @@ margin-top:var(--rh-space-2);overflow:hidden}\
 .rh-art-wrap{padding:var(--rh-space-4);overflow:auto}\
 .rh-art{background:#000;border:1px solid var(--rh-surface);\
 border-radius:var(--rh-radius);image-rendering:pixelated;max-width:100%}\
+.rh-dot.pending{background:var(--rh-accent);opacity:.6}\
+.rh-conn{font-size:var(--rh-font-xs);color:var(--rh-muted);\
+text-transform:uppercase;letter-spacing:.04em;margin-right:var(--rh-space-2)}\
+.rh-admin-status{padding:var(--rh-space-2) var(--rh-space-4);\
+color:var(--rh-muted);font-size:var(--rh-font-sm)}\
+.rh-config-row,.rh-account-row{flex-direction:row;align-items:center;\
+gap:var(--rh-space-2);flex-wrap:wrap}\
+.rh-config-key{font-weight:600;min-width:12rem}\
+.rh-account-role{font-size:var(--rh-font-xs);color:var(--rh-muted)}\
 ";
 
 #[cfg(test)]

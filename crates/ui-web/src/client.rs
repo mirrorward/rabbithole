@@ -16,6 +16,9 @@
 //! command-in / event-out shape stays the same.
 
 use rabbithole_core::api::{Command, Event};
+use rabbithole_proto::admin::{
+    AccountEntry, AccountList, ClassEntry, ClassList, ConfigApplied, ConfigValue, InviteCode,
+};
 use rabbithole_proto::filelib::{
     AreaList, FileAdded, FileAreaView, FileContent, FileNodeView, NodeList, NodeReply,
 };
@@ -24,7 +27,9 @@ use rabbithole_proto::{Frame, Message, RequestId};
 
 use crate::files::{KIND_FILE, KIND_FOLDER};
 use crate::state::{derive_server_name, Board, DmMessage, DmThread, Member, Post, Thread};
-use crate::wire::{frame_to_file_events, FileCommand, FileEvent};
+use crate::wire::{
+    frame_to_admin_events, frame_to_file_events, AdminCommand, AdminEvent, FileCommand, FileEvent,
+};
 
 /// The single room the mock exposes.
 pub const LOBBY: &str = "lobby";
@@ -84,6 +89,10 @@ pub struct MockClient {
     dm_threads: Vec<DmThread>,
     file_areas: Vec<FileAreaView>,
     file_nodes: Vec<FileNodeView>,
+    admin_classes: Vec<ClassEntry>,
+    admin_accounts: Vec<AccountEntry>,
+    admin_config: Vec<(String, String)>,
+    invite_seq: u32,
     /// Sink registered through the async [`EventClient`] seam, if any. Skipped
     /// by [`Debug`] (closures are not `Debug`).
     sink: Option<crate::wire::EventSink>,
@@ -104,6 +113,10 @@ impl std::fmt::Debug for MockClient {
             .field("dm_threads", &self.dm_threads)
             .field("file_areas", &self.file_areas)
             .field("file_nodes", &self.file_nodes)
+            .field("admin_classes", &self.admin_classes)
+            .field("admin_accounts", &self.admin_accounts)
+            .field("admin_config", &self.admin_config)
+            .field("invite_seq", &self.invite_seq)
             .field("sink", &self.sink.as_ref().map(|_| "<fn>"))
             .finish()
     }
@@ -132,6 +145,10 @@ impl MockClient {
             dm_threads: Self::seeded_dms(),
             file_areas: Self::seeded_file_areas(),
             file_nodes: Self::seeded_file_nodes(),
+            admin_classes: Self::seeded_classes(),
+            admin_accounts: Self::seeded_accounts(),
+            admin_config: Self::seeded_config(),
+            invite_seq: 0,
             sink: None,
         }
     }
@@ -406,6 +423,117 @@ impl MockClient {
         }
     }
 
+    fn seeded_classes() -> Vec<ClassEntry> {
+        vec![
+            ClassEntry::new("admin", 0xFFFF_FFFF_FFFF_FFFF, 1),
+            ClassEntry::new("staff", 0x0000_0000_00FF_FFFF, 3),
+            ClassEntry::new("member", 0x0000_0000_0000_00FF, 128),
+        ]
+    }
+
+    fn seeded_accounts() -> Vec<AccountEntry> {
+        vec![
+            AccountEntry::new(1, "rabbit", 2, Some("admin".into()), false),
+            AccountEntry::new(2, "alice", 1, Some("member".into()), false),
+            AccountEntry::new(3, "bob", 1, Some("member".into()), false),
+            AccountEntry::new(4, "spammer", 0, Some("member".into()), true),
+        ]
+    }
+
+    fn seeded_config() -> Vec<(String, String)> {
+        vec![
+            ("server.name".to_string(), "Rabbit Lobby".to_string()),
+            (
+                "server.motd".to_string(),
+                "Welcome to the warren.".to_string(),
+            ),
+            ("registration.mode".to_string(), "invite".to_string()),
+            ("chat.slowmode_secs".to_string(), "0".to_string()),
+        ]
+    }
+
+    /// Serve an [`AdminCommand`] from the in-memory admin console.
+    ///
+    /// Replies that carry a payload (`ClassList`, `AccountList`, `ConfigValue`,
+    /// `ConfigApplied`, `InviteCode`) are built as real ADMIN-family [`Frame`]s
+    /// and decoded back through [`frame_to_admin_events`], so the mock exercises
+    /// the exact host-tested wire mapping the browser transport uses. Commands
+    /// whose server reply is an empty ack (`SetClass`, `SetAccount`,
+    /// `Broadcast`, `Kick`) mutate the seeded state and synthesise an
+    /// [`AdminEvent::Ack`] for the console status line.
+    pub fn dispatch_admin(&mut self, command: AdminCommand) -> Vec<AdminEvent> {
+        match command {
+            AdminCommand::ListClasses => admin_events(&ClassList::new(self.admin_classes.clone())),
+            AdminCommand::SetClass { name, base_mask } => {
+                if let Some(c) = self.admin_classes.iter_mut().find(|c| c.name == name) {
+                    c.base_mask = base_mask;
+                } else {
+                    self.admin_classes
+                        .push(ClassEntry::new(&name, base_mask, 0));
+                }
+                vec![AdminEvent::Ack(format!("Class {name} saved."))]
+            }
+            AdminCommand::ListAccounts { offset, limit } => {
+                let total = self.admin_accounts.len() as u64;
+                let page: Vec<AccountEntry> = self
+                    .admin_accounts
+                    .iter()
+                    .skip(offset as usize)
+                    .take(limit as usize)
+                    .cloned()
+                    .collect();
+                admin_events(&AccountList::new(page, total))
+            }
+            AdminCommand::SetAccount {
+                login,
+                role,
+                class,
+                disabled,
+            } => match self.admin_accounts.iter_mut().find(|a| a.login == login) {
+                Some(a) => {
+                    if let Some(r) = role {
+                        a.role = r;
+                    }
+                    if let Some(c) = class {
+                        a.class = Some(c);
+                    }
+                    if let Some(d) = disabled {
+                        a.disabled = d;
+                    }
+                    vec![AdminEvent::Ack(format!("Account {login} updated."))]
+                }
+                None => vec![AdminEvent::Failed(format!("no account {login}"))],
+            },
+            AdminCommand::CreateInvite { ttl_secs } => {
+                self.invite_seq += 1;
+                let code = format!("WARREN-{:04}", self.invite_seq);
+                admin_events(&InviteCode::new(code, ttl_secs))
+            }
+            AdminCommand::Broadcast { text } => {
+                vec![AdminEvent::Ack(format!("Broadcast sent: {text}"))]
+            }
+            AdminCommand::Kick { session_id } => {
+                vec![AdminEvent::Ack(format!("Kicked session #{session_id}."))]
+            }
+            AdminCommand::GetConfig { key } => {
+                match self.admin_config.iter().find(|(k, _)| *k == key) {
+                    Some((k, v)) => admin_events(&ConfigValue::new(k.clone(), v.clone())),
+                    None => vec![AdminEvent::Failed(format!("no config key {key}"))],
+                }
+            }
+            AdminCommand::SetConfig { key, value } => {
+                if let Some(entry) = self.admin_config.iter_mut().find(|(k, _)| *k == key) {
+                    entry.1 = value;
+                } else {
+                    self.admin_config.push((key.clone(), value));
+                }
+                // Listener addresses need a restart; everything else is live.
+                let live = !key.starts_with("listen.");
+                admin_events(&ConfigApplied::new(live))
+            }
+        }
+    }
+
     /// The lobby scrollback every fresh session is seeded with.
     fn seeded_messages() -> Vec<Event> {
         [
@@ -529,6 +657,15 @@ fn file_events<M: Message>(msg: &M) -> Vec<FileEvent> {
     match Frame::request(RequestId(0), msg) {
         Ok(frame) => frame_to_file_events(&frame),
         Err(err) => vec![FileEvent::Failed(format!("encode: {err}"))],
+    }
+}
+
+/// Build [`AdminEvent`]s from a seeded ADMIN-family message by round-tripping
+/// it through a [`Frame`] and [`frame_to_admin_events`].
+fn admin_events<M: Message>(msg: &M) -> Vec<AdminEvent> {
+    match Frame::request(RequestId(0), msg) {
+        Ok(frame) => frame_to_admin_events(&frame),
+        Err(err) => vec![AdminEvent::Failed(format!("encode: {err}"))],
     }
 }
 
@@ -805,6 +942,138 @@ mod tests {
         let mut c = MockClient::new();
         let ev = c.dispatch_file(FileCommand::GetNode { id: 999 });
         assert!(matches!(ev.as_slice(), [FileEvent::Failed(_)]));
+    }
+
+    #[test]
+    fn admin_list_classes_returns_seeded_classes() {
+        let mut c = MockClient::new();
+        let ev = c.dispatch_admin(AdminCommand::ListClasses);
+        match ev.as_slice() {
+            [AdminEvent::ClassesListed(classes)] => {
+                assert_eq!(classes.len(), 3);
+                assert!(classes.iter().any(|c| c.name == "admin"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn admin_list_accounts_paginates_with_total() {
+        let mut c = MockClient::new();
+        let ev = c.dispatch_admin(AdminCommand::ListAccounts {
+            offset: 1,
+            limit: 2,
+        });
+        match ev.as_slice() {
+            [AdminEvent::AccountsListed { accounts, total }] => {
+                assert_eq!(*total, 4);
+                assert_eq!(accounts.len(), 2);
+                assert_eq!(accounts[0].login, "alice");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn admin_set_account_mutates_and_acks() {
+        let mut c = MockClient::new();
+        let ev = c.dispatch_admin(AdminCommand::SetAccount {
+            login: "alice".into(),
+            role: Some(2),
+            class: None,
+            disabled: Some(true),
+        });
+        assert!(matches!(ev.as_slice(), [AdminEvent::Ack(_)]));
+        // The mutation persists and shows up in a subsequent listing.
+        let listed = c.dispatch_admin(AdminCommand::ListAccounts {
+            offset: 0,
+            limit: 50,
+        });
+        let [AdminEvent::AccountsListed { accounts, .. }] = listed.as_slice() else {
+            panic!("expected an account listing");
+        };
+        let alice = accounts.iter().find(|a| a.login == "alice").unwrap();
+        assert_eq!(alice.role, 2);
+        assert!(alice.disabled);
+    }
+
+    #[test]
+    fn admin_set_unknown_account_fails() {
+        let mut c = MockClient::new();
+        let ev = c.dispatch_admin(AdminCommand::SetAccount {
+            login: "ghost".into(),
+            role: Some(1),
+            class: None,
+            disabled: None,
+        });
+        assert!(matches!(ev.as_slice(), [AdminEvent::Failed(_)]));
+    }
+
+    #[test]
+    fn admin_config_get_set_roundtrip() {
+        let mut c = MockClient::new();
+        let got = c.dispatch_admin(AdminCommand::GetConfig {
+            key: "server.name".into(),
+        });
+        assert!(matches!(
+            got.as_slice(),
+            [AdminEvent::ConfigLoaded { value, .. }] if value == "Rabbit Lobby"
+        ));
+        // Setting a non-listener key applies live.
+        let set = c.dispatch_admin(AdminCommand::SetConfig {
+            key: "server.name".into(),
+            value: "New Warren".into(),
+        });
+        assert!(matches!(
+            set.as_slice(),
+            [AdminEvent::ConfigApplied { applied_live: true }]
+        ));
+        // A listener key needs a restart.
+        let listen = c.dispatch_admin(AdminCommand::SetConfig {
+            key: "listen.ws".into(),
+            value: "0.0.0.0:9000".into(),
+        });
+        assert!(matches!(
+            listen.as_slice(),
+            [AdminEvent::ConfigApplied {
+                applied_live: false
+            }]
+        ));
+        // The updated value reads back.
+        let got = c.dispatch_admin(AdminCommand::GetConfig {
+            key: "server.name".into(),
+        });
+        assert!(matches!(
+            got.as_slice(),
+            [AdminEvent::ConfigLoaded { value, .. }] if value == "New Warren"
+        ));
+    }
+
+    #[test]
+    fn admin_create_invite_mints_unique_codes() {
+        let mut c = MockClient::new();
+        let first = c.dispatch_admin(AdminCommand::CreateInvite { ttl_secs: 3600 });
+        let second = c.dispatch_admin(AdminCommand::CreateInvite { ttl_secs: 3600 });
+        let code = |ev: &[AdminEvent]| match ev {
+            [AdminEvent::InviteCreated(code)] => code.code.clone(),
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_ne!(code(&first), code(&second));
+    }
+
+    #[test]
+    fn admin_broadcast_and_kick_ack() {
+        let mut c = MockClient::new();
+        assert!(matches!(
+            c.dispatch_admin(AdminCommand::Broadcast { text: "hi".into() })
+                .as_slice(),
+            [AdminEvent::Ack(_)]
+        ));
+        assert!(matches!(
+            c.dispatch_admin(AdminCommand::Kick { session_id: 9 })
+                .as_slice(),
+            [AdminEvent::Ack(_)]
+        ));
     }
 
     #[test]

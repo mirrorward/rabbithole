@@ -7,6 +7,8 @@
 
 use rabbithole_core::api::Event;
 
+use crate::conn::ConnState;
+
 /// One rendered line of chat scrollback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatLine {
@@ -104,6 +106,8 @@ pub struct Member {
 pub struct UiState {
     /// Whether the (mock) transport reports an active session.
     pub connected: bool,
+    /// The transport's connection lifecycle, surfaced in the header.
+    pub conn: ConnState,
     /// Human-readable server name, once known.
     pub server_name: String,
     /// One-line status shown in the header bar.
@@ -145,11 +149,13 @@ impl UiState {
                 server_version,
             } => {
                 self.connected = true;
+                self.conn = ConnState::Online;
                 self.server_name = server_name.clone();
                 self.status = format!("Connected to {server_name} ({server_version})");
             }
             Event::Disconnected { reason } => {
                 self.connected = false;
+                self.conn = ConnState::Offline;
                 self.status = format!("Disconnected: {reason}");
             }
             Event::CommandFailed { detail } => {
@@ -162,6 +168,16 @@ impl UiState {
                 });
             }
             _ => {}
+        }
+    }
+
+    /// Set the transport connection state (driven by the transport's
+    /// connection-lifecycle callback: `Connecting`/`Reconnecting` between the
+    /// `Connected`/`Disconnected` events the reducer already folds).
+    pub fn set_conn(&mut self, conn: ConnState) {
+        self.conn = conn;
+        if conn.is_pending() {
+            self.status = conn.label().to_string();
         }
     }
 
@@ -312,6 +328,25 @@ mod tests {
         });
         assert!(!s.connected);
         assert!(s.status.contains("bye"));
+    }
+
+    #[test]
+    fn conn_state_tracks_events_and_pending_overrides() {
+        let mut s = UiState::default();
+        assert_eq!(s.conn, ConnState::Offline);
+        s.apply(&Event::Connected {
+            server_name: "x".into(),
+            server_version: "1".into(),
+        });
+        assert_eq!(s.conn, ConnState::Online);
+        // A transport-driven pending state surfaces on the status line.
+        s.set_conn(ConnState::Reconnecting);
+        assert_eq!(s.conn, ConnState::Reconnecting);
+        assert!(s.status.contains("Reconnecting"));
+        s.apply(&Event::Disconnected {
+            reason: "bye".into(),
+        });
+        assert_eq!(s.conn, ConnState::Offline);
     }
 
     #[test]

@@ -11,12 +11,15 @@ use leptos_router::*;
 use rabbithole_core::api::Command;
 use rabbithole_core::theme::Mode;
 
+use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
-use crate::components::{ArtGallery, BoardView, Boards, Directory, Dms, Files, Lobby, Login};
+use crate::components::{
+    Admin, ArtGallery, BoardView, Boards, Directory, Dms, Files, Lobby, Login,
+};
 use crate::files::{join_path, FilesState};
 use crate::state::UiState;
 use crate::theme_css::{next_choice, root_style, ThemeChoice, DEFAULT_PACK, STYLESHEET};
-use crate::wire::{FileCommand, FileEvent};
+use crate::wire::{AdminCommand, AdminEvent, FileCommand, FileEvent};
 
 /// Reactive, `Copy` handle bundle shared through context.
 #[derive(Clone, Copy)]
@@ -25,6 +28,11 @@ pub struct AppState {
     pub state: RwSignal<UiState>,
     /// The file-library model, folded from file events.
     pub files: RwSignal<FilesState>,
+    /// The web-admin model, folded from admin events.
+    pub admin: RwSignal<AdminState>,
+    /// Whether the signed-in session holds an admin capability. Gates the admin
+    /// nav entry and routes.
+    pub is_admin: RwSignal<bool>,
     /// The user's appearance choice (System/Light/Dark). The effective
     /// [`Mode`] is derived from this plus the OS hint via [`AppState::mode`].
     pub theme: RwSignal<ThemeChoice>,
@@ -38,6 +46,8 @@ impl AppState {
         Self {
             state: create_rw_signal(UiState::default()),
             files: create_rw_signal(FilesState::default()),
+            admin: create_rw_signal(AdminState::default()),
+            is_admin: create_rw_signal(false),
             theme: create_rw_signal(initial_theme_choice()),
             client: store_value(MockClient::new()),
         }
@@ -209,6 +219,98 @@ impl AppState {
             bytes,
         });
     }
+
+    /// Grant or revoke the admin capability for the current session. Gates the
+    /// admin nav and routes.
+    pub fn set_admin(&self, is_admin: bool) {
+        self.is_admin.set(is_admin);
+    }
+
+    /// Drive one [`AdminCommand`] through the seam and fold its admin events
+    /// into the [`AdminState`].
+    fn dispatch_admin(&self, command: AdminCommand) {
+        let admin = self.admin;
+        self.client.update_value(|client| {
+            let events: Vec<AdminEvent> = client.dispatch_admin(command);
+            admin.update(|a| {
+                for event in &events {
+                    a.apply(event);
+                }
+            });
+        });
+    }
+
+    /// Load the permission-class list into admin state.
+    pub fn load_classes(&self) {
+        self.dispatch_admin(AdminCommand::ListClasses);
+    }
+
+    /// Save a permission class's capability mask.
+    pub fn set_class(&self, name: &str, base_mask: u64) {
+        self.dispatch_admin(AdminCommand::SetClass {
+            name: name.to_string(),
+            base_mask,
+        });
+    }
+
+    /// Load a page of accounts into admin state.
+    pub fn load_accounts(&self) {
+        self.dispatch_admin(AdminCommand::ListAccounts {
+            offset: 0,
+            limit: 100,
+        });
+    }
+
+    /// Enable or disable an account.
+    pub fn set_account_disabled(&self, login: &str, disabled: bool) {
+        self.dispatch_admin(AdminCommand::SetAccount {
+            login: login.to_string(),
+            role: None,
+            class: None,
+            disabled: Some(disabled),
+        });
+        // Reflect the change back into the visible listing.
+        self.load_accounts();
+    }
+
+    /// Load the seeded config keys the console exposes.
+    pub fn load_config(&self) {
+        for key in [
+            "server.name",
+            "server.motd",
+            "registration.mode",
+            "chat.slowmode_secs",
+        ] {
+            self.dispatch_admin(AdminCommand::GetConfig {
+                key: key.to_string(),
+            });
+        }
+    }
+
+    /// Set a config key/value.
+    pub fn set_config(&self, key: &str, value: &str) {
+        self.dispatch_admin(AdminCommand::SetConfig {
+            key: key.to_string(),
+            value: value.to_string(),
+        });
+    }
+
+    /// Mint an invite code with the given time-to-live in seconds.
+    pub fn create_invite(&self, ttl_secs: i64) {
+        self.dispatch_admin(AdminCommand::CreateInvite { ttl_secs });
+    }
+
+    /// Broadcast a notice to every session.
+    pub fn broadcast(&self, text: &str) {
+        self.dispatch_admin(AdminCommand::Broadcast {
+            text: text.to_string(),
+        });
+    }
+
+    /// Disconnect a session by id.
+    pub fn kick(&self, session_id: u64) {
+        self.dispatch_admin(AdminCommand::Kick { session_id });
+    }
 }
 
 /// The theme choice a fresh session starts with: the persisted choice on the
@@ -265,6 +367,7 @@ pub fn App() -> impl IntoView {
                     <Route path="/directory" view=Directory/>
                     <Route path="/files" view=Files/>
                     <Route path="/art" view=ArtGallery/>
+                    <Route path="/admin" view=Admin/>
                 </Routes>
             </div>
         </Router>
