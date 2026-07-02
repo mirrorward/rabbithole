@@ -14,7 +14,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -118,6 +118,75 @@ impl BlobStore {
 
     pub fn contains(&self, id: &BlobId) -> bool {
         self.blob_path(id).exists()
+    }
+
+    /// The size in bytes of a stored blob.
+    pub fn size(&self, id: &BlobId) -> Result<u64, BlobError> {
+        fs::metadata(self.blob_path(id))
+            .map(|m| m.len())
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => BlobError::NotFound(*id),
+                _ => BlobError::Io(e),
+            })
+    }
+
+    /// Read a byte range `[offset, offset+len)` of a blob without loading
+    /// the whole file — the download-serving primitive (Wave 4.2). Reads are
+    /// clamped to the end of the blob, so a short read at EOF returns fewer
+    /// bytes than requested. Integrity is the whole-file root check the
+    /// downloader performs on completion; the store serves its own trusted
+    /// content.
+    pub fn read_range(&self, id: &BlobId, offset: u64, len: usize) -> Result<Vec<u8>, BlobError> {
+        let mut f = fs::File::open(self.blob_path(id)).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => BlobError::NotFound(*id),
+            _ => BlobError::Io(e),
+        })?;
+        f.seek(SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; len];
+        let mut read = 0;
+        while read < len {
+            match f.read(&mut buf[read..])? {
+                0 => break, // EOF
+                n => read += n,
+            }
+        }
+        buf.truncate(read);
+        Ok(buf)
+    }
+
+    /// Commit a staged file into the store, verifying its content hashes to
+    /// `expected` — the upload-finalize primitive (Wave 4.2). Hashes the file
+    /// incrementally (no whole-file buffer), then renames it into the
+    /// content-addressed layout. On mismatch the staged file is left for the
+    /// caller to clean up. A no-op (removing the stage) if already present.
+    pub fn put_verified(&self, staged: &Path, expected: &BlobId) -> Result<BlobId, BlobError> {
+        let mut hasher = blake3::Hasher::new();
+        {
+            let mut f = fs::File::open(staged)?;
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+        }
+        let actual = BlobId(*hasher.finalize().as_bytes());
+        if actual != *expected {
+            return Err(BlobError::HashMismatch {
+                expected: *expected,
+                actual,
+            });
+        }
+        let path = self.blob_path(expected);
+        if path.exists() {
+            let _ = fs::remove_file(staged);
+            return Ok(*expected);
+        }
+        fs::create_dir_all(path.parent().expect("blob path has parent"))?;
+        fs::rename(staged, &path)?;
+        Ok(*expected)
     }
 
     /// Increment the reference count, returning the new count.
@@ -254,5 +323,40 @@ mod tests {
         let id = BlobId::for_bytes(b"x");
         assert_eq!(BlobId::from_hex(&id.to_hex()), Some(id));
         assert_eq!(BlobId::from_hex("zz"), None);
+    }
+
+    #[test]
+    fn read_range_serves_slices() {
+        let (_dir, store) = store();
+        let id = store.put(b"0123456789").unwrap();
+        assert_eq!(store.size(&id).unwrap(), 10);
+        assert_eq!(store.read_range(&id, 0, 4).unwrap(), b"0123");
+        assert_eq!(store.read_range(&id, 4, 3).unwrap(), b"456");
+        // Reads past EOF clamp to what's there.
+        assert_eq!(store.read_range(&id, 8, 100).unwrap(), b"89");
+        assert_eq!(store.read_range(&id, 10, 5).unwrap(), b"");
+    }
+
+    #[test]
+    fn put_verified_commits_and_rejects_mismatch() {
+        let (dir, store) = store();
+        let content = b"a staged upload body";
+        let expected = BlobId::for_bytes(content);
+
+        // A correct stage commits and becomes retrievable; the stage is gone.
+        let stage = dir.path().join("stage.part");
+        std::fs::write(&stage, content).unwrap();
+        assert_eq!(store.put_verified(&stage, &expected).unwrap(), expected);
+        assert_eq!(store.get(&expected).unwrap(), content);
+        assert!(!stage.exists());
+
+        // A stage whose bytes don't match the declared id is refused.
+        let bad = dir.path().join("bad.part");
+        std::fs::write(&bad, b"different bytes").unwrap();
+        assert!(matches!(
+            store.put_verified(&bad, &expected),
+            Err(BlobError::HashMismatch { .. })
+        ));
+        assert!(!store.contains(&BlobId::for_bytes(b"different bytes")));
     }
 }

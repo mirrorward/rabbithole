@@ -64,6 +64,26 @@ impl std::fmt::Display for TransportKind {
     }
 }
 
+/// The write half of a dedicated bulk-transfer stream.
+pub type BulkSend = Box<dyn tokio::io::AsyncWrite + Send + Unpin>;
+/// The read half of a dedicated bulk-transfer stream.
+pub type BulkRecv = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
+
+/// Opens additional streams on a live connection for bulk transfers
+/// (Wave 4.2), independent of the control channel. Only multiplexing
+/// transports (QUIC) offer this; a `None` from [`Connection::bulk`] means the
+/// caller must fall back to windowed control-frame chunks (the WebSocket
+/// path). The handle is cheap to clone/hold ('static) so transfers run
+/// concurrently with the control loop.
+#[async_trait]
+pub trait BulkStreams: Send + Sync {
+    /// Client side: open a fresh bidirectional stream to the peer.
+    async fn open(&self) -> Result<(BulkSend, BulkRecv), NetError>;
+
+    /// Server side: accept the next peer-opened bidirectional stream.
+    async fn accept(&self) -> Result<(BulkSend, BulkRecv), NetError>;
+}
+
 /// A live control channel to a peer: ordered, reliable frames both ways.
 #[async_trait]
 pub trait Connection: Send {
@@ -74,6 +94,13 @@ pub trait Connection: Send {
     async fn recv(&mut self) -> Result<Option<Frame>, NetError>;
 
     fn peer(&self) -> &PeerInfo;
+
+    /// A handle for opening dedicated bulk-transfer streams, if this
+    /// transport multiplexes (QUIC). Defaults to `None` — WebSocket and any
+    /// single-stream transport transfer over control-frame chunks instead.
+    fn bulk(&self) -> Option<Box<dyn BulkStreams>> {
+        None
+    }
 
     /// Close gracefully.
     async fn close(&mut self);

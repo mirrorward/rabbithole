@@ -101,6 +101,64 @@ async fn quic_rejects_wrong_fingerprint() {
 }
 
 #[tokio::test]
+async fn quic_bulk_stream_transfers_bytes() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let identity = TlsIdentity::self_signed(&["localhost".into()]).unwrap();
+    let fingerprint = identity.fingerprint();
+    let mut listener = QuicListener::bind("127.0.0.1:0".parse().unwrap(), &identity).unwrap();
+    let endpoint = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+
+    // A oneshot lets the client tell the server it has finished reading, so
+    // the server holds the QUIC connection open until then (dropping it early
+    // would discard the in-flight echo — the same race close() guards).
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Server: accept the control connection, then a bulk stream, and echo
+    // a large payload back over it (proving it's independent of control).
+    let server = tokio::spawn(async move {
+        let conn = listener.accept().await.expect("accept");
+        let bulk = conn.bulk().expect("quic offers bulk streams");
+        let (mut send, mut recv) = bulk.accept().await.expect("accept bulk");
+        let mut buf = Vec::new();
+        recv.read_to_end(&mut buf).await.expect("read bulk");
+        send.write_all(&buf).await.expect("echo");
+        send.shutdown().await.ok(); // FIN so the client's read_to_end returns
+        done_rx.await.ok(); // keep the connection alive until the client is done
+        buf.len()
+    });
+
+    let transport = QuicTransport::new("localhost", ServerAuth::Pinned(fingerprint));
+    let conn = transport.connect(&endpoint).await.expect("connect");
+    let bulk = conn.bulk().expect("client bulk");
+    let (mut send, mut recv) = bulk.open().await.expect("open bulk");
+    let payload = vec![0xABu8; 256 * 1024];
+    send.write_all(&payload).await.expect("write");
+    send.shutdown().await.expect("shutdown"); // FIN so the server sees EOF
+    let mut got = Vec::new();
+    recv.read_to_end(&mut got).await.expect("read echo");
+    assert_eq!(got, payload, "bulk stream round-trips the payload");
+    done_tx.send(()).ok();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ws_reports_no_bulk_streams() {
+    let listener = WsListener::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let endpoint = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let mut listener = listener;
+    let accept = tokio::spawn(async move {
+        let conn = listener.accept().await.expect("accept");
+        assert!(conn.bulk().is_none(), "ws has no bulk streams");
+    });
+    let conn = WsTransport.connect(&endpoint).await.expect("connect");
+    assert!(conn.bulk().is_none(), "ws client has no bulk streams");
+    accept.await.unwrap();
+}
+
+#[tokio::test]
 async fn ws_loopback_hello() {
     let listener = WsListener::bind("127.0.0.1:0".parse().unwrap())
         .await

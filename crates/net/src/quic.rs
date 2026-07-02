@@ -13,7 +13,10 @@ use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rabbithole_proto::{version::ALPN, Frame, FrameCodec};
 
 use crate::tls::{ensure_crypto_provider, PinnedCertVerifier, ServerAuth, TlsIdentity};
-use crate::{Connection, Listener, NetError, PeerInfo, Transport, TransportKind};
+use crate::{
+    BulkRecv, BulkSend, BulkStreams, Connection, Listener, NetError, PeerInfo, Transport,
+    TransportKind,
+};
 
 /// A listening QUIC endpoint.
 pub struct QuicListener {
@@ -166,6 +169,30 @@ struct QuicConnection {
     peer: PeerInfo,
 }
 
+/// Bulk-stream opener over a shared QUIC connection (Wave 4.2).
+struct QuicBulk(quinn::Connection);
+
+#[async_trait]
+impl BulkStreams for QuicBulk {
+    async fn open(&self) -> Result<(BulkSend, BulkRecv), NetError> {
+        let (send, recv) = self
+            .0
+            .open_bi()
+            .await
+            .map_err(|e| NetError::Quic(e.to_string()))?;
+        Ok((Box::new(send), Box::new(recv)))
+    }
+
+    async fn accept(&self) -> Result<(BulkSend, BulkRecv), NetError> {
+        let (send, recv) = self
+            .0
+            .accept_bi()
+            .await
+            .map_err(|e| NetError::Quic(e.to_string()))?;
+        Ok((Box::new(send), Box::new(recv)))
+    }
+}
+
 #[async_trait]
 impl Connection for QuicConnection {
     async fn send(&mut self, frame: Frame) -> Result<(), NetError> {
@@ -198,6 +225,13 @@ impl Connection for QuicConnection {
 
     fn peer(&self) -> &PeerInfo {
         &self.peer
+    }
+
+    fn bulk(&self) -> Option<Box<dyn BulkStreams>> {
+        // `quinn::Connection` is a cheap Arc handle; the opener runs
+        // concurrently with the control loop (which keeps the original
+        // control bi-stream). Extra bi-streams ride the same connection.
+        Some(Box::new(QuicBulk(self.conn.clone())))
     }
 
     async fn close(&mut self) {
