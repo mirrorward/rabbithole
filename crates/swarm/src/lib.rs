@@ -13,8 +13,10 @@ pub mod cap;
 pub mod link;
 pub mod manifest;
 pub mod peer;
+pub mod scheduler;
 
 pub use cap::{CapClaim, CapError, CapToken, CAP_CONTEXT};
 pub use link::{LinkError, LinkTarget, RabbitLink};
 pub use manifest::{Manifest, ManifestError, ManifestFile, CHUNK_SIZE};
 pub use peer::{fetch_file, fetch_range, PeerError, PeerServer, SeedStore};
+pub use scheduler::{fetch_swarm, FetchReport, SourcePeer, UNIT_SIZE};

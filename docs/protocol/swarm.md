@@ -95,8 +95,19 @@ bi-stream per request:
 
 Whole files loop 4 MiB range requests (`fetch_file`). Bytes never
 transit the origin server. `rabbit swarm share` seeds exactly this way;
-`rabbit swarm fetch <root|link> <out>` does find → ticket → fetch with
-per-peer fallback.
+`rabbit swarm fetch <root|link> <out>` does find → ticket → swarm fetch.
+
+## Multi-source scheduling
+
+`fetch_swarm` splits a file into 1 MiB work units and runs one worker
+per source. Scheduling is work-stealing: a worker pulls the next unit
+the moment it finishes, so faster peers carry more — that is the speed
+assignment, with no rate estimator to go stale. A failing source hands
+its unit back and retires; when the queue drains, idle workers enter
+endgame and duplicate units still in flight (verified writes are
+idempotent, first-done wins), so one stalled peer can't hold the tail.
+Rarest-first ordering applies across files (from coordinator source
+counts) and arrives with manifest-set fetching.
 
 ## Transport decision (the spike)
 

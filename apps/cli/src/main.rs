@@ -891,10 +891,7 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
                     c.swarm_contact(server.addr.port(), server.fingerprint.0)
                         .await?;
                     if !json {
-                        eprintln!(
-                            "seeding on port {} — Ctrl-C to stop",
-                            server.addr.port()
-                        );
+                        eprintln!("seeding on port {} — Ctrl-C to stop", server.addr.port());
                     }
                     // Re-announce at ~2/3 of the granted TTL.
                     let period =
@@ -940,55 +937,52 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
             SwarmAction::Fetch { target, out } => {
                 let root = parse_swarm_target(&target)?;
                 let list = c.swarm_find(root).await?;
-                let ticket = c.swarm_ticket(root).await?;
-                // Try advertising peers first (verified block-by-block);
-                // the origin's transfer engine is the fallback.
-                let mut fetched = None;
-                for s in &list.sources {
-                    let (Some(endpoint), Some(fp)) = (&s.endpoint, s.cert_fp) else {
-                        continue;
-                    };
-                    match rabbithole_swarm::fetch_file(
-                        endpoint,
-                        fp,
-                        &ticket.token,
-                        root,
-                        s.size,
-                        &out,
-                    )
-                    .await
-                    {
-                        Ok(n) => {
-                            fetched = Some((n, format!("peer {}", s.screen_name)));
-                            break;
-                        }
-                        Err(e) => {
-                            if !json {
-                                eprintln!("peer {} failed ({e}); trying next", s.screen_name);
-                            }
-                        }
-                    }
-                }
-                let (n, via) = match fetched {
-                    Some(v) => v,
-                    None if list.server_has => {
-                        // No serving peer: search the library for a node
-                        // with this blob and pull it over the W4.2 engine.
+                // Every source with a peer-wire endpoint joins the swarm
+                // fetch; work-stealing spreads units by real speed and a
+                // failing peer's units migrate to the others.
+                let sources: Vec<rabbithole_swarm::SourcePeer> = list
+                    .sources
+                    .iter()
+                    .filter_map(|s| {
+                        Some(rabbithole_swarm::SourcePeer {
+                            endpoint: s.endpoint.clone()?,
+                            cert_fp: s.cert_fp?,
+                        })
+                    })
+                    .collect();
+                if sources.is_empty() {
+                    if list.server_has {
                         bail!(
                             "no reachable peer serves {} — download it from the \
                              library instead (`rabbit file get`)",
                             hex::encode(root)
                         );
                     }
-                    None => bail!("no known sources for {}", hex::encode(root)),
-                };
+                    bail!("no known sources for {}", hex::encode(root));
+                }
+                let size = list.sources.iter().map(|s| s.size).max().unwrap_or(0);
+                let ticket = c.swarm_ticket(root).await?;
+                let report =
+                    rabbithole_swarm::fetch_swarm(&sources, &ticket.token, root, size, &out)
+                        .await?;
                 if json {
                     println!(
                         "{}",
-                        serde_json::json!({"bytes": n, "via": via, "out": out.display().to_string()})
+                        serde_json::json!({
+                            "bytes": report.bytes,
+                            "out": out.display().to_string(),
+                            "sources": report.per_source.iter().map(|(e, n)| {
+                                serde_json::json!({"endpoint": e, "units": n})
+                            }).collect::<Vec<_>>(),
+                        })
                     );
                 } else {
-                    println!("fetched {n} bytes via {via} → {}", out.display());
+                    println!("fetched {} bytes → {}", report.bytes, out.display());
+                    for (endpoint, units) in &report.per_source {
+                        if *units > 0 {
+                            println!("  {endpoint}: {units} unit(s)");
+                        }
+                    }
                 }
             }
             SwarmAction::Unshare { roots } => {
