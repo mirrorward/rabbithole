@@ -108,7 +108,7 @@
 ## Wave 6 — Telnet BBS + finger + art pipeline
 *Depends on: W2, W3 (W4 optional for file menus)*
 
-- [x] `art` crate: CP437↔Unicode tables, ANSI/SGR + cursor parser, iCE colors, renderer to terminal/plain — `rabbithole-art` (`cp437`/`ansi`/`sauce`/`render`, std-only, `AnsiParser`→`Canvas` of `Cell`, fuzz-tolerant). ANSImation + HTML-canvas/PNG thumbs deferred to W8 (canvas) rendering
+- [x] `art` crate: CP437↔Unicode tables, ANSI/SGR + cursor parser, iCE colors, renderers to terminal/plain/**PNG**/**HTML** — `rabbithole-art` (`cp437`/`ansi`/`sauce`/`render`/`raster`/`font`, `AnsiParser`→`Canvas` of `Cell`; PNG thumbnails via embedded 8x16 CP437 VGA font + 16-color palette; `<pre>`+`<span>` HTML output; fuzz-tolerant; 73 tests). Live ANSImation streaming deferred
 - [x] SAUCE reader/writer (128-byte record + COMNT) — `rabbithole-art::sauce`, tolerant reads / strict writes, iCE-color tflag, roundtrip tests
 - [x] `screen` crate: CP437/ANSI + UTF-8 text surface — `rabbithole-screen` (direct `Cell` buffer over `rabbithole-art`, `ScreenMode::{Utf8,Cp437Ansi}`, box/menu drawing with reverse-video selection, SGR-coalesced `flush`; no ratatui dep). Socket wiring into the telnet shell is the next slice
 - [x] Telnet codec: IAC state machine, ECHO/SGA/NAWS(resize)/TTYPE, 0xFF doubling, loop-safe negotiation — `rabbithole-legacy-telnet` (`proto`/`negotiate`/`stream`, sans-IO parser + RFC 1143-style state machine, line IO w/ password mode, CP437/UTF-8 seam); BINARY option TBD with the art integration
@@ -169,9 +169,9 @@
 *Depends on: W3 (dupe subsystem); W9 helpful*
 
 **NNTP**
-- [~] Reader server: CAPABILITIES, GROUP/LISTGROUP, ARTICLE/HEAD/BODY/STAT, NEXT/LAST, POST, OVER/XOVER + OVERVIEW.FMT, LIST, NEWNEWS; dot-stuffing both ways — codec landed: `rabbithole-legacy-nntp` (command parser, response codes, dot-stuffing, OVERVIEW.FMT, message-id grammar; 51 tests). TCP server + board mapping is the wiring slice
+- [x] Reader server: CAPABILITIES, GROUP/LISTGROUP, ARTICLE/HEAD/BODY/STAT, NEXT/LAST, POST, OVER/XOVER + OVERVIEW.FMT, LIST; dot-stuffing both ways — codec (`rabbithole-legacy-nntp`, 51 tests) + a live gateway wired into burrow (`apps/server/src/nntp.rs`, config-gated `nntp_enabled`/`nntp_addr`, AUTHINFO→AuthService, POST→BoardService; e2e-tested). NEWNEWS/IHAVE peering deferred to the federation slice
 - [ ] AUTHINFO USER/PASS on TLS only (563/STARTTLS)
-- [ ] Group↔board mapping; monotonic article numbers; permanent Message-IDs; References threading; **overview cache computed on post**
+- [x] Group↔board mapping (identity slug↔group); per-group monotonic article numbers; permanent Message-IDs (`<hex(blake3 event id)@origin>`); References threading; overview rendered from post metadata — in `apps/server/src/nntp.rs`
 - [ ] Peering: IHAVE/NEWNEWS with external peers; Message-ID dedupe via shared subsystem
 
 **FidoNet**
@@ -195,8 +195,8 @@
 ## Wave 11 — Radio
 *Depends on: W1, W4 (W8 for UI polish)*
 
-- [~] Station/mount model (multiple stations, per-server toggle) — audio core landed: `rabbithole-audio` (PCM frames, saturating mixer w/ per-source gain, broadcast `Station` fan-out with `NowPlaying` + lag-drop listeners, jitter buffer, VU meter; 21 tests). Multi-station registry + per-server toggle is the service layer
-- [ ] Playlist engine: library from file areas, rotation, **vote queue**, requests
+- [x] Station/mount model (multiple stations, per-server toggle) — `rabbithole-audio` (PCM frames, mixer, `Station` fan-out, jitter buffer, VU meter; 21 tests) + `rabbithole-radio::StationRegistry` (create/remove/list, per-station enable toggle, listener accounting; 23 tests)
+- [x] Playlist engine: rotation (Sequential/seeded-Shuffle/RepeatOne), **vote queue** + requests, `StationController` tying playlist→audio Station with now-playing/metadata — `rabbithole-radio`. Library-from-file-areas source wiring is the server slice
 - [ ] DJ live source (Icecast SOURCE/PUT + Basic auth) — works with butt/ices
 - [ ] Encode pipelines: Opus/Ogg primary + MP3 legacy mount
 - [~] Delivery: native QUIC uni-stream; HTTP streaming; ICY mounts w/ exact icy-metaint math (8192, len×16, 0x00 when unchanged) — ICY codec landed: `rabbithole-legacy-icecast` (SOURCE/PUT source auth, listener headers, exact `IcyMetaInterleaver` metaint math with fuzz-verified boundary correctness; 43 tests). Server delivery wiring + QUIC/HTTP transports pending

@@ -27,6 +27,7 @@ rabbithole-store-server.workspace = true
 rabbithole-swarm.workspace = true
 rabbithole-legacy-telnet.workspace = true
 rabbithole-legacy-finger.workspace = true
+rabbithole-legacy-nntp.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
 clap.workspace = true

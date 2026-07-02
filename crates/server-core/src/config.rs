@@ -63,6 +63,10 @@ pub struct ServerConfig {
     pub finger_enabled: bool,
     /// Finger listener address (default 0.0.0.0:7979 — 79 needs privilege).
     pub finger_addr: SocketAddr,
+    /// Serve the legacy NNTP reader/poster surface (RFC 3977) on `nntp_addr`.
+    pub nntp_enabled: bool,
+    /// NNTP listener address (default 0.0.0.0:1119 — 119 needs privilege).
+    pub nntp_addr: SocketAddr,
     /// Welcome-screen featured block (title on first line, body after).
     pub welcome_featured: String,
     /// Welcome-screen one-line ticker.
@@ -101,6 +105,8 @@ impl Default for ServerConfig {
             telnet_addr: "0.0.0.0:2323".parse().expect("valid"),
             finger_enabled: false,
             finger_addr: "0.0.0.0:7979".parse().expect("valid"),
+            nntp_enabled: false,
+            nntp_addr: "0.0.0.0:1119".parse().expect("valid"),
             welcome_featured: String::new(),
             welcome_ticker: String::new(),
             theme_accent: String::new(),
@@ -196,6 +202,8 @@ impl ServerConfig {
             "telnet_addr" => self.telnet_addr.to_string(),
             "finger_enabled" => self.finger_enabled.to_string(),
             "finger_addr" => self.finger_addr.to_string(),
+            "nntp_enabled" => self.nntp_enabled.to_string(),
+            "nntp_addr" => self.nntp_addr.to_string(),
             "welcome_featured" => self.welcome_featured.clone(),
             "welcome_ticker" => self.welcome_ticker.clone(),
             "theme_accent" => self.theme_accent.clone(),
@@ -350,6 +358,14 @@ impl ServerConfig {
             }
             "finger_addr" => {
                 self.finger_addr = parse_addr(key, value)?;
+                Ok(false)
+            }
+            "nntp_enabled" => {
+                self.nntp_enabled = parse_bool(key, value)?;
+                Ok(false)
+            }
+            "nntp_addr" => {
+                self.nntp_addr = parse_addr(key, value)?;
                 Ok(false)
             }
             "quic_addr" => {

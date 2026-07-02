@@ -28,12 +28,15 @@
 
 pub mod ansi;
 pub mod cp437;
+pub mod font;
+pub mod raster;
 pub mod render;
 pub mod sauce;
 
 pub use ansi::{AnsiParser, Attrs, Canvas, Cell};
 pub use cp437::{cp437_to_string, cp437_to_unicode, unicode_to_cp437, unicode_to_cp437_lossy};
-pub use render::{render_ansi, render_plain};
+pub use raster::{render_png, PngOptions, PALETTE};
+pub use render::{render_ansi, render_html, render_plain};
 pub use sauce::SauceRecord;
 
 #[cfg(test)]

@@ -11,10 +11,13 @@
 //!   along for the retro purists.
 //! - [`render_plain`]: glyphs only, for logs, search indexing, and clients
 //!   that can't do color.
+//! - [`render_html`]: a `<pre>` of styled `<span>` runs for the web client,
+//!   using the same 16-color VGA palette as hex.
 //!
-//! PNG thumbnails are a later slice; they will consume the same canvas.
+//! PNG raster thumbnails live alongside these in [`crate::raster`].
 
 use crate::ansi::{Attrs, Canvas, Cell};
+use crate::raster::PALETTE;
 
 /// Render to ANSI escape sequences + Unicode for a modern terminal.
 ///
@@ -89,6 +92,88 @@ fn push_sgr(out: &mut String, cell: &Cell) {
     out.push(';');
     out.push_str(&bg.to_string());
     out.push('m');
+}
+
+/// Render to an HTML `<pre>` block for embedding in the web client.
+///
+/// Each line becomes runs of `<span style="color:#rrggbb;background:#rrggbb">`
+/// coalesced across cells that share the same foreground, background, and
+/// attributes; the reverse attribute swaps the two colors. Glyph text is
+/// HTML-escaped. Colors come from the same 16-color VGA [`PALETTE`] the PNG
+/// renderer uses. Trailing default-blank cells are trimmed per line, matching
+/// [`render_ansi`].
+pub fn render_html(canvas: &Canvas) -> String {
+    let mut out = String::new();
+    out.push_str("<pre class=\"ansi-art\">");
+    let default = Cell::default();
+    for row in canvas.rows() {
+        let end = row
+            .iter()
+            .rposition(|cell| *cell != default)
+            .map_or(0, |i| i + 1);
+        let mut i = 0;
+        while i < end {
+            let key = style_key(&row[i]);
+            let mut text = String::new();
+            while i < end && style_key(&row[i]) == key {
+                push_escaped(&mut text, row[i].ch);
+                i += 1;
+            }
+            let (fg, bg) = key;
+            out.push_str("<span style=\"color:");
+            push_hex(&mut out, fg);
+            out.push_str(";background:");
+            push_hex(&mut out, bg);
+            out.push_str("\">");
+            out.push_str(&text);
+            out.push_str("</span>");
+        }
+        out.push('\n');
+    }
+    out.push_str("</pre>");
+    out
+}
+
+/// The (foreground, background) palette indices a cell renders with, after
+/// applying reverse video.
+fn style_key(cell: &Cell) -> (u8, u8) {
+    let fg = cell.fg & 0x0F;
+    let bg = cell.bg & 0x0F;
+    if cell.attrs.contains(Attrs::REVERSE) {
+        (bg, fg)
+    } else {
+        (fg, bg)
+    }
+}
+
+/// Append `#rrggbb` for palette index `idx` (masked to 0–15).
+fn push_hex(out: &mut String, idx: u8) {
+    let [r, g, b] = PALETTE[idx as usize & 0x0F];
+    out.push('#');
+    for byte in [r, g, b] {
+        out.push(hex_digit(byte >> 4));
+        out.push(hex_digit(byte & 0x0F));
+    }
+}
+
+fn hex_digit(nibble: u8) -> char {
+    match nibble {
+        0..=9 => (b'0' + nibble) as char,
+        _ => (b'a' + nibble - 10) as char,
+    }
+}
+
+/// Append `ch` to `out`, HTML-escaping the characters that are significant
+/// inside `<pre>` content.
+fn push_escaped(out: &mut String, ch: char) {
+    match ch {
+        '&' => out.push_str("&amp;"),
+        '<' => out.push_str("&lt;"),
+        '>' => out.push_str("&gt;"),
+        '"' => out.push_str("&quot;"),
+        '\'' => out.push_str("&#39;"),
+        _ => out.push(ch),
+    }
 }
 
 #[cfg(test)]
@@ -169,5 +254,73 @@ mod tests {
         let ansi = render_ansi(&canvas);
         assert_eq!(ansi.lines().count(), 3);
         assert_eq!(ansi.lines().nth(1), Some(""));
+    }
+
+    #[test]
+    fn html_wraps_in_pre_with_color_spans() {
+        let canvas = parse(b"\x1b[31;44mX");
+        let html = render_html(&canvas);
+        assert!(html.starts_with("<pre class=\"ansi-art\">"));
+        assert!(html.ends_with("</pre>"));
+        // Red (#aa0000) on blue (#0000aa), palette indices 1 and 4.
+        assert!(
+            html.contains("<span style=\"color:#aa0000;background:#0000aa\">X</span>"),
+            "got {html}"
+        );
+    }
+
+    #[test]
+    fn html_escapes_markup_characters() {
+        let canvas = parse(b"<a> & \"b\" 'c'");
+        let html = render_html(&canvas);
+        assert!(
+            html.contains("&lt;a&gt; &amp; &quot;b&quot; &#39;c&#39;"),
+            "got {html}"
+        );
+        assert!(!html.contains("<a>"));
+    }
+
+    #[test]
+    fn html_coalesces_runs_and_swaps_on_reverse() {
+        // Two greens then a yellow: one span for "ab", one for "c".
+        let canvas = parse(b"\x1b[32mab\x1b[33mc");
+        let html = render_html(&canvas);
+        assert!(
+            html.contains("background:#000000\">ab</span>"),
+            "got {html}"
+        );
+        // Reverse video swaps fg/bg in the emitted style.
+        let canvas = parse(b"\x1b[7;32;41mZ");
+        let html = render_html(&canvas);
+        // fg green(2)/bg red(1) reversed -> color red, background green.
+        assert!(
+            html.contains("color:#aa0000;background:#00aa00\">Z</span>"),
+            "got {html}"
+        );
+    }
+
+    #[test]
+    fn html_empty_canvas_is_empty_pre() {
+        let canvas = parse(b"");
+        assert_eq!(render_html(&canvas), "<pre class=\"ansi-art\"></pre>");
+    }
+
+    /// Fuzz-ish: arbitrary canvases must render to HTML without panicking.
+    #[test]
+    fn html_arbitrary_canvas_never_panics() {
+        let mut state: u64 = 0xDEAD_BEEF_CAFE_F00D;
+        for _ in 0..4 {
+            let mut bytes = Vec::with_capacity(2048);
+            for _ in 0..2048 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let b = (state >> 56) as u8;
+                bytes.push(if b == 0x1A { b'.' } else { b });
+            }
+            let canvas = parse(&bytes);
+            let html = render_html(&canvas);
+            assert!(html.starts_with("<pre"));
+        }
     }
 }

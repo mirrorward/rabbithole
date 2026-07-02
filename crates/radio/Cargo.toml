@@ -1,0 +1,13 @@
+[package]
+name = "rabbithole-radio"
+description = "Radio service layer: station registry, playlist rotation, request/vote queue, and station controller built on the audio core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rabbithole-audio = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }

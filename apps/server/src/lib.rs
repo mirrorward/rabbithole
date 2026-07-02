@@ -15,6 +15,7 @@ pub mod handlers8;
 pub mod handlers9;
 pub mod identity_store;
 pub mod legacy;
+pub mod nntp;
 pub mod session;
 
 use std::net::SocketAddr;
@@ -95,6 +96,8 @@ pub struct Burrow {
     pub telnet_addr: Option<SocketAddr>,
     /// Bound finger address when `finger_enabled` (else `None`).
     pub finger_addr: Option<SocketAddr>,
+    /// Bound NNTP address when `nntp_enabled` (else `None`).
+    pub nntp_addr: Option<SocketAddr>,
     pub fingerprint: CertFingerprint,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -131,6 +134,7 @@ impl Burrow {
         // live handle).
         let telnet = config.telnet_enabled.then_some(config.telnet_addr);
         let finger = config.finger_enabled.then_some(config.finger_addr);
+        let nntp = config.nntp_enabled.then_some(config.nntp_addr);
 
         let shared = Arc::new(Shared {
             chat: ChatService::new(bus.clone(), config.chat_max_len),
@@ -192,6 +196,13 @@ impl Burrow {
             finger_addr = Some(bound);
             tasks.push(handle);
         }
+        let mut nntp_addr = None;
+        if let Some(addr) = nntp {
+            let (bound, handle) = nntp::spawn_nntp(shared.clone(), addr).await?;
+            tracing::info!(nntp = %bound, "NNTP gateway listening");
+            nntp_addr = Some(bound);
+            tasks.push(handle);
+        }
 
         Ok(Burrow {
             shared,
@@ -199,6 +210,7 @@ impl Burrow {
             ws_addr,
             telnet_addr,
             finger_addr,
+            nntp_addr,
             fingerprint,
             tasks,
         })
