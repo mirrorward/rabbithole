@@ -34,6 +34,7 @@
 //! - [`field`] — TLV parameter fields, the parameter list, and size-dependent
 //!   integer helpers.
 //! - [`reassembly`] — accumulates fragmented bodies by transaction id.
+//! - [`access`] — the 64-bit account access bitmap and 16-bit user flags.
 //! - [`constants`] — well-known field ids and transaction type numbers.
 //! - [`error`] — the total, panic-free [`HotlineError`].
 //!
@@ -44,6 +45,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod access;
 pub mod constants;
 pub mod error;
 pub mod field;
@@ -51,8 +53,12 @@ pub mod handshake;
 pub mod reassembly;
 pub mod transaction;
 
+pub use access::{AccessMask, Privilege, UserFlags};
 pub use error::HotlineError;
-pub use field::{decode_params, encode_params, min_int_bytes, read_int, Field, MAX_FIELD_SIZE};
+pub use field::{
+    decode_params, deobfuscate, encode_params, min_int_bytes, obfuscate, read_int, Field,
+    MAX_FIELD_SIZE,
+};
 pub use handshake::{Handshake, HandshakeReply, HANDSHAKE_VERSION, PROTOCOL_ID, SUB_PROTOCOL_HOTL};
 pub use reassembly::Reassembler;
 pub use transaction::{Transaction, TransactionHeader};

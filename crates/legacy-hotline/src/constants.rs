@@ -3,8 +3,9 @@
 //! These are the classic, on-the-wire numeric constants shared by every
 //! Hotline client and server since the late 1990s. They are grouped into two
 //! submodules: [`field`] for TLV parameter ids and [`transaction`] for
-//! transaction types. Only the constants needed by the Wave 7.1 codec slice are
-//! defined here; the remaining news/file/account sets land with later slices.
+//! transaction types. The core chat/login set landed with the Wave 7.1 codec
+//! slice, the news/file sets with W7.4, and the account-admin set (transactions
+//! 350-355 and their field aliases) with the account-admin slice.
 
 /// Well-known TLV parameter field ids (the `id` in a [`crate::field::Field`]).
 ///
@@ -36,6 +37,14 @@ pub mod field {
 
     /// Password (106), text. Sent obfuscated at login.
     pub const PASSWORD: u16 = 106;
+
+    /// Alias for [`LOGIN`] (105) when it names the target account in the
+    /// admin flows (NewUser / DeleteUser / GetUser / SetUser).
+    pub const USER_LOGIN: u16 = LOGIN;
+
+    /// Alias for [`PASSWORD`] (106) in the admin flows. Like the login copy it
+    /// travels obfuscated (see [`crate::field::obfuscate`]).
+    pub const USER_PASSWORD: u16 = PASSWORD;
 
     /// Reference number (107), integer — file-transfer handle handed back to
     /// the client to open on the HTXF channel.
@@ -306,6 +315,30 @@ pub mod transaction {
     /// Set this client's user info (name/icon) (304).
     pub const SET_CLIENT_USER_INFO: u16 = 304;
 
+    // ---- Accounts (350-355) ------------------------------------------------
+
+    /// Create a new account (350). Carries USER_NAME (102), USER_LOGIN (105,
+    /// obfuscated), USER_PASSWORD (106, obfuscated), and USER_ACCESS (110).
+    pub const NEW_USER: u16 = 350;
+
+    /// Delete an account (351). Carries USER_LOGIN (105, obfuscated).
+    pub const DELETE_USER: u16 = 351;
+
+    /// Fetch an account for editing (352). The reply carries the account's
+    /// name, login, password placeholder, and access bitmap.
+    pub const GET_USER: u16 = 352;
+
+    /// Update (or rename) an account (353). Same fields as [`NEW_USER`]; a
+    /// changed login in the DATA field renames the account.
+    pub const SET_USER: u16 = 353;
+
+    /// Push: this session's access bitmap changed (354). Carries USER_ACCESS
+    /// (110) so the client can grey out menus it may no longer use.
+    pub const USER_ACCESS: u16 = 354;
+
+    /// Broadcast an admin message to every connected user (355).
+    pub const USER_BROADCAST: u16 = 355;
+
     /// Keep-alive ping (500).
     pub const KEEP_ALIVE: u16 = 500;
 }
@@ -330,6 +363,14 @@ mod tests {
         assert_eq!(field::NEWS_CAT_LIST_DATA_15, 323);
         assert_eq!(field::NEWS_PATH, 325);
         assert_eq!(field::NEWS_ART_DATA, 333);
+        // Account-admin field ids (added with the account-admin slice).
+        assert_eq!(field::DATA, 101);
+        assert_eq!(field::USER_NAME, 102);
+        assert_eq!(field::USER_LOGIN, 105);
+        assert_eq!(field::USER_PASSWORD, 106);
+        assert_eq!(field::USER_ACCESS, 110);
+        assert_eq!(field::USER_FLAGS, 112);
+        assert_eq!(field::OPTIONS, 113);
     }
 
     #[test]
@@ -345,5 +386,15 @@ mod tests {
         assert_eq!(transaction::GET_NEWS_ART_NAME_LIST, 371);
         assert_eq!(transaction::GET_NEWS_ART_DATA, 400);
         assert_eq!(transaction::POST_NEWS_ART, 410);
+        // Account-admin transaction types (added with the account-admin slice).
+        assert_eq!(transaction::DISCONNECT_USER, 110);
+        assert_eq!(transaction::DISCONNECT_MSG, 111);
+        assert_eq!(transaction::GET_CLIENT_INFO_TEXT, 303);
+        assert_eq!(transaction::NEW_USER, 350);
+        assert_eq!(transaction::DELETE_USER, 351);
+        assert_eq!(transaction::GET_USER, 352);
+        assert_eq!(transaction::SET_USER, 353);
+        assert_eq!(transaction::USER_ACCESS, 354);
+        assert_eq!(transaction::USER_BROADCAST, 355);
     }
 }

@@ -81,6 +81,18 @@ impl Field {
         String::from_utf8_lossy(&self.data)
     }
 
+    /// A credential field (LOGIN / PASSWORD): text stored [`obfuscate`]d, as
+    /// classic clients send it in Login and the account-admin flows.
+    pub fn credential(id: u16, text: &str) -> Self {
+        Self::new(id, obfuscate(text.as_bytes()))
+    }
+
+    /// Interpret this field's value as an obfuscated credential, returning
+    /// the clear text (lossily decoded as UTF-8).
+    pub fn as_credential_text_lossy(&self) -> String {
+        String::from_utf8_lossy(&deobfuscate(&self.data)).into_owned()
+    }
+
     /// Encoded length of this field on the wire (`4 + data.len()`).
     pub fn encoded_len(&self) -> usize {
         4 + self.data.len()
@@ -154,6 +166,25 @@ pub fn min_int_bytes(value: u32) -> Vec<u8> {
     } else {
         value.to_be_bytes().to_vec()
     }
+}
+
+/// Obfuscate credential bytes the classic Hotline way: bitwise-complement
+/// every byte (`255 - b`, i.e. `!b`).
+///
+/// LOGIN (105) and PASSWORD (106) travel obfuscated in the Login transaction
+/// and in the account-admin flows (NewUser / GetUser / SetUser). This is
+/// obfuscation, not encryption — it only keeps credentials out of casual
+/// packet dumps.
+pub fn obfuscate(bytes: &[u8]) -> Vec<u8> {
+    bytes.iter().map(|b| !b).collect()
+}
+
+/// De-obfuscate credential bytes (see [`obfuscate`]).
+///
+/// The complement transform is an involution, so this is the same operation;
+/// the separate name keeps call sites self-describing.
+pub fn deobfuscate(bytes: &[u8]) -> Vec<u8> {
+    obfuscate(bytes)
 }
 
 /// Encode a parameter list: 2-byte count followed by every field.
@@ -236,6 +267,31 @@ mod tests {
             let f = Field::int(9, v);
             assert_eq!(f.as_int().unwrap(), v);
         }
+    }
+
+    #[test]
+    fn obfuscation_is_a_complement_involution() {
+        // 'p' = 0x70 -> 0x8F, 'a' = 0x61 -> 0x9E, 's' = 0x73 -> 0x8C.
+        assert_eq!(obfuscate(b"pass"), vec![0x8F, 0x9E, 0x8C, 0x8C]);
+        assert_eq!(deobfuscate(&[0x8F, 0x9E, 0x8C, 0x8C]), b"pass".to_vec());
+        assert_eq!(deobfuscate(&obfuscate(b"gu\xC3\xA9st")), b"gu\xC3\xA9st");
+        assert_eq!(obfuscate(&[]), Vec::<u8>::new());
+        // `!b` is exactly `255 - b`.
+        for b in [0u8, 1, 0x7F, 0xFE, 0xFF] {
+            assert_eq!(obfuscate(&[b]), vec![255 - b]);
+        }
+    }
+
+    #[test]
+    fn credential_field_roundtrip() {
+        let f = Field::credential(106, "s3cret");
+        assert_ne!(f.data, b"s3cret".to_vec());
+        assert_eq!(f.as_credential_text_lossy(), "s3cret");
+        // Wire round-trip preserves the obfuscated bytes exactly.
+        let mut buf = Vec::new();
+        f.encode_into(&mut buf);
+        let (back, _) = Field::decode(&buf).unwrap();
+        assert_eq!(back.as_credential_text_lossy(), "s3cret");
     }
 
     #[test]
