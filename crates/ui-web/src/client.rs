@@ -58,8 +58,12 @@ pub trait UiClient {
     fn send_dm(&mut self, thread_id: &str, text: &str) -> Option<DmMessage>;
 }
 
-/// In-memory [`UiClient`] used until the real WebSocket transport lands.
-#[derive(Debug, Clone)]
+/// In-memory [`UiClient`] used alongside the real WebSocket transport.
+///
+/// Also implements the async [`EventClient`](crate::wire::EventClient) seam so
+/// it is interchangeable with [`WsClient`](crate::ws::WsClient): a registered
+/// sink receives the same events `send` returns, pushed synchronously.
+#[derive(Clone)]
 pub struct MockClient {
     connected: bool,
     signed_in: bool,
@@ -71,6 +75,27 @@ pub struct MockClient {
     posts: Vec<Post>,
     members: Vec<Member>,
     dm_threads: Vec<DmThread>,
+    /// Sink registered through the async [`EventClient`] seam, if any. Skipped
+    /// by [`Debug`] (closures are not `Debug`).
+    sink: Option<crate::wire::EventSink>,
+}
+
+impl std::fmt::Debug for MockClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockClient")
+            .field("connected", &self.connected)
+            .field("signed_in", &self.signed_in)
+            .field("server_name", &self.server_name)
+            .field("current_user", &self.current_user)
+            .field("who", &self.who)
+            .field("boards", &self.boards)
+            .field("threads", &self.threads)
+            .field("posts", &self.posts)
+            .field("members", &self.members)
+            .field("dm_threads", &self.dm_threads)
+            .field("sink", &self.sink.as_ref().map(|_| "<fn>"))
+            .finish()
+    }
 }
 
 impl Default for MockClient {
@@ -94,6 +119,22 @@ impl MockClient {
             posts: Self::seeded_posts(),
             members: Self::seeded_members(),
             dm_threads: Self::seeded_dms(),
+            sink: None,
+        }
+    }
+
+    /// Register the async event sink (used by the
+    /// [`EventClient`](crate::wire::EventClient) impl).
+    pub(crate) fn set_sink(&mut self, sink: crate::wire::EventSink) {
+        self.sink = Some(sink);
+    }
+
+    /// Push events into the registered sink, if one is set.
+    pub(crate) fn emit_events(&self, events: &[Event]) {
+        if let Some(sink) = &self.sink {
+            for event in events {
+                sink(event.clone());
+            }
         }
     }
 

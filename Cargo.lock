@@ -313,7 +313,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "burrow"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "burrow-tui"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1321,6 +1321,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gloo-timers"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "gloo-utils"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2023,7 +2035,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "looking-glass"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2704,7 +2716,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rabbit"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2721,7 +2733,7 @@ dependencies = [
 
 [[package]]
 name = "rabbit-tui"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2734,14 +2746,14 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-art"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "png",
 ]
 
 [[package]]
 name = "rabbithole-audio"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "thiserror 2.0.18",
  "tokio",
@@ -2749,7 +2761,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-blobs"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "blake3",
  "hex",
@@ -2760,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-core"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -2776,7 +2788,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-e2ee"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -2792,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-federation"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "blake3",
  "postcard",
@@ -2803,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-identity"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "argon2",
  "blake3",
@@ -2821,7 +2833,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-legacy-binkp"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "hmac",
  "md-5",
@@ -2830,14 +2842,14 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-legacy-doors"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "rabbithole-legacy-finger"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "async-trait",
  "tokio",
@@ -2846,21 +2858,21 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-legacy-ftn"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "rabbithole-legacy-hotline"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "rabbithole-legacy-icecast"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "data-encoding",
  "thiserror 2.0.18",
@@ -2868,28 +2880,28 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-legacy-nntp"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "rabbithole-legacy-qwk"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "rabbithole-legacy-syndication"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "blake3",
 ]
 
 [[package]]
 name = "rabbithole-legacy-telnet"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "async-trait",
  "tokio",
@@ -2897,14 +2909,14 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-legacy-zmodem"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "rabbithole-net"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2924,7 +2936,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-proto"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "bytes",
  "postcard",
@@ -2934,7 +2946,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-radio"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "parking_lot",
  "rabbithole-audio",
@@ -2943,7 +2955,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-reticulum"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -2958,14 +2970,14 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-screen"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "rabbithole-art",
 ]
 
 [[package]]
 name = "rabbithole-server-core"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -2986,7 +2998,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-store-client"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "rabbithole-proto",
  "rusqlite",
@@ -2996,7 +3008,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-store-server"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "hex",
  "serde_json",
@@ -3009,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-swarm"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "bao-tree",
  "blake3",
@@ -3027,12 +3039,17 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-ui-web"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
+ "gloo-timers",
+ "js-sys",
  "leptos",
  "leptos_router",
  "rabbithole-core",
  "rabbithole-proto",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

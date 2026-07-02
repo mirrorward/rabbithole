@@ -37,7 +37,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.12.1"
+version = "0.13.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]
@@ -144,6 +144,19 @@ ratatui = "0.29"
 crossterm = "0.28"
 leptos = { version = "0.6", features = ["csr"] }
 leptos_router = { version = "0.6", features = ["csr"] }
+
+# wasm (browser SPA transport — target-gated in the consuming crates)
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "WebSocket",
+    "MessageEvent",
+    "BinaryType",
+    "Event",
+    "CloseEvent",
+] }
+gloo-timers = { version = "0.3", features = ["futures"] }
 
 [profile.release]
 lto = "thin"

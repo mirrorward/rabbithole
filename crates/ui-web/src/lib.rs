@@ -15,9 +15,12 @@
 //! ```
 //!
 //! - [`client`] defines the [`UiClient`](client::UiClient) seam and a
-//!   [`MockClient`](client::MockClient) in-memory implementation. The real
-//!   browser WebSocket transport is a later slice; the seam keeps the UI
-//!   buildable and testable now.
+//!   [`MockClient`](client::MockClient) in-memory implementation.
+//! - [`wire`] holds the host-tested RHP mapping (Command ↔ Frame ↔ Event) and
+//!   the async [`EventClient`](wire::EventClient) seam shared by the mock and
+//!   the browser transport.
+//! - [`ws`] (wasm only) is the browser [`WsClient`](ws::WsClient) WebSocket
+//!   transport that speaks RHP over `ws://`/`wss://`.
 //! - [`state`] holds the DOM-free [`UiState`](state::UiState) reducer, unit
 //!   tested on the host.
 //! - [`theme_css`] maps [`rabbithole_core::theme`] design tokens to CSS custom
@@ -36,7 +39,19 @@ pub mod client;
 pub mod components;
 pub mod state;
 pub mod theme_css;
+pub mod wire;
+
+/// Browser WebSocket transport (`wasm32-unknown-unknown` only).
+#[cfg(target_arch = "wasm32")]
+pub mod ws;
 
 pub use app::{mount, App, AppState};
 pub use client::{MockClient, UiClient};
 pub use state::{Board, ChatLine, DmMessage, DmThread, Member, Post, Thread, UiState};
+pub use wire::{
+    command_to_frame, frame_to_events, hello_request, normalize_ws_url, ping_request, who_request,
+    EventClient, EventSink,
+};
+
+#[cfg(target_arch = "wasm32")]
+pub use ws::WsClient;
