@@ -111,6 +111,83 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
                 .collect();
             Ok(Value::Array(users))
         }
+        // ---- QWK offline mail (Wave 10) --------------------------------
+        // Admin/testing surfaces over crate::qwk: both are gated on
+        // `qwk_enabled` inside the service (same gate as the telnet `qwk`
+        // command). The upload path here takes an already-unzipped
+        // `<BBSID>.MSG` member; the interactive (zmodem) upload path is a
+        // documented follow-up.
+        "qwk-build" => {
+            let login = str_arg("login")?;
+            let account = rabbithole_store_server::repo::AccountsRepo(&shared.pool)
+                .by_login(&login)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("no such account")?;
+            let build = crate::qwk::build_for(shared, &account)
+                .await
+                .map_err(|e| e.to_string())?;
+            audit(
+                "qwk-build",
+                format!("{login} messages={}", build.total_messages),
+            );
+            let members: Vec<Value> = build
+                .members
+                .iter()
+                .map(|m| {
+                    json!({
+                        "name": m.name,
+                        "size": m.size,
+                        "path": m.path.display().to_string(),
+                    })
+                })
+                .collect();
+            let conferences: Vec<Value> = build
+                .conferences
+                .iter()
+                .map(|(n, slug)| json!({"conference": n, "board": slug}))
+                .collect();
+            Ok(json!({
+                "spool_dir": build.spool_dir.display().to_string(),
+                "total_messages": build.total_messages,
+                "conferences": conferences,
+                "members": members,
+            }))
+        }
+        "qwk-ingest" => {
+            let login = str_arg("login")?;
+            let path = str_arg("path")?;
+            let account = rabbithole_store_server::repo::AccountsRepo(&shared.pool)
+                .by_login(&login)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("no such account")?;
+            let bytes = tokio::fs::read(&path)
+                .await
+                .map_err(|e| format!("read {path}: {e}"))?;
+            let report = crate::qwk::ingest_rep_for(shared, &account, &bytes)
+                .await
+                .map_err(|e| e.to_string())?;
+            audit(
+                "qwk-ingest",
+                format!(
+                    "{login} accepted={} duplicates={} rejected={}",
+                    report.accepted,
+                    report.duplicates,
+                    report.rejected.len()
+                ),
+            );
+            let rejected: Vec<Value> = report
+                .rejected
+                .iter()
+                .map(|(subject, reason)| json!({"subject": subject, "reason": reason}))
+                .collect();
+            Ok(json!({
+                "accepted": report.accepted,
+                "duplicates": report.duplicates,
+                "rejected": rejected,
+            }))
+        }
         // ---- S2S federation peers (Wave 9) -----------------------------
         "peer-list" => {
             let peers: Vec<Value> = shared

@@ -206,6 +206,14 @@ pub struct ServerConfig {
     /// Echomail AREA tag → board slug map, driving the echomail↔board gateway
     /// in both directions.
     pub ftn_areas: std::collections::HashMap<String, String>,
+    /// Offer QWK offline-mail packets: the telnet `qwk` command plus the ctl
+    /// `qwk-build` / `qwk-ingest` admin commands. Off by default. Applies
+    /// live (checked per command).
+    pub qwk_enabled: bool,
+    /// Spool directory for per-user QWK packet members (one subdirectory per
+    /// login, rebuilt on every `qwk` build). Relative paths resolve under
+    /// `data_dir`.
+    pub qwk_spool_dir: PathBuf,
     /// Poll the configured `syndication_feeds` and post fresh items to their
     /// mapped boards (Wave 10). Off by default.
     pub syndication_enabled: bool,
@@ -336,6 +344,8 @@ impl Default for ServerConfig {
             ftn_inbound_dir: PathBuf::from("ftn/inbound"),
             ftn_outbound_dir: PathBuf::from("ftn/outbound"),
             ftn_areas: std::collections::HashMap::new(),
+            qwk_enabled: false,
+            qwk_spool_dir: PathBuf::from("qwk"),
             syndication_enabled: false,
             syndication_feeds: std::collections::HashMap::new(),
             syndication_poll_secs: 1800,
@@ -482,6 +492,8 @@ impl ServerConfig {
             "ftn_password" => self.ftn_password.clone(),
             "ftn_inbound_dir" => self.ftn_inbound_dir.display().to_string(),
             "ftn_outbound_dir" => self.ftn_outbound_dir.display().to_string(),
+            "qwk_enabled" => self.qwk_enabled.to_string(),
+            "qwk_spool_dir" => self.qwk_spool_dir.display().to_string(),
             "syndication_enabled" => self.syndication_enabled.to_string(),
             "syndication_poll_secs" => self.syndication_poll_secs.to_string(),
             "federation_enabled" => self.federation_enabled.to_string(),
@@ -790,6 +802,16 @@ impl ServerConfig {
                 self.ftn_outbound_dir = PathBuf::from(value);
                 Ok(false)
             }
+            // QWK applies live: both surfaces re-read config per command and
+            // resolve the spool dir at build time.
+            "qwk_enabled" => {
+                self.qwk_enabled = parse_bool(key, value)?;
+                Ok(true)
+            }
+            "qwk_spool_dir" => {
+                self.qwk_spool_dir = PathBuf::from(value);
+                Ok(true)
+            }
             "syndication_enabled" => {
                 self.syndication_enabled = parse_bool(key, value)?;
                 Ok(false) // the poll task starts at boot
@@ -1054,6 +1076,21 @@ mod tests {
         assert_eq!(loaded.telnet_min_role, "user");
         assert_eq!(loaded.files_http_base, "http://h:1");
         assert_eq!(loaded.finger_min_role, "guest");
+    }
+
+    #[test]
+    fn qwk_knobs_default_off_and_apply_live() {
+        let live = LiveConfig::new(ServerConfig::default());
+        assert_eq!(live.get_key("qwk_enabled").unwrap(), "false");
+        assert_eq!(live.get_key("qwk_spool_dir").unwrap(), "qwk");
+        assert!(live.set_key("qwk_enabled", "on").unwrap(), "applies live");
+        assert!(live.set_key("qwk_spool_dir", "mail/qwk").unwrap());
+        assert_eq!(live.get_key("qwk_enabled").unwrap(), "true");
+        assert_eq!(live.get_key("qwk_spool_dir").unwrap(), "mail/qwk");
+        assert!(matches!(
+            live.set_key("qwk_enabled", "maybe"),
+            Err(ConfigError::BadValue { .. })
+        ));
     }
 
     #[test]

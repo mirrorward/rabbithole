@@ -25,6 +25,11 @@ pub enum SeenKey {
     MessageId(String),
     /// QWK: conference number + message number.
     Qwk { conference: u16, number: u32 },
+    /// QWK `.REP` reply upload: the blake3 *content* digest of an uploaded
+    /// reply (`rabbithole-legacy-qwk`'s `content_hash` — conference, routing,
+    /// subject, body; volatile header bookkeeping excluded), so a re-uploaded
+    /// reply packet does not double-post.
+    QwkReply([u8; 32]),
     /// Syndicated feed item: the stable `legacy-syndication` dedup id
     /// (blake3 of guid/link/title+date, 64 hex chars).
     Syndication(String),
@@ -139,9 +144,12 @@ mod tests {
             },
             0
         ));
+        assert!(d.check_and_record(SeenKey::QwkReply([7; 32]), 0));
         // Same textual content, different network → distinct keys.
         assert!(d.check_and_record(SeenKey::MessageId("1:2/3 abcd".into()), 0));
-        assert_eq!(d.len(), 4);
+        // Same 32 bytes, different namespace → distinct keys.
+        assert!(d.check_and_record(SeenKey::Event([7; 32]), 0));
+        assert_eq!(d.len(), 6);
     }
 
     #[test]

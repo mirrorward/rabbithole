@@ -8,8 +8,10 @@
 //! (yielding a full [`AuthedUser`] with a permission [`Subject`], which the
 //! trait-shaped `TelnetAuth` seam cannot carry), enforces the
 //! `telnet_min_role` surface gate, and hosts the door-game commands (`doors`
-//! to list, `door <id>` to play — see [`crate::doors`]) plus the file
-//! browser (`files`).
+//! to list, `door <id>` to play — see [`crate::doors`]), the file
+//! browser (`files`), and the QWK offline-mail packet command (`qwk` — see
+//! [`crate::qwk`]; it reuses the same HTTP-link handoff discipline as
+//! `get`, one link per raw packet member).
 //!
 //! ## The file browser and the HTTP handoff
 //!
@@ -161,6 +163,9 @@ where
 {
     loop {
         let mut menu = String::from("\n=== MAIN MENU ===\n [F] Files\n");
+        if shared.config.read().qwk_enabled {
+            menu.push_str(" [M] QWK offline mail\n");
+        }
         if shared.doors.enabled() {
             menu.push_str(" [D] Doors\n");
         }
@@ -189,6 +194,7 @@ where
             }
             ("", _) => {}
             ("f" | "files", _) => browse_files(t, shared, authed, peer_ip).await?,
+            ("m" | "qwk" | "mail", _) => qwk_packet(t, shared, authed).await?,
             ("d" | "doors", None) => list_doors(t, shared).await?,
             ("d" | "door" | "doors" | "open", Some(id)) => {
                 doors::run_door(t, shared, authed, id).await?;
@@ -615,6 +621,78 @@ fn url_encode_path(path: &str) -> String {
         }
     }
     out
+}
+
+/// The `qwk` command: build an offline-mail packet (see [`crate::qwk`]) and
+/// print one HTTP handoff link per raw member — telnet never streams bytes,
+/// exactly the file browser's `get` discipline. Refusals come first, and
+/// **before** the build, so read pointers never advance for a packet the
+/// caller can't fetch: `qwk_enabled` off → polite notice; `files_http_base`
+/// unset → the no-transfers-on-telnet notice. ZIP bundling, HTTP serving of
+/// the spool, and a zmodem path are documented follow-ups in [`crate::qwk`].
+async fn qwk_packet<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let cfg = shared.config.read();
+    if !cfg.qwk_enabled {
+        return t
+            .write_str("\nQWK offline mail is not enabled on this system.\n")
+            .await;
+    }
+    let base = cfg.files_http_base.trim().trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return t
+            .write_str(
+                "\nQWK packet transfers are not available on telnet; ask your \
+                 sysop about the web interface.\n",
+            )
+            .await;
+    }
+    drop(cfg);
+    let build = match crate::qwk::build_for(shared, &authed.account).await {
+        Ok(b) => b,
+        Err(crate::qwk::QwkGateError::Disabled) => {
+            return t
+                .write_str("\nQWK offline mail is not enabled on this system.\n")
+                .await;
+        }
+        Err(crate::qwk::QwkGateError::Forbidden) => {
+            return t
+                .write_str("\nYou do not have permission to download mail packets.\n")
+                .await;
+        }
+        Err(e) => {
+            tracing::warn!("telnet qwk build failed: {e}");
+            return t
+                .write_str("\nThe QWK packer is unavailable right now; try again later.\n")
+                .await;
+        }
+    };
+    let mut out = format!(
+        "\n--- QWK packet for {}: {} new message(s) in {} conference(s) ---\n\
+         Fetch each member over HTTP (raw QWK members; ZIP bundling is a \
+         follow-up):\n",
+        authed.account.login,
+        build.total_messages,
+        build.conferences.len()
+    );
+    for m in &build.members {
+        out.push_str(&format!(
+            "  {:<12} {:>8}  {}/qwk/{}/{}\n",
+            m.name,
+            fmt_size(m.size as i64),
+            base,
+            url_encode_path(&authed.account.login),
+            url_encode_path(&m.name)
+        ));
+    }
+    out.push_str("Read pointers advanced; the next packet starts after this mail.\n");
+    t.write_str(&out).await
 }
 
 /// Print the door menu (insertion order = the sysop's `[[doors]]` order).

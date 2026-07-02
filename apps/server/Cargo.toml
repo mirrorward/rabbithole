@@ -32,6 +32,7 @@ rabbithole-legacy-finger.workspace = true
 rabbithole-legacy-nntp.workspace = true
 rabbithole-legacy-hotline.workspace = true
 rabbithole-legacy-ftn.workspace = true
+rabbithole-legacy-qwk.workspace = true
 rabbithole-legacy-binkp.workspace = true
 rabbithole-legacy-syndication.workspace = true
 rabbithole-audio.workspace = true

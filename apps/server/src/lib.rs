@@ -24,6 +24,7 @@ pub mod identity_store;
 pub mod legacy;
 pub mod nntp;
 pub mod nntp_feed;
+pub mod qwk;
 pub mod radio;
 pub mod session;
 pub mod syndication;
