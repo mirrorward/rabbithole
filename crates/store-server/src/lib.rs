@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod repo;
+
 use std::path::Path;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};

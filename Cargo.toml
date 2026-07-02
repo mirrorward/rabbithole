@@ -101,6 +101,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # misc
+toml = "0.8"
+serde_json = "1"
+dirs = "5"
+proptest = "1"
 ulid = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 hex = "0.4"

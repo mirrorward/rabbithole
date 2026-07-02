@@ -10,7 +10,7 @@ browsers, telnet BBS clients, newsreaders, offline mail readers, and (yes)
 real classic Hotline clients. Servers federate over **Tunnels** and are
 discoverable through **Looking Glass** directories.
 
-**Status: Wave 0 (foundations).** The plan is the product right now:
+**Status: Wave 1 (vertical slice) — a server you can talk to.**
 
 - [`PLAN.md`](PLAN.md) — the full-vision phased roadmap
 - [`TODO.md`](TODO.md) — the wave-by-wave tracker
@@ -21,30 +21,35 @@ discoverable through **Looking Glass** directories.
 
 | Piece | State |
 |---|---|
-| `crates/proto` | RHP framing, families, hello/version/capability negotiation (wasm-clean) |
-| `crates/identity` | Ed25519 identity keys, Argon2id passwords, session tokens, TOTP + recovery codes |
+| `crates/proto` | RHP framing + session/presence/chat families, hello/version/capability negotiation, push-replay sequencing (wasm-clean) |
+| `crates/identity` | Ed25519 identity keys, Argon2id passwords, hashed session tokens, TOTP + recovery codes |
 | `crates/net` | `Transport` trait with QUIC (quinn, fingerprint pinning) + WebSocket implementations |
 | `crates/blobs` | content-addressed blob store (blake3, refcounted GC) |
-| `crates/store-server` / `store-client` | SQLite migration harnesses (sqlx / rusqlite) |
-| `crates/server-core` | event bus (every protocol surface subscribes to one stream of truth) |
-| `apps/server` (`burrow`) | binds QUIC 4653 + WS 4654, answers RHP hellos |
-| `apps/cli` (`rabbit`) | `rabbit hello <endpoint>` — dial a burrow over either transport |
+| `crates/store-server` | accounts, classes, sessions, ACLs, audit log (sqlx/SQLite WAL) |
+| `crates/server-core` | event bus, config (TOML+env+live), roles/classes/**ACL evaluator** (property-tested), auth (password/guest/resume), presence registry, lobby chat, push replay log |
+| `crates/core` | native `Client` driver: request/reply + push buffering + auth/chat/who helpers |
+| `apps/server` (`burrow`) | full session state machine, persistent Ed25519 + TLS identity, agreement gate, `burrow ctl` unix admin socket |
+| `apps/cli` (`rabbit`) | `login` (password/guest, QUIC or WS), `who`, `say`, `history`, `tail`, `status`, `--json` |
 | everything else | stubs awaiting their wave (see PLAN.md §15) |
 
 ## Try it
 
 ```console
-$ cargo run -p burrow -- --name "My First Burrow"
-  INFO burrow: generated self-signed TLS identity … fingerprint="<hex>"
-  INFO burrow: quic listener up addr=0.0.0.0:4653
-  INFO burrow: websocket listener up addr=0.0.0.0:4654
+$ cargo run -p burrow -- run
+  INFO burrow: burrow is up quic=0.0.0.0:4653 ws=0.0.0.0:4654 fingerprint=<hex>
 
-# In another terminal — QUIC with the fingerprint from the server log:
-$ cargo run -p rabbit -- hello 127.0.0.1:4653 --fingerprint <hex> --server-name localhost
-connected to "My First Burrow" (rhp/1 quic)
+# Admin from another terminal (unix socket, no network):
+$ burrow ctl account-create alice wonderland user
+$ burrow ctl config-set motd "Down the rabbit hole we go"
 
-# …or WebSocket, no pinning needed on loopback:
-$ cargo run -p rabbit -- hello ws://127.0.0.1:4654
+# Sign in and chat:
+$ rabbit login ws://127.0.0.1:4654 --user alice --password wonderland
+$ rabbit say "oh my ears and whiskers"
+$ rabbit who
+$ rabbit tail            # stream the lobby
+
+# QUIC with certificate pinning (fingerprint from `burrow ctl status`):
+$ rabbit login 127.0.0.1:4653 --fingerprint <hex> --server-name localhost --guest
 ```
 
 ## Development

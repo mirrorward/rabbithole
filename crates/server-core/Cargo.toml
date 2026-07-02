@@ -10,7 +10,15 @@ publish.workspace = true
 [dependencies]
 rabbithole-proto.workspace = true
 rabbithole-identity.workspace = true
+rabbithole-store-server.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+parking_lot.workspace = true
+chrono.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true

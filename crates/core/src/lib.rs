@@ -18,5 +18,9 @@
 #![forbid(unsafe_code)]
 
 pub mod api;
+#[cfg(feature = "native")]
+pub mod client;
 
 pub use api::{Command, Event};
+#[cfg(feature = "native")]
+pub use client::{Client, ClientError};

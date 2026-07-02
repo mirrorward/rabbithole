@@ -5,7 +5,7 @@
 > dependency edges shown in PLAN.md §15. ⛔ = do not start until PLAN.md is
 > reviewed and approved by the project owner.
 
-**Status: APPROVED 2026-07-01 — Wave 0 complete; Wave 1 is next.**
+**Status: Wave 1 complete — Wave 2 (community layer) is next.**
 
 ---
 
@@ -29,16 +29,16 @@
 ## Wave 1 — Vertical slice: a server you can talk to
 *Depends on: W0*
 
-- [ ] Server daemon: QUIC + WS listeners; graceful shutdown
-- [ ] Hello/HelloAck; auth: password, guest (toggleable), token resume; keepalive; reconnect w/ replay cursor
-- [ ] Roles (guest→superuser) + classes + u64 capability bitmask
-- [ ] ACL evaluator: nearest-ancestor, deny-wins, hide-vs-deny, cached effective masks (property-tested)
-- [ ] Presence registry actor; who's-online query + pushes
-- [ ] Public chat (lobby), server agreement gate, MOTD
-- [ ] `rabbit` CLI: login, who, chat, JSON output mode
-- [ ] `burrow ctl`: config get/set, account create, local admin socket
-- [ ] Config system: TOML + env overrides + hot-reload-where-safe
-- [ ] `tracing` + audit-log skeleton
+- [x] Server daemon: QUIC + WS listeners; graceful shutdown
+- [x] Hello/HelloAck; auth: password, guest (toggleable), token resume; keepalive; reconnect w/ replay cursor
+- [x] Roles (guest→superuser) + classes + u64 capability bitmask
+- [x] ACL evaluator: nearest-ancestor, deny-wins, hide-vs-deny, cached effective masks (property-tested)
+- [x] Presence registry actor; who's-online query + pushes
+- [x] Public chat (lobby), server agreement gate, MOTD
+- [x] `rabbit` CLI: login, who, chat, JSON output mode
+- [x] `burrow ctl`: config get/set, account create, local admin socket
+- [x] Config system: TOML + env overrides + hot-reload-where-safe
+- [x] `tracing` + audit-log skeleton
 
 ## Wave 2 — Community layer
 *Depends on: W1*

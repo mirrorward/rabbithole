@@ -24,7 +24,10 @@ pub enum ServerEvent {
         screen_name: String,
     },
     /// A session ended.
-    SessionClosed { session_id: u64 },
+    SessionClosed {
+        session_id: u64,
+        screen_name: String,
+    },
     /// A chat line was said in a room.
     Chat {
         room: String,

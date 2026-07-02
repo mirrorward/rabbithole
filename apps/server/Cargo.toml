@@ -7,12 +7,30 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "burrow"
+path = "src/lib.rs"
+
+[[bin]]
+name = "burrow"
+path = "src/main.rs"
+
 [dependencies]
 rabbithole-proto.workspace = true
 rabbithole-net.workspace = true
+rabbithole-identity.workspace = true
 rabbithole-server-core.workspace = true
+rabbithole-store-server.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+hex.workspace = true
+rustls-pki-types.workspace = true
+
+[dev-dependencies]
+rabbithole-core = { workspace = true, features = ["native"] }
+tempfile.workspace = true

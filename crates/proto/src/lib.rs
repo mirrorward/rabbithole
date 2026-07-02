@@ -21,14 +21,17 @@
 
 #![forbid(unsafe_code)]
 
+pub mod chat;
 pub mod codec;
 pub mod error;
 pub mod frame;
 pub mod hello;
+pub mod presence;
+pub mod session;
 pub mod version;
 
 pub use codec::{decode_frame, encode_frame, FrameCodec};
 pub use error::{ErrorCode, ProtoError};
-pub use frame::{Family, Frame, FrameKind, Payload, RequestId};
+pub use frame::{Family, Frame, FrameKind, Message, Payload, RequestId};
 pub use hello::{Capability, CapabilitySet, Hello, HelloAck};
 pub use version::{ProtocolVersion, PROTOCOL_VERSION};

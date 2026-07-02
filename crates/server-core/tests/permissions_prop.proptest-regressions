@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 992daf6263e261d687d6977b8078254f6f98c51795f71c6966e622426af02429 # shrinks to rules = [("a/b/c", Role(Moderator), AclRule { allow: 2519646208, deny: 4948754356478246912 }), ("a/b/c", Everyone, AclRule { allow: 0, deny: 8032884544611729408 })], role = Moderator, query = "a/b/c", deny_bits = 114876516368384

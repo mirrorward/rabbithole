@@ -12,5 +12,10 @@ rabbithole-proto.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+# native (non-wasm) session driver
+rabbithole-net = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
 [features]
 default = []
+native = ["dep:rabbithole-net", "dep:tokio"]

@@ -1,37 +1,36 @@
 //! `burrow` — the RabbitHole server daemon.
-//!
-//! Wave 0: binds the QUIC (4653) and WebSocket (4654) listeners with a
-//! fresh self-signed TLS identity, answers RHP hello handshakes, and logs
-//! sessions to the event bus. Auth, presence, chat, and persistence arrive
-//! in Wave 1; until then every hello is greeted and the connection closed
-//! when the client goes away.
 
-use std::net::SocketAddr;
+use std::path::PathBuf;
 
-use anyhow::Result;
-use clap::Parser;
-use rabbithole_net::quic::QuicListener;
-use rabbithole_net::tls::TlsIdentity;
-use rabbithole_net::ws::WsListener;
-use rabbithole_net::{Connection, Listener};
-use rabbithole_proto::version::MIN_SUPPORTED_VERSION;
-use rabbithole_proto::{
-    CapabilitySet, ErrorCode, Frame, FrameKind, Hello, HelloAck, ProtocolVersion, PROTOCOL_VERSION,
-};
-use rabbithole_server_core::{EventBus, ServerEvent};
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use rabbithole_server_core::ServerConfig;
 
 #[derive(Parser)]
 #[command(name = "burrow", version, about = "RabbitHole server", long_about = None)]
-struct Args {
-    /// QUIC listener address.
-    #[arg(long, default_value = "0.0.0.0:4653")]
-    quic: SocketAddr,
-    /// WebSocket listener address.
-    #[arg(long, default_value = "0.0.0.0:4654")]
-    ws: SocketAddr,
-    /// Server display name.
-    #[arg(long, default_value = "An Unnamed Burrow")]
-    name: String,
+struct Cli {
+    /// Path to burrow.toml (defaults next to --data-dir).
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+    /// Data directory override (db, blobs, identity, ctl socket).
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run the server (default when no subcommand is given).
+    Run,
+    /// Talk to a running burrow through its local ctl socket.
+    Ctl {
+        /// e.g.: status | config-get | config-set | account-create | who
+        cmd: String,
+        /// Positional args: config-get KEY, config-set KEY VALUE,
+        /// account-create LOGIN PASSWORD [ROLE]
+        args: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -42,97 +41,67 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let args = Args::parse();
-    let identity = TlsIdentity::self_signed(&["localhost".into()])?;
-    tracing::info!(
-        fingerprint = identity.fingerprint().to_hex(),
-        "generated self-signed TLS identity (persistent identity lands in Wave 1)"
-    );
+    let cli = Cli::parse();
+    let mut config = ServerConfig::load(cli.config.as_deref())?;
+    if let Some(dir) = cli.data_dir {
+        config.data_dir = dir;
+    }
 
-    let bus = EventBus::default();
-
-    let quic = QuicListener::bind(args.quic, &identity)?;
-    tracing::info!(addr = %quic.local_addr()?, "quic listener up");
-    let ws = WsListener::bind(args.ws).await?;
-    tracing::info!(addr = %ws.local_addr()?, "websocket listener up");
-
-    tokio::try_join!(
-        serve(Box::new(quic), args.name.clone(), bus.clone()),
-        serve(Box::new(ws), args.name.clone(), bus.clone()),
-    )?;
-    Ok(())
-}
-
-async fn serve(mut listener: Box<dyn Listener>, server_name: String, bus: EventBus) -> Result<()> {
-    let mut next_session: u64 = 1;
-    loop {
-        match listener.accept().await {
-            Ok(conn) => {
-                let session_id = next_session;
-                next_session += 1;
-                let name = server_name.clone();
-                let bus = bus.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = session(conn, session_id, &name, &bus).await {
-                        tracing::debug!(session_id, "session ended with error: {e}");
-                    }
-                    bus.publish(ServerEvent::SessionClosed { session_id });
-                });
-            }
-            Err(e) => {
-                tracing::warn!("accept failed: {e}");
-            }
-        }
+    match cli.command.unwrap_or(Cmd::Run) {
+        Cmd::Run => run(config).await,
+        Cmd::Ctl { cmd, args } => ctl_client(config, &cmd, &args).await,
     }
 }
 
-async fn session(
-    mut conn: Box<dyn Connection>,
-    session_id: u64,
-    server_name: &str,
-    bus: &EventBus,
-) -> Result<()> {
-    let peer = conn.peer().clone();
-    tracing::info!(session_id, remote = %peer.remote_addr, transport = %peer.transport, "connection");
-
-    while let Some(frame) = conn.recv().await? {
-        if frame.kind != FrameKind::Request {
-            continue;
-        }
-        if let Some(hello) = frame.decode::<Hello>() {
-            let hello = match hello {
-                Ok(h) => h,
-                Err(_) => {
-                    conn.send(Frame::error_reply(&frame, ErrorCode::BadRequest))
-                        .await?;
-                    continue;
-                }
-            };
-            let Some(version) = ProtocolVersion::negotiate(PROTOCOL_VERSION, hello.version) else {
-                tracing::info!(session_id, theirs = %hello.version, min = %MIN_SUPPORTED_VERSION, "version mismatch");
-                conn.send(Frame::error_reply(&frame, ErrorCode::VersionMismatch))
-                    .await?;
-                continue;
-            };
-            // Wave 1: the zero key becomes the persistent Ed25519 server identity key.
-            let ack = HelloAck::new(
-                version,
-                CapabilitySet::default(),
-                server_name,
-                env!("CARGO_PKG_VERSION"),
-                [0u8; 32],
-            );
-            conn.send(Frame::reply_to(&frame, &ack)?).await?;
-            tracing::info!(session_id, client = %hello.client_name, version = %version, "hello");
-            bus.publish(ServerEvent::SessionOpened {
-                session_id,
-                screen_name: format!("{}@{}", hello.client_name, peer.remote_addr),
-            });
-        } else {
-            // Unknown message type: tolerated, answered, never fatal.
-            conn.send(Frame::error_reply(&frame, ErrorCode::Unsupported))
-                .await?;
-        }
-    }
+async fn run(config: ServerConfig) -> Result<()> {
+    let burrow = burrow::Burrow::start(config).await?;
+    tracing::info!("press Ctrl-C to shut down");
+    tokio::signal::ctrl_c().await?;
+    tracing::info!("shutting down");
+    burrow.shutdown().await;
     Ok(())
+}
+
+#[cfg(unix)]
+async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<()> {
+    use serde_json::{json, Value};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let request = match (cmd, args) {
+        ("status", _) => json!({"cmd": "status"}),
+        ("who", _) => json!({"cmd": "who"}),
+        ("config-get", [key]) => json!({"cmd": "config-get", "key": key}),
+        ("config-set", [key, value]) => json!({"cmd": "config-set", "key": key, "value": value}),
+        ("account-create", [login, password]) => {
+            json!({"cmd": "account-create", "login": login, "password": password})
+        }
+        ("account-create", [login, password, role]) => {
+            json!({"cmd": "account-create", "login": login, "password": password, "role": role})
+        }
+        _ => anyhow::bail!(
+            "usage: burrow ctl <status|who|config-get KEY|config-set KEY VALUE|account-create LOGIN PASSWORD [ROLE]>"
+        ),
+    };
+
+    let path = config.data_dir.join("ctl.sock");
+    let stream = tokio::net::UnixStream::connect(&path)
+        .await
+        .with_context(|| format!("is burrow running? (no socket at {})", path.display()))?;
+    let (read, mut write) = stream.into_split();
+    write.write_all(format!("{request}\n").as_bytes()).await?;
+
+    let mut lines = BufReader::new(read).lines();
+    let line = lines.next_line().await?.context("no response")?;
+    let response: Value = serde_json::from_str(&line)?;
+    if response.get("ok").and_then(Value::as_bool) == Some(true) {
+        println!("{}", serde_json::to_string_pretty(&response["data"])?);
+        Ok(())
+    } else {
+        anyhow::bail!("{}", response["error"].as_str().unwrap_or("unknown error"));
+    }
+}
+
+#[cfg(not(unix))]
+async fn ctl_client(_config: ServerConfig, _cmd: &str, _args: &[String]) -> Result<()> {
+    anyhow::bail!("burrow ctl is unix-only for now");
 }

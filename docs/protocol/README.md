@@ -9,8 +9,10 @@ that is a bug in one of them.
 | Doc | Status | Contents |
 |---|---|---|
 | [`framing.md`](framing.md) | Wave 0 | Transports, frame layout, length delimiting, size limits |
-| [`session.md`](session.md) | Wave 0 (hello only) | Hello/HelloAck, version + capability negotiation; auth arrives in Wave 1 |
-| families/*.md | future waves | One doc per family as it lands (presence, chat, dm, board, file, swarm, admin, federation, radio, wishing-well) |
+| [`session.md`](session.md) | Wave 1 | Hello, auth (password/guest/resume), keepalive, welcome/agreement, push replay |
+| [`presence.md`](presence.md) | Wave 1 | Who-list, join/leave pushes |
+| [`chat.md`](chat.md) | Wave 1 | Lobby chat, history, chat pushes |
+| families/*.md | future waves | One doc per family as it lands (dm, board, file, swarm, admin, federation, radio, wishing-well) |
 
 ## Ground rules
 

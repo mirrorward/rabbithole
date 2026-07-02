@@ -9,7 +9,11 @@ publish.workspace = true
 
 [dependencies]
 rabbithole-proto.workspace = true
-rabbithole-net.workspace = true
+rabbithole-core = { workspace = true, features = ["native"] }
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+hex.workspace = true

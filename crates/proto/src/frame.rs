@@ -131,7 +131,25 @@ impl Frame {
         }
     }
 
+    /// Build an empty success reply — the unit ack for requests whose only
+    /// meaningful answer is "done" (chat send, agreement accept, …).
+    pub fn ack(request: &Frame) -> Frame {
+        Frame {
+            version: request.version,
+            kind: FrameKind::Reply,
+            family: request.family,
+            message_type: request.message_type,
+            id: request.id,
+            error: None,
+            payload: Payload::default(),
+        }
+    }
+
     /// Build a push frame from a typed message.
+    ///
+    /// Pushes default to sequence 0; servers that support replay stamp a
+    /// per-account sequence number into `id` before sending (see
+    /// `docs/protocol/session.md`).
     pub fn push<M: Message>(msg: &M) -> Result<Frame, crate::ProtoError> {
         Ok(Frame {
             version: PROTOCOL_VERSION,
