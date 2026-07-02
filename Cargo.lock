@@ -2028,6 +2028,9 @@ version = "0.3.0"
 [[package]]
 name = "rabbithole-legacy-hotline"
 version = "0.3.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "rabbithole-legacy-nntp"
@@ -2085,9 +2088,6 @@ dependencies = [
 [[package]]
 name = "rabbithole-screen"
 version = "0.3.0"
-dependencies = [
- "rabbithole-art",
-]
 
 [[package]]
 name = "rabbithole-server-core"
