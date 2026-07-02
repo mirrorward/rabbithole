@@ -138,12 +138,18 @@ fn draw(f: &mut Frame, state: &State) {
     // Status panel.
     let s = &state.status;
     let status_lines = vec![
-        Line::from(format!("name:        {}", s["name"].as_str().unwrap_or("?"))),
+        Line::from(format!(
+            "name:        {}",
+            s["name"].as_str().unwrap_or("?")
+        )),
         Line::from(format!(
             "version:     {}",
             s["version"].as_str().unwrap_or("?")
         )),
-        Line::from(format!("online:      {}", s["online"].as_u64().unwrap_or(0))),
+        Line::from(format!(
+            "online:      {}",
+            s["online"].as_u64().unwrap_or(0)
+        )),
         Line::from(format!(
             "quic:        {}",
             s["quic_addr"].as_str().unwrap_or("?")
