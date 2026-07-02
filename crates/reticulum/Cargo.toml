@@ -16,6 +16,8 @@ chacha20poly1305.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+postcard.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

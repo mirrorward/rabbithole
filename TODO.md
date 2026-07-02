@@ -230,7 +230,7 @@
 
 - [ ] Spike: `reticulum-rs` maturity vs Python RNS gateway sidecar → decision
 - [~] RNS interop foundation: identity (X25519+Ed25519), destination/name hashes, packet + announce codecs, ECDH+AEAD token — `rabbithole-reticulum` (spec-faithful hashes, never-panic decoders, documented cipher/field divergences; 40 tests). The live RNS transport adapter (Burrow as a Reticulum destination, constrained RHP profile) builds on this
-- [ ] LXMF bridge: DMs ↔ LXMF (delay-tolerant, NomadNet-compatible); boards ↔ LXMF propagation nodes (shared dupe subsystem)
+- [~] LXMF bridge: DMs ↔ LXMF (delay-tolerant, NomadNet-compatible); boards ↔ LXMF propagation nodes (shared dupe subsystem) — message layer landed: `rabbithole-reticulum::lxmf` (`LxmfMessage`/`SignedLxmf`, `hash()` = SHA-256(dest‖src‖packed payload), Ed25519 sign/verify, deterministic postcard packing via a sorted fields map, total `unpack`; 22 tests). Wiring DMs↔LXMF over the RNS transport + propagation-node board bridge (with the shared dupe subsystem) and reconciling the packing with upstream MessagePack are the transport slices; the LXMF stamp/PoW is deferred
 - [ ] Delay-tolerant Tunnels (S2S flood-fill) over RNS with bandwidth-aware batching
 - [ ] rabbit links w/ RNS destination hashes; Looking Glass entries may advertise RNS destinations
 - [ ] LoRa/packet-radio deployment docs (power/bandwidth budgets)

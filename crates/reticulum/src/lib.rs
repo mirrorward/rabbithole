@@ -19,6 +19,9 @@
 //! - [`announce`]: announce payload construction and Ed25519 verification.
 //! - [`crypto`]: signing/verification and an X25519 + AEAD encrypt/decrypt
 //!   token (see the divergence note below).
+//! - [`lxmf`]: a Lightweight Extensible Message Format (LXMF) message — the
+//!   addressed, Ed25519-signed message that rides inside a Reticulum packet
+//!   body (see the divergence note below).
 //!
 //! # Fidelity to upstream Reticulum
 //!
@@ -46,6 +49,20 @@
 //! 3. **Ratchets and IFAC bodies.** Ratchet keys (newer announces) and the
 //!    per-interface IFAC authentication field are out of scope here. The packet
 //!    codec preserves the IFAC *flag bit* but carries no IFAC field body.
+//! 4. **LXMF payload packing.** Upstream [LXMF](https://github.com/markqvist/LXMF)
+//!    packs the signed payload as a MessagePack array
+//!    `[timestamp, title, content, fields]` with integer-keyed `fields`, and
+//!    signs `destination_hash || source_hash || packed_payload || hash`. To
+//!    avoid a new MessagePack dependency (this workspace standardizes on
+//!    `serde` + `postcard`), [`lxmf`] packs the payload deterministically with
+//!    postcard and uses a string-keyed `fields` map, and signs the 32-byte
+//!    message `hash` alone. The hash construction
+//!    (`SHA-256(destination_hash || source_hash || packed_payload)`) mirrors
+//!    upstream, but the packed bytes and the signed input are **not
+//!    byte-compatible**; a transport/bridge slice must reconcile the packing
+//!    (and the stamp/proof-of-work cost field, deferred here) with upstream
+//!    MessagePack before exchanging messages with real LXMF peers. See
+//!    [`lxmf`].
 //!
 //! Nothing in this crate performs I/O.
 
@@ -55,9 +72,11 @@ pub mod announce;
 pub mod crypto;
 pub mod destination;
 pub mod identity;
+pub mod lxmf;
 pub mod packet;
 
 pub use announce::Announce;
 pub use destination::{Destination, DESTINATION_HASH_LENGTH, NAME_HASH_LENGTH};
 pub use identity::{Identity, PublicIdentity, IDENTITY_HASH_LENGTH, PUBLIC_IDENTITY_LENGTH};
+pub use lxmf::{LxmfError, LxmfMessage, SignedLxmf, LXMF_HASH_LENGTH};
 pub use packet::{DestinationType, HeaderType, Packet, PacketError, PacketType, PropagationType};
