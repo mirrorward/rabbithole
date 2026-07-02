@@ -522,8 +522,14 @@ pub async fn handle(
             Ok(f) => f,
             Err(_) => fail!(ErrorCode::Internal),
         };
+        // Flush before acking: `tokio::fs` only *queues* the write, so without
+        // this the sync `put_verified` read at UploadFinish can race an
+        // unflushed chunk and see a short/holey stage → spurious hash-mismatch
+        // (BadRequest). The dedicated-stream path already flushes; the chunk
+        // path must too.
         if f.seek(std::io::SeekFrom::Start(req.offset)).await.is_err()
             || f.write_all(&req.bytes).await.is_err()
+            || f.flush().await.is_err()
         {
             fail!(ErrorCode::Internal);
         }
