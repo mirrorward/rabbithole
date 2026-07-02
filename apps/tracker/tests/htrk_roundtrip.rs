@@ -154,7 +154,7 @@ async fn status_query_lists_servers_line_per_entry() {
     stream.write_all(b"LIST\n").await.unwrap();
     let mut out = String::new();
     stream.read_to_string(&mut out).await.unwrap();
-    assert_eq!(out, "Cheshire\t127.0.0.1:4653\t2\tWe're all mad here\n");
+    assert_eq!(out, "Cheshire\t127.0.0.1:4653\t2\tWe're all mad here\t-\n");
 
     // Unknown commands get a one-line error.
     let mut stream = TcpStream::connect(status_addr).await.unwrap();

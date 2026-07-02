@@ -21,6 +21,15 @@ struct Cli {
     /// Plain-text status listener (native placeholder, TCP).
     #[arg(long, default_value = "0.0.0.0:4655")]
     status: SocketAddr,
+    /// Gossip + signed-announce listener (UDP).
+    #[arg(long, default_value = "0.0.0.0:4656")]
+    gossip_udp: SocketAddr,
+    /// Peer tracker gossip address; repeat for multiple peers.
+    #[arg(long = "gossip-peer")]
+    gossip_peers: Vec<SocketAddr>,
+    /// Seconds between gossip digests to peers.
+    #[arg(long, default_value_t = 60)]
+    gossip_interval: u64,
     /// Seconds a registration stays listed without a fresh heartbeat.
     #[arg(long, default_value_t = 360)]
     ttl: u64,
@@ -46,15 +55,30 @@ async fn main() -> Result<()> {
     let status = TcpListener::bind(cli.status)
         .await
         .with_context(|| format!("binding status TCP {}", cli.status))?;
+    let gossip = UdpSocket::bind(cli.gossip_udp)
+        .await
+        .with_context(|| format!("binding gossip UDP {}", cli.gossip_udp))?;
 
     tracing::info!(addr = %cli.htrk_udp, "HTRK registration (UDP) listening");
     tracing::info!(addr = %cli.htrk_tcp, "HTRK listing (TCP) listening");
     tracing::info!(addr = %cli.status, "status (TCP) listening");
+    tracing::info!(
+        addr = %cli.gossip_udp,
+        peers = cli.gossip_peers.len(),
+        interval_secs = cli.gossip_interval,
+        "gossip (UDP) listening"
+    );
     tracing::info!(ttl_secs = cli.ttl, "registration TTL");
 
     let mut registration = tokio::spawn(service::run_registration_udp(udp, registry.clone()));
     let mut listing = tokio::spawn(service::run_listing_tcp(listing, registry.clone()));
-    let mut status = tokio::spawn(service::run_status_tcp(status, registry));
+    let mut status = tokio::spawn(service::run_status_tcp(status, registry.clone()));
+    let mut gossip = tokio::spawn(service::run_gossip_udp(
+        gossip,
+        registry,
+        cli.gossip_peers,
+        Duration::from_secs(cli.gossip_interval.max(1)),
+    ));
 
     tracing::info!("press Ctrl-C to shut down");
     tokio::select! {
@@ -71,10 +95,14 @@ async fn main() -> Result<()> {
         result = &mut status => {
             result.context("status listener panicked")??;
         }
+        result = &mut gossip => {
+            result.context("gossip listener panicked")??;
+        }
     }
 
     registration.abort();
     listing.abort();
     status.abort();
+    gossip.abort();
     Ok(())
 }
