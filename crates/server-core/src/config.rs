@@ -12,6 +12,26 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+/// A configured server-to-server federation dial target (Wave 9). Entries are
+/// implicitly admin-approved on this side (we chose to dial them); the peer
+/// still approves *us* before a session is established.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FederationPeer {
+    /// Human-readable label for logs/status.
+    pub name: String,
+    /// `host:port` to dial (the peer's `federation_addr`).
+    pub addr: String,
+    /// TLS SNI / certificate name to expect (default "localhost" for
+    /// self-signed burrows).
+    pub server_name: String,
+    /// The peer's expected Ed25519 server key, hex-encoded (32 bytes). Empty
+    /// = accept whatever the peer presents (still fingerprint-pinned).
+    pub key: String,
+    /// The peer's pinned TLS certificate blake3 fingerprint, hex-encoded.
+    pub fingerprint: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
@@ -98,6 +118,15 @@ pub struct ServerConfig {
     /// Echomail AREA tag → board slug map, driving the echomail↔board gateway
     /// in both directions.
     pub ftn_areas: std::collections::HashMap<String, String>,
+    /// Serve the server-to-server (S2S) federation peering surface on
+    /// `federation_addr` and dial `federation_peers` (Wave 9). Off by default.
+    pub federation_enabled: bool,
+    /// Federation S2S listener address (default 0.0.0.0:4655 — alongside the
+    /// QUIC 4653 / WebSocket 4654 client transports).
+    pub federation_addr: SocketAddr,
+    /// Configured peer dial targets. Serialized as an array of tables in TOML;
+    /// edited on disk (not via `ctl config set`), like `ftn_areas`.
+    pub federation_peers: Vec<FederationPeer>,
     /// Welcome-screen featured block (title on first line, body after).
     pub welcome_featured: String,
     /// Welcome-screen one-line ticker.
@@ -151,6 +180,9 @@ impl Default for ServerConfig {
             ftn_inbound_dir: PathBuf::from("ftn/inbound"),
             ftn_outbound_dir: PathBuf::from("ftn/outbound"),
             ftn_areas: std::collections::HashMap::new(),
+            federation_enabled: false,
+            federation_addr: "0.0.0.0:4655".parse().expect("valid"),
+            federation_peers: Vec::new(),
             welcome_featured: String::new(),
             welcome_ticker: String::new(),
             theme_accent: String::new(),
@@ -260,6 +292,8 @@ impl ServerConfig {
             "ftn_password" => self.ftn_password.clone(),
             "ftn_inbound_dir" => self.ftn_inbound_dir.display().to_string(),
             "ftn_outbound_dir" => self.ftn_outbound_dir.display().to_string(),
+            "federation_enabled" => self.federation_enabled.to_string(),
+            "federation_addr" => self.federation_addr.to_string(),
             "welcome_featured" => self.welcome_featured.clone(),
             "welcome_ticker" => self.welcome_ticker.clone(),
             "theme_accent" => self.theme_accent.clone(),
@@ -470,6 +504,14 @@ impl ServerConfig {
             }
             "ftn_outbound_dir" => {
                 self.ftn_outbound_dir = PathBuf::from(value);
+                Ok(false)
+            }
+            "federation_enabled" => {
+                self.federation_enabled = parse_bool(key, value)?;
+                Ok(false) // listener binds at startup
+            }
+            "federation_addr" => {
+                self.federation_addr = parse_addr(key, value)?;
                 Ok(false)
             }
             "quic_addr" => {

@@ -4,6 +4,7 @@
 
 pub mod admin_store;
 pub mod ctl;
+pub mod federation;
 pub mod ftn;
 pub mod handlers10;
 pub mod handlers2;
@@ -33,8 +34,8 @@ use rabbithole_net::ws::WsListener;
 use rabbithole_net::Listener;
 use rabbithole_server_core::{
     AuthService, BoardService, ChatService, ClassCache, DedupStore, EventBus, FileService,
-    LiveConfig, PermissionEvaluator, PresenceRegistry, PushLog, RegistrationMode, ServerConfig,
-    ServerEvent, SwarmCatalog,
+    LiveConfig, PeerRegistry, PermissionEvaluator, PresenceRegistry, PushLog, RegistrationMode,
+    ServerConfig, ServerEvent, SwarmCatalog,
 };
 use rabbithole_store_server::SqlitePool;
 
@@ -70,6 +71,8 @@ pub struct Shared {
     pub radio: radio::Stations,
     /// Connected Hotline clients for IM routing + user-list icons (Wave 7.3).
     pub hotline: hotline::Hub,
+    /// Known/approved/pending S2S federation peers + their state (Wave 9).
+    pub peers: PeerRegistry,
     next_session: AtomicU64,
 }
 
@@ -111,6 +114,8 @@ pub struct Burrow {
     pub hotline_addr: Option<SocketAddr>,
     /// Bound FTN binkp address when `ftn_enabled` (else `None`).
     pub ftn_addr: Option<SocketAddr>,
+    /// Bound S2S federation address when `federation_enabled` (else `None`).
+    pub federation_addr: Option<SocketAddr>,
     pub fingerprint: CertFingerprint,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -151,6 +156,8 @@ impl Burrow {
         let radio = config.radio_enabled.then_some(config.radio_addr);
         let hotline = config.hotline_enabled.then_some(config.hotline_addr);
         let ftn = config.ftn_enabled.then_some(config.ftn_addr);
+        let federation = config.federation_enabled.then_some(config.federation_addr);
+        let federation_peers = config.federation_peers.clone();
         // FTN spool dirs resolve under data_dir when relative.
         let ftn_inbound = resolve_dir(&data_dir, &config.ftn_inbound_dir);
         let ftn_outbound = resolve_dir(&data_dir, &config.ftn_outbound_dir);
@@ -177,8 +184,20 @@ impl Burrow {
             swarm: SwarmCatalog::new(),
             radio: radio::Stations::new(),
             hotline: hotline::Hub::new(),
+            peers: PeerRegistry::new(),
             next_session: AtomicU64::new(1),
         });
+
+        // Seed the peer registry: admin-approved keys persisted on disk, plus
+        // configured dial targets (implicitly approved on our side).
+        for key in federation::load_approved(&data_dir) {
+            shared.peers.seed_approved(key, "");
+        }
+        for peer in &federation_peers {
+            if let Some(key) = federation::hex_key(&peer.key) {
+                shared.peers.seed_approved(key, peer.name.clone());
+            }
+        }
 
         tracing::info!(
             quic = %quic_addr,
@@ -246,6 +265,14 @@ impl Burrow {
             ftn_addr = Some(bound);
             tasks.push(handle);
         }
+        let mut federation_addr = None;
+        if let Some(addr) = federation {
+            let (bound, handle) =
+                federation::spawn_federation(shared.clone(), addr, &identity.tls).await?;
+            tracing::info!(federation = %bound, "S2S federation peering listening");
+            federation_addr = Some(bound);
+            tasks.push(handle);
+        }
 
         Ok(Burrow {
             shared,
@@ -257,6 +284,7 @@ impl Burrow {
             radio_addr,
             hotline_addr,
             ftn_addr,
+            federation_addr,
             fingerprint,
             tasks,
         })

@@ -111,6 +111,40 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
                 .collect();
             Ok(Value::Array(users))
         }
+        // ---- S2S federation peers (Wave 9) -----------------------------
+        "peer-list" => {
+            let peers: Vec<Value> = shared
+                .peers
+                .snapshot()
+                .into_iter()
+                .map(|p| {
+                    json!({
+                        "key": p.key_hex(),
+                        "name": p.name,
+                        "addr": p.addr,
+                        "state": p.state.as_str(),
+                        "approved": p.approved,
+                    })
+                })
+                .collect();
+            Ok(Value::Array(peers))
+        }
+        "peer-approve" => {
+            let key_hex = str_arg("key")?;
+            let key = crate::federation::hex_key(&key_hex).ok_or("key must be 32-byte hex")?;
+            let existed = shared.peers.approve(&key);
+            crate::federation::persist_approved(shared).map_err(|e| e.to_string())?;
+            audit("peer-approve", key_hex.clone());
+            Ok(json!({"key": key_hex, "was_known": existed}))
+        }
+        "peer-revoke" => {
+            let key_hex = str_arg("key")?;
+            let key = crate::federation::hex_key(&key_hex).ok_or("key must be 32-byte hex")?;
+            let existed = shared.peers.revoke(&key);
+            crate::federation::persist_approved(shared).map_err(|e| e.to_string())?;
+            audit("peer-revoke", key_hex.clone());
+            Ok(json!({"key": key_hex, "was_known": existed}))
+        }
         other => Err(format!("unknown cmd: {other}")),
     }
 }

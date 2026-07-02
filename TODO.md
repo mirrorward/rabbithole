@@ -153,7 +153,7 @@
 ## Wave 9 — Federation & discovery
 *Depends on: W3 (+W4/W5 for catalogs/swarm; W8 admin UI helpful)*
 
-- [ ] S2S QUIC channel; server key exchange; peering handshake + admin approval
+- [x] S2S QUIC channel; server key exchange; peering handshake + admin approval — `apps/server/src/federation.rs`: dedicated QUIC endpoint on `federation_addr` (reuses `rabbithole-net` QuicListener/Transport + the burrow TLS identity/fingerprint pinning, ALPN `rhp/1`, handshake carried in the `Family::FEDERATION(8)` frames), nonce-bound Ed25519 challenge-response (both sides sign `rhp-fed-s2s-auth-v1‖keys‖nonces` with the server identity key, replay-proof). Unknown peers stay **Pending** until an admin approves via audited ctl `peer-approve`/`peer-revoke`; approvals persist across restart. `PeerRegistry`/`PeerRecord`/`PeerState` in server-core; `federation_*` config off by default (port 4655); graceful `close()` on every path. 5 unit + 4 e2e tests. Catalog sync/search over the session is the next slice
 - [~] Board flood-fill: per-peer/per-board subscriptions, ihave/pull, Bloom+store seen-set — model landed: `rabbithole-federation` (`Subscription`/`IHave`/`PullRequest`/`PushEvents`/`FedEvent`, classic `BloomFilter` with optimal m,k; 25 tests). S2S transport + store wiring is the service slice
 - [~] Tombstone/redact propagation (server-sovereign application) — `rabbithole-federation::redaction` (signed `Redaction`, verify authenticates; apply left to receiver). Propagation wiring pending
 - [~] Ingest defense: dual-sig verify, per-peer rate limits, reputation, auto-defederation, allow/deny lists — `rabbithole-federation::policy` (per-peer token-bucket `RateLimiter`, allow/deny `PeerPolicy`) + descriptor verify done; reputation/auto-defederation pending
