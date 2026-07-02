@@ -5,7 +5,13 @@
 > dependency edges shown in PLAN.md §15. ⛔ = do not start until PLAN.md is
 > reviewed and approved by the project owner.
 
-**Status: Wave 4.1 (file libraries) complete — Wave 4.2 (transfer engine) is next.**
+**Status: Wave 4.2 (transfer engine) functionally complete — Wave 4.3 (quotas/rate policy, persistent client queue) is next.**
+
+> W4.2 note: transfers are resumable + integrity-checked over both transports
+> and folder-pipelined. The dedicated-QUIC-bulk-stream *data plane* (moving
+> bytes off the control stream) is the one deferred optimization — its
+> transport primitive (`net::BulkStreams` / `Connection::bulk()`) and the
+> `BulkPreamble` wire type are already in place and tested.
 
 ---
 
