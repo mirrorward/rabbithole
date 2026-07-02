@@ -6,6 +6,7 @@ members = [
     "crates/server-core",
     "crates/net",
     "crates/identity",
+    "crates/e2ee",
     "crates/blobs",
     "crates/store-server",
     "crates/store-client",
@@ -13,6 +14,7 @@ members = [
     "crates/art",
     "crates/screen",
     "crates/audio",
+    "crates/legacy-doors",
     "crates/legacy-hotline",
     "crates/legacy-telnet",
     "crates/legacy-finger",
@@ -30,7 +32,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]
@@ -45,6 +47,7 @@ rabbithole-core = { path = "crates/core" }
 rabbithole-server-core = { path = "crates/server-core" }
 rabbithole-net = { path = "crates/net" }
 rabbithole-identity = { path = "crates/identity" }
+rabbithole-e2ee = { path = "crates/e2ee" }
 rabbithole-blobs = { path = "crates/blobs" }
 rabbithole-store-server = { path = "crates/store-server" }
 rabbithole-store-client = { path = "crates/store-client" }
@@ -52,6 +55,7 @@ rabbithole-swarm = { path = "crates/swarm" }
 rabbithole-art = { path = "crates/art" }
 rabbithole-screen = { path = "crates/screen" }
 rabbithole-audio = { path = "crates/audio" }
+rabbithole-legacy-doors = { path = "crates/legacy-doors" }
 rabbithole-legacy-hotline = { path = "crates/legacy-hotline" }
 rabbithole-legacy-telnet = { path = "crates/legacy-telnet" }
 rabbithole-legacy-finger = { path = "crates/legacy-finger" }
@@ -85,7 +89,8 @@ tokio-tungstenite = "0.26"
 
 # crypto & identity
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
-x25519-dalek = "2"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+chacha20poly1305 = "0.10"
 argon2 = "0.5"
 blake3 = "1"
 bao-tree = "0.16"

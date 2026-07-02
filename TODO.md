@@ -114,7 +114,7 @@
 - [x] Telnet codec: IAC state machine, ECHO/SGA/NAWS(resize)/TTYPE, 0xFF doubling, loop-safe negotiation — `rabbithole-legacy-telnet` (`proto`/`negotiate`/`stream`, sans-IO parser + RFC 1143-style state machine, line IO w/ password mode, CP437/UTF-8 seam); BINARY option TBD with the art integration
 - [~] BBS surface: telnet login shell + MAIN MENU stub (`legacy-telnet::shell`, pluggable `TelnetAuth`); full welcome art / boards / chat / DMs / keyword nav still to wire into burrow
 - [ ] File browse + HTTP-link handoff
-- [ ] Zmodem transfers over telnet: download, then upload; ZRPOS resume; tested against SyncTERM/NetRunner/qodem
+- [~] Zmodem transfers over telnet — codec landed: `rabbithole-legacy-zmodem` (CRC16/32, ZDLE, hex/bin16/bin32 headers, data subpackets, ZFILE, sans-IO Sender/Receiver state machine, fuzz-tolerant; 61 tests). Telnet-stream wiring + resume + client-interop testing (SyncTERM/NetRunner/qodem) is the next slice
 - [ ] Door games: DOOR32.SYS (+DOOR.SYS/DORINFO1.DEF) dropfiles; telnet/PTY bridge (no fd inheritance); door menu + per-door ACLs + time limits
 - [ ] Legacy security-level projection (RBAC → 0–255 SL + flags) for dropfiles
 - [x] finger (79): empty = who list; user = profile+presence+.plan; /W; **forwarding refused**; output caps — `rabbithole-legacy-finger` (RFC 1288, pluggable `FingerDirectory`, control-char sanitized so a hostile .plan can't inject escapes, 32 KiB cap); per-persona opt-out + burrow wiring TBD
@@ -131,7 +131,7 @@
 - [ ] Threaded news transactions (370–411) mapped to boards; flat-news (101/102) projection
 - [ ] File transactions (200–213); HTXF channel (port+1); FFO encode/decode (INFO/DATA forks, MWIN); fork-offset resume; folder lockstep
 - [ ] Account admin transactions (348–355); access-mask projection (big-endian bit order, tested); kick/ban (110/111)
-- [ ] `apps/tracker`: native registry + HTRK (5498) listing + heartbeat registration
+- [x] `apps/tracker`: native registry + HTRK (5498) listing + UDP (5499) heartbeat registration — `looking-glass` daemon (TTL registry, HTRK UDP registration + TCP listing codecs with packet diagrams, native `LIST` status port; 18 tests). Signed descriptors / tracker gossip land with W9
 - [ ] Compat rig: archived Hotline clients + mobius-driven integration tests
 
 ## Wave 8 — Web & desktop GUI
@@ -169,14 +169,14 @@
 *Depends on: W3 (dupe subsystem); W9 helpful*
 
 **NNTP**
-- [ ] Reader server: CAPABILITIES, GROUP/LISTGROUP, ARTICLE/HEAD/BODY/STAT, NEXT/LAST, POST, OVER/XOVER + OVERVIEW.FMT, LIST, NEWNEWS; dot-stuffing both ways
+- [~] Reader server: CAPABILITIES, GROUP/LISTGROUP, ARTICLE/HEAD/BODY/STAT, NEXT/LAST, POST, OVER/XOVER + OVERVIEW.FMT, LIST, NEWNEWS; dot-stuffing both ways — codec landed: `rabbithole-legacy-nntp` (command parser, response codes, dot-stuffing, OVERVIEW.FMT, message-id grammar; 51 tests). TCP server + board mapping is the wiring slice
 - [ ] AUTHINFO USER/PASS on TLS only (563/STARTTLS)
 - [ ] Group↔board mapping; monotonic article numbers; permanent Message-IDs; References threading; **overview cache computed on post**
 - [ ] Peering: IHAVE/NEWNEWS with external peers; Message-ID dedupe via shared subsystem
 
 **FidoNet**
-- [ ] PKT codec: type-2+ w/ type-2 fallback (capability word), packed messages, golden-file round-trip tests
-- [ ] Kludges: INTL/FMPT/TOPT/MSGID/REPLY/PID/TID; AREA:; Origin; SEEN-BY + PATH maintenance
+- [x] PKT codec: type-2+ w/ type-2 fallback (capability word), packed messages, golden-file round-trip tests — `rabbithole-legacy-ftn` (bounds-checked LE reader, 5D addresses, CP437; 31 tests incl. 2000-iter fuzz)
+- [x] Kludges: INTL/FMPT/TOPT/MSGID/REPLY/PID/TID; AREA:; Origin; SEEN-BY + PATH maintenance — `rabbithole-legacy-ftn::kludge` (canonical re-serialization, raw-CP437 text). Tosser/scanner/binkp/AreaFix/nodelist below are the service layer
 - [ ] Tosser + scanner services; ARCmail bundles (day-coded names + collision handling); BSO outbound
 - [ ] binkp mailer (FTS-1026, port 24554)
 - [ ] AreaFix (netmail commands: +/−/％LIST/％QUERY)
@@ -186,8 +186,8 @@
 - [x] Feed parsing: lenient hand-rolled XML pull tokenizer, RSS 2.0 + Atom 1.0 → `Feed`/`FeedItem`, manual RFC 2822 + RFC 3339 date parsing, HTML-to-text (tag strip + entity decode + char-boundary cap), blake3 dedup ids — `rabbithole-legacy-syndication` (blake3-only dep, 39 tests). Network fetch + board ingestion wiring is the next slice.
 
 **QWK/QWKE**
-- [ ] Packer: MESSAGES.DAT 128-byte blocks (0xE3 EOL, conf# @124–125), CONTROL.DAT, per-conf NDX with **MBF float** encode, DOOR.ID (QWKE advertised), bulletins; ZIP bundling
-- [ ] QWKE long To/From/Subject kludges (both directions)
+- [~] Packer: MESSAGES.DAT 128-byte blocks (0xE3 EOL, conf# @124–125), CONTROL.DAT, per-conf NDX with **MBF float** encode, DOOR.ID (QWKE advertised), bulletins — codec landed: `rabbithole-legacy-qwk` (MBF float verified against known vectors, Latin-1 fields; 40 tests incl. fuzz). ZIP bundling is the documented seam
+- [x] QWKE long To/From/Subject kludges (both directions) — `rabbithole-legacy-qwk::qwke`
 - [ ] REP ingest: validate, dedupe, post as signed events
 - [ ] Delivery: CLI/web export, telnet surface, scheduled per-user packets; read pointers shared with offline mode
 - [ ] Syndication admin UI: per-board network mappings, feed monitor, dupe stats
@@ -195,7 +195,7 @@
 ## Wave 11 — Radio
 *Depends on: W1, W4 (W8 for UI polish)*
 
-- [ ] Station/mount model (multiple stations, per-server toggle)
+- [~] Station/mount model (multiple stations, per-server toggle) — audio core landed: `rabbithole-audio` (PCM frames, saturating mixer w/ per-source gain, broadcast `Station` fan-out with `NowPlaying` + lag-drop listeners, jitter buffer, VU meter; 21 tests). Multi-station registry + per-server toggle is the service layer
 - [ ] Playlist engine: library from file areas, rotation, **vote queue**, requests
 - [ ] DJ live source (Icecast SOURCE/PUT + Basic auth) — works with butt/ices
 - [ ] Encode pipelines: Opus/Ogg primary + MP3 legacy mount

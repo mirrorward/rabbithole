@@ -1,0 +1,53 @@
+[Unit]
+Description=RabbitHole burrow server
+Documentation=https://github.com/kevinelliott/RabbitHole
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=burrow
+Group=burrow
+ExecStart=/usr/local/bin/burrow --data-dir /var/lib/burrow run
+Restart=on-failure
+RestartSec=5s
+
+# Configuration. Prefer an EnvironmentFile for secrets/overrides; the
+# RABBITHOLE_* names below are the real keys from server-core config.rs.
+Environment=RABBITHOLE_DATA_DIR=/var/lib/burrow
+# EnvironmentFile=-/etc/burrow/burrow.env
+
+# systemd creates and owns /var/lib/burrow (0750) for User=burrow.
+StateDirectory=burrow
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/burrow
+
+# --- Sandboxing / hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ReadWritePaths=/var/lib/burrow
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

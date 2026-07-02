@@ -1,0 +1,11 @@
+[package]
+name = "rabbithole-legacy-doors"
+description = "Door-game drop files: DoorContext + DOOR.SYS/DORINFO1.DEF/DOOR32.SYS codecs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
