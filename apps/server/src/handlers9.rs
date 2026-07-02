@@ -1,0 +1,409 @@
+//! Wave 4.2 handlers: the bulk file-transfer engine (control-frame chunk
+//! path, works over both QUIC and WebSocket).
+//!
+//! A transfer is negotiated on the control stream ([`pt::TransferOpen`] →
+//! [`pt::TransferTicket`]); bytes then move as windowed ranged chunks
+//! ([`pt::FileChunkRequest`]/[`pt::FileChunk`] for downloads,
+//! [`pt::FileChunkPut`] for uploads). Everything is resumable — a download
+//! resumes from the client's local offset, an upload from the server's
+//! verified staged prefix — and every finished file is checked against its
+//! blake3 root (== blob id). Dedicated QUIC bulk streams and folder-manifest
+//! pipelining build on these same messages next.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use rabbithole_blobs::BlobId;
+use rabbithole_net::Connection;
+use rabbithole_proto::filelib as pf;
+use rabbithole_proto::transfer as pt;
+use rabbithole_proto::{ErrorCode, Frame};
+use rabbithole_server_core::files::KIND_FILE;
+use rabbithole_server_core::{Caps, ServerEvent};
+
+use crate::session::SessionCtx;
+use crate::Shared;
+
+/// Max bytes a single chunk carries (well under the 1 MiB control-frame cap).
+const CHUNK_MAX: usize = 256 * 1024;
+
+/// A live transfer authorization + progress.
+pub struct Ticket {
+    pub account_id: i64,
+    pub direction: u8,
+    pub root: [u8; 32],
+    pub size: u64,
+    pub token: [u8; 16],
+    // Download:
+    pub blob_id: Option<[u8; 32]>,
+    pub node_area: String,
+    pub node_path: String,
+    // Upload:
+    pub area: String,
+    pub parent: Option<String>,
+    pub name: String,
+    pub mime: String,
+    pub comment: String,
+    pub uploader: String,
+    pub staging: Option<PathBuf>,
+    /// Verified staged bytes (upload) — the resume high-water.
+    pub have: u64,
+}
+
+/// Registry of live transfer tickets, keyed by transfer id.
+pub struct TransferRegistry {
+    inner: Mutex<HashMap<u64, Ticket>>,
+    next: AtomicU64,
+}
+
+impl TransferRegistry {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            next: AtomicU64::new(1),
+        }
+    }
+
+    fn next_id(&self) -> u64 {
+        self.next.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+impl Default for TransferRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// An unguessable token binding a transfer to its authorization: keyed by the
+/// server's secret signing seed so clients can't forge one for another id.
+fn mint_token(seed: &[u8; 32], transfer_id: u64) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(seed);
+    hasher.update(b"transfer-token");
+    hasher.update(&transfer_id.to_le_bytes());
+    let mut token = [0u8; 16];
+    token.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    token
+}
+
+fn resource(area: &str, path: Option<&str>) -> String {
+    match path {
+        Some(p) if !p.is_empty() => format!("files/{area}/{p}"),
+        _ => format!("files/{area}"),
+    }
+}
+
+fn staging_path(shared: &Shared, id: u64) -> PathBuf {
+    shared
+        .config
+        .read()
+        .data_dir
+        .join("transfers")
+        .join(format!("{id}.part"))
+}
+
+pub async fn handle(
+    conn: &mut Box<dyn Connection>,
+    frame: &Frame,
+    shared: &Arc<Shared>,
+    ctx: &mut SessionCtx,
+) -> anyhow::Result<bool> {
+    macro_rules! reply {
+        ($msg:expr) => {
+            conn.send(Frame::reply_to(frame, $msg)?).await?
+        };
+    }
+    macro_rules! fail {
+        ($code:expr) => {{
+            conn.send(Frame::error_reply(frame, $code)).await?;
+            return Ok(true);
+        }};
+    }
+
+    // ---- Open a transfer -------------------------------------------------
+    if let Some(Ok(req)) = frame.decode::<pt::TransferOpen>() {
+        match req.direction {
+            pt::DIR_DOWNLOAD => {
+                let Some(node_id) = req.node_id else {
+                    fail!(ErrorCode::BadRequest)
+                };
+                let Some(node) = shared.files.node(node_id).await.ok().flatten() else {
+                    fail!(ErrorCode::NotFound)
+                };
+                let target = match shared.files.resolve(node.id).await {
+                    Ok(t) => t,
+                    Err(_) => fail!(ErrorCode::NotFound),
+                };
+                if target.kind != KIND_FILE {
+                    fail!(ErrorCode::BadRequest);
+                }
+                let res = resource(&target.area, Some(&target.path));
+                if !ctx.allows(shared, &res, Caps::FILE_DOWNLOAD) {
+                    fail!(ErrorCode::Forbidden);
+                }
+                if shared.files.in_dropbox(&target).await.unwrap_or(false)
+                    && !ctx.allows(shared, &res, Caps::DROPBOX_VIEW)
+                    && !ctx.allows(shared, &resource(&target.area, None), Caps::FILE_MANAGE)
+                {
+                    fail!(ErrorCode::Forbidden);
+                }
+                let Some(blob_id) = target.blob_id else {
+                    fail!(ErrorCode::NotFound)
+                };
+                // Count the download once, at authorization.
+                let _ = shared.files.record_download(node.id).await;
+                let id = shared.transfers.next_id();
+                let token = mint_token(&shared.server_signing_seed, id);
+                let size = target.size.max(0) as u64;
+                shared.transfers.inner.lock().insert(
+                    id,
+                    Ticket {
+                        account_id: ctx.account_id,
+                        direction: pt::DIR_DOWNLOAD,
+                        root: blob_id,
+                        size,
+                        token,
+                        blob_id: Some(blob_id),
+                        node_area: target.area.clone(),
+                        node_path: target.path.clone(),
+                        area: String::new(),
+                        parent: None,
+                        name: String::new(),
+                        mime: String::new(),
+                        comment: String::new(),
+                        uploader: String::new(),
+                        staging: None,
+                        have: size,
+                    },
+                );
+                reply!(&pt::TransferTicket::new(id, blob_id, size, token));
+                return Ok(true);
+            }
+            pt::DIR_UPLOAD => {
+                if ctx.is_guest {
+                    fail!(ErrorCode::Forbidden);
+                }
+                let res = resource(&req.area, req.parent.as_deref());
+                if !ctx.allows(shared, &res, Caps::FILE_UPLOAD) {
+                    fail!(ErrorCode::Forbidden);
+                }
+                if req.name.trim().is_empty() || req.name.contains('/') {
+                    fail!(ErrorCode::BadRequest);
+                }
+                let id = shared.transfers.next_id();
+                let token = mint_token(&shared.server_signing_seed, id);
+                let staging = staging_path(shared, id);
+                if let Some(dir) = staging.parent() {
+                    let _ = tokio::fs::create_dir_all(dir).await;
+                }
+                let _ = tokio::fs::File::create(&staging).await;
+                let uploader = format!("{}@{}", ctx.screen_name, shared.origin_name());
+                shared.transfers.inner.lock().insert(
+                    id,
+                    Ticket {
+                        account_id: ctx.account_id,
+                        direction: pt::DIR_UPLOAD,
+                        root: req.root,
+                        size: req.size,
+                        token,
+                        blob_id: None,
+                        node_area: String::new(),
+                        node_path: String::new(),
+                        area: req.area.clone(),
+                        parent: req.parent.clone(),
+                        name: req.name.clone(),
+                        mime: req.mime.clone(),
+                        comment: req.comment.clone(),
+                        uploader,
+                        staging: Some(staging),
+                        have: 0,
+                    },
+                );
+                reply!(&pt::TransferTicket::new(id, req.root, req.size, token).with_server_have(0));
+                return Ok(true);
+            }
+            _ => fail!(ErrorCode::BadRequest),
+        }
+    }
+
+    // ---- Resume ----------------------------------------------------------
+    if let Some(Ok(req)) = frame.decode::<pt::TransferResume>() {
+        // Compute under the lock, drop the guard, THEN await (the guard is
+        // !Send and must not cross an await point).
+        let outcome: Result<([u8; 32], u64, u64), ErrorCode> = {
+            let map = shared.transfers.inner.lock();
+            match map.get(&req.transfer_id) {
+                None => Err(ErrorCode::NotFound),
+                Some(t) if t.account_id != ctx.account_id || t.token != req.token => {
+                    Err(ErrorCode::Forbidden)
+                }
+                Some(t) => Ok((t.root, t.size, t.have)),
+            }
+        };
+        let (root, size, have) = match outcome {
+            Ok(v) => v,
+            Err(code) => fail!(code),
+        };
+        reply!(
+            &pt::TransferTicket::new(req.transfer_id, root, size, req.token).with_server_have(have)
+        );
+        return Ok(true);
+    }
+
+    // ---- Download a chunk ------------------------------------------------
+    if let Some(Ok(req)) = frame.decode::<pt::FileChunkRequest>() {
+        let outcome: Result<([u8; 32], u64), ErrorCode> = {
+            let map = shared.transfers.inner.lock();
+            match map.get(&req.transfer_id) {
+                None => Err(ErrorCode::NotFound),
+                Some(t) if t.account_id != ctx.account_id || t.direction != pt::DIR_DOWNLOAD => {
+                    Err(ErrorCode::Forbidden)
+                }
+                Some(t) => match t.blob_id {
+                    Some(b) => Ok((b, t.size)),
+                    None => Err(ErrorCode::NotFound),
+                },
+            }
+        };
+        let (blob_id, size) = match outcome {
+            Ok(v) => v,
+            Err(code) => fail!(code),
+        };
+        let len = (req.len as usize).min(CHUNK_MAX);
+        let blobs = shared.blobs.clone();
+        let offset = req.offset;
+        let bytes = match tokio::task::spawn_blocking(move || {
+            blobs.read_range(&BlobId(blob_id), offset, len)
+        })
+        .await?
+        {
+            Ok(b) => b,
+            Err(_) => fail!(ErrorCode::NotFound),
+        };
+        let last = req.offset + bytes.len() as u64 >= size;
+        reply!(&pt::FileChunk::new(
+            req.transfer_id,
+            req.offset,
+            last,
+            bytes
+        ));
+        return Ok(true);
+    }
+
+    // ---- Upload a chunk --------------------------------------------------
+    if let Some(Ok(req)) = frame.decode::<pt::FileChunkPut>() {
+        let outcome: Result<PathBuf, ErrorCode> = {
+            let map = shared.transfers.inner.lock();
+            match map.get(&req.transfer_id) {
+                None => Err(ErrorCode::NotFound),
+                Some(t) if t.account_id != ctx.account_id || t.direction != pt::DIR_UPLOAD => {
+                    Err(ErrorCode::Forbidden)
+                }
+                // Sequential MVP: a chunk must continue exactly where we are.
+                Some(t) if req.offset != t.have => Err(ErrorCode::BadRequest),
+                Some(t) => match &t.staging {
+                    Some(p) => Ok(p.clone()),
+                    None => Err(ErrorCode::Internal),
+                },
+            }
+        };
+        let staging = match outcome {
+            Ok(v) => v,
+            Err(code) => fail!(code),
+        };
+        use tokio::io::AsyncWriteExt;
+        let mut f = match tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&staging)
+            .await
+        {
+            Ok(f) => f,
+            Err(_) => fail!(ErrorCode::Internal),
+        };
+        if f.write_all(&req.bytes).await.is_err() {
+            fail!(ErrorCode::Internal);
+        }
+        {
+            let mut map = shared.transfers.inner.lock();
+            if let Some(t) = map.get_mut(&req.transfer_id) {
+                t.have += req.bytes.len() as u64;
+            }
+        }
+        conn.send(Frame::ack(frame)).await?;
+        return Ok(true);
+    }
+
+    // ---- Finish an upload ------------------------------------------------
+    if let Some(Ok(req)) = frame.decode::<pt::UploadFinish>() {
+        let outcome: Result<Ticket, ErrorCode> = {
+            let mut map = shared.transfers.inner.lock();
+            match map.get(&req.transfer_id) {
+                None => Err(ErrorCode::NotFound),
+                Some(t) if t.account_id != ctx.account_id || t.direction != pt::DIR_UPLOAD => {
+                    Err(ErrorCode::Forbidden)
+                }
+                Some(_) => Ok(map.remove(&req.transfer_id).expect("just checked")),
+            }
+        };
+        let ticket = match outcome {
+            Ok(t) => t,
+            Err(code) => fail!(code),
+        };
+        let staging = ticket.staging.clone().unwrap_or_default();
+        let blobs = shared.blobs.clone();
+        let root = ticket.root;
+        let staged = staging.clone();
+        let committed =
+            tokio::task::spawn_blocking(move || blobs.put_verified(&staged, &BlobId(root))).await?;
+        if committed.is_err() {
+            let _ = tokio::fs::remove_file(&staging).await;
+            fail!(ErrorCode::BadRequest); // hash mismatch or io error
+        }
+        let node = match shared
+            .files
+            .add_file(
+                &ticket.area,
+                ticket.parent.as_deref(),
+                &ticket.name,
+                &ticket.root,
+                ticket.size as i64,
+                &ticket.mime,
+                "",
+                &ticket.comment,
+                &ticket.uploader,
+                ctx.account_id,
+            )
+            .await
+        {
+            Ok(n) => n,
+            Err(_) => fail!(ErrorCode::AlreadyExists),
+        };
+        shared.bus.publish(ServerEvent::FileAdded {
+            area: ticket.area.clone(),
+            id: node.id,
+        });
+        reply!(&pf::NodeReply::new(crate::handlers8::view(&node)));
+        return Ok(true);
+    }
+
+    // ---- Abort -----------------------------------------------------------
+    if let Some(Ok(req)) = frame.decode::<pt::TransferAbort>() {
+        let staging = shared
+            .transfers
+            .inner
+            .lock()
+            .remove(&req.transfer_id)
+            .and_then(|t| t.staging);
+        if let Some(p) = staging {
+            let _ = tokio::fs::remove_file(p).await;
+        }
+        conn.send(Frame::ack(frame)).await?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}

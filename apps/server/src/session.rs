@@ -454,6 +454,10 @@ async fn handle_request(
     if crate::handlers8::handle(conn, frame, shared, ctx).await? {
         return Ok(());
     }
+    // Wave 4.2: bulk transfers ------------------------------------------------
+    if crate::handlers9::handle(conn, frame, shared, ctx).await? {
+        return Ok(());
+    }
 
     // Anything else: tolerated, answered, never fatal.
     conn.send(Frame::error_reply(frame, ErrorCode::Unsupported))

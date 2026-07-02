@@ -31,6 +31,10 @@ pub enum ClientError {
     UnexpectedReply { family: u8, message_type: u16 },
     #[error("bad fingerprint: {0}")]
     BadFingerprint(String),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("integrity check failed: transferred bytes do not match the file's hash")]
+    IntegrityError,
 }
 
 /// A connected, hello-negotiated session.
@@ -760,6 +764,135 @@ impl Client {
     ) -> Result<rabbithole_proto::persona::RecoveryCodes, ClientError> {
         self.request(&rabbithole_proto::persona::TotpEnrollConfirm::new(code))
             .await
+    }
+
+    // ---- Wave 4.2: bulk transfers -----------------------------------------
+
+    /// Chunk size for ranged transfers (kept under the 1 MiB control cap).
+    const TRANSFER_CHUNK: usize = 256 * 1024;
+
+    /// blake3-hash a local file incrementally, returning `(root, size)`.
+    fn hash_file(path: &std::path::Path) -> Result<([u8; 32], u64), ClientError> {
+        use std::io::Read;
+        let mut f = std::fs::File::open(path)?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = [0u8; 64 * 1024];
+        let mut total = 0u64;
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            total += n as u64;
+        }
+        Ok((*hasher.finalize().as_bytes(), total))
+    }
+
+    /// Download a file node to `dest`, resuming from any partial already
+    /// present. Verifies the finished file's blake3 root against the ticket
+    /// before returning the byte count. Works over any transport (the ranged
+    /// chunk path); dedicated QUIC bulk streams are a transparent optimization
+    /// added on top of the same tickets.
+    pub async fn transfer_download(
+        &mut self,
+        node_id: i64,
+        dest: &std::path::Path,
+    ) -> Result<u64, ClientError> {
+        use std::io::{Seek, SeekFrom, Write};
+        let ticket: rabbithole_proto::transfer::TransferTicket = self
+            .request(&rabbithole_proto::transfer::TransferOpen::download(node_id))
+            .await?;
+        // Resume from the existing partial (clamped to the real size).
+        let mut have = std::fs::metadata(dest)
+            .map(|m| m.len())
+            .unwrap_or(0)
+            .min(ticket.size);
+        // Resuming: keep the existing partial (never truncate); we seek past it.
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dest)?;
+        file.seek(SeekFrom::Start(have))?;
+        while have < ticket.size {
+            let want = ((ticket.size - have).min(Self::TRANSFER_CHUNK as u64)) as u32;
+            let chunk: rabbithole_proto::transfer::FileChunk = self
+                .request(&rabbithole_proto::transfer::FileChunkRequest::new(
+                    ticket.transfer_id,
+                    have,
+                    want,
+                ))
+                .await?;
+            if chunk.bytes.is_empty() {
+                break;
+            }
+            file.write_all(&chunk.bytes)?;
+            have += chunk.bytes.len() as u64;
+            if chunk.last {
+                break;
+            }
+        }
+        file.flush()?;
+        drop(file);
+        let (root, _) = Self::hash_file(dest)?;
+        if root != ticket.root {
+            return Err(ClientError::IntegrityError);
+        }
+        Ok(have)
+    }
+
+    /// Upload a local file into `area` (optionally under `parent`), resuming
+    /// from the server's staged prefix. Returns the created node.
+    pub async fn transfer_upload(
+        &mut self,
+        area: &str,
+        parent: Option<String>,
+        name: &str,
+        src: &std::path::Path,
+        mime: &str,
+        comment: &str,
+    ) -> Result<rabbithole_proto::filelib::FileNodeView, ClientError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let (root, size) = Self::hash_file(src)?;
+        let open = rabbithole_proto::transfer::TransferOpen::upload(area, parent, name, size, root)
+            .with_meta(mime, comment);
+        let ticket: rabbithole_proto::transfer::TransferTicket = self.request(&open).await?;
+
+        let mut have = ticket.server_have.min(size);
+        let mut file = std::fs::File::open(src)?;
+        file.seek(SeekFrom::Start(have))?;
+        let mut buf = vec![0u8; Self::TRANSFER_CHUNK];
+        while have < size {
+            let want = ((size - have).min(Self::TRANSFER_CHUNK as u64)) as usize;
+            // Read up to `want` bytes (files can short-read).
+            let mut filled = 0;
+            while filled < want {
+                let n = file.read(&mut buf[filled..want])?;
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+            }
+            if filled == 0 {
+                break;
+            }
+            let last = have + filled as u64 >= size;
+            self.request_ack(&rabbithole_proto::transfer::FileChunkPut::new(
+                ticket.transfer_id,
+                have,
+                last,
+                buf[..filled].to_vec(),
+            ))
+            .await?;
+            have += filled as u64;
+        }
+        let reply: rabbithole_proto::filelib::NodeReply = self
+            .request(&rabbithole_proto::transfer::UploadFinish::new(
+                ticket.transfer_id,
+            ))
+            .await?;
+        Ok(reply.node)
     }
 
     pub async fn close(&mut self) {

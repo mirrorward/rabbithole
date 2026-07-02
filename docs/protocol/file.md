@@ -48,6 +48,41 @@ can drop files in, but the contents are hidden — `FolderListRequest`
 returns an empty list and downloads are refused — unless the caller holds
 `DROPBOX_VIEW` (or `FILE_MANAGE`). The classic Hotline upload folder.
 
+## Bulk transfers (Wave 4.2)
+
+Inline `FileUpload`/`FileDownload` (above) are for *small* files. Real
+transfers negotiate a **ticket** on the control stream, then move bytes in a
+resumable, integrity-checked way. Messages (types 20-42):
+
+| type | name | direction | payload |
+|---|---|---|---|
+| 20/21 | TransferOpen → TransferTicket | Request/Reply | download `node_id`, or upload dest + `size`/`root`; ticket has `transfer_id`, `server_have`, `token` |
+| 22/21 | TransferResume → TransferTicket | Request/Reply | re-authorize after reconnect; re-reports `server_have` |
+| 23 | UploadFinish | Request → `NodeReply` | verify staged blake3 == root, commit to blob store, record node |
+| 24 | TransferAbort | Request → ack | drop ticket + staging |
+| 25/26 | FolderManifestRequest → FolderManifest | Request/Reply | whole subtree in one round trip (pipelining) |
+| 30 | BulkPreamble | (stream) | length-prefixed first bytes on a dedicated QUIC bulk stream |
+| 40/41 | FileChunkRequest → FileChunk | Request/Reply | ranged download (WS / control-stream path) |
+| 42 | FileChunkPut | Request → ack | ranged upload |
+
+**Transports.** On QUIC, `Connection::bulk()` yields a `BulkStreams` handle
+that opens dedicated bi-streams (bytes off the control channel). On
+WebSocket/wasm there are no extra streams, so the same byte ranges ride the
+control connection as windowed `FileChunk` frames (bounded well under the
+1 MiB cap so chat/presence still interleave). One transfer protocol, two
+framings.
+
+**Resume.** A download resumes from the client's local partial offset; an
+upload resumes from the server's verified staged prefix (`server_have`).
+Either way the finished file is verified whole against its blake3 root
+(== blob id) before it's accepted — so a partial transfer is always safe to
+continue and a corrupt one is rejected.
+
+**Verification scope.** W4.2 verifies the whole-file root against the
+authenticated origin server. Per-chunk Bao merkle verification — needed when
+bytes come from *untrusted* peers — lands with the swarm in Wave 5, over the
+same byte ranges (`bao-tree`).
+
 ## Ratings & the index
 
 Ratings are one row per (node, account); the average and count are computed

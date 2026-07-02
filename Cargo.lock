@@ -234,6 +234,7 @@ dependencies = [
  "clap",
  "data-encoding",
  "hex",
+ "parking_lot",
  "postcard",
  "rabbithole-blobs",
  "rabbithole-core",
@@ -1825,6 +1826,7 @@ dependencies = [
 name = "rabbithole-core"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "ed25519-dalek",
  "postcard",
  "rabbithole-identity",

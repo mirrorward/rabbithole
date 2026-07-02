@@ -11,6 +11,7 @@ pub mod handlers5;
 pub mod handlers6;
 pub mod handlers7;
 pub mod handlers8;
+pub mod handlers9;
 pub mod identity_store;
 pub mod session;
 
@@ -55,6 +56,8 @@ pub struct Shared {
     /// The shared dupe/seen gate — prevents reprocessing and rebroadcast
     /// loops once federation (W9) and syndication (W10) come online.
     pub dedup: DedupStore,
+    /// Live bulk-transfer tickets (Wave 4.2).
+    pub transfers: handlers9::TransferRegistry,
     next_session: AtomicU64,
 }
 
@@ -134,6 +137,7 @@ impl Burrow {
             server_signing_seed: identity.signing.seed(),
             fingerprint_hex: fingerprint.to_hex(),
             dedup: DedupStore::with_defaults(),
+            transfers: handlers9::TransferRegistry::new(),
             next_session: AtomicU64::new(1),
         });
 

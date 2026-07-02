@@ -607,19 +607,24 @@ async fn cmd_file(json: bool, action: FileAction) -> Result<()> {
                 parent,
                 comment,
             } => {
-                let bytes = std::fs::read(&local)
-                    .with_context(|| format!("reading {}", local.display()))?;
                 let name = local
                     .file_name()
                     .and_then(|s| s.to_str())
-                    .context("bad local file name")?;
-                let mime = mime_guess_simple(name);
-                let req = pf::FileUpload::new(&area, parent, name, bytes).with_meta(
-                    mime,
-                    "",
-                    comment.unwrap_or_default(),
-                );
-                let n = c.file_upload(&req).await?;
+                    .context("bad local file name")?
+                    .to_string();
+                let mime = mime_guess_simple(&name);
+                // The resumable transfer engine (dedicated stream on QUIC,
+                // ranged chunks on WS) — handles files of any size.
+                let n = c
+                    .transfer_upload(
+                        &area,
+                        parent,
+                        &name,
+                        &local,
+                        mime,
+                        &comment.unwrap_or_default(),
+                    )
+                    .await?;
                 if json {
                     println!(
                         "{}",
@@ -630,15 +635,8 @@ async fn cmd_file(json: bool, action: FileAction) -> Result<()> {
                 }
             }
             FileAction::Get { id, local } => {
-                let content = c.file_download(id).await?;
-                std::fs::write(&local, &content.bytes)
-                    .with_context(|| format!("writing {}", local.display()))?;
-                println!(
-                    "downloaded {} ({} bytes) → {}",
-                    content.node.name,
-                    content.bytes.len(),
-                    local.display()
-                );
+                let n = c.transfer_download(id, &local).await?;
+                println!("downloaded {} bytes → {}", n, local.display());
             }
             FileAction::Info { id } => {
                 let n = c.node_get(id).await?;

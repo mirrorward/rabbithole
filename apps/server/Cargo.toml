@@ -26,6 +26,7 @@ rabbithole-server-core.workspace = true
 rabbithole-store-server.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+parking_lot.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

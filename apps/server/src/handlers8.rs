@@ -23,7 +23,7 @@ use crate::Shared;
 /// for the surrounding fields. Larger files use W4.2 streaming.
 const MAX_INLINE_UPLOAD: usize = 768 * 1024;
 
-fn view(row: &FileNodeRow) -> pf::FileNodeView {
+pub(crate) fn view(row: &FileNodeRow) -> pf::FileNodeView {
     let mut v = pf::FileNodeView::new(
         row.id,
         row.area.clone(),
