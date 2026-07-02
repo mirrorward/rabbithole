@@ -2038,6 +2038,13 @@ name = "rabbithole-legacy-qwk"
 version = "0.2.0"
 
 [[package]]
+name = "rabbithole-legacy-syndication"
+version = "0.2.0"
+dependencies = [
+ "blake3",
+]
+
+[[package]]
 name = "rabbithole-legacy-telnet"
 version = "0.2.0"
 dependencies = [
