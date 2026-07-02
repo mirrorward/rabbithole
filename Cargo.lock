@@ -231,7 +231,9 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "data-encoding",
  "hex",
+ "rabbithole-blobs",
  "rabbithole-core",
  "rabbithole-identity",
  "rabbithole-net",
@@ -1766,6 +1768,8 @@ dependencies = [
 name = "rabbithole-store-server"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "serde_json",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",

@@ -43,11 +43,11 @@
 ## Wave 2 — Community layer
 *Depends on: W1*
 
-- [ ] Registration gating (open/invite/email), TOTP enrollment, key enrollment
-- [ ] Class admin (create/edit/assign; live inheritance)
-- [ ] Personas: multiple per account (cap configurable), switcher
-- [ ] Profiles (location/interests/quote/free text/.plan), avatars + **banner images** (blob-backed, size-capped)
-- [ ] Member directory + search; "locate online" (privacy-gated)
+- [x] Registration gating (open/invite/email), TOTP enrollment, key enrollment
+- [x] Class admin (create/edit/assign; live inheritance)
+- [x] Personas: multiple per account (cap configurable), switcher
+- [x] Profiles (location/interests/quote/free text/.plan), avatars + **banner images** (blob-backed, size-capped)
+- [x] Member directory + search; "locate online" (privacy-gated)
 - [ ] Buddy lists: server-stored, groups, permit/deny; presence states (online/away+msg/idle/invisible) + pub/sub pushes
 - [ ] Chat: multiple public rooms w/ categories + topics; ad-hoc rooms; private rooms w/ invite/decline/join/leave; subjects; room moderation (kick/mute/ban/slow-mode)
 - [ ] DMs: threads, offline queueing, quoting, away auto-response, receipts (privacy-gated)
@@ -58,7 +58,7 @@
 - [ ] Keyword registry + `/go` fuzzy teleport
 - [ ] TUI client v1: login, chat, who, DMs (`screen` crate begun); light/dark palettes
 - [ ] Server TUI v1: connection monitor, config, accounts
-- [ ] Remote admin protocol family live (capability-gated + audited)
+- [x] Remote admin protocol family live (capability-gated + audited)
 
 ## Wave 3 — Message bases & offline
 *Depends on: W2*

@@ -237,6 +237,104 @@ impl Client {
         Ok(())
     }
 
+    // ---- Wave 2: registration, personas, directory, blobs, admin ---------
+
+    pub async fn register(
+        &mut self,
+        login: &str,
+        password: &str,
+        invite_code: Option<String>,
+    ) -> Result<psess::AuthOk, ClientError> {
+        self.request(&rabbithole_proto::persona::Register::new(
+            login,
+            password,
+            invite_code,
+        ))
+        .await
+    }
+
+    pub async fn personas(
+        &mut self,
+    ) -> Result<rabbithole_proto::persona::PersonaList, ClientError> {
+        self.request(&rabbithole_proto::persona::PersonaListRequest)
+            .await
+    }
+
+    pub async fn persona_create(
+        &mut self,
+        screen_name: &str,
+    ) -> Result<rabbithole_proto::persona::PersonaReply, ClientError> {
+        self.request(&rabbithole_proto::persona::PersonaCreate::new(screen_name))
+            .await
+    }
+
+    pub async fn persona_switch(
+        &mut self,
+        id: i64,
+    ) -> Result<rabbithole_proto::persona::PersonaReply, ClientError> {
+        self.request(&rabbithole_proto::persona::PersonaSwitch::new(id))
+            .await
+    }
+
+    pub async fn persona_update(
+        &mut self,
+        update: &rabbithole_proto::persona::PersonaUpdate,
+    ) -> Result<rabbithole_proto::persona::PersonaReply, ClientError> {
+        self.request(update).await
+    }
+
+    pub async fn profile_get(
+        &mut self,
+        screen_name: &str,
+    ) -> Result<rabbithole_proto::directory::ProfileCard, ClientError> {
+        self.request(&rabbithole_proto::directory::ProfileGet::new(screen_name))
+            .await
+    }
+
+    pub async fn directory_search(
+        &mut self,
+        query: &str,
+        limit: u32,
+    ) -> Result<rabbithole_proto::directory::DirectoryResults, ClientError> {
+        self.request(&rabbithole_proto::directory::DirectorySearch::new(
+            query, limit,
+        ))
+        .await
+    }
+
+    pub async fn blob_put(
+        &mut self,
+        purpose: rabbithole_proto::blob::BlobPurpose,
+        bytes: Vec<u8>,
+    ) -> Result<[u8; 32], ClientError> {
+        let r: rabbithole_proto::blob::BlobRef = self
+            .request(&rabbithole_proto::blob::BlobPut::new(purpose, bytes))
+            .await?;
+        Ok(r.id)
+    }
+
+    pub async fn blob_get(&mut self, id: [u8; 32]) -> Result<Vec<u8>, ClientError> {
+        let r: rabbithole_proto::blob::BlobData = self
+            .request(&rabbithole_proto::blob::BlobGet::new(id))
+            .await?;
+        Ok(r.bytes)
+    }
+
+    pub async fn totp_enroll(
+        &mut self,
+    ) -> Result<rabbithole_proto::persona::TotpEnrollInfo, ClientError> {
+        self.request(&rabbithole_proto::persona::TotpEnrollBegin)
+            .await
+    }
+
+    pub async fn totp_confirm(
+        &mut self,
+        code: &str,
+    ) -> Result<rabbithole_proto::persona::RecoveryCodes, ClientError> {
+        self.request(&rabbithole_proto::persona::TotpEnrollConfirm::new(code))
+            .await
+    }
+
     pub async fn close(&mut self) {
         self.conn.close().await;
     }

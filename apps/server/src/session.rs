@@ -4,21 +4,60 @@
 //! AwaitHello ──Hello/HelloAck──▶ AwaitAuth ──AuthOk──▶ Active
 //! ```
 //!
-//! Before authentication only Hello, auth requests, and Ping are honored.
-//! Once active, the session joins presence, receives the Welcome push, and
-//! pumps bus events out as pushes while serving requests. Requests may be
-//! pipelined; pushes are routed by type, never by request id.
+//! Before authentication only Hello, Register, auth requests, and Ping are
+//! honored. Once active, the session joins presence, receives the Welcome
+//! push, and pumps bus events out as pushes while serving requests.
+//! Requests may be pipelined; pushes are routed by type, never by request
+//! id. Wave 2 handlers (personas, directory, blobs, admin) live in
+//! [`crate::handlers2`].
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use rabbithole_net::Connection;
 use rabbithole_proto::{chat as pchat, presence as ppres, session as psess};
+use rabbithole_proto::{directory as pdir, persona as ppers};
 use rabbithole_proto::{ErrorCode, Frame, FrameKind, ProtocolVersion, PROTOCOL_VERSION};
 use rabbithole_proto::{Hello, HelloAck};
-use rabbithole_server_core::{AuthError, AuthedUser, Caps, PresenceEntry, Role, ServerEvent};
+use rabbithole_server_core::{
+    AuthError, AuthedUser, Caps, PresenceEntry, Role, ServerEvent, Subject,
+};
 
 use crate::Shared;
+
+/// Mutable per-session state shared by all request handlers.
+pub struct SessionCtx {
+    pub session_id: u64,
+    pub account_id: i64,
+    pub login: String,
+    pub role: Role,
+    pub class_id: Option<i64>,
+    pub grant_mask: u64,
+    pub revoke_mask: u64,
+    pub persona_id: i64,
+    pub screen_name: String,
+    pub agreed: bool,
+    pub is_guest: bool,
+}
+
+impl SessionCtx {
+    /// Build the subject with the **current** class mask — the live-
+    /// inheritance mechanism: a `ClassSet` applies on the next check.
+    pub fn subject(&self, shared: &Shared) -> Subject {
+        Subject {
+            account_id: self.account_id,
+            role: self.role,
+            class_id: self.class_id,
+            class_mask: shared.classes.mask(self.class_id),
+            grant_mask: self.grant_mask,
+            revoke_mask: self.revoke_mask,
+        }
+    }
+
+    pub fn allows(&self, shared: &Shared, resource: &str, needed: Caps) -> bool {
+        shared.perms.allows(&self.subject(shared), resource, needed)
+    }
+}
 
 pub async fn run_session(
     mut conn: Box<dyn Connection>,
@@ -88,7 +127,12 @@ pub async fn run_session(
 
         let attempt: Option<Result<AuthedUser, AuthError>> =
             if let Some(Ok(req)) = frame.decode::<psess::AuthPassword>() {
-                Some(shared.auth.login_password(&req.login, &req.password).await)
+                Some(
+                    shared
+                        .auth
+                        .login_password(&req.login, &req.password, req.totp.as_deref())
+                        .await,
+                )
             } else if let Some(Ok(req)) = frame.decode::<psess::AuthGuest>() {
                 let guests = shared.config.read().guest_enabled;
                 Some(
@@ -101,6 +145,14 @@ pub async fn run_session(
                 replay_cursor = req.replay_cursor;
                 resumed = true;
                 Some(shared.auth.login_resume(&req.token).await)
+            } else if let Some(Ok(req)) = frame.decode::<ppers::Register>() {
+                let mode = shared.registration_mode();
+                Some(
+                    shared
+                        .auth
+                        .register(mode, &req.login, &req.password, req.invite_code.as_deref())
+                        .await,
+                )
             } else {
                 None
             };
@@ -110,7 +162,7 @@ pub async fn run_session(
                 let ok = psess::AuthOk::new(
                     user.token.as_ref().map(|t| t.encode()).unwrap_or_default(),
                     user.account.id,
-                    user.account.screen_name.clone(),
+                    user.persona.screen_name.clone(),
                     user.account.role,
                     shared.perms.effective(&user.subject, ""),
                     resumed,
@@ -121,9 +173,11 @@ pub async fn run_session(
             }
             Some(Err(e)) => {
                 let code = match &e {
-                    AuthError::GuestsDisabled => ErrorCode::Forbidden,
+                    AuthError::GuestsDisabled | AuthError::Disabled => ErrorCode::Forbidden,
                     AuthError::SessionExpired => ErrorCode::SessionExpired,
-                    AuthError::Disabled => ErrorCode::Forbidden,
+                    AuthError::TotpRequired => ErrorCode::TotpRequired,
+                    AuthError::RegistrationClosed | AuthError::BadInvite => ErrorCode::Forbidden,
+                    AuthError::LoginTaken => ErrorCode::AlreadyExists,
                     _ => ErrorCode::Unauthenticated,
                 };
                 tracing::debug!(session_id, "auth failed: {e}");
@@ -138,16 +192,29 @@ pub async fn run_session(
     }
 
     // ---- Active ---------------------------------------------------------
-    let account_id = authed.account.id;
-    let screen_name = authed.account.screen_name.clone();
-    let role = Role::from_ordinal(authed.account.role);
-    let subject = authed.subject;
+    let cfg = shared.config.read();
+    let agreement = (!cfg.agreement.is_empty()).then(|| cfg.agreement.clone());
+    let mut ctx = SessionCtx {
+        session_id,
+        account_id: authed.account.id,
+        login: authed.account.login.clone(),
+        role: Role::from_ordinal(authed.account.role),
+        class_id: authed.account.class_id,
+        grant_mask: authed.account.grant_mask,
+        revoke_mask: authed.account.revoke_mask,
+        persona_id: authed.persona.id,
+        screen_name: authed.persona.screen_name.clone(),
+        agreed: agreement.is_none(),
+        is_guest: authed.token.is_none(),
+    };
+    let motd = cfg.motd.clone();
+    drop(cfg);
 
     shared.presence.join(PresenceEntry {
         session_id,
-        account_id,
-        screen_name: screen_name.clone(),
-        role,
+        account_id: ctx.account_id,
+        screen_name: ctx.screen_name.clone(),
+        role: ctx.role,
         transport: peer.transport.to_string(),
         connected_at: Instant::now(),
     });
@@ -158,17 +225,14 @@ pub async fn run_session(
     // fresh Welcome — the new Welcome gets a higher sequence and must not
     // appear in its own replay.
     if resumed && replay_cursor > 0 {
-        for missed in shared.pushlog.since(account_id, replay_cursor) {
+        for missed in shared.pushlog.since(ctx.account_id, replay_cursor) {
             conn.send(missed).await?;
         }
     }
 
-    let cfg = shared.config.read();
-    let agreement = (!cfg.agreement.is_empty()).then(|| cfg.agreement.clone());
-    let mut agreed = agreement.is_none();
-    let welcome = Frame::push(&psess::Welcome::new(cfg.motd.clone(), agreement))?;
-    conn.send(shared.pushlog.stamp(account_id, welcome)).await?;
-    drop(cfg);
+    let welcome = Frame::push(&psess::Welcome::new(motd, agreement))?;
+    conn.send(shared.pushlog.stamp(ctx.account_id, welcome))
+        .await?;
 
     let result: anyhow::Result<()> = async {
         loop {
@@ -178,15 +242,22 @@ pub async fn run_session(
                     if frame.kind != FrameKind::Request {
                         continue;
                     }
-                    handle_request(&mut conn, &frame, &shared, &subject, &screen_name, &mut agreed)
-                        .await?;
+                    handle_request(&mut conn, &frame, &shared, &mut ctx).await?;
                 }
                 event = bus_rx.recv() => {
                     use tokio::sync::broadcast::error::RecvError;
                     match event {
+                        Ok(ServerEvent::Kick { session_id: target, reason }) if target == session_id => {
+                            let notice = Frame::push(&psess::ServerNotice::new(
+                                format!("disconnected by operator: {reason}"),
+                                "server",
+                            ))?;
+                            let _ = conn.send(notice).await;
+                            break;
+                        }
                         Ok(ev) => {
                             if let Some(push) = push_for_event(&ev, &shared) {
-                                conn.send(shared.pushlog.stamp(account_id, push)).await?;
+                                conn.send(shared.pushlog.stamp(ctx.account_id, push)).await?;
                             }
                             if matches!(ev, ServerEvent::Shutdown) {
                                 break;
@@ -213,10 +284,8 @@ pub async fn run_session(
 async fn handle_request(
     conn: &mut Box<dyn Connection>,
     frame: &Frame,
-    shared: &Shared,
-    subject: &rabbithole_server_core::Subject,
-    screen_name: &str,
-    agreed: &mut bool,
+    shared: &Arc<Shared>,
+    ctx: &mut SessionCtx,
 ) -> anyhow::Result<()> {
     // Session family -------------------------------------------------------
     if frame.decode::<psess::Ping>().is_some() {
@@ -224,7 +293,7 @@ async fn handle_request(
         return Ok(());
     }
     if frame.decode::<psess::AgreementAccept>().is_some() {
-        *agreed = true;
+        ctx.agreed = true;
         conn.send(Frame::ack(frame)).await?;
         return Ok(());
     }
@@ -232,6 +301,7 @@ async fn handle_request(
         || frame.decode::<psess::AuthPassword>().is_some()
         || frame.decode::<psess::AuthGuest>().is_some()
         || frame.decode::<psess::AuthResume>().is_some()
+        || frame.decode::<ppers::Register>().is_some()
     {
         // Re-hello / re-auth on a live session is a protocol violation.
         conn.send(Frame::error_reply(frame, ErrorCode::BadRequest))
@@ -241,7 +311,7 @@ async fn handle_request(
 
     // Presence family --------------------------------------------------------
     if frame.decode::<ppres::Who>().is_some() {
-        if !shared.perms.allows(subject, "", Caps::WHO) {
+        if !ctx.allows(shared, "", Caps::WHO) {
             conn.send(Frame::error_reply(frame, ErrorCode::Forbidden))
                 .await?;
             return Ok(());
@@ -272,18 +342,18 @@ async fn handle_request(
                 .await?;
             return Ok(());
         };
-        if !*agreed {
+        if !ctx.agreed {
             conn.send(Frame::error_reply(frame, ErrorCode::Forbidden))
                 .await?;
             return Ok(());
         }
         let resource = format!("chat/{}", req.room);
-        if !shared.perms.allows(subject, &resource, Caps::CHAT_SEND) {
+        if !ctx.allows(shared, &resource, Caps::CHAT_SEND) {
             conn.send(Frame::error_reply(frame, ErrorCode::Forbidden))
                 .await?;
             return Ok(());
         }
-        match shared.chat.send(&req.room, screen_name, &req.text) {
+        match shared.chat.send(&req.room, &ctx.screen_name, &req.text) {
             Ok(_) => conn.send(Frame::ack(frame)).await?,
             Err(rabbithole_server_core::chat::ChatError::NoSuchRoom(_)) => {
                 conn.send(Frame::error_reply(frame, ErrorCode::NotFound))
@@ -301,10 +371,7 @@ async fn handle_request(
         return Ok(());
     }
     if let Some(Ok(req)) = frame.decode::<pchat::ChatHistoryRequest>() {
-        if !shared
-            .perms
-            .allows(subject, &format!("chat/{}", req.room), Caps::CHAT_READ)
-        {
+        if !ctx.allows(shared, &format!("chat/{}", req.room), Caps::CHAT_READ) {
             conn.send(Frame::error_reply(frame, ErrorCode::Forbidden))
                 .await?;
             return Ok(());
@@ -323,6 +390,11 @@ async fn handle_request(
                     .await?
             }
         }
+        return Ok(());
+    }
+
+    // Wave 2 families (personas, directory, blobs, admin) -------------------
+    if crate::handlers2::handle(conn, frame, shared, ctx).await? {
         return Ok(());
     }
 
@@ -357,6 +429,13 @@ pub(crate) fn push_for_event(event: &ServerEvent, shared: &Shared) -> Option<Fra
             session_id,
             screen_name,
         } => Frame::push(&ppres::UserLeft::new(*session_id, screen_name.clone())).ok(),
+        ServerEvent::SessionChanged {
+            session_id,
+            screen_name,
+        } => Frame::push(&pdir::UserChanged::new(*session_id, screen_name.clone())).ok(),
+        ServerEvent::Notice { text, from } => {
+            Frame::push(&psess::ServerNotice::new(text.clone(), from.clone())).ok()
+        }
         _ => None,
     }
 }

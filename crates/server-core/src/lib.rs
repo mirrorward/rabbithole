@@ -12,14 +12,16 @@
 pub mod auth;
 pub mod bus;
 pub mod chat;
+pub mod classes;
 pub mod config;
 pub mod permissions;
 pub mod presence;
 pub mod pushlog;
 
-pub use auth::{AuthError, AuthService, AuthedUser};
+pub use auth::{AuthError, AuthService, AuthedUser, RegistrationMode};
 pub use bus::{EventBus, ServerEvent};
 pub use chat::{ChatService, LOBBY};
+pub use classes::ClassCache;
 pub use config::{LiveConfig, ServerConfig};
 pub use permissions::{Caps, PermissionEvaluator, Role, Subject};
 pub use presence::{PresenceEntry, PresenceRegistry};

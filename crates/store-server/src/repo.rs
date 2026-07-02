@@ -93,6 +93,46 @@ impl AccountsRepo<'_> {
             .await?
             .get("n"))
     }
+
+    pub async fn list(&self, offset: i64, limit: i64) -> Result<Vec<Account>, StoreError> {
+        Ok(
+            sqlx::query("SELECT * FROM accounts ORDER BY id LIMIT ? OFFSET ?")
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(self.0)
+                .await?
+                .iter()
+                .map(row_to_account)
+                .collect(),
+        )
+    }
+
+    /// Apply admin edits; `Some` fields are changed. Returns whether the
+    /// login existed.
+    pub async fn admin_set(
+        &self,
+        login: &str,
+        role: Option<u8>,
+        class_id: Option<Option<i64>>,
+        disabled: Option<bool>,
+    ) -> Result<bool, StoreError> {
+        let affected = sqlx::query(
+            "UPDATE accounts SET
+               role = COALESCE(?, role),
+               class_id = CASE WHEN ? THEN ? ELSE class_id END,
+               disabled = COALESCE(?, disabled)
+             WHERE login = ?",
+        )
+        .bind(role.map(|r| r as i64))
+        .bind(class_id.is_some())
+        .bind(class_id.flatten())
+        .bind(disabled.map(|d| d as i64))
+        .bind(login)
+        .execute(self.0)
+        .await?
+        .rows_affected();
+        Ok(affected > 0)
+    }
 }
 
 /// A permission class row.
@@ -137,6 +177,46 @@ impl ClassesRepo<'_> {
             .execute(self.0)
             .await?;
         Ok(())
+    }
+
+    pub async fn all(&self) -> Result<Vec<Class>, StoreError> {
+        Ok(sqlx::query("SELECT * FROM classes ORDER BY id")
+            .fetch_all(self.0)
+            .await?
+            .iter()
+            .map(|r| Class {
+                id: r.get("id"),
+                name: r.get("name"),
+                base_mask: r.get::<i64, _>("base_mask") as u64,
+            })
+            .collect())
+    }
+
+    /// Create-or-update by name; returns the class id.
+    pub async fn upsert(&self, name: &str, mask: u64) -> Result<i64, StoreError> {
+        Ok(sqlx::query(
+            "INSERT INTO classes (name, base_mask) VALUES (?, ?)
+             ON CONFLICT (name) DO UPDATE SET base_mask = excluded.base_mask
+             RETURNING id",
+        )
+        .bind(name)
+        .bind(mask as i64)
+        .fetch_one(self.0)
+        .await?
+        .get("id"))
+    }
+
+    /// Number of accounts in each class, keyed by class id.
+    pub async fn member_counts(&self) -> Result<std::collections::HashMap<i64, u64>, StoreError> {
+        Ok(sqlx::query(
+            "SELECT class_id, COUNT(*) AS n FROM accounts
+             WHERE class_id IS NOT NULL GROUP BY class_id",
+        )
+        .fetch_all(self.0)
+        .await?
+        .iter()
+        .map(|r| (r.get::<i64, _>("class_id"), r.get::<i64, _>("n") as u64))
+        .collect())
     }
 }
 

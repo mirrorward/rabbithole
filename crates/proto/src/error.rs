@@ -34,6 +34,10 @@ pub enum ErrorCode {
     SessionExpired,
     /// The server is shutting down or the surface is disabled.
     Unavailable,
+    /// Credentials were valid but a TOTP code is required (2FA enrolled).
+    TotpRequired,
+    /// The session was disconnected by an operator.
+    Kicked,
     /// Escape hatch for codes this build doesn't know.
     Other(u16),
 }

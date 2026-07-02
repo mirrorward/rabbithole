@@ -21,11 +21,15 @@
 
 #![forbid(unsafe_code)]
 
+pub mod admin;
+pub mod blob;
 pub mod chat;
 pub mod codec;
+pub mod directory;
 pub mod error;
 pub mod frame;
 pub mod hello;
+pub mod persona;
 pub mod presence;
 pub mod session;
 pub mod version;

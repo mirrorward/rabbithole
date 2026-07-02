@@ -67,6 +67,31 @@ impl PresenceRegistry {
         self.inner.read().get(&session_id).cloned()
     }
 
+    /// Rename a session's visible identity (persona switch); publishes a
+    /// change event.
+    pub fn rename(&self, session_id: u64, screen_name: &str) {
+        let mut inner = self.inner.write();
+        if let Some(entry) = inner.get_mut(&session_id) {
+            entry.screen_name = screen_name.to_string();
+            drop(inner);
+            if let Some(bus) = &self.bus {
+                bus.publish(ServerEvent::SessionChanged {
+                    session_id,
+                    screen_name: screen_name.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Is any live session currently using this persona screen name?
+    pub fn is_screen_name_online(&self, screen_name: &str) -> Option<PresenceEntry> {
+        self.inner
+            .read()
+            .values()
+            .find(|e| e.screen_name.eq_ignore_ascii_case(screen_name))
+            .cloned()
+    }
+
     /// Snapshot for who-lists, sorted by join time (regulars first).
     pub fn snapshot(&self) -> Vec<PresenceEntry> {
         let mut all: Vec<PresenceEntry> = self.inner.read().values().cloned().collect();

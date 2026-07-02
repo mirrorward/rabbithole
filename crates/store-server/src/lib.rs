@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod repo;
+pub mod repo2;
 
 use std::path::Path;
 

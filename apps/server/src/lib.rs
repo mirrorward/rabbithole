@@ -2,7 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod admin_store;
 pub mod ctl;
+pub mod handlers2;
 pub mod identity_store;
 pub mod session;
 
@@ -11,13 +13,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
+use rabbithole_blobs::BlobStore;
 use rabbithole_net::quic::QuicListener;
 use rabbithole_net::tls::CertFingerprint;
 use rabbithole_net::ws::WsListener;
 use rabbithole_net::Listener;
 use rabbithole_server_core::{
-    AuthService, ChatService, EventBus, LiveConfig, PermissionEvaluator, PresenceRegistry, PushLog,
-    ServerConfig, ServerEvent,
+    AuthService, ChatService, ClassCache, EventBus, LiveConfig, PermissionEvaluator,
+    PresenceRegistry, PushLog, RegistrationMode, ServerConfig, ServerEvent,
 };
 use rabbithole_store_server::SqlitePool;
 
@@ -31,6 +34,8 @@ pub struct Shared {
     pub presence: PresenceRegistry,
     pub chat: ChatService,
     pub pushlog: PushLog,
+    pub classes: ClassCache,
+    pub blobs: std::sync::Arc<BlobStore>,
     pub server_key: [u8; 32],
     pub fingerprint_hex: String,
     next_session: AtomicU64,
@@ -39,6 +44,13 @@ pub struct Shared {
 impl Shared {
     pub fn next_session_id(&self) -> u64 {
         self.next_session.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Parse the configured registration mode (bad values read as closed —
+    /// fail safe).
+    pub fn registration_mode(&self) -> RegistrationMode {
+        RegistrationMode::parse(&self.config.read().registration_mode)
+            .unwrap_or(RegistrationMode::Closed)
     }
 }
 
@@ -67,6 +79,11 @@ impl Burrow {
         let auth = AuthService::new(pool.clone(), config.session_ttl_secs);
         auth.seed_class_masks().await?;
 
+        let classes = ClassCache::load(&pool).await?;
+        let blobs = std::sync::Arc::new(
+            BlobStore::open(data_dir.join("blobs")).map_err(|e| anyhow::anyhow!("blobs: {e}"))?,
+        );
+
         let quic = QuicListener::bind(config.quic_addr, &identity.tls)?;
         let ws = WsListener::bind(config.ws_addr).await?;
         let quic_addr = quic.local_addr()?;
@@ -81,6 +98,8 @@ impl Burrow {
             auth,
             perms: PermissionEvaluator::new(),
             pushlog: PushLog::new(),
+            classes,
+            blobs,
             server_key: identity.signing.public().0,
             fingerprint_hex: fingerprint.to_hex(),
             next_session: AtomicU64::new(1),

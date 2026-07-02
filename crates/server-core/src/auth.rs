@@ -7,8 +7,10 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use rabbithole_identity::totp::{check_recovery_code, TotpEnrollment};
 use rabbithole_identity::{hash_password, needs_rehash, verify_password, SessionToken};
 use rabbithole_store_server::repo::{Account, AccountsRepo, ClassesRepo, SessionsRepo};
+use rabbithole_store_server::repo2::{InvitesRepo, PersonaRow, PersonasRepo, TotpRepo};
 use rabbithole_store_server::SqlitePool;
 
 use crate::permissions::{Role, Subject};
@@ -25,10 +27,43 @@ pub enum AuthError {
     SessionExpired,
     #[error("login already taken")]
     LoginTaken,
+    #[error("a TOTP code is required")]
+    TotpRequired,
+    #[error("registration is closed")]
+    RegistrationClosed,
+    #[error("invalid or expired invite code")]
+    BadInvite,
     #[error("store: {0}")]
     Store(#[from] rabbithole_store_server::StoreError),
     #[error("hash: {0}")]
     Hash(#[from] rabbithole_identity::PasswordError),
+}
+
+/// How new accounts may be created (config `registration_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationMode {
+    Open,
+    Invite,
+    Closed,
+}
+
+impl RegistrationMode {
+    pub fn parse(s: &str) -> Option<RegistrationMode> {
+        match s {
+            "open" => Some(RegistrationMode::Open),
+            "invite" => Some(RegistrationMode::Invite),
+            "closed" => Some(RegistrationMode::Closed),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RegistrationMode::Open => "open",
+            RegistrationMode::Invite => "invite",
+            RegistrationMode::Closed => "closed",
+        }
+    }
 }
 
 /// An authenticated principal, ready for permission evaluation.
@@ -36,6 +71,9 @@ pub enum AuthError {
 pub struct AuthedUser {
     pub account: Account,
     pub subject: Subject,
+    /// The persona this session starts as (accounts always have one;
+    /// guests get a synthetic, unsaved one).
+    pub persona: PersonaRow,
     /// Present for password/resume logins; `None` for guests.
     pub token: Option<SessionToken>,
 }
@@ -77,7 +115,7 @@ impl AuthService {
         Ok(())
     }
 
-    /// Create an account (admin/ctl path — registration gating is Wave 2).
+    /// Create an account with its default persona (admin/ctl/registration).
     pub async fn create_account(
         &self,
         login: &str,
@@ -85,7 +123,12 @@ impl AuthService {
         role: Role,
     ) -> Result<Account, AuthError> {
         let accounts = AccountsRepo(&self.pool);
-        if accounts.by_login(login).await?.is_some() {
+        if accounts.by_login(login).await?.is_some()
+            || PersonasRepo(&self.pool)
+                .by_screen_name(login)
+                .await?
+                .is_some()
+        {
             return Err(AuthError::LoginTaken);
         }
         let phc = hash_password(password)?;
@@ -93,16 +136,49 @@ impl AuthService {
             .by_name(role.class_name())
             .await?
             .map(|c| c.id);
-        Ok(accounts
+        let account = accounts
             .create(login, Some(&phc), login, role as u8, class)
-            .await?)
+            .await?;
+        PersonasRepo(&self.pool)
+            .create(account.id, login, true)
+            .await?;
+        Ok(account)
     }
 
-    /// Password sign-in. Issues a resumable session token.
+    /// Self-service registration, honoring the server's mode. On success
+    /// the account is created and signed in (returns like a password login).
+    pub async fn register(
+        &self,
+        mode: RegistrationMode,
+        login: &str,
+        password: &str,
+        invite_code: Option<&str>,
+    ) -> Result<AuthedUser, AuthError> {
+        match mode {
+            RegistrationMode::Closed => return Err(AuthError::RegistrationClosed),
+            RegistrationMode::Open => {}
+            RegistrationMode::Invite => {
+                let Some(code) = invite_code else {
+                    return Err(AuthError::BadInvite);
+                };
+                // Reserve the invite before creating the account; marked
+                // with the creator id afterwards (0 = pending).
+                if !InvitesRepo(&self.pool).consume(code, 0).await? {
+                    return Err(AuthError::BadInvite);
+                }
+            }
+        }
+        self.create_account(login, password, Role::User).await?;
+        self.login_password(login, password, None).await
+    }
+
+    /// Password sign-in. Issues a resumable session token. Accounts with
+    /// confirmed TOTP must supply a current code or a recovery code.
     pub async fn login_password(
         &self,
         login: &str,
         password: &str,
+        totp_code: Option<&str>,
     ) -> Result<AuthedUser, AuthError> {
         let accounts = AccountsRepo(&self.pool);
         let Some(account) = accounts.by_login(login).await? else {
@@ -120,6 +196,34 @@ impl AuthService {
         if account.disabled {
             return Err(AuthError::Disabled);
         }
+
+        // 2FA gate — only after the password checked out, so the error
+        // doesn't leak whether the password was right.
+        if let Some(totp) = TotpRepo(&self.pool).get(account.id).await? {
+            if totp.confirmed {
+                let Some(code) = totp_code else {
+                    return Err(AuthError::TotpRequired);
+                };
+                let enrollment =
+                    TotpEnrollment::from_secret(&totp.secret, "RabbitHole", &account.login)
+                        .map_err(|_| AuthError::BadCredentials)?;
+                let ok_totp = enrollment.verify(code).unwrap_or(false);
+                if !ok_totp {
+                    // Try it as a recovery code; burn it on success.
+                    match check_recovery_code(code, &totp.recovery_hashes) {
+                        Some(idx) => {
+                            let mut remaining = totp.recovery_hashes.clone();
+                            remaining.remove(idx);
+                            TotpRepo(&self.pool)
+                                .spend_recovery(account.id, &remaining)
+                                .await?;
+                        }
+                        None => return Err(AuthError::BadCredentials),
+                    }
+                }
+            }
+        }
+
         if needs_rehash(phc)? {
             accounts
                 .update_phc(account.id, &hash_password(password)?)
@@ -132,11 +236,22 @@ impl AuthService {
             .await?;
 
         let subject = self.subject_for(&account).await?;
+        let persona = self.default_persona(&account).await?;
         Ok(AuthedUser {
             account,
             subject,
+            persona,
             token: Some(token),
         })
+    }
+
+    /// The account's default persona (creating one if somehow missing).
+    async fn default_persona(&self, account: &Account) -> Result<PersonaRow, AuthError> {
+        let personas = PersonasRepo(&self.pool);
+        match personas.default_for_account(account.id).await? {
+            Some(p) => Ok(p),
+            None => Ok(personas.create(account.id, &account.login, true).await?),
+        }
     }
 
     /// Guest sign-in (caller checks the config toggle *and* passes it here
@@ -180,9 +295,25 @@ impl AuthService {
             grant_mask: 0,
             revoke_mask: 0,
         };
+        // Synthetic, unsaved persona for the guest session.
+        let persona = PersonaRow {
+            id: account.id,
+            account_id: account.id,
+            screen_name: account.screen_name.clone(),
+            is_default: true,
+            location: None,
+            interests: None,
+            quote: None,
+            plan: None,
+            pronouns: None,
+            avatar_hex: None,
+            banner_hex: None,
+            directory_visible: false,
+        };
         Ok(AuthedUser {
             account,
             subject,
+            persona,
             token: None,
         })
     }
@@ -205,9 +336,11 @@ impl AuthService {
             return Err(AuthError::Disabled);
         }
         let subject = self.subject_for(&account).await?;
+        let persona = self.default_persona(&account).await?;
         Ok(AuthedUser {
             account,
             subject,
+            persona,
             token: Some(token),
         })
     }
@@ -276,17 +409,20 @@ mod tests {
             Err(AuthError::LoginTaken)
         ));
 
-        let authed = svc.login_password("alice", "correct horse").await.unwrap();
+        let authed = svc
+            .login_password("alice", "correct horse", None)
+            .await
+            .unwrap();
         assert_eq!(authed.subject.role, Role::User);
         assert!(authed.subject.base_caps() & Role::User.default_caps().0 != 0);
 
         // Wrong password and unknown user look identical.
         assert!(matches!(
-            svc.login_password("alice", "wrong").await,
+            svc.login_password("alice", "wrong", None).await,
             Err(AuthError::BadCredentials)
         ));
         assert!(matches!(
-            svc.login_password("nobody", "wrong").await,
+            svc.login_password("nobody", "wrong", None).await,
             Err(AuthError::BadCredentials)
         ));
 

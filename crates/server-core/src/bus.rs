@@ -34,6 +34,15 @@ pub enum ServerEvent {
         from: String,
         text: String,
     },
+    /// A session's visible identity changed (persona switch, avatar…).
+    SessionChanged {
+        session_id: u64,
+        screen_name: String,
+    },
+    /// An operator notice for every session.
+    Notice { text: String, from: String },
+    /// An operator disconnected a session; the session task closes itself.
+    Kick { session_id: u64, reason: String },
     /// The server is shutting down; surfaces should drain gracefully.
     Shutdown,
 }

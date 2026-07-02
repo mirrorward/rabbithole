@@ -14,12 +14,16 @@ use serde::{Deserialize, Serialize};
 use crate::frame::{Family, Message};
 
 /// Authenticate with login + password. → [`AuthOk`] or error
-/// (`Unauthenticated`, `RateLimited`).
+/// (`Unauthenticated`, `RateLimited`; accounts with TOTP enrolled answer
+/// `TotpRequired` until a valid `totp` code — or a recovery code — is
+/// supplied).
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthPassword {
     pub login: String,
     pub password: String,
+    /// Current TOTP code or a recovery code, when 2FA is enrolled.
+    pub totp: Option<String>,
 }
 
 impl AuthPassword {
@@ -27,7 +31,13 @@ impl AuthPassword {
         Self {
             login: login.into(),
             password: password.into(),
+            totp: None,
         }
+    }
+
+    pub fn with_totp(mut self, code: impl Into<String>) -> Self {
+        self.totp = Some(code.into());
+        self
     }
 }
 
@@ -174,6 +184,28 @@ impl Welcome {
 impl Message for Welcome {
     const FAMILY: Family = Family::SESSION;
     const MESSAGE_TYPE: u16 = 40;
+}
+
+/// Push: an operator notice (admin broadcast, shutdown warning, …).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerNotice {
+    pub text: String,
+    pub from: String,
+}
+
+impl ServerNotice {
+    pub fn new(text: impl Into<String>, from: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            from: from.into(),
+        }
+    }
+}
+
+impl Message for ServerNotice {
+    const FAMILY: Family = Family::SESSION;
+    const MESSAGE_TYPE: u16 = 41;
 }
 
 #[cfg(test)]

@@ -34,6 +34,13 @@ pub struct ServerConfig {
     pub session_ttl_secs: i64,
     /// Maximum chat line length in bytes.
     pub chat_max_len: usize,
+    /// Registration policy: "open", "invite", or "closed".
+    pub registration_mode: String,
+    /// Maximum personas per account.
+    pub persona_max: u32,
+    /// Size caps for profile art blobs, in bytes.
+    pub avatar_max_bytes: usize,
+    pub banner_max_bytes: usize,
 }
 
 impl Default for ServerConfig {
@@ -48,6 +55,10 @@ impl Default for ServerConfig {
             data_dir: PathBuf::from("./burrow-data"),
             session_ttl_secs: 60 * 60 * 24 * 30, // 30 days
             chat_max_len: 4096,
+            registration_mode: "open".into(),
+            persona_max: 5,
+            avatar_max_bytes: 256 * 1024,
+            banner_max_bytes: 1024 * 1024,
         }
     }
 }
@@ -124,6 +135,10 @@ impl ServerConfig {
             "data_dir" => self.data_dir.display().to_string(),
             "session_ttl_secs" => self.session_ttl_secs.to_string(),
             "chat_max_len" => self.chat_max_len.to_string(),
+            "registration_mode" => self.registration_mode.clone(),
+            "persona_max" => self.persona_max.to_string(),
+            "avatar_max_bytes" => self.avatar_max_bytes.to_string(),
+            "banner_max_bytes" => self.banner_max_bytes.to_string(),
             other => return Err(ConfigError::UnknownKey(other.to_string())),
         })
     }
@@ -157,6 +172,37 @@ impl ServerConfig {
             }
             "chat_max_len" => {
                 self.chat_max_len = value.parse().map_err(|_| ConfigError::BadValue {
+                    key: key.into(),
+                    detail: value.into(),
+                })?;
+                Ok(true)
+            }
+            "registration_mode" => {
+                if !["open", "invite", "closed"].contains(&value) {
+                    return Err(ConfigError::BadValue {
+                        key: key.into(),
+                        detail: value.into(),
+                    });
+                }
+                self.registration_mode = value.to_string();
+                Ok(true)
+            }
+            "persona_max" => {
+                self.persona_max = value.parse().map_err(|_| ConfigError::BadValue {
+                    key: key.into(),
+                    detail: value.into(),
+                })?;
+                Ok(true)
+            }
+            "avatar_max_bytes" => {
+                self.avatar_max_bytes = value.parse().map_err(|_| ConfigError::BadValue {
+                    key: key.into(),
+                    detail: value.into(),
+                })?;
+                Ok(true)
+            }
+            "banner_max_bytes" => {
+                self.banner_max_bytes = value.parse().map_err(|_| ConfigError::BadValue {
                     key: key.into(),
                     detail: value.into(),
                 })?;
