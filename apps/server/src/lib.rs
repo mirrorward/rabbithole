@@ -22,6 +22,7 @@ pub mod legacy;
 pub mod nntp;
 pub mod radio;
 pub mod session;
+pub mod syndication;
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -168,6 +169,8 @@ impl Burrow {
         let ftn = config.ftn_enabled.then_some(config.ftn_addr);
         let federation = config.federation_enabled.then_some(config.federation_addr);
         let federation_peers = config.federation_peers.clone();
+        // Feed ingest is worth spawning only when enabled *and* mapped.
+        let syndication_on = config.syndication_enabled && !config.syndication_feeds.is_empty();
         // FTN spool dirs resolve under data_dir when relative.
         let ftn_inbound = resolve_dir(&data_dir, &config.ftn_inbound_dir);
         let ftn_outbound = resolve_dir(&data_dir, &config.ftn_outbound_dir);
@@ -290,6 +293,14 @@ impl Burrow {
             tracing::info!(ftn = %bound, "FidoNet (binkp) gateway listening");
             ftn_addr = Some(bound);
             tasks.push(handle);
+        }
+        // RSS/Atom feed ingest (Wave 10): background poller, no listener.
+        if syndication_on {
+            tasks.push(syndication::spawn_syndication(
+                shared.clone(),
+                data_dir.join("syndication"),
+            ));
+            tracing::info!("syndication feed ingest running");
         }
         let mut federation_addr = None;
         if let Some(addr) = federation {

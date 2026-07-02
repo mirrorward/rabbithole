@@ -137,6 +137,17 @@ pub struct ServerConfig {
     /// Echomail AREA tag → board slug map, driving the echomail↔board gateway
     /// in both directions.
     pub ftn_areas: std::collections::HashMap<String, String>,
+    /// Poll the configured `syndication_feeds` and post fresh items to their
+    /// mapped boards (Wave 10). Off by default.
+    pub syndication_enabled: bool,
+    /// Feed URL → board slug map, driving the RSS/Atom → board ingest.
+    /// Serialized as a TOML table and edited on disk (like `ftn_areas`), not
+    /// via `ctl config set`.
+    pub syndication_feeds: std::collections::HashMap<String, String>,
+    /// Base interval between feed polls, in seconds. Per-feed error backoff
+    /// and feed-declared TTLs stretch it; a politeness floor caps how low it
+    /// can effectively go.
+    pub syndication_poll_secs: i64,
     /// Serve the server-to-server (S2S) federation peering surface on
     /// `federation_addr` and dial `federation_peers` (Wave 9). Off by default.
     pub federation_enabled: bool,
@@ -204,6 +215,9 @@ impl Default for ServerConfig {
             ftn_inbound_dir: PathBuf::from("ftn/inbound"),
             ftn_outbound_dir: PathBuf::from("ftn/outbound"),
             ftn_areas: std::collections::HashMap::new(),
+            syndication_enabled: false,
+            syndication_feeds: std::collections::HashMap::new(),
+            syndication_poll_secs: 1800,
             federation_enabled: false,
             federation_addr: "0.0.0.0:4655".parse().expect("valid"),
             federation_peers: Vec::new(),
@@ -320,6 +334,8 @@ impl ServerConfig {
             "ftn_password" => self.ftn_password.clone(),
             "ftn_inbound_dir" => self.ftn_inbound_dir.display().to_string(),
             "ftn_outbound_dir" => self.ftn_outbound_dir.display().to_string(),
+            "syndication_enabled" => self.syndication_enabled.to_string(),
+            "syndication_poll_secs" => self.syndication_poll_secs.to_string(),
             "federation_enabled" => self.federation_enabled.to_string(),
             "federation_addr" => self.federation_addr.to_string(),
             "welcome_featured" => self.welcome_featured.clone(),
@@ -548,6 +564,17 @@ impl ServerConfig {
             }
             "ftn_outbound_dir" => {
                 self.ftn_outbound_dir = PathBuf::from(value);
+                Ok(false)
+            }
+            "syndication_enabled" => {
+                self.syndication_enabled = parse_bool(key, value)?;
+                Ok(false) // the poll task starts at boot
+            }
+            "syndication_poll_secs" => {
+                self.syndication_poll_secs = value.parse().map_err(|_| ConfigError::BadValue {
+                    key: key.into(),
+                    detail: value.into(),
+                })?;
                 Ok(false)
             }
             "federation_enabled" => {

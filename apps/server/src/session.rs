@@ -653,6 +653,30 @@ pub(crate) fn push_for_event(
         ServerEvent::Notice { text, from } => {
             Frame::push(&psess::ServerNotice::new(text.clone(), from.clone())).ok()
         }
+        // Radio now-playing rides the documented `[radio]` ServerNotice
+        // bridge until a RADIO proto family lands (the TUI's
+        // `radio::parse_notice` is the counterpart). Ephemeral status is
+        // pointless after the fact, so the offline-replay recorder
+        // (viewer_session 0 — real sessions start at 1) skips it.
+        ServerEvent::RadioNowPlaying {
+            station,
+            title,
+            artist,
+            dj,
+            listeners,
+        } => {
+            if viewer_session == 0 {
+                return None;
+            }
+            let live = shared
+                .presence
+                .radio_status(station)
+                .map(|s| s.live)
+                .unwrap_or(false);
+            let text =
+                crate::radio::radio_notice_text(station, live, *listeners, dj, artist, title);
+            Frame::push(&psess::ServerNotice::new(text, "radio".to_string())).ok()
+        }
         _ => None,
     }
 }

@@ -32,6 +32,7 @@ rabbithole-legacy-nntp.workspace = true
 rabbithole-legacy-hotline.workspace = true
 rabbithole-legacy-ftn.workspace = true
 rabbithole-legacy-binkp.workspace = true
+rabbithole-legacy-syndication.workspace = true
 rabbithole-audio.workspace = true
 rabbithole-radio.workspace = true
 rabbithole-legacy-icecast.workspace = true
@@ -47,7 +48,9 @@ tracing-subscriber.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 hex.workspace = true
+rustls.workspace = true
 rustls-pki-types.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 data-encoding.workspace = true

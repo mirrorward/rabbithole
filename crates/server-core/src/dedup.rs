@@ -25,6 +25,9 @@ pub enum SeenKey {
     MessageId(String),
     /// QWK: conference number + message number.
     Qwk { conference: u16, number: u32 },
+    /// Syndicated feed item: the stable `legacy-syndication` dedup id
+    /// (blake3 of guid/link/title+date, 64 hex chars).
+    Syndication(String),
 }
 
 struct Inner {

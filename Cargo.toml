@@ -37,7 +37,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.31.0"
+version = "0.32.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]
@@ -94,6 +94,7 @@ bytes = "1"
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1"
+webpki-roots = "1"
 rcgen = "0.13"
 tokio-tungstenite = "0.26"
 
