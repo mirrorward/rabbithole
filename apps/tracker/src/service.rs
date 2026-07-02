@@ -6,15 +6,16 @@
 //!
 //! - [`run_registration_udp`] — HTRK heartbeats in, registry updates out.
 //! - [`run_listing_tcp`] — HTRK hello in, the current server list out.
-//! - [`run_status_tcp`] — native placeholder: `LIST\n` (optionally
-//!   `LIST cat=<name>\n`) or `CATEGORIES\n` in, tab-separated lines out
-//!   (until the RHP tracker family lands).
+//! - [`run_status_tcp`] — native placeholder: `LIST`, `CATEGORIES`, the
+//!   `INDEX` directory index, and per-server `HEALTH` in; tab-separated
+//!   lines out (until the RHP tracker family lands).
 //! - [`run_gossip_udp`] — signed announces from servers plus digest/want/
 //!   batch exchanges with peer trackers (see [`crate::gossip`]).
 //!
 //! Malformed input never takes a listener down: bad datagrams are logged and
 //! dropped, bad TCP sessions are logged and closed.
 
+use std::fmt::Write as _;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,8 +25,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 use crate::gossip::{self, GossipMessage, MAX_GOSSIP_DATAGRAM};
+use crate::health;
 use crate::htrk;
-use crate::registry::{Registry, ServerEntry};
+use crate::registry::{IndexRow, Registry, ServerEntry};
 
 /// Largest registration datagram we accept: prefix + two maximal pascal
 /// strings, with headroom for trailing junk from sloppy senders.
@@ -118,6 +120,25 @@ async fn serve_listing(mut stream: TcpStream, registry: &Registry) -> Result<()>
 ///   (ASCII-case-insensitive).
 /// - `CATEGORIES` — the summary, one `name<TAB>live-count` line per
 ///   category, sorted by name.
+/// - `INDEX` (and `INDEX cat=<name>`) — the directory index, one line per
+///   live server, sorted signed-first, then observed uptime descending,
+///   then name:
+///   `name<TAB>ip:port<TAB>users<TAB>categories<TAB>uptime_24h<TAB>last_seen_secs<TAB>signed<TAB>key<TAB>gen`
+///   where `uptime_24h` is a percent (this tracker's **local observation**,
+///   never a signed claim — see [`crate::health`]), `signed` is `yes`/`no`,
+///   `key` is the first 8 bytes of the verified server key in hex (`-` when
+///   unsigned), and `gen` is the signed descriptor's generation/attestation
+///   timestamp (unix ms; the descriptor's `timestamp` doubles as both — see
+///   [`crate::descriptor`]). `key` + `gen` let a client fetch the full
+///   signed descriptor (e.g. a gossip `Want` to this tracker) and verify it
+///   offline instead of trusting the line.
+/// - `HEALTH <ip:port>` — one slot's detail plus a bucket sparkline:
+///   `ip:port<TAB>live=…<TAB>uptime_24h=…<TAB>first_seen_secs=…<TAB>last_seen_secs=…<TAB>flaps=…`
+///   then a line of `#`/`+`/`.` per 15-minute bucket, oldest first (see
+///   [`crate::health`]). Works for recently-expired servers too.
+///
+/// Unknown commands, unparseable addresses, and unknown servers each get a
+/// one-line `ERR …` reply — never a dropped connection, never a panic.
 pub async fn run_status_tcp(listener: TcpListener, registry: Arc<Registry>) -> Result<()> {
     loop {
         let (stream, from) = listener.accept().await?;
@@ -134,45 +155,124 @@ async fn serve_status(stream: TcpStream, registry: &Registry) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut line = String::new();
     BufReader::new(read).read_line(&mut line).await?;
-    let command = line.trim();
-
-    let entries = if command == "LIST" {
-        Some(registry.snapshot())
-    } else {
-        command
-            .strip_prefix("LIST cat=")
-            .map(|category| registry.snapshot_category(category.trim()))
-    };
-
-    let mut out = String::new();
-    match (entries, command) {
-        (Some(entries), _) => {
-            for entry in entries {
-                let categories = if entry.categories.is_empty() {
-                    "-".to_owned()
-                } else {
-                    entry.categories.join(",")
-                };
-                out.push_str(&format!(
-                    "{}\t{}\t{}\t{}\t{}\n",
-                    sanitize(&entry.name),
-                    entry.addr,
-                    entry.users_online,
-                    sanitize(&entry.description),
-                    sanitize(&categories),
-                ));
-            }
-        }
-        (None, "CATEGORIES") => {
-            for (category, count) in registry.category_counts() {
-                out.push_str(&format!("{}\t{}\n", sanitize(&category), count));
-            }
-        }
-        (None, _) => out.push_str("ERR unknown command\n"),
-    }
+    let out = status_response(registry, line.trim());
     write.write_all(out.as_bytes()).await?;
     write.shutdown().await?;
     Ok(())
+}
+
+/// Computes the reply to one status-port command line. Total: every input —
+/// including garbage — yields a reply, so this is directly unit-testable
+/// without sockets.
+fn status_response(registry: &Registry, command: &str) -> String {
+    if command == "LIST" {
+        list_lines(&registry.snapshot())
+    } else if let Some(category) = command.strip_prefix("LIST cat=") {
+        list_lines(&registry.snapshot_category(category.trim()))
+    } else if command == "CATEGORIES" {
+        let mut out = String::new();
+        for (category, count) in registry.category_counts() {
+            let _ = writeln!(out, "{}\t{}", sanitize(&category), count);
+        }
+        out
+    } else if command == "INDEX" {
+        index_lines(&registry.index())
+    } else if let Some(category) = command.strip_prefix("INDEX cat=") {
+        index_lines(&registry.index_category(category.trim()))
+    } else if let Some(addr) = command.strip_prefix("HEALTH ") {
+        health_lines(registry, addr.trim())
+    } else {
+        "ERR unknown command\n".to_owned()
+    }
+}
+
+/// Formats `LIST` output: one tab-separated line per entry.
+fn list_lines(entries: &[ServerEntry]) -> String {
+    let mut out = String::new();
+    for entry in entries {
+        let _ = writeln!(
+            out,
+            "{}\t{}\t{}\t{}\t{}",
+            sanitize(&entry.name),
+            entry.addr,
+            entry.users_online,
+            sanitize(&entry.description),
+            sanitize(&categories_str(entry)),
+        );
+    }
+    out
+}
+
+/// Formats `INDEX` output: one tab-separated line per row (see the
+/// [`run_status_tcp`] protocol docs for the columns).
+fn index_lines(rows: &[IndexRow]) -> String {
+    let mut out = String::new();
+    for row in rows {
+        let entry = &row.entry;
+        let (signed, key, generation) = match &entry.signed {
+            Some(sd) => (
+                "yes",
+                key_prefix(&sd.descriptor.server_key),
+                sd.descriptor.timestamp.to_string(),
+            ),
+            None => ("no", "-".to_owned(), "-".to_owned()),
+        };
+        let _ = writeln!(
+            out,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            sanitize(&entry.name),
+            entry.addr,
+            entry.users_online,
+            sanitize(&categories_str(entry)),
+            health::format_permille(row.uptime_permille),
+            row.last_seen_secs,
+            signed,
+            key,
+            generation,
+        );
+    }
+    out
+}
+
+/// Formats `HEALTH <ip:port>` output: a detail line plus the sparkline, or
+/// a one-line `ERR …` for bad addresses / unknown servers (total, like
+/// every parser here).
+fn health_lines(registry: &Registry, arg: &str) -> String {
+    let Ok(addr) = arg.parse::<SocketAddr>() else {
+        return "ERR bad address\n".to_owned();
+    };
+    match registry.health_report(addr) {
+        Some(report) => format!(
+            "{}\tlive={}\tuptime_24h={}\tfirst_seen_secs={}\tlast_seen_secs={}\tflaps={}\n{}\n",
+            report.addr,
+            if report.live { "yes" } else { "no" },
+            health::format_permille(report.uptime_permille),
+            report.first_seen_secs,
+            report.last_seen_secs,
+            report.flap_count,
+            report.sparkline,
+        ),
+        None => "ERR unknown server\n".to_owned(),
+    }
+}
+
+/// Comma-joined category tags, `-` when the entry has none.
+fn categories_str(entry: &ServerEntry) -> String {
+    if entry.categories.is_empty() {
+        "-".to_owned()
+    } else {
+        entry.categories.join(",")
+    }
+}
+
+/// The first 8 bytes of a server key as lowercase hex — enough for a client
+/// to match the index line against the descriptor it fetches.
+fn key_prefix(key: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(16);
+    for byte in &key[..8] {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// Keeps registrant-supplied text from breaking the line/tab framing.
@@ -277,5 +377,104 @@ async fn handle_gossip(socket: &UdpSocket, registry: &Registry, buf: &[u8], from
 async fn send_best_effort(socket: &UdpSocket, message: &GossipMessage, to: SocketAddr) {
     if let Err(err) = socket.send_to(&message.encode(), to).await {
         tracing::debug!(%to, %err, "gossip send failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::descriptor::Descriptor;
+    use crate::registry::DEFAULT_TTL;
+    use rabbithole_identity::IdentityKey;
+    use std::time::Instant;
+
+    /// A registry with one signed and one unsigned entry, both observed at
+    /// `now` (injected time — no sleeps anywhere).
+    fn seeded_registry(now: Instant) -> (Registry, [u8; 32]) {
+        let registry = Registry::new(DEFAULT_TTL);
+        let key = IdentityKey::from_seed(&[7u8; 32]);
+        let signed = Descriptor::new("Wonderland", ([10, 0, 0, 1], 5500).into())
+            .with_description("Down the rabbit hole")
+            .with_category("chat")
+            .with_users(12)
+            .with_timestamp(1_700_000_000_000)
+            .sign(&key)
+            .unwrap();
+        registry.register_descriptor_at(signed, None, now).unwrap();
+        registry.register_unsigned_at(
+            ServerEntry::unsigned("Plain", "no key", ([10, 0, 0, 2], 5510).into(), 3),
+            now,
+        );
+        (registry, key.public().0)
+    }
+
+    #[test]
+    fn index_lines_carry_uptime_signature_and_generation() {
+        let now = Instant::now();
+        let (registry, key) = seeded_registry(now);
+        let out = index_lines(&registry.index_at(now));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // Signed sorts first; every line has exactly nine columns.
+        let expected_prefix = key_prefix(&key);
+        assert_eq!(
+            lines[0],
+            format!(
+                "Wonderland\t10.0.0.1:5500\t12\tchat\t100.0\t0\tyes\t{expected_prefix}\t1700000000000"
+            )
+        );
+        assert_eq!(lines[1], "Plain\t10.0.0.2:5510\t3\t-\t100.0\t0\tno\t-\t-");
+        for line in lines {
+            assert_eq!(line.split('\t').count(), 9);
+        }
+    }
+
+    #[test]
+    fn status_response_answers_index_health_and_garbage_totally() {
+        let now = Instant::now();
+        let (registry, _) = seeded_registry(now);
+
+        // INDEX cat= filters (unsigned entries carry no tags).
+        let chat = status_response(&registry, "INDEX cat=CHAT");
+        assert_eq!(chat.lines().count(), 1);
+        assert!(chat.starts_with("Wonderland\t"));
+        assert_eq!(status_response(&registry, "INDEX cat=nope"), "");
+
+        // HEALTH detail: one header line + one sparkline line.
+        let health = status_response(&registry, "HEALTH 10.0.0.1:5500");
+        let lines: Vec<&str> = health.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("10.0.0.1:5500\tlive=yes\tuptime_24h=100.0\t"));
+        assert!(lines[0].ends_with("flaps=0"));
+        assert_eq!(lines[1], "#");
+
+        // Malformed input is answered, never dropped or panicked over.
+        assert_eq!(
+            status_response(&registry, "HEALTH not-an-address"),
+            "ERR bad address\n"
+        );
+        assert_eq!(status_response(&registry, "HEALTH "), "ERR bad address\n");
+        assert_eq!(
+            status_response(&registry, "HEALTH 10.0.0.9:1"),
+            "ERR unknown server\n"
+        );
+        assert_eq!(
+            status_response(&registry, "HEALTH"),
+            "ERR unknown command\n"
+        );
+        assert_eq!(status_response(&registry, ""), "ERR unknown command\n");
+        assert_eq!(
+            status_response(&registry, "FROLIC"),
+            "ERR unknown command\n"
+        );
+    }
+
+    #[test]
+    fn key_prefix_is_eight_bytes_of_lowercase_hex() {
+        let mut key = [0u8; 32];
+        key[0] = 0xAB;
+        key[7] = 0x01;
+        key[8] = 0xFF; // beyond the prefix — never rendered
+        assert_eq!(key_prefix(&key), "ab00000000000001");
     }
 }

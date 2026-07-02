@@ -15,7 +15,12 @@
 //! register with an Ed25519-**signed descriptor** ([`descriptor`]) carrying
 //! category tags, and trackers with static peer lists exchange those signed
 //! entries via **gossip** ([`gossip`]) so an announce to one tracker
-//! propagates to all of them.
+//! propagates to all of them. The tracker also keeps per-server **health
+//! observations** ([`health`]) — 24 h uptime, flap counts, sparklines —
+//! served by the status port's `INDEX` and `HEALTH` verbs. Those numbers are
+//! *verifiable, not authoritative*: local bookkeeping presented alongside
+//! the signed-descriptor data a client needs to verify entries itself,
+//! never gossiped and never imported from peers.
 //!
 //! ## Listeners
 //!
@@ -35,6 +40,8 @@
 //!   context-prefixed Ed25519, like federation catalogs).
 //! - [`gossip`] — sans-IO anti-entropy model (digest/diff/batch) + the UDP
 //!   gossip codec.
+//! - [`health`] — per-server uptime/flap observation rings (local-only,
+//!   injected-clock; feeds the `INDEX`/`HEALTH` verbs).
 //! - [`service`] — the async listeners that glue sockets to the registry.
 //!
 //! Every decoder is total: malformed or truncated input yields `Err`, never a
@@ -44,10 +51,12 @@
 
 pub mod descriptor;
 pub mod gossip;
+pub mod health;
 pub mod htrk;
 pub mod registry;
 pub mod service;
 
 pub use descriptor::{Descriptor, DescriptorError, SignedDescriptor, DESCRIPTOR_CONTEXT};
 pub use gossip::{GossipBatch, GossipDigest, GossipMessage, Want};
-pub use registry::{RegisterError, Registry, ServerEntry, DEFAULT_TTL};
+pub use health::{HealthLog, HealthReport};
+pub use registry::{IndexRow, RegisterError, Registry, ServerEntry, DEFAULT_TTL};
