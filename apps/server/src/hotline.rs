@@ -36,26 +36,53 @@
 //! (DownloadFile) whose bulk bytes ride the classic **HTXF** data channel
 //! (control port + 1) as a flattened file object (INFO + DATA forks).
 //!
+//! The account-admin slice adds the classic **admin transactions**:
+//!
+//! - **NewUser/DeleteUser/GetUser/SetUser (350-353)** — Hotline account
+//!   records (obfuscated login/password, name, 64-bit access bitmap) mapped
+//!   onto the shared [`AuthService`](rabbithole_server_core::AuthService)
+//!   accounts and RBAC classes. The access bitmap is a *projection* of
+//!   RabbitHole roles/capabilities — see [`access_mask_for`] and
+//!   [`role_for_access`] for the exact (documented, lossy) mapping.
+//!   DeleteUser is a **soft delete**: the account is disabled (it can no
+//!   longer log in and reads as absent on this surface) rather than having
+//!   its row destroyed; hard removal is a follow-up.
+//! - **DisconnectUser (110)** — kick via the same
+//!   [`ServerEvent::Kick`] bus path the native admin Kick uses (same
+//!   capability + role-ordering checks); the optional ban rides an
+//!   **in-memory temporary ban list** (see [`Hub`]; persisting bans across
+//!   restarts is a documented follow-up). The kicked client receives a
+//!   DisconnectMsg (111) before its connection closes.
+//! - **UserBroadcast (355)** — admin broadcast published as
+//!   [`ServerEvent::Notice`], the same shared path native broadcasts use, so
+//!   native/telnet clients see it too; Hotline clients receive it as a
+//!   ServerMsg (104).
+//!
+//! All admin operations are audit-logged with the same conventions as the
+//! native admin family.
+//!
 //! Still deferred (tolerated with an empty success reply so probing clients
 //! keep working): HTXF **upload** and fork-offset **resume**, folder
-//! downloads, private chat rooms, and admin/account transactions.
+//! downloads, and private chat rooms.
 //! The listener is opt-in via config (`hotline_enabled`) and off by default.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use parking_lot::Mutex;
 use rabbithole_blobs::BlobId;
+use rabbithole_identity::hash_password;
 use rabbithole_legacy_hotline::constants::{field, transaction};
 use rabbithole_legacy_hotline::{read_int, Field, Handshake, HandshakeReply, Reassembler};
-use rabbithole_legacy_hotline::{Transaction, TransactionHeader};
+use rabbithole_legacy_hotline::{AccessMask, Privilege, Transaction, TransactionHeader};
 use rabbithole_server_core::chat::LOBBY;
 use rabbithole_server_core::files::{KIND_ALIAS, KIND_FILE, KIND_FOLDER};
-use rabbithole_server_core::{Caps, PresenceEntry, Role, ServerEvent, Subject};
+use rabbithole_server_core::{AuthError, Caps, PresenceEntry, Role, ServerEvent, Subject};
+use rabbithole_store_server::repo::{Account, AccountsRepo, AuditRepo};
 use rabbithole_store_server::repo4::{BoardRow, PostRow};
 use rabbithole_store_server::repo6::FileNodeRow;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -86,6 +113,11 @@ const OPTIONS_IM: u32 = 1;
 /// connection (belt-and-suspenders; reassembly enforces the real body cap).
 const MAX_FRAME_BODY: usize = 16 * 1024 * 1024;
 
+/// How long a DisconnectUser ban lasts (the classic "temporary ban"). The ban
+/// list is in-memory only — it does not survive a server restart. Persisting
+/// bans (and exposing an unban admin op) is a documented follow-up.
+const TEMP_BAN: Duration = Duration::from_secs(30 * 60);
+
 /// The per-server Hotline hub: the set of currently-connected Hotline clients,
 /// keyed by their wire user id, used to route private instant messages and to
 /// answer icon lookups for the user list. A field of [`Shared`] alongside
@@ -100,6 +132,10 @@ pub struct Hub {
     transfers: Mutex<HashMap<u32, Vec<u8>>>,
     /// Monotonic reference-number source for staged transfers.
     next_ref: AtomicU32,
+    /// Temporary ban list: namespaced key (`"login:<name>"` / `"ip:<addr>"`)
+    /// to the instant the ban expires. In-memory only (see [`TEMP_BAN`]);
+    /// expired entries are pruned lazily on lookup.
+    bans: Mutex<HashMap<String, Instant>>,
 }
 
 /// A connected Hotline client's routing handle.
@@ -108,6 +144,8 @@ struct ClientHandle {
     tx: mpsc::UnboundedSender<Vec<u8>>,
     /// The client's current icon id (for the user list).
     icon: u16,
+    /// The client's remote IP (for the DisconnectUser ban option).
+    ip: Option<IpAddr>,
 }
 
 impl Hub {
@@ -131,8 +169,8 @@ impl Hub {
         self.transfers.lock().remove(&refnum)
     }
 
-    fn register(&self, id: u32, tx: mpsc::UnboundedSender<Vec<u8>>, icon: u16) {
-        self.inner.lock().insert(id, ClientHandle { tx, icon });
+    fn register(&self, id: u32, tx: mpsc::UnboundedSender<Vec<u8>>, icon: u16, ip: Option<IpAddr>) {
+        self.inner.lock().insert(id, ClientHandle { tx, icon, ip });
     }
 
     fn set_icon(&self, id: u32, icon: u16) {
@@ -159,6 +197,30 @@ impl Hub {
     fn deliver(&self, id: u32, bytes: Vec<u8>) -> bool {
         match self.inner.lock().get(&id) {
             Some(h) => h.tx.send(bytes).is_ok(),
+            None => false,
+        }
+    }
+
+    /// The remote IP of a connected Hotline client, if known.
+    fn ip_of(&self, id: u32) -> Option<IpAddr> {
+        self.inner.lock().get(&id).and_then(|h| h.ip)
+    }
+
+    /// Add a temporary ban entry (see [`TEMP_BAN`]). Keys are namespaced:
+    /// `"login:<lowercase login>"` or `"ip:<addr>"`.
+    fn ban(&self, key: String) {
+        self.bans.lock().insert(key, Instant::now() + TEMP_BAN);
+    }
+
+    /// Whether `key` is currently banned; expired entries are pruned.
+    fn is_banned(&self, key: &str) -> bool {
+        let mut bans = self.bans.lock();
+        match bans.get(key) {
+            Some(&until) if until > Instant::now() => true,
+            Some(_) => {
+                bans.remove(key);
+                false
+            }
             None => false,
         }
     }
@@ -254,6 +316,8 @@ struct Active {
     user_id: u32,
     /// Permission subject captured at login.
     subject: Subject,
+    /// Account login (audit-log actor for admin operations).
+    login: String,
     /// Current display name (updatable via SetClientUserInfo).
     screen_name: String,
     /// Current icon id.
@@ -265,6 +329,7 @@ struct Active {
 /// The accept handler for one Hotline client.
 async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
     sock.set_nodelay(true).ok();
+    let peer_ip = sock.peer_addr().ok().map(|a| a.ip());
     let (rd, mut wr) = sock.into_split();
     let mut rd = BufReader::new(rd);
 
@@ -323,15 +388,42 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
                 .encode(),
             )
             .await?;
+            wr.shutdown().await.ok();
             return Ok(());
         }
     };
+
+    // Temporary ban gate (DisconnectUser's ban option): refuse banned
+    // accounts and banned client addresses.
+    let login_banned = shared
+        .hotline
+        .is_banned(&format!("login:{}", authed.account.login.to_lowercase()));
+    let ip_banned = peer_ip
+        .map(|ip| shared.hotline.is_banned(&format!("ip:{ip}")))
+        .unwrap_or(false);
+    if login_banned || ip_banned {
+        wr.write_all(
+            &Transaction::reply(
+                transaction::LOGIN,
+                login_txn.header.id,
+                1,
+                vec![Field::text(field::ERROR_TEXT, "you are banned")],
+            )
+            .encode(),
+        )
+        .await?;
+        wr.shutdown().await.ok();
+        return Ok(());
+    }
 
     let screen_name = want_name.unwrap_or_else(|| authed.persona.screen_name.clone());
     let session_id = shared.next_session_id();
     let user_id = session_id as u32;
 
-    // 4. Login reply: success carries a server version + name.
+    // 4. Login reply: success carries a server version + name, plus the
+    //    session's access bitmap (projected from role + capabilities) so real
+    //    clients enable/grey their admin menus correctly.
+    let access = access_mask_for(authed.subject.role, authed.subject.base_caps());
     let server_name = shared.config.read().name;
     wr.write_all(
         &Transaction::reply(
@@ -341,6 +433,7 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
             vec![
                 Field::int(field::VERSION, SERVER_VERSION),
                 Field::text(field::SERVER_NAME, &server_name),
+                Field::new(field::USER_ACCESS, access.to_bytes().to_vec()),
             ],
         )
         .encode(),
@@ -366,7 +459,7 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
     //    no roster delta falls into a gap.
     let mut bus_rx = shared.bus.subscribe();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    shared.hotline.register(user_id, out_tx, icon);
+    shared.hotline.register(user_id, out_tx, icon, peer_ip);
     shared.presence.join(PresenceEntry {
         session_id,
         account_id: authed.account.id,
@@ -384,6 +477,7 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
         session_id,
         user_id,
         subject: authed.subject,
+        login: authed.account.login.clone(),
         screen_name,
         icon,
         agreed,
@@ -400,6 +494,19 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
                 ev = bus_rx.recv() => {
                     match ev {
                         Ok(ServerEvent::Shutdown) => break,
+                        // An operator kicked this session (native admin Kick
+                        // or Hotline DisconnectUser both land here): deliver
+                        // the classic DisconnectMsg, then close.
+                        Ok(ServerEvent::Kick { session_id: target, reason }) if target == active.session_id => {
+                            let bytes = Transaction::request(
+                                transaction::DISCONNECT_MSG,
+                                0,
+                                vec![Field::text(field::DATA, &reason)],
+                            )
+                            .encode();
+                            let _ = wr.write_all(&bytes).await;
+                            break;
+                        }
                         Ok(event) => {
                             if let Some(bytes) = project_event(&shared, &event) {
                                 wr.write_all(&bytes).await?;
@@ -423,10 +530,13 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
     }
     .await;
 
-    // 7. Leave the shared world (publishes the roster delete).
+    // 7. Leave the shared world (publishes the roster delete), then shut the
+    //    write half down gracefully (FIN) so buffered bytes — e.g. a final
+    //    DisconnectMsg — drain instead of being discarded by an RST.
     shared.hotline.unregister(user_id);
     shared.chat.session_closed(session_id);
     shared.presence.leave(session_id);
+    wr.shutdown().await.ok();
     tracing::info!(user_id, "hotline client disconnected");
     result
 }
@@ -614,8 +724,34 @@ async fn handle_txn(
                 .await?;
         }
 
-        // Deferred transaction families (uploads/folder-download/private-chat/
-        // admin): reply with a bare success so a probing client keeps working.
+        // ---- Account admin + kick/ban + broadcast -------------------------
+        transaction::NEW_USER => {
+            wr.write_all(&new_user(shared, active, txn).await.encode())
+                .await?;
+        }
+        transaction::DELETE_USER => {
+            wr.write_all(&delete_user(shared, active, txn).await.encode())
+                .await?;
+        }
+        transaction::GET_USER => {
+            wr.write_all(&get_user(shared, active, txn).await.encode())
+                .await?;
+        }
+        transaction::SET_USER => {
+            wr.write_all(&set_user(shared, active, txn).await.encode())
+                .await?;
+        }
+        transaction::DISCONNECT_USER => {
+            wr.write_all(&disconnect_user(shared, active, txn).await.encode())
+                .await?;
+        }
+        transaction::USER_BROADCAST => {
+            wr.write_all(&user_broadcast(shared, active, txn).encode())
+                .await?;
+        }
+
+        // Deferred transaction families (uploads/folder-download/private-chat):
+        // reply with a bare success so a probing client keeps working.
         _ => {
             wr.write_all(&empty_reply(txn.header.type_, txn.header.id))
                 .await?;
@@ -1422,6 +1558,481 @@ async fn download_file(shared: &Arc<Shared>, active: &Active, txn: &Transaction)
     )
 }
 
+// ========================================================================
+// Account admin (350-355) + kick/ban (110), mapped onto the shared
+// account service and RBAC classes
+// ========================================================================
+//
+// ## The role <-> AccessMask projection
+//
+// Hotline accounts carry a 64-bit privilege bitmap; RabbitHole accounts carry
+// a role + class + per-account capability masks. The two are bridged by a
+// documented projection (see [`access_mask_for`] / [`role_for_access`]):
+//
+// - **GetUser** projects the account's effective base capabilities (role
+//   default | class mask | grants, minus revokes) into the classic bitmap:
+//   admin capability -> create/delete/open/modify-users bits, kick -> the
+//   disconnect bit, board caps -> the news bits, file caps -> the file bits,
+//   and so on. Every account additionally gets *show in list*; real (non-
+//   guest) accounts get *change own password* and *use any name*.
+// - **NewUser/SetUser** map an incoming bitmap back to the **nearest role**
+//   (and its same-named class): any user-admin bit -> admin; any moderation
+//   bit (disconnect / news-delete / close-chat) -> moderator; any member bit
+//   (post news / upload / download / private messages / open chat) -> member;
+//   otherwise guest.
+//
+// **Documented lossy cases**: individual bit grants beyond a role's default
+// set are dropped (they are not translated into per-account grant/revoke
+// masks — a follow-up); the superuser role projects as a full bitmap but can
+// never be *assigned* from a bitmap (SetUser never up- or downgrades a
+// superuser); DeleteUser is a soft delete (the login stays reserved).
+
+/// Fire-and-forget audit record, same conventions as the native admin family.
+fn audit(shared: &Arc<Shared>, actor: &str, action: &str, detail: String) {
+    let pool = shared.pool.clone();
+    let actor = actor.to_string();
+    let action = action.to_string();
+    tokio::spawn(async move {
+        let _ = AuditRepo(&pool).record(&actor, &action, &detail).await;
+    });
+}
+
+/// Project a role + effective capability mask into the classic Hotline
+/// 64-bit access bitmap. See the section docs above for the mapping table.
+fn access_mask_for(role: Role, caps: u64) -> AccessMask {
+    let has = |c: Caps| caps & c.0 == c.0;
+    let mut m = AccessMask::NONE;
+    // Everyone appears in the online user list.
+    m.grant(Privilege::ShowInList);
+    if has(Caps::WHO) {
+        m.grant(Privilege::GetClientInfo);
+    }
+    if has(Caps::CHAT_READ) {
+        m.grant(Privilege::ReadChat);
+    }
+    if has(Caps::CHAT_SEND) {
+        m.grant(Privilege::SendChat);
+    }
+    if has(Caps::CHAT_CREATE_ROOM) {
+        m.grant(Privilege::OpenChat);
+    }
+    if has(Caps::CHAT_MODERATE) {
+        m.grant(Privilege::CloseChat);
+    }
+    if has(Caps::DM_SEND) {
+        m.grant(Privilege::SendPrivateMessages);
+    }
+    if has(Caps::BOARD_READ) {
+        m.grant(Privilege::NewsReadArticle);
+    }
+    if has(Caps::BOARD_POST) {
+        m.grant(Privilege::NewsPostArticle);
+    }
+    if has(Caps::BOARD_MODERATE) {
+        for p in [
+            Privilege::NewsDeleteArticle,
+            Privilege::NewsCreateCategory,
+            Privilege::NewsDeleteCategory,
+            Privilege::NewsCreateFolder,
+            Privilege::NewsDeleteFolder,
+        ] {
+            m.grant(p);
+        }
+    }
+    if has(Caps::FILE_DOWNLOAD) {
+        m.grant(Privilege::DownloadFiles);
+    }
+    if has(Caps::FILE_UPLOAD) {
+        m.grant(Privilege::UploadFiles);
+    }
+    if has(Caps::FILE_MANAGE) {
+        for p in [
+            Privilege::DeleteFiles,
+            Privilege::RenameFiles,
+            Privilege::MoveFiles,
+            Privilege::CreateFolders,
+            Privilege::DeleteFolders,
+            Privilege::RenameFolders,
+            Privilege::MoveFolders,
+            Privilege::UploadAnywhere,
+            Privilege::SetFileComment,
+            Privilege::SetFolderComment,
+            Privilege::MakeAliases,
+        ] {
+            m.grant(p);
+        }
+    }
+    if has(Caps::DROPBOX_VIEW) {
+        m.grant(Privilege::ViewDropBoxes);
+    }
+    if has(Caps::USER_KICK) {
+        m.grant(Privilege::DisconnectUsers);
+    }
+    if has(Caps::CANNOT_BE_KICKED) {
+        m.grant(Privilege::CannotBeDisconnected);
+    }
+    if has(Caps::ACCOUNT_ADMIN) {
+        for p in [
+            Privilege::CreateUsers,
+            Privilege::DeleteUsers,
+            Privilege::OpenUsers,
+            Privilege::ModifyUsers,
+        ] {
+            m.grant(p);
+        }
+    }
+    if has(Caps::BROADCAST) {
+        m.grant(Privilege::Broadcast);
+    }
+    // Real accounts (not guests) manage their own password and pick names.
+    if role >= Role::User {
+        m.grant(Privilege::ChangeOwnPassword);
+        m.grant(Privilege::AnyName);
+    }
+    m
+}
+
+/// Map an incoming Hotline access bitmap to the nearest RabbitHole role.
+///
+/// Lossy by design (see the section docs): bits between role tiers are
+/// rounded to the tier they signal, and superuser is never reachable.
+fn role_for_access(mask: &AccessMask) -> Role {
+    if mask.has(Privilege::CreateUsers)
+        || mask.has(Privilege::DeleteUsers)
+        || mask.has(Privilege::ModifyUsers)
+    {
+        Role::Admin
+    } else if mask.has(Privilege::DisconnectUsers)
+        || mask.has(Privilege::NewsDeleteArticle)
+        || mask.has(Privilege::CloseChat)
+    {
+        Role::Moderator
+    } else if mask.has(Privilege::NewsPostArticle)
+        || mask.has(Privilege::UploadFiles)
+        || mask.has(Privilege::DownloadFiles)
+        || mask.has(Privilege::SendPrivateMessages)
+        || mask.has(Privilege::OpenChat)
+    {
+        Role::User
+    } else {
+        Role::Guest
+    }
+}
+
+/// The effective base capabilities of a stored account row (role default |
+/// class mask | grants, minus revokes) — the same layering a live session's
+/// `Subject` uses, sourced from the live class cache.
+fn account_base_caps(shared: &Shared, account: &Account) -> u64 {
+    Subject {
+        account_id: account.id,
+        role: Role::from_ordinal(account.role),
+        class_id: account.class_id,
+        class_mask: shared.classes.mask(account.class_id),
+        grant_mask: account.grant_mask,
+        revoke_mask: account.revoke_mask,
+    }
+    .base_caps()
+}
+
+/// Does the caller hold `needed` on the `admin` resource? (Identical to the
+/// checks the native admin family performs.)
+fn admin_allowed(shared: &Shared, active: &Active, needed: Caps) -> bool {
+    shared.perms.allows(&active.subject, "admin", needed)
+}
+
+/// Look up a *visible* account by login. Soft-deleted (disabled) accounts
+/// read as absent on this surface.
+async fn visible_account(shared: &Shared, login: &str) -> Result<Option<Account>, anyhow::Error> {
+    Ok(AccountsRepo(&shared.pool)
+        .by_login(login)
+        .await?
+        .filter(|a| !a.disabled))
+}
+
+/// NewUser (350): create an account. The access bitmap picks the nearest
+/// role (and its same-named class); a missing bitmap defaults to member.
+async fn new_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
+    let ty = transaction::NEW_USER;
+    let id = txn.header.id;
+    if !admin_allowed(shared, active, Caps::ACCOUNT_ADMIN) {
+        return err_reply(ty, id, "not permitted");
+    }
+    let login = field_text_deobf(txn, field::USER_LOGIN).trim().to_string();
+    if login.is_empty() {
+        return err_reply(ty, id, "no login given");
+    }
+    let password = field_text_deobf(txn, field::USER_PASSWORD);
+    let role = field_bytes(txn, field::USER_ACCESS)
+        .and_then(|b| AccessMask::decode(b).ok())
+        .map(|m| role_for_access(&m))
+        .unwrap_or(Role::User);
+    match shared.auth.create_account(&login, &password, role).await {
+        Ok(_) => {
+            audit(
+                shared,
+                &active.login,
+                "account-create",
+                format!("{login} role={role:?} via=hotline"),
+            );
+            Transaction::reply(ty, id, 0, Vec::new())
+        }
+        Err(AuthError::LoginTaken) => err_reply(ty, id, "login already exists"),
+        Err(e) => err_reply(ty, id, &format!("create failed: {e}")),
+    }
+}
+
+/// DeleteUser (351): soft-delete an account — it is disabled (login refused,
+/// absent from this surface) and its live sessions are kicked. The row (and
+/// the login) is retained; hard removal is a documented follow-up.
+async fn delete_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
+    let ty = transaction::DELETE_USER;
+    let id = txn.header.id;
+    if !admin_allowed(shared, active, Caps::ACCOUNT_ADMIN) {
+        return err_reply(ty, id, "not permitted");
+    }
+    let login = field_text_deobf(txn, field::USER_LOGIN).trim().to_string();
+    let account = match visible_account(shared, &login).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return err_reply(ty, id, "no such account"),
+        Err(e) => return err_reply(ty, id, &format!("{e}")),
+    };
+    // Never let a Hotline admin soft-delete a superuser (or themselves out
+    // from under their own session by role trickery): role ordering applies,
+    // same as the kick path.
+    if Role::from_ordinal(account.role) >= active.subject.role
+        && active.subject.role != Role::Superuser
+    {
+        return err_reply(ty, id, "cannot delete that account");
+    }
+    match AccountsRepo(&shared.pool)
+        .admin_set(&login, None, None, Some(true))
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return err_reply(ty, id, "no such account"),
+        Err(e) => return err_reply(ty, id, &format!("{e}")),
+    }
+    // Classic servers drop the deleted account's live sessions.
+    for e in shared.presence.snapshot() {
+        if e.account_id == account.id {
+            shared.bus.publish(ServerEvent::Kick {
+                session_id: e.session_id,
+                reason: "account deleted".into(),
+            });
+        }
+    }
+    audit(
+        shared,
+        &active.login,
+        "account-delete",
+        format!("{login} via=hotline (soft delete: disabled)"),
+    );
+    Transaction::reply(ty, id, 0, Vec::new())
+}
+
+/// GetUser (352): an account's name, login, password placeholder, and the
+/// projected access bitmap.
+///
+/// The password is **never** disclosed (only an Argon2id hash is stored):
+/// the reply carries an empty USER_PASSWORD placeholder, and SetUser treats
+/// an empty password as "unchanged".
+async fn get_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
+    let ty = transaction::GET_USER;
+    let id = txn.header.id;
+    if !admin_allowed(shared, active, Caps::ACCOUNT_ADMIN) {
+        return err_reply(ty, id, "not permitted");
+    }
+    let login = field_text_deobf(txn, field::USER_LOGIN).trim().to_string();
+    let account = match visible_account(shared, &login).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return err_reply(ty, id, "no such account"),
+        Err(e) => return err_reply(ty, id, &format!("{e}")),
+    };
+    let mask = access_mask_for(
+        Role::from_ordinal(account.role),
+        account_base_caps(shared, &account),
+    );
+    audit(
+        shared,
+        &active.login,
+        "account-get",
+        format!("{login} via=hotline"),
+    );
+    Transaction::reply(
+        ty,
+        id,
+        0,
+        vec![
+            Field::text(field::USER_NAME, &account.screen_name),
+            Field::credential(field::USER_LOGIN, &account.login),
+            Field::new(field::USER_PASSWORD, Vec::new()),
+            Field::new(field::USER_ACCESS, mask.to_bytes().to_vec()),
+        ],
+    )
+}
+
+/// SetUser (353): update an account. A non-empty password re-hashes it; the
+/// access bitmap re-maps role + class **only when the projected role
+/// changes** (so a round-tripped GetUser bitmap is a no-op), and never
+/// touches a superuser's role. Login rename and screen-name edits are not
+/// supported on this surface (documented lossy cases).
+async fn set_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
+    let ty = transaction::SET_USER;
+    let id = txn.header.id;
+    if !admin_allowed(shared, active, Caps::ACCOUNT_ADMIN) {
+        return err_reply(ty, id, "not permitted");
+    }
+    let login = field_text_deobf(txn, field::USER_LOGIN).trim().to_string();
+    let account = match visible_account(shared, &login).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return err_reply(ty, id, "no such account"),
+        Err(e) => return err_reply(ty, id, &format!("{e}")),
+    };
+
+    let mut detail = Vec::new();
+
+    // Password: empty means unchanged (GetUser sends an empty placeholder).
+    let password = field_text_deobf(txn, field::USER_PASSWORD);
+    if !password.is_empty() {
+        let Ok(phc) = hash_password(&password) else {
+            return err_reply(ty, id, "password rejected");
+        };
+        if let Err(e) = AccountsRepo(&shared.pool)
+            .update_phc(account.id, &phc)
+            .await
+        {
+            return err_reply(ty, id, &format!("{e}"));
+        }
+        detail.push("password".to_string());
+    }
+
+    // Access bitmap -> nearest role + same-named class, when it changes.
+    if let Some(mask) =
+        field_bytes(txn, field::USER_ACCESS).and_then(|b| AccessMask::decode(b).ok())
+    {
+        let current = Role::from_ordinal(account.role);
+        let wanted = role_for_access(&mask);
+        if wanted != current && current != Role::Superuser {
+            let class = shared.classes.id_by_name(wanted.class_name());
+            match AccountsRepo(&shared.pool)
+                .admin_set(&login, Some(wanted as u8), Some(class), None)
+                .await
+            {
+                Ok(true) => detail.push(format!("role={wanted:?}")),
+                Ok(false) => return err_reply(ty, id, "no such account"),
+                Err(e) => return err_reply(ty, id, &format!("{e}")),
+            }
+            // Push the new bitmap (UserAccess, 354) to the account's live
+            // Hotline sessions so their menus update immediately.
+            if let Ok(Some(updated)) = AccountsRepo(&shared.pool).by_login(&login).await {
+                let mask = access_mask_for(wanted, account_base_caps(shared, &updated));
+                let push = Transaction::request(
+                    transaction::USER_ACCESS,
+                    0,
+                    vec![Field::new(field::USER_ACCESS, mask.to_bytes().to_vec())],
+                )
+                .encode();
+                for e in shared.presence.snapshot() {
+                    if e.account_id == account.id {
+                        shared.hotline.deliver(e.session_id as u32, push.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    audit(
+        shared,
+        &active.login,
+        "account-set",
+        format!("{login} [{}] via=hotline", detail.join(", ")),
+    );
+    Transaction::reply(ty, id, 0, Vec::new())
+}
+
+/// DisconnectUser (110): kick (and optionally temp-ban) an online user, via
+/// the same [`ServerEvent::Kick`] path and the same capability + role-order
+/// checks as the native admin Kick. The ban option (a non-zero OPTIONS
+/// field) additionally requires the ban capability and records the target's
+/// login — and, for Hotline clients, their remote IP — in the in-memory
+/// temporary ban list.
+async fn disconnect_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
+    let ty = transaction::DISCONNECT_USER;
+    let id = txn.header.id;
+    if !admin_allowed(shared, active, Caps::USER_KICK) {
+        return err_reply(ty, id, "not permitted");
+    }
+    let target = field_int(txn, field::USER_ID).unwrap_or(0);
+    let Some(entry) = shared
+        .presence
+        .snapshot()
+        .into_iter()
+        .find(|e| e.session_id as u32 == target)
+    else {
+        return err_reply(ty, id, "no such user");
+    };
+    // Respect CANNOT_BE_KICKED and role ordering (no kicking upwards) —
+    // identical to the native Kick handler.
+    if entry.role >= active.subject.role && active.subject.role != Role::Superuser {
+        return err_reply(ty, id, "cannot disconnect that user");
+    }
+    let ban = field_int(txn, field::OPTIONS).unwrap_or(0) != 0;
+    if ban {
+        if !admin_allowed(shared, active, Caps::USER_BAN) {
+            return err_reply(ty, id, "not permitted to ban");
+        }
+        // Ban the account login (real accounts) and the client IP (known for
+        // Hotline sessions; native sessions ban by login only).
+        if entry.account_id > 0 {
+            if let Ok(Some(account)) = AccountsRepo(&shared.pool).by_id(entry.account_id).await {
+                shared
+                    .hotline
+                    .ban(format!("login:{}", account.login.to_lowercase()));
+            }
+        }
+        if let Some(ip) = shared.hotline.ip_of(target) {
+            shared.hotline.ban(format!("ip:{ip}"));
+        }
+    }
+    let reason = if ban { "banned" } else { "kicked" };
+    shared.bus.publish(ServerEvent::Kick {
+        session_id: entry.session_id,
+        reason: reason.into(),
+    });
+    audit(
+        shared,
+        &active.login,
+        "kick",
+        format!(
+            "session {} via=hotline{}",
+            entry.session_id,
+            if ban { " (banned)" } else { "" }
+        ),
+    );
+    Transaction::reply(ty, id, 0, Vec::new())
+}
+
+/// UserBroadcast (355): admin message to every connected user, published as
+/// [`ServerEvent::Notice`] — the same shared path the native Broadcast admin
+/// op uses — so native, telnet, and Hotline clients all see it.
+fn user_broadcast(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
+    let ty = transaction::USER_BROADCAST;
+    let id = txn.header.id;
+    if !admin_allowed(shared, active, Caps::BROADCAST) {
+        return err_reply(ty, id, "not permitted");
+    }
+    let text = field_text(txn, field::DATA).unwrap_or_default();
+    if text.trim().is_empty() {
+        return err_reply(ty, id, "empty broadcast");
+    }
+    shared.bus.publish(ServerEvent::Notice {
+        text: text.clone(),
+        from: active.screen_name.clone(),
+    });
+    audit(shared, &active.login, "broadcast", text);
+    Transaction::reply(ty, id, 0, Vec::new())
+}
+
 /// Project a server event into a Hotline push for this client, if relevant.
 ///
 /// A client seeing its own roster/chat delta is harmless in the classic
@@ -1476,6 +2087,17 @@ fn project_event(shared: &Shared, event: &ServerEvent) -> Option<Vec<u8>> {
         ServerEvent::SessionClosed { session_id, .. } => {
             Some(notify_delete_user(*session_id as u32))
         }
+        // Admin broadcast (native Broadcast or Hotline UserBroadcast): the
+        // classic server-message push without a USER_ID field, which clients
+        // render as a server broadcast rather than a private message.
+        ServerEvent::Notice { text, .. } => Some(
+            Transaction::request(
+                transaction::SERVER_MSG,
+                0,
+                vec![Field::new(field::DATA, text.clone().into_bytes())],
+            )
+            .encode(),
+        ),
         _ => None,
     }
 }
@@ -1562,5 +2184,107 @@ fn field_text_deobf(txn: &Transaction, id: u16) -> String {
             String::from_utf8_lossy(&inv).into_owned()
         }
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The projected mask for a role's *default* capabilities.
+    fn mask_for(role: Role) -> AccessMask {
+        access_mask_for(role, role.default_caps().0)
+    }
+
+    #[test]
+    fn role_projection_roundtrips_for_assignable_roles() {
+        // Guest/User/Moderator/Admin project to a bitmap that maps back to
+        // the same role — the invariant GetUser -> SetUser depends on.
+        for role in [Role::Guest, Role::User, Role::Moderator, Role::Admin] {
+            assert_eq!(role_for_access(&mask_for(role)), role, "{role:?}");
+        }
+        // Superuser is the documented lossy case: its bitmap is admin-shaped,
+        // and no bitmap can assign superuser.
+        assert_eq!(role_for_access(&mask_for(Role::Superuser)), Role::Admin);
+    }
+
+    #[test]
+    fn admin_mask_has_user_admin_kick_and_broadcast_bits() {
+        let m = mask_for(Role::Admin);
+        for p in [
+            Privilege::CreateUsers,
+            Privilege::DeleteUsers,
+            Privilege::OpenUsers,
+            Privilege::ModifyUsers,
+            Privilege::DisconnectUsers,
+            Privilege::Broadcast,
+            Privilege::DeleteFiles,
+            Privilege::ViewDropBoxes,
+        ] {
+            assert!(m.has(p), "admin should hold {p:?}");
+        }
+    }
+
+    #[test]
+    fn member_mask_has_participation_bits_but_no_admin_bits() {
+        let m = mask_for(Role::User);
+        for p in [
+            Privilege::ReadChat,
+            Privilege::SendChat,
+            Privilege::OpenChat,
+            Privilege::NewsReadArticle,
+            Privilege::NewsPostArticle,
+            Privilege::DownloadFiles,
+            Privilege::UploadFiles,
+            Privilege::SendPrivateMessages,
+            Privilege::ChangeOwnPassword,
+            Privilege::AnyName,
+            Privilege::ShowInList,
+        ] {
+            assert!(m.has(p), "member should hold {p:?}");
+        }
+        for p in [
+            Privilege::CreateUsers,
+            Privilege::DeleteUsers,
+            Privilege::ModifyUsers,
+            Privilege::DisconnectUsers,
+            Privilege::Broadcast,
+            Privilege::DeleteFiles,
+        ] {
+            assert!(!m.has(p), "member should not hold {p:?}");
+        }
+    }
+
+    #[test]
+    fn guest_mask_is_read_mostly_and_maps_back_to_guest() {
+        let m = mask_for(Role::Guest);
+        assert!(m.has(Privilege::ReadChat));
+        assert!(m.has(Privilege::SendChat)); // the Hotline tradition
+        assert!(m.has(Privilege::NewsReadArticle));
+        assert!(m.has(Privilege::ShowInList));
+        assert!(!m.has(Privilege::DownloadFiles));
+        assert!(!m.has(Privilege::NewsPostArticle));
+        assert!(!m.has(Privilege::ChangeOwnPassword));
+        assert_eq!(role_for_access(&m), Role::Guest);
+    }
+
+    #[test]
+    fn moderator_bits_round_to_moderator() {
+        // Any single moderation signal rounds up to moderator...
+        let mut m = mask_for(Role::User);
+        m.grant(Privilege::DisconnectUsers);
+        assert_eq!(role_for_access(&m), Role::Moderator);
+        // ...but a user-admin bit outranks it.
+        m.grant(Privilege::CreateUsers);
+        assert_eq!(role_for_access(&m), Role::Admin);
+    }
+
+    #[test]
+    fn kick_and_cannot_be_kicked_bits_project() {
+        let moderator = mask_for(Role::Moderator);
+        assert!(moderator.has(Privilege::DisconnectUsers));
+        // CANNOT_BE_KICKED is not in any default role mask; a grant projects.
+        let caps = Role::User.default_caps().0 | Caps::CANNOT_BE_KICKED.0;
+        assert!(access_mask_for(Role::User, caps).has(Privilege::CannotBeDisconnected));
     }
 }
