@@ -15,7 +15,9 @@
 //!
 //! [`IcyMetaInterleaver`] weaves these blocks into an arbitrary byte stream at
 //! exact boundaries, so callers can feed audio in chunks of any size and get a
-//! correctly-metaint'd stream back.
+//! correctly-metaint'd stream back. The payload text itself round-trips
+//! through [`encode_stream_title`] / [`parse_stream_title`], and the
+//! receive-side inverse of the interleaver is [`crate::MetaintReader`].
 //!
 //! ```
 //! use rabbithole_legacy_icecast::{IcyMetaInterleaver, DEFAULT_METAINT};
@@ -27,6 +29,8 @@
 //! assert_eq!(out[16], 2);                // "StreamTitle='Song A';" (21 B) -> 2 units
 //! assert_eq!(DEFAULT_METAINT, 8192);
 //! ```
+
+use crate::IcyError;
 
 /// The default `icy-metaint` spacing used by SHOUTcast/Icecast: a metadata
 /// block after every 8192 bytes of audio.
@@ -44,10 +48,31 @@ const MAX_PAYLOAD: usize = MAX_UNITS * 16;
 /// bytes, prefixed with a length byte equal to the number of 16-byte units.
 /// The returned vector is therefore always `1 + length_byte * 16` bytes long.
 ///
-/// Overlong titles are truncated (at a UTF-8 char boundary) so the payload
-/// never exceeds the 255-unit ceiling the length byte can encode.
+/// Shorthand for [`encode_stream_title`] with no `StreamUrl`.
 pub fn format_metadata(title: &str) -> Vec<u8> {
-    let mut payload = format!("StreamTitle='{title}';").into_bytes();
+    encode_stream_title(title, None)
+}
+
+/// Builds one ICY metadata block carrying `StreamTitle='<title>';` and, when
+/// `url` is given, a trailing `StreamUrl='<url>';` attribute:
+///
+/// ```text
+/// +-----+----------------------------------------------+---------+
+/// | len | StreamTitle='<title>';StreamUrl='<url>';     | \0 pad  |
+/// +-----+----------------------------------------------+---------+
+///   1 B                len * 16 bytes total
+/// ```
+///
+/// Overlong payloads are truncated (at a UTF-8 char boundary) so they never
+/// exceed the 255-unit ceiling the length byte can encode. The inverse is
+/// [`parse_stream_title`].
+pub fn encode_stream_title(title: &str, url: Option<&str>) -> Vec<u8> {
+    let mut text = format!("StreamTitle='{title}';");
+    if let Some(url) = url {
+        use std::fmt::Write as _;
+        let _ = write!(text, "StreamUrl='{url}';");
+    }
+    let mut payload = text.into_bytes();
     if payload.len() > MAX_PAYLOAD {
         truncate_to_char_boundary(&mut payload, MAX_PAYLOAD);
     }
@@ -57,6 +82,89 @@ pub fn format_metadata(title: &str) -> Vec<u8> {
     block.extend_from_slice(&payload);
     block.resize(1 + units * 16, 0);
     block
+}
+
+/// A decoded in-band metadata update: the contents of a
+/// `StreamTitle='…';StreamUrl='…';` payload.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StreamTitle {
+    /// The track title (`StreamTitle`). May be empty — an explicit
+    /// `StreamTitle='';` clears the display, which is distinct from the
+    /// single-`0x00` "no change" block.
+    pub title: String,
+    /// The track/station URL (`StreamUrl`), when present and non-empty.
+    pub url: Option<String>,
+}
+
+/// Parses a metadata block *payload* — the bytes after the length byte — into
+/// a [`StreamTitle`]. The inverse of [`encode_stream_title`].
+///
+/// Deliberately tolerant, because encoders in the wild are sloppy:
+///
+/// - trailing NUL padding is ignored and non-UTF-8 bytes are decoded lossily;
+/// - attribute names match case-insensitively (`STREAMTITLE`, `StreamURL`);
+/// - raw apostrophes inside a value survive (`StreamTitle='It's Oh So
+///   Quiet';` — a value ends at the first `';` that is followed by
+///   end-of-payload or another `Key='` attribute, falling back to the last
+///   `';` present);
+/// - backslash-escaped quotes (`\'`) are skipped as terminators and unescaped
+///   in the returned value;
+/// - a missing `';` terminator is tolerated (the rest of the payload is the
+///   value), which covers blocks truncated at the 255-unit ceiling.
+///
+/// Errors with [`IcyError::MalformedMetadata`] when no `StreamTitle='`
+/// attribute is present at all; never panics.
+pub fn parse_stream_title(payload: &[u8]) -> Result<StreamTitle, IcyError> {
+    let end = payload.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let text = String::from_utf8_lossy(&payload[..end]);
+    let title = extract_attr(&text, "streamtitle").ok_or(IcyError::MalformedMetadata)?;
+    let url = extract_attr(&text, "streamurl").filter(|u| !u.is_empty());
+    Ok(StreamTitle { title, url })
+}
+
+/// Extracts the value of `<key>='<value>';` from `text`. `key` must be given
+/// lowercase; the match is case-insensitive. See [`parse_stream_title`] for
+/// the terminator-selection rules.
+fn extract_attr(text: &str, key: &str) -> Option<String> {
+    debug_assert_eq!(key, key.to_ascii_lowercase());
+    // `to_ascii_lowercase` only rewrites ASCII bytes in place, so byte offsets
+    // in `lower` are valid offsets into `text`.
+    let lower = text.to_ascii_lowercase();
+    let needle = format!("{key}='");
+    let start = lower.find(&needle)? + needle.len();
+    let body = &text[start..];
+    let bytes = body.as_bytes();
+
+    // All `';` occurrences not escaped as `\';` are candidate terminators.
+    let candidates: Vec<usize> = (0..bytes.len().saturating_sub(1))
+        .filter(|&i| bytes[i] == b'\'' && bytes[i + 1] == b';' && (i == 0 || bytes[i - 1] != b'\\'))
+        .collect();
+
+    // Prefer the candidate followed by end-of-payload or another attribute;
+    // fall back to the last candidate, then to the whole (unterminated) rest.
+    let end = candidates
+        .iter()
+        .copied()
+        .find(|&i| {
+            let tail = body[i + 2..].trim_start();
+            tail.is_empty() || looks_like_attr_start(tail)
+        })
+        .or_else(|| candidates.last().copied());
+    let value = match end {
+        Some(i) => &body[..i],
+        None => body,
+    };
+    Some(value.replace("\\'", "'"))
+}
+
+/// Whether `s` starts with something shaped like `Key='` (the beginning of
+/// another metadata attribute).
+fn looks_like_attr_start(s: &str) -> bool {
+    let name_len = s
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        .count();
+    name_len > 0 && s[name_len..].starts_with("='")
 }
 
 /// Truncates `buf` to at most `max` bytes, backing up to the previous UTF-8
@@ -314,5 +422,123 @@ mod tests {
     fn empty_push_is_noop() {
         let mut w = IcyMetaInterleaver::new(16);
         assert!(w.push(&[]).is_empty());
+    }
+
+    #[test]
+    fn format_metadata_is_encode_without_url() {
+        assert_eq!(
+            format_metadata("Song A"),
+            encode_stream_title("Song A", None)
+        );
+    }
+
+    #[test]
+    fn encode_stream_title_includes_url_attribute() {
+        let block = encode_stream_title("Song", Some("http://radio.example/"));
+        let units = block[0] as usize;
+        assert_eq!(block.len(), 1 + units * 16);
+        let text = std::str::from_utf8(&block[1..])
+            .unwrap()
+            .trim_end_matches('\0');
+        assert_eq!(
+            text,
+            "StreamTitle='Song';StreamUrl='http://radio.example/';"
+        );
+    }
+
+    #[test]
+    fn encode_stream_title_truncates_overlong_payload() {
+        let block = encode_stream_title(&"あ".repeat(2_000), Some("http://x.example/"));
+        assert_eq!(block[0], 255);
+        assert_eq!(block.len(), 1 + 255 * 16);
+    }
+
+    #[test]
+    fn parse_stream_title_basic_and_padded() {
+        let got = parse_stream_title(b"StreamTitle='Daft Punk - Da Funk';").unwrap();
+        assert_eq!(got.title, "Daft Punk - Da Funk");
+        assert_eq!(got.url, None);
+
+        let padded = b"StreamTitle='Padded';\0\0\0\0\0\0\0\0\0\0\0";
+        assert_eq!(parse_stream_title(padded).unwrap().title, "Padded");
+    }
+
+    #[test]
+    fn parse_stream_title_with_url() {
+        let got =
+            parse_stream_title(b"StreamTitle='Song';StreamUrl='http://radio.example/';").unwrap();
+        assert_eq!(got.title, "Song");
+        assert_eq!(got.url.as_deref(), Some("http://radio.example/"));
+    }
+
+    #[test]
+    fn parse_stream_title_empty_title_and_empty_url() {
+        let got = parse_stream_title(b"StreamTitle='';StreamUrl='';").unwrap();
+        assert_eq!(got.title, "");
+        assert_eq!(got.url, None); // empty StreamUrl normalises to None
+    }
+
+    #[test]
+    fn parse_stream_title_tolerates_raw_apostrophes() {
+        let got =
+            parse_stream_title(b"StreamTitle='It's Oh So Quiet';StreamUrl='http://x/';").unwrap();
+        assert_eq!(got.title, "It's Oh So Quiet");
+        assert_eq!(got.url.as_deref(), Some("http://x/"));
+
+        // Even a literal `';` inside the value survives when a later
+        // terminator is better placed.
+        let got = parse_stream_title(b"StreamTitle='A';B';").unwrap();
+        assert_eq!(got.title, "A';B");
+    }
+
+    #[test]
+    fn parse_stream_title_unescapes_backslashed_quotes() {
+        let got = parse_stream_title(br"StreamTitle='Don\'t Stop Me Now';").unwrap();
+        assert_eq!(got.title, "Don't Stop Me Now");
+    }
+
+    #[test]
+    fn parse_stream_title_is_case_insensitive() {
+        let got = parse_stream_title(b"STREAMTITLE='Loud';StreamURL='http://x/';").unwrap();
+        assert_eq!(got.title, "Loud");
+        assert_eq!(got.url.as_deref(), Some("http://x/"));
+    }
+
+    #[test]
+    fn parse_stream_title_tolerates_missing_terminator() {
+        let got = parse_stream_title(b"StreamTitle='Cut Off Mid Sen").unwrap();
+        assert_eq!(got.title, "Cut Off Mid Sen");
+    }
+
+    #[test]
+    fn parse_stream_title_rejects_payload_without_title() {
+        for bad in [
+            &b""[..],
+            b"\0\0\0\0",
+            b"total garbage!!!",
+            b"StreamUrl='http://only-a-url/';",
+            b"\xff\xfe\xfd",
+        ] {
+            assert_eq!(
+                parse_stream_title(bad).unwrap_err(),
+                crate::IcyError::MalformedMetadata,
+                "payload={bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_title_round_trips_through_encode() {
+        for (title, url) in [
+            ("Daft Punk - Da Funk", None),
+            ("", None),
+            ("It's Oh So Quiet", Some("http://radio.example/now")),
+            ("あいうえお", Some("http://例え.example/")),
+        ] {
+            let block = encode_stream_title(title, url);
+            let got = parse_stream_title(&block[1..]).unwrap(); // strip length byte
+            assert_eq!(got.title, title, "title={title:?}");
+            assert_eq!(got.url.as_deref(), url, "title={title:?}");
+        }
     }
 }

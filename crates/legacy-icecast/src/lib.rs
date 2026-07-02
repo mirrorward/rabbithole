@@ -7,13 +7,19 @@
 //! deliberately does not depend on) the audio crate — a host wires the two
 //! together in a later slice.
 //!
-//! Three surfaces, in signal order:
+//! Five surfaces, in signal order:
 //!
 //! - **Source (DJ push)** — [`parse_source_request`] decodes a classic
 //!   SHOUTcast `SOURCE` or an Icecast 2 `PUT`, including `Authorization: Basic`
 //!   and the `ice-*`/`icy-*` station headers, into a [`SourceRequest`].
 //!   [`source_ok`], [`source_unauthorized`], and [`source_forbidden`] build the
 //!   server's replies.
+//! - **Mid-stream updates (admin)** — [`parse_metadata_update`] decodes the
+//!   `GET /admin/metadata?mode=updinfo&song=…` title-change request (and the
+//!   SHOUTcast v1 `admin.cgi` spelling) into a [`MetadataUpdate`], with query
+//!   [`percent_decode`]-ing and both `pass=` and Basic-auth credential forms;
+//!   [`metadata_update_ok`], [`metadata_update_failed`], and
+//!   [`metadata_update_unauthorized`] build the replies.
 //! - **Listener (player pull)** — [`parse_listener_request`] reads the client
 //!   `GET` (and its `Icy-MetaData: 1` opt-in); [`build_listener_response`]
 //!   renders the `ICY 200 OK` head with the station's `icy-*` headers and the
@@ -21,15 +27,20 @@
 //! - **Metadata interleaving** — [`IcyMetaInterleaver`] and [`format_metadata`]
 //!   splice `StreamTitle='…';` blocks into the audio byte stream at exact
 //!   `icy-metaint` boundaries, emitting the single `0x00` byte when nothing
-//!   changed.
+//!   changed. [`encode_stream_title`] / [`parse_stream_title`] are the pure
+//!   payload codec underneath.
+//! - **Metadata de-interleaving (player side)** — [`MetaintReader`] and
+//!   [`parse_metaint_stream`] run the inverse: strip the in-band blocks back
+//!   out of a received stream, yielding clean audio plus decoded
+//!   [`StreamTitle`] updates.
 //!
 //! Every parser is total: malformed input yields an [`IcyError`], never a
 //! panic.
 //!
 //! ```
 //! use rabbithole_legacy_icecast::{
-//!     build_listener_response, parse_listener_request, IcyMetaInterleaver, StationMeta,
-//!     DEFAULT_METAINT,
+//!     build_listener_response, parse_listener_request, IcyMetaInterleaver, MetaintReader,
+//!     StationMeta, DEFAULT_METAINT,
 //! };
 //!
 //! let req = parse_listener_request(b"GET /live HTTP/1.0\r\nIcy-MetaData: 1\r\n\r\n").unwrap();
@@ -42,20 +53,36 @@
 //!
 //! let mut weaver = IcyMetaInterleaver::new(DEFAULT_METAINT);
 //! weaver.set_title("Artist - Track");
-//! let _wire = weaver.push(&[0u8; DEFAULT_METAINT]); // audio + one metadata block
+//! let wire = weaver.push(&[0u8; DEFAULT_METAINT]); // audio + one metadata block
+//!
+//! // …and the player side recovers both from the wire bytes.
+//! let mut reader = MetaintReader::new(DEFAULT_METAINT);
+//! let chunk = reader.push(&wire);
+//! assert_eq!(chunk.audio, vec![0u8; DEFAULT_METAINT]);
+//! assert_eq!(chunk.updates[0].title, "Artist - Track");
 //! ```
 
 #![forbid(unsafe_code)]
 
+mod admin;
 mod http;
 mod listener;
 mod meta;
 mod metaint;
+mod metaread;
 mod source;
 
+pub use admin::{
+    metadata_update_failed, metadata_update_ok, metadata_update_unauthorized,
+    parse_metadata_update, percent_decode, MetadataUpdate,
+};
 pub use listener::{build_listener_response, parse_listener_request, ListenerRequest};
 pub use meta::StationMeta;
-pub use metaint::{format_metadata, IcyMetaInterleaver, DEFAULT_METAINT};
+pub use metaint::{
+    encode_stream_title, format_metadata, parse_stream_title, IcyMetaInterleaver, StreamTitle,
+    DEFAULT_METAINT,
+};
+pub use metaread::{parse_metaint_stream, DeinterleavedChunk, MetaintReader};
 pub use source::{
     parse_basic_auth, parse_source_request, source_forbidden, source_ok, source_unauthorized,
     SourceMethod, SourceRequest,
@@ -77,6 +104,19 @@ pub enum IcyError {
     /// The request method is not one this surface handles.
     #[error("unsupported method: {0}")]
     UnsupportedMethod(String),
+    /// The request target is not a recognised admin metadata endpoint
+    /// (`/admin/metadata` or `/admin.cgi`).
+    #[error("unsupported target: {0}")]
+    UnsupportedTarget(String),
+    /// The admin request's `mode` parameter is missing or not `updinfo`.
+    #[error("unsupported admin mode: {0}")]
+    UnsupportedMode(String),
+    /// A required query parameter (e.g. `song`) was absent.
+    #[error("missing required parameter: {0}")]
+    MissingParameter(String),
+    /// An in-band metadata payload carried no `StreamTitle='…'` attribute.
+    #[error("malformed metadata block")]
+    MalformedMetadata,
 }
 
 #[cfg(test)]
@@ -108,8 +148,11 @@ mod fuzzish_tests {
             // None of these may panic regardless of input.
             let _ = parse_source_request(&buf);
             let _ = parse_listener_request(&buf);
+            let _ = parse_metadata_update(&buf);
+            let _ = parse_stream_title(&buf);
             let text = String::from_utf8_lossy(&buf);
             let _ = parse_basic_auth(&text);
+            let _ = percent_decode(&text);
         }
     }
 
@@ -128,10 +171,16 @@ mod fuzzish_tests {
             b"SOURCE \xff\xfe\xfd /m\r\n\r\n",
             b":::::\r\n:::::\r\n",
             b"GET /\0\0\0 HTTP/1.0\r\nIcy-MetaData: 1\r\n",
+            b"GET /admin/metadata HTTP/1.0\r\n\r\n",
+            b"GET /admin/metadata? HTTP/1.0\r\n\r\n",
+            b"GET /admin.cgi?mode=updinfo&song HTTP/1.0\r\n\r\n",
+            b"GET /admin/metadata?mode=updinfo&song=%%%%&pass=%2 HTTP/1.0\r\n\r\n",
+            b"GET /admin/metadata?&&&==&=x&mode=updinfo&song=a HTTP/1.0\r\n\r\n",
         ];
         for case in cases {
             let _ = parse_source_request(case);
             let _ = parse_listener_request(case);
+            let _ = parse_metadata_update(case);
         }
     }
 
@@ -148,6 +197,20 @@ mod fuzzish_tests {
                 let n = (rng.next_u64() % 200) as usize;
                 let chunk: Vec<u8> = (0..n).map(|_| rng.byte()).collect();
                 let _ = w.push(&chunk);
+            }
+        }
+    }
+
+    #[test]
+    fn metaint_reader_never_panics_on_random_bytes() {
+        let mut rng = Rng(0xFEED_FACE);
+        for _ in 0..500 {
+            let metaint = (rng.next_u64() % 64) as usize; // includes 0 -> clamps to 1
+            let mut r = MetaintReader::new(metaint);
+            for _ in 0..5 {
+                let n = (rng.next_u64() % 200) as usize;
+                let chunk: Vec<u8> = (0..n).map(|_| rng.byte()).collect();
+                let _ = r.push(&chunk);
             }
         }
     }
