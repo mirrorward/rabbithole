@@ -75,6 +75,29 @@ pub struct ServerConfig {
     pub hotline_enabled: bool,
     /// Hotline listener address (default 0.0.0.0:5500 — the classic Hotline port).
     pub hotline_addr: SocketAddr,
+    /// Serve the FidoNet (FTN) binkp mailer gateway on `ftn_addr`.
+    pub ftn_enabled: bool,
+    /// binkp listener address (default 0.0.0.0:24554 — the IANA binkp port).
+    pub ftn_addr: SocketAddr,
+    /// This system's FTN node address (e.g. "2:280/464"). Empty disables
+    /// tossing/scanning even when the listener is up.
+    pub ftn_node: String,
+    /// Uplink/boss FTN node address for outbound mail (e.g. "2:280/1").
+    pub ftn_uplink: String,
+    /// Uplink binkp host:port to dial for outbound polls
+    /// (e.g. "hub.example.org:24554").
+    pub ftn_uplink_host: String,
+    /// binkp session password shared with the uplink ("" or "-" = unsecured).
+    pub ftn_password: String,
+    /// Inbound spool directory for received PKT/bundle files. Relative paths
+    /// resolve under `data_dir`.
+    pub ftn_inbound_dir: PathBuf,
+    /// Outbound Binkley-Style Outbound (BSO) directory for staged PKT files.
+    /// Relative paths resolve under `data_dir`.
+    pub ftn_outbound_dir: PathBuf,
+    /// Echomail AREA tag → board slug map, driving the echomail↔board gateway
+    /// in both directions.
+    pub ftn_areas: std::collections::HashMap<String, String>,
     /// Welcome-screen featured block (title on first line, body after).
     pub welcome_featured: String,
     /// Welcome-screen one-line ticker.
@@ -119,6 +142,15 @@ impl Default for ServerConfig {
             radio_addr: "0.0.0.0:8000".parse().expect("valid"),
             hotline_enabled: false,
             hotline_addr: "0.0.0.0:5500".parse().expect("valid"),
+            ftn_enabled: false,
+            ftn_addr: "0.0.0.0:24554".parse().expect("valid"),
+            ftn_node: String::new(),
+            ftn_uplink: String::new(),
+            ftn_uplink_host: String::new(),
+            ftn_password: String::new(),
+            ftn_inbound_dir: PathBuf::from("ftn/inbound"),
+            ftn_outbound_dir: PathBuf::from("ftn/outbound"),
+            ftn_areas: std::collections::HashMap::new(),
             welcome_featured: String::new(),
             welcome_ticker: String::new(),
             theme_accent: String::new(),
@@ -220,6 +252,14 @@ impl ServerConfig {
             "radio_addr" => self.radio_addr.to_string(),
             "hotline_enabled" => self.hotline_enabled.to_string(),
             "hotline_addr" => self.hotline_addr.to_string(),
+            "ftn_enabled" => self.ftn_enabled.to_string(),
+            "ftn_addr" => self.ftn_addr.to_string(),
+            "ftn_node" => self.ftn_node.clone(),
+            "ftn_uplink" => self.ftn_uplink.clone(),
+            "ftn_uplink_host" => self.ftn_uplink_host.clone(),
+            "ftn_password" => self.ftn_password.clone(),
+            "ftn_inbound_dir" => self.ftn_inbound_dir.display().to_string(),
+            "ftn_outbound_dir" => self.ftn_outbound_dir.display().to_string(),
             "welcome_featured" => self.welcome_featured.clone(),
             "welcome_ticker" => self.welcome_ticker.clone(),
             "theme_accent" => self.theme_accent.clone(),
@@ -398,6 +438,38 @@ impl ServerConfig {
             }
             "hotline_addr" => {
                 self.hotline_addr = parse_addr(key, value)?;
+                Ok(false)
+            }
+            "ftn_enabled" => {
+                self.ftn_enabled = parse_bool(key, value)?;
+                Ok(false)
+            }
+            "ftn_addr" => {
+                self.ftn_addr = parse_addr(key, value)?;
+                Ok(false)
+            }
+            "ftn_node" => {
+                self.ftn_node = value.to_string();
+                Ok(false)
+            }
+            "ftn_uplink" => {
+                self.ftn_uplink = value.to_string();
+                Ok(false)
+            }
+            "ftn_uplink_host" => {
+                self.ftn_uplink_host = value.to_string();
+                Ok(false)
+            }
+            "ftn_password" => {
+                self.ftn_password = value.to_string();
+                Ok(false)
+            }
+            "ftn_inbound_dir" => {
+                self.ftn_inbound_dir = PathBuf::from(value);
+                Ok(false)
+            }
+            "ftn_outbound_dir" => {
+                self.ftn_outbound_dir = PathBuf::from(value);
                 Ok(false)
             }
             "quic_addr" => {

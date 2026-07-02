@@ -4,6 +4,7 @@
 
 pub mod admin_store;
 pub mod ctl;
+pub mod ftn;
 pub mod handlers10;
 pub mod handlers2;
 pub mod handlers3;
@@ -108,6 +109,8 @@ pub struct Burrow {
     pub radio_addr: Option<SocketAddr>,
     /// Bound Hotline address when `hotline_enabled` (else `None`).
     pub hotline_addr: Option<SocketAddr>,
+    /// Bound FTN binkp address when `ftn_enabled` (else `None`).
+    pub ftn_addr: Option<SocketAddr>,
     pub fingerprint: CertFingerprint,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -147,6 +150,10 @@ impl Burrow {
         let nntp = config.nntp_enabled.then_some(config.nntp_addr);
         let radio = config.radio_enabled.then_some(config.radio_addr);
         let hotline = config.hotline_enabled.then_some(config.hotline_addr);
+        let ftn = config.ftn_enabled.then_some(config.ftn_addr);
+        // FTN spool dirs resolve under data_dir when relative.
+        let ftn_inbound = resolve_dir(&data_dir, &config.ftn_inbound_dir);
+        let ftn_outbound = resolve_dir(&data_dir, &config.ftn_outbound_dir);
 
         let shared = Arc::new(Shared {
             chat: ChatService::new(bus.clone(), config.chat_max_len),
@@ -231,6 +238,14 @@ impl Burrow {
             hotline_addr = Some(bound);
             tasks.push(handle);
         }
+        let mut ftn_addr = None;
+        if let Some(addr) = ftn {
+            let (bound, handle) =
+                ftn::spawn_ftn(shared.clone(), addr, ftn_inbound, ftn_outbound).await?;
+            tracing::info!(ftn = %bound, "FidoNet (binkp) gateway listening");
+            ftn_addr = Some(bound);
+            tasks.push(handle);
+        }
 
         Ok(Burrow {
             shared,
@@ -241,6 +256,7 @@ impl Burrow {
             nntp_addr,
             radio_addr,
             hotline_addr,
+            ftn_addr,
             fingerprint,
             tasks,
         })
@@ -329,6 +345,15 @@ async fn replay_recorder(shared: Arc<Shared>) {
             }
             Err(RecvError::Closed) => break,
         }
+    }
+}
+
+/// Resolve a possibly-relative path under `base` (absolute paths pass through).
+fn resolve_dir(base: &std::path::Path, p: &std::path::Path) -> std::path::PathBuf {
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base.join(p)
     }
 }
 
