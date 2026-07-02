@@ -229,6 +229,7 @@ name = "burrow"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "chrono",
  "clap",
  "data-encoding",
@@ -1909,9 +1910,11 @@ version = "0.1.0"
 name = "rabbithole-server-core"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "chrono",
  "hex",
  "parking_lot",
+ "postcard",
  "proptest",
  "rabbithole-identity",
  "rabbithole-proto",

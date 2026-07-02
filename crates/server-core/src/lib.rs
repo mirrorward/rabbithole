@@ -10,15 +10,18 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod boards;
 pub mod bus;
 pub mod chat;
 pub mod classes;
 pub mod config;
+pub mod events;
 pub mod permissions;
 pub mod presence;
 pub mod pushlog;
 
 pub use auth::{AuthError, AuthService, AuthedUser, RegistrationMode};
+pub use boards::{BoardError, BoardService};
 pub use bus::{EventBus, ServerEvent};
 pub use chat::{ChatService, LOBBY};
 pub use classes::ClassCache;

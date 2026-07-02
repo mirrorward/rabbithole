@@ -19,6 +19,8 @@ parking_lot.workspace = true
 chrono.workspace = true
 toml.workspace = true
 hex.workspace = true
+postcard.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

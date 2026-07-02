@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 rabbithole-proto.workspace = true
 postcard.workspace = true
+blake3.workspace = true
 rabbithole-net.workspace = true
 rabbithole-identity.workspace = true
 rabbithole-blobs.workspace = true

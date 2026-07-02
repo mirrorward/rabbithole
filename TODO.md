@@ -63,15 +63,15 @@
 ## Wave 3 — Message bases & offline
 *Depends on: W2*
 
-- [ ] Board hierarchy (categories/bundles/boards, dotted slugs) + per-board ACLs + moderators
-- [ ] Posts as signed blake3 events (author + server sigs) — federation-ready
-- [ ] Threading (parent/root), markdown/plain/ANSI bodies, edit-as-event, tombstones
-- [ ] Retention/auto-archive policy (KDX-style)
-- [ ] Per-user read pointers; unread counts surfaced (welcome, keyword bar)
+- [x] Board hierarchy (categories/bundles/boards, dotted slugs) + per-board ACLs + moderators
+- [x] Posts as signed blake3 events (author + server sigs) — federation-ready
+- [x] Threading (parent/root), markdown/plain/ANSI bodies, edit-as-event, tombstones
+- [x] Retention/auto-archive policy (KDX-style)
+- [x] Per-user read pointers; unread counts surfaced (welcome, keyword bar)
 - [ ] Client offline store: board subscribe, batch delta download, offline read/reply, outbox sync on reconnect
 - [ ] Request system ("wishing well"): CRUD, voting, claim → fulfilled linkage, notifications
 - [ ] Shared dupe/seen subsystem (time-windowed, multi-ID-form) + tests
-- [ ] CLI/TUI board reading + posting
+- [x] CLI/TUI board reading + posting
 
 ## Wave 4 — File libraries & transfers
 *Depends on: W3*

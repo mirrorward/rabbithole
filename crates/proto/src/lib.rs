@@ -23,6 +23,7 @@
 
 pub mod admin;
 pub mod blob;
+pub mod board;
 pub mod chat;
 pub mod codec;
 pub mod directory;

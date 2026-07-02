@@ -71,6 +71,20 @@ enum Cmd {
     },
     /// Stream lobby chat and presence until interrupted.
     Tail,
+    /// List the board tree (with unread counts).
+    Boards,
+    /// List threads in a board.
+    Threads {
+        board: String,
+        #[arg(default_value_t = 25)]
+        limit: u32,
+    },
+    /// Post a new thread to a board.
+    Post {
+        board: String,
+        subject: String,
+        body: Vec<String>,
+    },
 }
 
 /// The cached session (written by `login`).
@@ -315,6 +329,81 @@ async fn main() -> Result<()> {
                 }
             }
             persist_cursor(&c);
+            c.close().await;
+            Ok(())
+        }
+        Cmd::Boards => {
+            let (mut c, _) = reconnect().await?;
+            let boards = c.boards().await?;
+            if cli.json {
+                let rows: Vec<_> = boards
+                    .iter()
+                    .map(|b| serde_json::json!({"slug": b.slug, "title": b.title, "kind": b.kind, "unread": b.unread}))
+                    .collect();
+                println!("{}", serde_json::Value::Array(rows));
+            } else {
+                for b in boards {
+                    let kind = match b.kind {
+                        0 => "category",
+                        1 => "bundle",
+                        _ => "board",
+                    };
+                    let unread = if b.unread > 0 {
+                        format!("  ({} unread)", b.unread)
+                    } else {
+                        String::new()
+                    };
+                    println!("{:22} {:8} {}{}", b.slug, kind, b.title, unread);
+                }
+            }
+            c.close().await;
+            Ok(())
+        }
+        Cmd::Threads { board, limit } => {
+            let (mut c, _) = reconnect().await?;
+            let threads = c.threads(&board, limit).await?;
+            if cli.json {
+                let rows: Vec<_> = threads
+                    .iter()
+                    .map(|t| serde_json::json!({"id": hex::encode(t.root.id), "subject": t.root.subject, "author": t.root.author, "replies": t.replies}))
+                    .collect();
+                println!("{}", serde_json::Value::Array(rows));
+            } else if threads.is_empty() {
+                println!("(no threads in {board})");
+            } else {
+                for t in threads {
+                    println!(
+                        "{}  {} — {} ({} repl.)",
+                        &hex::encode(t.root.id)[..8],
+                        t.root.subject,
+                        t.root.author,
+                        t.replies
+                    );
+                }
+            }
+            c.close().await;
+            Ok(())
+        }
+        Cmd::Post {
+            board,
+            subject,
+            body,
+        } => {
+            let body = body.join(" ");
+            let (mut c, _) = reconnect().await?;
+            let post = c
+                .post(&rabbithole_proto::board::PostCreate::new(
+                    &board, &subject, &body,
+                ))
+                .await?;
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({"id": hex::encode(post.id), "board": post.board})
+                );
+            } else {
+                println!("posted to {} ({})", post.board, &hex::encode(post.id)[..8]);
+            }
             c.close().await;
             Ok(())
         }

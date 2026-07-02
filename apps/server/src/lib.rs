@@ -8,6 +8,7 @@ pub mod handlers2;
 pub mod handlers3;
 pub mod handlers4;
 pub mod handlers5;
+pub mod handlers6;
 pub mod identity_store;
 pub mod session;
 
@@ -22,7 +23,7 @@ use rabbithole_net::tls::CertFingerprint;
 use rabbithole_net::ws::WsListener;
 use rabbithole_net::Listener;
 use rabbithole_server_core::{
-    AuthService, ChatService, ClassCache, EventBus, LiveConfig, PermissionEvaluator,
+    AuthService, BoardService, ChatService, ClassCache, EventBus, LiveConfig, PermissionEvaluator,
     PresenceRegistry, PushLog, RegistrationMode, ServerConfig, ServerEvent,
 };
 use rabbithole_store_server::SqlitePool;
@@ -36,6 +37,7 @@ pub struct Shared {
     pub perms: PermissionEvaluator,
     pub presence: PresenceRegistry,
     pub chat: ChatService,
+    pub boards: BoardService,
     pub pushlog: PushLog,
     pub classes: ClassCache,
     /// (sender_account, recipient_account) pairs already auto-responded
@@ -52,6 +54,13 @@ pub struct Shared {
 impl Shared {
     pub fn next_session_id(&self) -> u64 {
         self.next_session.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// The server's origin id for `persona@origin` event authorship: the
+    /// configured name, lowercased and space-free (federation hostnames
+    /// arrive in W9).
+    pub fn origin_name(&self) -> String {
+        self.config.read().name.to_lowercase().replace(' ', "-")
     }
 
     /// Parse the configured registration mode (bad values read as closed —
@@ -92,6 +101,9 @@ impl Burrow {
             BlobStore::open(data_dir.join("blobs")).map_err(|e| anyhow::anyhow!("blobs: {e}"))?,
         );
 
+        let origin_name = config.name.to_lowercase().replace(' ', "-");
+        let boards = BoardService::new(pool.clone(), origin_name, identity.signing.seed());
+
         let quic = QuicListener::bind(config.quic_addr, &identity.tls)?;
         let ws = WsListener::bind(config.ws_addr).await?;
         let quic_addr = quic.local_addr()?;
@@ -99,6 +111,7 @@ impl Burrow {
 
         let shared = Arc::new(Shared {
             chat: ChatService::new(bus.clone(), config.chat_max_len),
+            boards,
             presence: PresenceRegistry::new(bus.clone()),
             config: LiveConfig::new(config),
             bus,

@@ -442,6 +442,10 @@ async fn handle_request(
     if crate::handlers5::handle(conn, frame, shared, ctx).await? {
         return Ok(());
     }
+    // Wave 3.1: message bases -------------------------------------------------
+    if crate::handlers6::handle(conn, frame, shared, ctx).await? {
+        return Ok(());
+    }
 
     // Anything else: tolerated, answered, never fatal.
     conn.send(Frame::error_reply(frame, ErrorCode::Unsupported))
@@ -594,6 +598,7 @@ pub(crate) fn push_for_event(
             }
             Frame::push(&pchat::RoomKicked::new(room.clone(), *banned)).ok()
         }
+        ServerEvent::BoardPost { .. } => crate::handlers6::board_push(event),
         ServerEvent::Notice { text, from } => {
             Frame::push(&psess::ServerNotice::new(text.clone(), from.clone())).ok()
         }

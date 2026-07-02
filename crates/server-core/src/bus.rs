@@ -78,6 +78,12 @@ pub enum ServerEvent {
     Notice { text: String, from: String },
     /// An operator disconnected a session; the session task closes itself.
     Kick { session_id: u64, reason: String },
+    /// A new board post landed (broadcast so unread counts stay live).
+    BoardPost {
+        board: String,
+        id: [u8; 32],
+        root: Option<[u8; 32]>,
+    },
     /// The server is shutting down; surfaces should drain gracefully.
     Shutdown,
 }

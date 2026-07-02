@@ -479,6 +479,87 @@ impl Client {
             .await
     }
 
+    // ---- Wave 3.1: boards -------------------------------------------------
+
+    pub async fn boards(&mut self) -> Result<Vec<rabbithole_proto::board::BoardInfo>, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::board::BoardList>(
+                &rabbithole_proto::board::BoardListRequest,
+            )
+            .await?
+            .boards)
+    }
+
+    pub async fn board_create(
+        &mut self,
+        req: &rabbithole_proto::board::BoardCreate,
+    ) -> Result<rabbithole_proto::board::BoardInfo, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::board::BoardCreated>(req)
+            .await?
+            .board)
+    }
+
+    pub async fn threads(
+        &mut self,
+        board: &str,
+        limit: u32,
+    ) -> Result<Vec<rabbithole_proto::board::ThreadSummary>, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::board::ThreadList>(
+                &rabbithole_proto::board::ThreadListRequest::new(board, limit),
+            )
+            .await?
+            .threads)
+    }
+
+    pub async fn thread(
+        &mut self,
+        root: [u8; 32],
+        limit: u32,
+    ) -> Result<Vec<rabbithole_proto::board::PostView>, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::board::ThreadPosts>(
+                &rabbithole_proto::board::ThreadRequest::new(root, limit),
+            )
+            .await?
+            .posts)
+    }
+
+    pub async fn post(
+        &mut self,
+        req: &rabbithole_proto::board::PostCreate,
+    ) -> Result<rabbithole_proto::board::PostView, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::board::PostReply>(req)
+            .await?
+            .post)
+    }
+
+    pub async fn post_edit(
+        &mut self,
+        target: [u8; 32],
+        subject: &str,
+        body: &str,
+        mime: &str,
+    ) -> Result<rabbithole_proto::board::PostView, ClientError> {
+        let req = rabbithole_proto::board::PostEdit::new(target, subject, body, mime);
+        Ok(self
+            .request::<_, rabbithole_proto::board::PostReply>(&req)
+            .await?
+            .post)
+    }
+
+    pub async fn post_delete(&mut self, target: [u8; 32]) -> Result<(), ClientError> {
+        self.request_ack(&rabbithole_proto::board::PostDelete::new(target))
+            .await
+    }
+
+    pub async fn board_mark_read(&mut self, board: &str, up_to: i64) -> Result<(), ClientError> {
+        self.request_ack(&rabbithole_proto::board::MarkRead::new(board, up_to))
+            .await
+    }
+
     pub async fn totp_enroll(
         &mut self,
     ) -> Result<rabbithole_proto::persona::TotpEnrollInfo, ClientError> {
