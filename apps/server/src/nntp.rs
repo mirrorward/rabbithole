@@ -398,9 +398,19 @@ async fn serve(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<(
             }
 
             // Recognised but unsupported here (not advertised in CAPABILITIES).
-            Command::NewNews { .. } => {
+            Command::NewNews { .. } | Command::NewGroups { .. } => {
                 write
                     .write_all(Status::FeatureNotSupported.response().render().as_bytes())
+                    .await?;
+            }
+
+            // Transit/peering verbs (MODE STREAM, IHAVE, CHECK, TAKETHIS) are a
+            // peer-feed concern — this listener is a reader server, so they are
+            // refused rather than half-implemented. The peering service slice
+            // will run these on its own session type.
+            Command::ModeStream | Command::IHave(_) | Command::Check(_) | Command::TakeThis(_) => {
+                write
+                    .write_all(Status::CommandUnavailable.response().render().as_bytes())
                     .await?;
             }
 

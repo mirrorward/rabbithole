@@ -172,7 +172,7 @@
 - [x] Reader server: CAPABILITIES, GROUP/LISTGROUP, ARTICLE/HEAD/BODY/STAT, NEXT/LAST, POST, OVER/XOVER + OVERVIEW.FMT, LIST; dot-stuffing both ways — codec (`rabbithole-legacy-nntp`, 51 tests) + a live gateway wired into burrow (`apps/server/src/nntp.rs`, config-gated `nntp_enabled`/`nntp_addr`, AUTHINFO→AuthService, POST→BoardService; e2e-tested). NEWNEWS/IHAVE peering deferred to the federation slice
 - [ ] AUTHINFO USER/PASS on TLS only (563/STARTTLS)
 - [x] Group↔board mapping (identity slug↔group); per-group monotonic article numbers; permanent Message-IDs (`<hex(blake3 event id)@origin>`); References threading; overview rendered from post metadata — in `apps/server/src/nntp.rs`
-- [ ] Peering: IHAVE/NEWNEWS with external peers; Message-ID dedupe via shared subsystem
+- [~] Peering: IHAVE/NEWNEWS with external peers; Message-ID dedupe via shared subsystem — codec landed: `rabbithole-legacy-nntp` gains `transit` (IHAVE 335/435/436/437 + RFC 4644 streaming MODE STREAM/CHECK/TAKETHIS with the offered→wanted→transferred `Exchange` state machine), `wildmat` (RFC 3977 §4 matcher), `datetime` (NEWNEWS/NEWGROUPS 6/8-digit dates, closest-century expansion, GMT, calendar-validated), `listing` (LIST ACTIVE/ACTIVE.TIMES/NEWSGROUPS + 230/231 blocks), `Command::requires_secure_transport()` for RFC 4643; 96 tests. Burrow's reader listener refuses transit verbs (502) pending the peer-feed service slice, which will also wire Message-ID dedupe
 
 **FidoNet**
 - [x] PKT codec: type-2+ w/ type-2 fallback (capability word), packed messages, golden-file round-trip tests — `rabbithole-legacy-ftn` (bounds-checked LE reader, 5D addresses, CP437; 31 tests incl. 2000-iter fuzz)

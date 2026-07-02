@@ -69,6 +69,8 @@ pub enum Command {
     Capabilities,
     /// `MODE READER`
     ModeReader,
+    /// `MODE STREAM` — request streaming feed mode (RFC 4644).
+    ModeStream,
     /// `GROUP <name>`
     Group(String),
     /// `LISTGROUP [group [range]]`
@@ -107,11 +109,36 @@ pub enum Command {
         /// Whether the `GMT` suffix was present.
         gmt: bool,
     },
+    /// `NEWGROUPS <date> <time> [GMT]` (RFC 3977 §7.3)
+    NewGroups {
+        /// Date argument (`yymmdd` or `yyyymmdd`), kept as text.
+        date: String,
+        /// Time argument (`hhmmss`), kept as text.
+        time: String,
+        /// Whether the `GMT` suffix was present.
+        gmt: bool,
+    },
     /// `POST`
     Post,
-    /// `AUTHINFO USER <name>`
+    /// `IHAVE <message-id>` — offer an article for transfer (RFC 3977 §6.3.2).
+    IHave(MessageId),
+    /// `CHECK <message-id>` — streaming offer probe (RFC 4644).
+    Check(MessageId),
+    /// `TAKETHIS <message-id>` — streaming unconditional transfer (RFC 4644).
+    ///
+    /// The article body follows the command line as a data block; this codec
+    /// models only the command itself.
+    TakeThis(MessageId),
+    /// `AUTHINFO USER <name>` (RFC 4643).
+    ///
+    /// Per RFC 4643 §2.3.1 this MUST only be honoured over a secure transport;
+    /// the codec merely represents the command (see
+    /// [`Command::requires_secure_transport`]) and leaves enforcement to the
+    /// server.
     AuthInfoUser(String),
-    /// `AUTHINFO PASS <password>`
+    /// `AUTHINFO PASS <password>` (RFC 4643).
+    ///
+    /// As with [`Command::AuthInfoUser`], honour this only over TLS.
     AuthInfoPass(String),
     /// `DATE`
     Date,
@@ -184,13 +211,11 @@ impl Command {
             "NEXT" => Ok(Command::Next),
             "LAST" => Ok(Command::Last),
 
-            "MODE" => {
-                if rest.len() == 1 && rest[0].eq_ignore_ascii_case("READER") {
-                    Ok(Command::ModeReader)
-                } else {
-                    Ok(Command::Unknown(line.to_string()))
-                }
-            }
+            "MODE" => match rest.as_slice() {
+                [arg] if arg.eq_ignore_ascii_case("READER") => Ok(Command::ModeReader),
+                [arg] if arg.eq_ignore_ascii_case("STREAM") => Ok(Command::ModeStream),
+                _ => Ok(Command::Unknown(line.to_string())),
+            },
 
             "GROUP" => match rest.as_slice() {
                 [name] => Ok(Command::Group((*name).to_string())),
@@ -243,10 +268,51 @@ impl Command {
                 _ => Err(CommandError::UnexpectedArgument { verb: "NEWNEWS" }),
             },
 
+            "NEWGROUPS" => match rest.as_slice() {
+                [date, time] => Ok(Command::NewGroups {
+                    date: (*date).to_string(),
+                    time: (*time).to_string(),
+                    gmt: false,
+                }),
+                [date, time, gmt] if gmt.eq_ignore_ascii_case("GMT") => Ok(Command::NewGroups {
+                    date: (*date).to_string(),
+                    time: (*time).to_string(),
+                    gmt: true,
+                }),
+                [] | [_] => Err(CommandError::MissingArgument { verb: "NEWGROUPS" }),
+                _ => Err(CommandError::UnexpectedArgument { verb: "NEWGROUPS" }),
+            },
+
+            "IHAVE" => Ok(Command::IHave(parse_message_id_arg("IHAVE", &rest)?)),
+            "CHECK" => Ok(Command::Check(parse_message_id_arg("CHECK", &rest)?)),
+            "TAKETHIS" => Ok(Command::TakeThis(parse_message_id_arg("TAKETHIS", &rest)?)),
+
             "AUTHINFO" => parse_authinfo(&rest),
 
             _ => Ok(Command::Unknown(line.to_string())),
         }
+    }
+
+    /// Whether this command carries credentials that a server MUST refuse to
+    /// honour unless the connection is already secured (RFC 4643 §2.3.1, §2.4).
+    ///
+    /// Returns `true` for [`Command::AuthInfoUser`] and
+    /// [`Command::AuthInfoPass`], which transmit a username/password in the
+    /// clear. This codec does not itself know the transport's security — the
+    /// flag simply records the RFC requirement so the session layer can answer
+    /// `483` (encryption required) when the check fails.
+    #[must_use]
+    pub fn requires_secure_transport(&self) -> bool {
+        matches!(self, Command::AuthInfoUser(_) | Command::AuthInfoPass(_))
+    }
+}
+
+/// Parse a command that takes exactly one mandatory `<message-id>` argument.
+fn parse_message_id_arg(verb: &'static str, rest: &[&str]) -> Result<MessageId, CommandError> {
+    match rest {
+        [arg] => Ok(MessageId::new(*arg)?),
+        [] => Err(CommandError::MissingArgument { verb }),
+        _ => Err(CommandError::UnexpectedArgument { verb }),
     }
 }
 
@@ -374,8 +440,8 @@ mod tests {
         assert_eq!(Command::parse("MODE READER"), Ok(Command::ModeReader));
         assert_eq!(Command::parse("mode reader\r\n"), Ok(Command::ModeReader));
         assert_eq!(
-            Command::parse("MODE STREAM"),
-            Ok(Command::Unknown("MODE STREAM".to_string()))
+            Command::parse("MODE FROBNICATE"),
+            Ok(Command::Unknown("MODE FROBNICATE".to_string()))
         );
     }
 
@@ -545,6 +611,86 @@ mod tests {
     }
 
     #[test]
+    fn parses_mode_stream() {
+        assert_eq!(Command::parse("MODE STREAM"), Ok(Command::ModeStream));
+        assert_eq!(Command::parse("mode stream\r\n"), Ok(Command::ModeStream));
+        assert_eq!(Command::parse("MODE READER"), Ok(Command::ModeReader));
+    }
+
+    #[test]
+    fn parses_streaming_and_ihave_offers() {
+        assert_eq!(
+            Command::parse("IHAVE <a@b>"),
+            Ok(Command::IHave(MessageId::new("<a@b>").unwrap()))
+        );
+        assert_eq!(
+            Command::parse("CHECK <a@b>"),
+            Ok(Command::Check(MessageId::new("<a@b>").unwrap()))
+        );
+        assert_eq!(
+            Command::parse("TAKETHIS <a@b>"),
+            Ok(Command::TakeThis(MessageId::new("<a@b>").unwrap()))
+        );
+    }
+
+    #[test]
+    fn offer_requires_a_valid_message_id() {
+        assert_eq!(
+            Command::parse("CHECK"),
+            Err(CommandError::MissingArgument { verb: "CHECK" })
+        );
+        assert_eq!(
+            Command::parse("TAKETHIS <a@b> extra"),
+            Err(CommandError::UnexpectedArgument { verb: "TAKETHIS" })
+        );
+        assert!(matches!(
+            Command::parse("IHAVE notanid"),
+            Err(CommandError::MessageId(_))
+        ));
+    }
+
+    #[test]
+    fn parses_newgroups() {
+        assert_eq!(
+            Command::parse("NEWGROUPS 20260101 000000 GMT"),
+            Ok(Command::NewGroups {
+                date: "20260101".to_string(),
+                time: "000000".to_string(),
+                gmt: true,
+            })
+        );
+        assert_eq!(
+            Command::parse("NEWGROUPS 260101 000000"),
+            Ok(Command::NewGroups {
+                date: "260101".to_string(),
+                time: "000000".to_string(),
+                gmt: false,
+            })
+        );
+        assert_eq!(
+            Command::parse("NEWGROUPS 20260101"),
+            Err(CommandError::MissingArgument { verb: "NEWGROUPS" })
+        );
+        assert_eq!(
+            Command::parse("NEWGROUPS 20260101 000000 GMT junk"),
+            Err(CommandError::UnexpectedArgument { verb: "NEWGROUPS" })
+        );
+    }
+
+    #[test]
+    fn authinfo_flagged_as_tls_only() {
+        assert!(Command::parse("AUTHINFO USER kevin")
+            .unwrap()
+            .requires_secure_transport());
+        assert!(Command::parse("AUTHINFO PASS hunter2")
+            .unwrap()
+            .requires_secure_transport());
+        assert!(!Command::parse("CAPABILITIES")
+            .unwrap()
+            .requires_secure_transport());
+    }
+
+    #[test]
     fn parses_authinfo() {
         assert_eq!(
             Command::parse("AUTHINFO USER kevin"),
@@ -591,6 +737,14 @@ mod tests {
             "LISTGROUP a b c d",
             "AUTHINFO",
             "NEWNEWS a b c d e",
+            "MODE",
+            "MODE STREAM extra",
+            "CHECK",
+            "CHECK <",
+            "TAKETHIS",
+            "IHAVE <a@b> c",
+            "NEWGROUPS",
+            "NEWGROUPS 1",
         ] {
             let _ = Command::parse(probe);
         }
