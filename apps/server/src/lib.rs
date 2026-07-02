@@ -6,6 +6,7 @@ pub mod admin_store;
 pub mod ctl;
 pub mod handlers2;
 pub mod handlers3;
+pub mod handlers4;
 pub mod identity_store;
 pub mod session;
 
@@ -178,6 +179,7 @@ async fn replay_recorder(shared: Arc<Shared>) {
                             &shared,
                             rabbithole_server_core::Role::User,
                             account_id,
+                            0, // no live session: room chat is filtered out
                         ) else {
                             continue;
                         };

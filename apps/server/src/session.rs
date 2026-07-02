@@ -220,6 +220,7 @@ pub async fn run_session(
         state: 0,
         status: None,
     });
+    shared.chat.join_lobby(session_id, &ctx.screen_name);
     // Subscribe BEFORE welcome/replay so no event falls in a gap.
     let mut bus_rx = shared.bus.subscribe();
 
@@ -271,7 +272,7 @@ pub async fn run_session(
                             break;
                         }
                         Ok(ev) => {
-                            if let Some(push) = push_for_event(&ev, &shared, ctx.role, ctx.account_id) {
+                            if let Some(push) = push_for_event(&ev, &shared, ctx.role, ctx.account_id, ctx.session_id) {
                                 conn.send(shared.pushlog.stamp(ctx.account_id, push)).await?;
                             }
                             if matches!(ev, ServerEvent::Shutdown) {
@@ -290,6 +291,7 @@ pub async fn run_session(
     }
     .await;
 
+    shared.chat.session_closed(session_id);
     shared.presence.leave(session_id);
     conn.close().await;
     tracing::info!(session_id, "session ended");
@@ -373,17 +375,25 @@ async fn handle_request(
                 .await?;
             return Ok(());
         }
-        match shared.chat.send(&req.room, &ctx.screen_name, &req.text) {
+        use rabbithole_server_core::chat::ChatError;
+        match shared
+            .chat
+            .send(&req.room, ctx.session_id, &ctx.screen_name, &req.text)
+        {
             Ok(_) => conn.send(Frame::ack(frame)).await?,
-            Err(rabbithole_server_core::chat::ChatError::NoSuchRoom(_)) => {
+            Err(ChatError::NoSuchRoom(_)) => {
                 conn.send(Frame::error_reply(frame, ErrorCode::NotFound))
                     .await?
             }
-            Err(rabbithole_server_core::chat::ChatError::TooLong { .. }) => {
+            Err(ChatError::NotMember | ChatError::Forbidden) => {
+                conn.send(Frame::error_reply(frame, ErrorCode::Forbidden))
+                    .await?
+            }
+            Err(ChatError::TooLong { .. }) => {
                 conn.send(Frame::error_reply(frame, ErrorCode::TooLarge))
                     .await?
             }
-            Err(rabbithole_server_core::chat::ChatError::Empty) => {
+            Err(_) => {
                 conn.send(Frame::error_reply(frame, ErrorCode::BadRequest))
                     .await?
             }
@@ -396,7 +406,10 @@ async fn handle_request(
                 .await?;
             return Ok(());
         }
-        match shared.chat.history(&req.room, req.limit.min(500) as usize) {
+        match shared
+            .chat
+            .history(&req.room, ctx.session_id, req.limit.min(500) as usize)
+        {
             Ok(lines) => {
                 let messages = lines
                     .into_iter()
@@ -421,6 +434,10 @@ async fn handle_request(
     if crate::handlers3::handle(conn, frame, shared, ctx).await? {
         return Ok(());
     }
+    // Wave 2.2b: rooms --------------------------------------------------------
+    if crate::handlers4::handle(conn, frame, shared, ctx).await? {
+        return Ok(());
+    }
 
     // Anything else: tolerated, answered, never fatal.
     conn.send(Frame::error_reply(frame, ErrorCode::Unsupported))
@@ -436,16 +453,25 @@ pub(crate) fn push_for_event(
     shared: &Shared,
     viewer_role: Role,
     viewer_account: i64,
+    viewer_session: u64,
 ) -> Option<Frame> {
     let viewer_is_mod = viewer_role >= Role::Moderator;
     match event {
-        ServerEvent::Chat { room, from, text } => Frame::push(&pchat::ChatMessage::new(
-            room.clone(),
-            from.clone(),
-            text.clone(),
-            chrono::Utc::now().timestamp_millis(),
-        ))
-        .ok(),
+        ServerEvent::Chat { room, from, text } => {
+            // Lobby chat is for everyone (including offline-replay); other
+            // rooms deliver to members only.
+            if room != rabbithole_server_core::LOBBY && !shared.chat.is_member(room, viewer_session)
+            {
+                return None;
+            }
+            Frame::push(&pchat::ChatMessage::new(
+                room.clone(),
+                from.clone(),
+                text.clone(),
+                chrono::Utc::now().timestamp_millis(),
+            ))
+            .ok()
+        }
         ServerEvent::SessionOpened { session_id, .. } => {
             let entry = shared.presence.get(*session_id)?;
             if entry.is_invisible() && !viewer_is_mod {
@@ -543,6 +569,26 @@ pub(crate) fn push_for_event(
                 *up_to_id,
             ))
             .ok()
+        }
+        ServerEvent::RoomInvited {
+            to_account,
+            room,
+            from,
+        } => {
+            if *to_account != viewer_account {
+                return None;
+            }
+            Frame::push(&pchat::RoomInvited::new(room.clone(), from.clone())).ok()
+        }
+        ServerEvent::RoomKicked {
+            account,
+            room,
+            banned,
+        } => {
+            if *account != viewer_account {
+                return None;
+            }
+            Frame::push(&pchat::RoomKicked::new(room.clone(), *banned)).ok()
         }
         ServerEvent::Notice { text, from } => {
             Frame::push(&psess::ServerNotice::new(text.clone(), from.clone())).ok()

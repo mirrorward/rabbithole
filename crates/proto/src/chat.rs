@@ -103,3 +103,288 @@ impl Message for ChatHistory {
     const FAMILY: Family = Family::CHAT;
     const MESSAGE_TYPE: u16 = 4;
 }
+
+// ---- Rooms (Wave 2.2) ----------------------------------------------------
+
+/// A room as the wire sees it.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomInfo {
+    pub name: String,
+    pub category: String,
+    pub topic: String,
+    pub private: bool,
+    pub member_count: u32,
+    pub created_by: String,
+}
+
+impl RoomInfo {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            category: String::new(),
+            topic: String::new(),
+            private: false,
+            member_count: 0,
+            created_by: String::new(),
+        }
+    }
+}
+
+/// List rooms: public ones plus private rooms you belong to. → [`RoomList`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RoomListRequest;
+
+impl Message for RoomListRequest {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 10;
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RoomList {
+    pub rooms: Vec<RoomInfo>,
+}
+
+impl RoomList {
+    pub fn new(rooms: Vec<RoomInfo>) -> Self {
+        Self { rooms }
+    }
+}
+
+impl Message for RoomList {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 11;
+}
+
+/// Create a room (requires CHAT_CREATE_ROOM; you join it on creation).
+/// → [`RoomInfoReply`] or `AlreadyExists`. Ad-hoc private rooms vanish
+/// when the last member leaves; the lobby is permanent.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomCreate {
+    pub name: String,
+    pub category: String,
+    pub topic: String,
+    pub private: bool,
+}
+
+impl RoomCreate {
+    pub fn new(name: impl Into<String>, private: bool) -> Self {
+        Self {
+            name: name.into(),
+            category: String::new(),
+            topic: String::new(),
+            private,
+        }
+    }
+}
+
+impl Message for RoomCreate {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 12;
+}
+
+/// Join a room. → [`RoomInfoReply`]; `Forbidden` for uninvited private
+/// rooms or bans; `NotFound` otherwise.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomJoin {
+    pub room: String,
+}
+
+impl RoomJoin {
+    pub fn new(room: impl Into<String>) -> Self {
+        Self { room: room.into() }
+    }
+}
+
+impl Message for RoomJoin {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 13;
+}
+
+/// Leave a room. → empty ack. (You can't leave the lobby.)
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomLeave {
+    pub room: String,
+}
+
+impl RoomLeave {
+    pub fn new(room: impl Into<String>) -> Self {
+        Self { room: room.into() }
+    }
+}
+
+impl Message for RoomLeave {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 14;
+}
+
+/// Invite someone to a room you belong to. → empty ack; they receive a
+/// [`RoomInvited`] push and may then join even if the room is private.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomInvite {
+    pub room: String,
+    pub screen_name: String,
+}
+
+impl RoomInvite {
+    pub fn new(room: impl Into<String>, screen_name: impl Into<String>) -> Self {
+        Self {
+            room: room.into(),
+            screen_name: screen_name.into(),
+        }
+    }
+}
+
+impl Message for RoomInvite {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 15;
+}
+
+/// Push: you were invited to a room.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomInvited {
+    pub room: String,
+    pub from: String,
+}
+
+impl RoomInvited {
+    pub fn new(room: impl Into<String>, from: impl Into<String>) -> Self {
+        Self {
+            room: room.into(),
+            from: from.into(),
+        }
+    }
+}
+
+impl Message for RoomInvited {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 16;
+}
+
+/// Set a room's topic (creator or CHAT_MODERATE). → empty ack.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomTopicSet {
+    pub room: String,
+    pub topic: String,
+}
+
+impl RoomTopicSet {
+    pub fn new(room: impl Into<String>, topic: impl Into<String>) -> Self {
+        Self {
+            room: room.into(),
+            topic: topic.into(),
+        }
+    }
+}
+
+impl Message for RoomTopicSet {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 17;
+}
+
+/// Kick someone from a room (creator or CHAT_MODERATE), optionally
+/// banning them from rejoining. → empty ack.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomKick {
+    pub room: String,
+    pub screen_name: String,
+    pub ban: bool,
+}
+
+impl RoomKick {
+    pub fn new(room: impl Into<String>, screen_name: impl Into<String>, ban: bool) -> Self {
+        Self {
+            room: room.into(),
+            screen_name: screen_name.into(),
+            ban,
+        }
+    }
+}
+
+impl Message for RoomKick {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 18;
+}
+
+/// Reply carrying a single room.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomInfoReply {
+    pub room: RoomInfo,
+}
+
+impl RoomInfoReply {
+    pub fn new(room: RoomInfo) -> Self {
+        Self { room }
+    }
+}
+
+impl Message for RoomInfoReply {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 19;
+}
+
+/// Push: you were kicked from a room.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomKicked {
+    pub room: String,
+    pub banned: bool,
+}
+
+impl RoomKicked {
+    pub fn new(room: impl Into<String>, banned: bool) -> Self {
+        Self {
+            room: room.into(),
+            banned,
+        }
+    }
+}
+
+impl Message for RoomKicked {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 20;
+}
+
+/// List a room's members. → [`RoomMemberList`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomMembersRequest {
+    pub room: String,
+}
+
+impl RoomMembersRequest {
+    pub fn new(room: impl Into<String>) -> Self {
+        Self { room: room.into() }
+    }
+}
+
+impl Message for RoomMembersRequest {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 21;
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RoomMemberList {
+    pub members: Vec<String>,
+}
+
+impl RoomMemberList {
+    pub fn new(members: Vec<String>) -> Self {
+        Self { members }
+    }
+}
+
+impl Message for RoomMemberList {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 22;
+}

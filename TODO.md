@@ -49,7 +49,7 @@
 - [x] Profiles (location/interests/quote/free text/.plan), avatars + **banner images** (blob-backed, size-capped)
 - [x] Member directory + search; "locate online" (privacy-gated)
 - [x] Buddy lists: server-stored, groups, permit/deny; presence states (online/away+msg/idle/invisible) + pub/sub pushes
-- [ ] Chat: multiple public rooms w/ categories + topics; ad-hoc rooms; private rooms w/ invite/decline/join/leave; subjects; room moderation (kick/mute/ban/slow-mode)
+- [x] Chat: multiple public rooms w/ categories + topics; ad-hoc rooms; private rooms w/ invite/join/leave; subjects; room kick/ban (mute + slow-mode deferred to W13 moderation hardening)
 - [x] DMs: threads, offline queueing, quoting, away auto-response, receipts (privacy-gated)
 - [x] DM attachments (server-config max size, content-addressed)
 - [ ] Notifications: protocol pushes + client-side sounds (optional, tasteful)

@@ -62,6 +62,18 @@ pub enum ServerEvent {
         by: String,
         up_to_id: i64,
     },
+    /// A room invitation for `to_account`.
+    RoomInvited {
+        to_account: i64,
+        room: String,
+        from: String,
+    },
+    /// `account` was kicked from a room.
+    RoomKicked {
+        account: i64,
+        room: String,
+        banned: bool,
+    },
     /// An operator notice for every session.
     Notice { text: String, from: String },
     /// An operator disconnected a session; the session task closes itself.

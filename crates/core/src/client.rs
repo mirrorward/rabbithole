@@ -389,6 +389,60 @@ impl Client {
             .await
     }
 
+    // ---- Wave 2.2b: rooms -------------------------------------------------
+
+    pub async fn room_list(&mut self) -> Result<Vec<pchat::RoomInfo>, ClientError> {
+        Ok(self
+            .request::<_, pchat::RoomList>(&pchat::RoomListRequest)
+            .await?
+            .rooms)
+    }
+
+    pub async fn room_create(
+        &mut self,
+        req: &pchat::RoomCreate,
+    ) -> Result<pchat::RoomInfo, ClientError> {
+        Ok(self.request::<_, pchat::RoomInfoReply>(req).await?.room)
+    }
+
+    pub async fn room_join(&mut self, room: &str) -> Result<pchat::RoomInfo, ClientError> {
+        Ok(self
+            .request::<_, pchat::RoomInfoReply>(&pchat::RoomJoin::new(room))
+            .await?
+            .room)
+    }
+
+    pub async fn room_leave(&mut self, room: &str) -> Result<(), ClientError> {
+        self.request_ack(&pchat::RoomLeave::new(room)).await
+    }
+
+    pub async fn room_invite(&mut self, room: &str, screen_name: &str) -> Result<(), ClientError> {
+        self.request_ack(&pchat::RoomInvite::new(room, screen_name))
+            .await
+    }
+
+    pub async fn room_topic(&mut self, room: &str, topic: &str) -> Result<(), ClientError> {
+        self.request_ack(&pchat::RoomTopicSet::new(room, topic))
+            .await
+    }
+
+    pub async fn room_kick(
+        &mut self,
+        room: &str,
+        screen_name: &str,
+        ban: bool,
+    ) -> Result<(), ClientError> {
+        self.request_ack(&pchat::RoomKick::new(room, screen_name, ban))
+            .await
+    }
+
+    pub async fn room_members(&mut self, room: &str) -> Result<Vec<String>, ClientError> {
+        Ok(self
+            .request::<_, pchat::RoomMemberList>(&pchat::RoomMembersRequest::new(room))
+            .await?
+            .members)
+    }
+
     pub async fn totp_enroll(
         &mut self,
     ) -> Result<rabbithole_proto::persona::TotpEnrollInfo, ClientError> {
