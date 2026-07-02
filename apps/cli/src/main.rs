@@ -105,6 +105,58 @@ enum Cmd {
         #[command(subcommand)]
         action: WishAction,
     },
+    /// File libraries — browse, upload, download, search.
+    File {
+        #[command(subcommand)]
+        action: FileAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum FileAction {
+    /// List file areas.
+    Areas,
+    /// List a folder's contents (path optional).
+    Ls { area: String, path: Option<String> },
+    /// Create a library (needs manage rights).
+    Mkarea {
+        slug: String,
+        title: String,
+        description: Vec<String>,
+    },
+    /// Create a folder (`--parent PATH`, `--dropbox` for write-only).
+    Mkdir {
+        area: String,
+        name: String,
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(long)]
+        dropbox: bool,
+    },
+    /// Upload a local file.
+    Put {
+        area: String,
+        /// Local file to upload.
+        local: PathBuf,
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(long)]
+        comment: Option<String>,
+    },
+    /// Download a file by id to a local path.
+    Get { id: i64, local: PathBuf },
+    /// Show a node's metadata.
+    Info { id: i64 },
+    /// Delete a node.
+    Rm { id: i64 },
+    /// Rate a file 1..5.
+    Rate { id: i64, stars: u8 },
+    /// Search files by name/comment/uploader.
+    Search {
+        query: String,
+        #[arg(long)]
+        area: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -462,6 +514,207 @@ async fn main() -> Result<()> {
             text,
         } => cmd_reply(cli.json, board, parent, text.join(" ")).await,
         Cmd::Wish { action } => cmd_wish(cli.json, action).await,
+        Cmd::File { action } => cmd_file(cli.json, action).await,
+    }
+}
+
+fn file_kind(kind: u8) -> &'static str {
+    match kind {
+        0 => "dir",
+        1 => "file",
+        2 => "alias",
+        _ => "?",
+    }
+}
+
+async fn cmd_file(json: bool, action: FileAction) -> Result<()> {
+    use rabbithole_proto::filelib as pf;
+    let (mut c, _) = reconnect().await?;
+    let result: Result<()> = async {
+        match action {
+            FileAction::Areas => {
+                let areas = c.file_areas().await?;
+                if json {
+                    let rows: Vec<_> = areas
+                        .iter()
+                        .map(|a| serde_json::json!({"slug": a.slug, "title": a.title}))
+                        .collect();
+                    println!("{}", serde_json::Value::Array(rows));
+                } else if areas.is_empty() {
+                    println!("(no file areas)");
+                } else {
+                    for a in areas {
+                        println!("{:16} {}", a.slug, a.title);
+                    }
+                }
+            }
+            FileAction::Ls { area, path } => {
+                let nodes = c.folder_list(&area, path).await?;
+                if json {
+                    let rows: Vec<_> = nodes
+                        .iter()
+                        .map(|n| {
+                            serde_json::json!({
+                                "id": n.id, "kind": file_kind(n.kind), "name": n.name,
+                                "size": n.size, "downloads": n.downloads,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::Value::Array(rows));
+                } else if nodes.is_empty() {
+                    println!("(empty)");
+                } else {
+                    for n in nodes {
+                        println!(
+                            "{:>6}  {:5}  {:24} {:>9}  ↓{}",
+                            n.id,
+                            file_kind(n.kind),
+                            n.name,
+                            n.size,
+                            n.downloads
+                        );
+                    }
+                }
+            }
+            FileAction::Mkarea {
+                slug,
+                title,
+                description,
+            } => {
+                let a = c.area_create(&slug, &title, &description.join(" ")).await?;
+                println!("created area {}", a.slug);
+            }
+            FileAction::Mkdir {
+                area,
+                name,
+                parent,
+                dropbox,
+            } => {
+                let mut req = pf::FolderCreate::new(&area, parent, &name);
+                if dropbox {
+                    req = req.dropbox();
+                }
+                let n = c.folder_create(&req).await?;
+                println!(
+                    "created {} {}",
+                    if dropbox { "dropbox" } else { "folder" },
+                    n.path
+                );
+            }
+            FileAction::Put {
+                area,
+                local,
+                parent,
+                comment,
+            } => {
+                let bytes = std::fs::read(&local)
+                    .with_context(|| format!("reading {}", local.display()))?;
+                let name = local
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .context("bad local file name")?;
+                let mime = mime_guess_simple(name);
+                let req = pf::FileUpload::new(&area, parent, name, bytes).with_meta(
+                    mime,
+                    "",
+                    comment.unwrap_or_default(),
+                );
+                let n = c.file_upload(&req).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"id": n.id, "path": n.path, "size": n.size})
+                    );
+                } else {
+                    println!("uploaded {} ({} bytes) as #{}", n.path, n.size, n.id);
+                }
+            }
+            FileAction::Get { id, local } => {
+                let content = c.file_download(id).await?;
+                std::fs::write(&local, &content.bytes)
+                    .with_context(|| format!("writing {}", local.display()))?;
+                println!(
+                    "downloaded {} ({} bytes) → {}",
+                    content.node.name,
+                    content.bytes.len(),
+                    local.display()
+                );
+            }
+            FileAction::Info { id } => {
+                let n = c.node_get(id).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "id": n.id, "kind": file_kind(n.kind), "name": n.name, "path": n.path,
+                            "size": n.size, "mime": n.mime, "comment": n.comment,
+                            "uploader": n.uploader, "downloads": n.downloads,
+                            "rating_avg": n.rating_avg, "rating_count": n.rating_count,
+                        })
+                    );
+                } else {
+                    println!("#{} {} ({})", n.id, n.name, file_kind(n.kind));
+                    println!("path:     {}", n.path);
+                    println!("size:     {}", n.size);
+                    println!("uploader: {}", n.uploader);
+                    println!("downloads:{}", n.downloads);
+                    if n.rating_count > 0 {
+                        println!("rating:   {:.1} ({} votes)", n.rating_avg, n.rating_count);
+                    }
+                    if !n.comment.is_empty() {
+                        println!("comment:  {}", n.comment);
+                    }
+                }
+            }
+            FileAction::Rm { id } => {
+                c.node_delete(id).await?;
+                println!("deleted #{id}");
+            }
+            FileAction::Rate { id, stars } => {
+                let n = c.rate_file(id, stars).await?;
+                println!(
+                    "rated #{}: {:.1} ({} votes)",
+                    n.id, n.rating_avg, n.rating_count
+                );
+            }
+            FileAction::Search { query, area } => {
+                let nodes = c.file_search(area, &query, 50).await?;
+                if json {
+                    let rows: Vec<_> = nodes
+                        .iter()
+                        .map(|n| serde_json::json!({"id": n.id, "path": n.path, "area": n.area}))
+                        .collect();
+                    println!("{}", serde_json::Value::Array(rows));
+                } else if nodes.is_empty() {
+                    println!("(no matches)");
+                } else {
+                    for n in nodes {
+                        println!("{:>6}  {}/{}", n.id, n.area, n.path);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    c.close().await;
+    result
+}
+
+/// A tiny extension→MIME guess (enough for the CLI; the server stores it).
+fn mime_guess_simple(name: &str) -> &'static str {
+    let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "txt" | "md" | "nfo" | "diz" => "text/plain",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "zip" => "application/zip",
+        "gz" | "tgz" => "application/gzip",
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        "html" | "htm" => "text/html",
+        _ => "application/octet-stream",
     }
 }
 

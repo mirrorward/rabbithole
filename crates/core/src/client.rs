@@ -611,6 +611,142 @@ impl Client {
             .wish)
     }
 
+    // ---- Wave 4.1: file libraries -----------------------------------------
+
+    pub async fn file_areas(
+        &mut self,
+    ) -> Result<Vec<rabbithole_proto::filelib::FileAreaView>, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::filelib::AreaList>(
+                &rabbithole_proto::filelib::AreaListRequest,
+            )
+            .await?
+            .areas)
+    }
+
+    pub async fn folder_list(
+        &mut self,
+        area: &str,
+        path: Option<String>,
+    ) -> Result<Vec<rabbithole_proto::filelib::FileNodeView>, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::filelib::NodeList>(
+                &rabbithole_proto::filelib::FolderListRequest::new(area, path),
+            )
+            .await?
+            .nodes)
+    }
+
+    pub async fn node_get(
+        &mut self,
+        id: i64,
+    ) -> Result<rabbithole_proto::filelib::FileNodeView, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::filelib::NodeReply>(
+                &rabbithole_proto::filelib::NodeGet::new(id),
+            )
+            .await?
+            .node)
+    }
+
+    pub async fn area_create(
+        &mut self,
+        slug: &str,
+        title: &str,
+        description: &str,
+    ) -> Result<rabbithole_proto::filelib::FileAreaView, ClientError> {
+        let req =
+            rabbithole_proto::filelib::AreaCreate::new(slug, title).with_description(description);
+        Ok(self
+            .request::<_, rabbithole_proto::filelib::AreaReply>(&req)
+            .await?
+            .area)
+    }
+
+    pub async fn folder_create(
+        &mut self,
+        req: &rabbithole_proto::filelib::FolderCreate,
+    ) -> Result<rabbithole_proto::filelib::FileNodeView, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::filelib::NodeReply>(req)
+            .await?
+            .node)
+    }
+
+    pub async fn file_upload(
+        &mut self,
+        req: &rabbithole_proto::filelib::FileUpload,
+    ) -> Result<rabbithole_proto::filelib::FileNodeView, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::filelib::NodeReply>(req)
+            .await?
+            .node)
+    }
+
+    pub async fn file_download(
+        &mut self,
+        id: i64,
+    ) -> Result<rabbithole_proto::filelib::FileContent, ClientError> {
+        self.request(&rabbithole_proto::filelib::FileDownloadRequest::new(id))
+            .await
+    }
+
+    pub async fn node_delete(&mut self, id: i64) -> Result<(), ClientError> {
+        self.request_ack(&rabbithole_proto::filelib::NodeDelete::new(id))
+            .await
+    }
+
+    pub async fn set_file_metadata(
+        &mut self,
+        id: i64,
+        icon: &str,
+        comment: &str,
+    ) -> Result<rabbithole_proto::filelib::FileNodeView, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::filelib::NodeReply>(
+                &rabbithole_proto::filelib::SetMetadata::new(id, icon, comment),
+            )
+            .await?
+            .node)
+    }
+
+    pub async fn file_search(
+        &mut self,
+        area: Option<String>,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<rabbithole_proto::filelib::FileNodeView>, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::filelib::SearchResults>(
+                &rabbithole_proto::filelib::SearchRequest::new(area, query, limit),
+            )
+            .await?
+            .nodes)
+    }
+
+    pub async fn rate_file(
+        &mut self,
+        id: i64,
+        stars: u8,
+    ) -> Result<rabbithole_proto::filelib::FileNodeView, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::filelib::NodeReply>(
+                &rabbithole_proto::filelib::RateFile::new(id, stars),
+            )
+            .await?
+            .node)
+    }
+
+    pub async fn alias_create(
+        &mut self,
+        req: &rabbithole_proto::filelib::AliasCreate,
+    ) -> Result<rabbithole_proto::filelib::FileNodeView, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::filelib::NodeReply>(req)
+            .await?
+            .node)
+    }
+
     pub async fn totp_enroll(
         &mut self,
     ) -> Result<rabbithole_proto::persona::TotpEnrollInfo, ClientError> {

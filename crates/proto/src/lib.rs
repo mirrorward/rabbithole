@@ -29,6 +29,7 @@ pub mod codec;
 pub mod directory;
 pub mod dm;
 pub mod error;
+pub mod filelib;
 pub mod frame;
 pub mod hello;
 pub mod persona;

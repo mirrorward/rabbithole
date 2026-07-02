@@ -450,6 +450,10 @@ async fn handle_request(
     if crate::handlers7::handle(conn, frame, shared, ctx).await? {
         return Ok(());
     }
+    // Wave 4.1: file libraries ------------------------------------------------
+    if crate::handlers8::handle(conn, frame, shared, ctx).await? {
+        return Ok(());
+    }
 
     // Anything else: tolerated, answered, never fatal.
     conn.send(Frame::error_reply(frame, ErrorCode::Unsupported))
@@ -603,6 +607,7 @@ pub(crate) fn push_for_event(
             Frame::push(&pchat::RoomKicked::new(room.clone(), *banned)).ok()
         }
         ServerEvent::BoardPost { .. } => crate::handlers6::board_push(event),
+        ServerEvent::FileAdded { .. } => crate::handlers8::file_push(event),
         ServerEvent::WishUpdated { to_account, wish } => {
             if *to_account != viewer_account {
                 return None;

@@ -10,6 +10,7 @@ pub mod handlers4;
 pub mod handlers5;
 pub mod handlers6;
 pub mod handlers7;
+pub mod handlers8;
 pub mod identity_store;
 pub mod session;
 
@@ -24,8 +25,9 @@ use rabbithole_net::tls::CertFingerprint;
 use rabbithole_net::ws::WsListener;
 use rabbithole_net::Listener;
 use rabbithole_server_core::{
-    AuthService, BoardService, ChatService, ClassCache, DedupStore, EventBus, LiveConfig,
-    PermissionEvaluator, PresenceRegistry, PushLog, RegistrationMode, ServerConfig, ServerEvent,
+    AuthService, BoardService, ChatService, ClassCache, DedupStore, EventBus, FileService,
+    LiveConfig, PermissionEvaluator, PresenceRegistry, PushLog, RegistrationMode, ServerConfig,
+    ServerEvent,
 };
 use rabbithole_store_server::SqlitePool;
 
@@ -39,6 +41,7 @@ pub struct Shared {
     pub presence: PresenceRegistry,
     pub chat: ChatService,
     pub boards: BoardService,
+    pub files: FileService,
     pub pushlog: PushLog,
     pub classes: ClassCache,
     /// (sender_account, recipient_account) pairs already auto-responded
@@ -115,6 +118,7 @@ impl Burrow {
 
         let shared = Arc::new(Shared {
             chat: ChatService::new(bus.clone(), config.chat_max_len),
+            files: FileService::new(pool.clone()),
             boards,
             presence: PresenceRegistry::new(bus.clone()),
             config: LiveConfig::new(config),

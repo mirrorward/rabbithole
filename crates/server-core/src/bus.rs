@@ -90,6 +90,8 @@ pub enum ServerEvent {
         to_account: i64,
         wish: rabbithole_proto::wish::WishView,
     },
+    /// A file landed in a library (broadcast so listings/search stay live).
+    FileAdded { area: String, id: i64 },
     /// The server is shutting down; surfaces should drain gracefully.
     Shutdown,
 }
