@@ -12,13 +12,20 @@ use crate::dorinfo::write_dorinfo1;
 use crate::util::split_lines;
 
 /// The classic door drop-file formats this crate can produce.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Serializes as the lowercase conventional filename (`"door.sys"`,
+/// `"dorinfo1.def"`, `"door32.sys"`), which reads naturally in a TOML door
+/// definition: `dropfile = "door32.sys"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DropFile {
     /// GAP DOOR.SYS (52 lines).
+    #[serde(rename = "door.sys")]
     DoorSys,
     /// RBBS/QuickBBS DORINFO1.DEF.
+    #[serde(rename = "dorinfo1.def")]
     DorInfo1,
     /// Mystic/EleBBS DOOR32.SYS (11 lines).
+    #[serde(rename = "door32.sys")]
     Door32Sys,
 }
 
