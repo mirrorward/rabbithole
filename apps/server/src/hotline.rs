@@ -23,7 +23,22 @@
 //!   versa.
 //!
 //! Private instant messages (transaction 108) are routed directly between
-//! online Hotline clients through the per-server [`Hub`].
+//! online Hotline clients through the per-server [`Hub`], with the classic
+//! quoting field (214) relayed verbatim and the shared away auto-response:
+//! when every session of the target account is away/idle with a status
+//! message, the sender gets it back once per away period as a ServerMsg with
+//! the automatic-response option — the same rule (and the same re-arm set)
+//! the native DM path uses.
+//!
+//! **Private chat rooms** (transactions 112-120) ride the shared
+//! [`ChatService`] as ad-hoc private rooms, so a Hotline private chat *is* a
+//! RabbitHole room: InviteNewChat creates the room and invites the target
+//! (native targets get the native `RoomInvited` push; Hotline targets get the
+//! classic InviteToChat 113), JoinChat honours the room service's invite-only
+//! privacy and bans, chat text is SEND_CHAT with the CHAT_ID field routed to
+//! the room, and joins/leaves/subject changes push 117/118/119 to Hotline
+//! members. The 32-bit wire chat ids are a per-server projection of room
+//! names held in the [`Hub`].
 //!
 //! # Scope
 //!
@@ -62,8 +77,12 @@
 //! native admin family.
 //!
 //! Still deferred (tolerated with an empty success reply so probing clients
-//! keep working): HTXF **upload** and fork-offset **resume**, folder
-//! downloads, and private chat rooms.
+//! keep working): HTXF **upload** and fork-offset **resume**, and folder
+//! downloads. Private-chat pushes (117/118/119) reach Hotline members only:
+//! native members of the same room follow it through their own pushes, but a
+//! topic set natively is not (yet) echoed as a 119, and a member dropping
+//! its connection is announced by the global roster delete (302) rather than
+//! a per-chat 118.
 //! The listener is opt-in via config (`hotline_enabled`) and off by default.
 
 use std::collections::HashMap;
@@ -109,6 +128,10 @@ const SERVER_VERSION: u32 = 151;
 /// `Options` value marking a server message as a private instant message.
 const OPTIONS_IM: u32 = 1;
 
+/// `Options` value marking a server message as an automatic response (the
+/// away auto-reply echoed back to an IM sender).
+const OPTIONS_AUTO_RESPONSE: u32 = 4;
+
 /// Largest single frame body we will read off the wire before giving up on a
 /// connection (belt-and-suspenders; reassembly enforces the real body cap).
 const MAX_FRAME_BODY: usize = 16 * 1024 * 1024;
@@ -136,6 +159,13 @@ pub struct Hub {
     /// to the instant the ban expires. In-memory only (see [`TEMP_BAN`]);
     /// expired entries are pruned lazily on lookup.
     bans: Mutex<HashMap<String, Instant>>,
+    /// Private-chat wire id → shared room name. The classic protocol names a
+    /// private chat by a 32-bit id, the shared [`ChatService`] by room name;
+    /// this map is the per-server projection between the two. Entries are
+    /// dropped when the room reaps (see [`Hub::forget_chat`]).
+    chats: Mutex<HashMap<u32, String>>,
+    /// Monotonic chat-id source.
+    next_chat: AtomicU32,
 }
 
 /// A connected Hotline client's routing handle.
@@ -210,6 +240,47 @@ impl Hub {
     /// `"login:<lowercase login>"` or `"ip:<addr>"`.
     fn ban(&self, key: String) {
         self.bans.lock().insert(key, Instant::now() + TEMP_BAN);
+    }
+
+    /// Allocate a fresh private-chat wire id and its backing room name
+    /// (`"private chat <id>"`) and record the mapping. The caller creates the
+    /// actual room (and calls [`Hub::forget_chat`] if that fails).
+    fn new_chat(&self) -> (u32, String) {
+        let id = self
+            .next_chat
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let room = format!("private chat {id}");
+        self.chats.lock().insert(id, room.clone());
+        (id, room)
+    }
+
+    /// The wire chat id projecting `room`, allocating one on first sight
+    /// (e.g. a native-created private room a Hotline user is invited to).
+    fn chat_id_for_room(&self, room: &str) -> u32 {
+        let mut chats = self.chats.lock();
+        if let Some((id, _)) = chats
+            .iter()
+            .find(|(_, name)| name.eq_ignore_ascii_case(room))
+        {
+            return *id;
+        }
+        let id = self
+            .next_chat
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        chats.insert(id, room.to_string());
+        id
+    }
+
+    /// The room name behind a wire chat id, if the id is live.
+    fn room_for_chat(&self, id: u32) -> Option<String> {
+        self.chats.lock().get(&id).cloned()
+    }
+
+    /// Drop a chat-id mapping (its room reaped when the last member left).
+    fn forget_chat(&self, id: u32) {
+        self.chats.lock().remove(&id);
     }
 
     /// Whether `key` is currently banned; expired entries are pruned.
@@ -355,6 +426,10 @@ struct Active {
     icon: u16,
     /// Whether the agreement (if any) has been accepted.
     agreed: bool,
+    /// Whether this surface marked the session away because the client set an
+    /// automatic-response text (so clearing it goes back online without
+    /// clobbering an away state set elsewhere).
+    auto_away: bool,
 }
 
 /// The accept handler for one Hotline client.
@@ -512,6 +587,7 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
         screen_name,
         icon,
         agreed,
+        auto_away: false,
     };
 
     // 6. The active loop: client requests, bus deltas, and routed IMs.
@@ -539,7 +615,7 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
                             break;
                         }
                         Ok(event) => {
-                            if let Some(bytes) = project_event(&shared, &event) {
+                            if let Some(bytes) = project_event(&shared, &active, &event) {
                                 wr.write_all(&bytes).await?;
                             }
                         }
@@ -639,6 +715,27 @@ async fn handle_txn(
             shared
                 .presence
                 .rename(active.session_id, &active.screen_name);
+            // An automatic-response text (field 215) doubles as the shared
+            // away state: setting it marks this session away with that text
+            // as its status (so the native DM auto-response rule sees it
+            // too); clearing it comes back online and re-arms the
+            // once-per-away-period auto-responses, exactly like the native
+            // PresenceSet path.
+            if let Some(auto) = field_text(txn, field::AUTOMATIC_RESPONSE) {
+                let auto = auto.trim().to_string();
+                if !auto.is_empty() {
+                    active.auto_away = true;
+                    shared.presence.set_state(active.session_id, 1, Some(auto));
+                } else if active.auto_away {
+                    active.auto_away = false;
+                    shared.presence.set_state(active.session_id, 0, None);
+                    shared
+                        .auto_responded
+                        .lock()
+                        .expect("lock")
+                        .retain(|(_, to)| *to != active.subject.account_id);
+                }
+            }
         }
 
         transaction::GET_USER_NAME_LIST => {
@@ -665,16 +762,22 @@ async fn handle_txn(
         transaction::CHAT_SEND => {
             let text = field_text(txn, field::CHAT_TEXT).unwrap_or_default();
             let text = text.trim_end_matches(['\r', '\n']).to_string();
+            // A CHAT_ID field routes the line to that private room; without
+            // one (or with an unknown id) it is lobby chat as ever.
+            let room = field_int(txn, field::CHAT_ID)
+                .and_then(|cid| shared.hotline.room_for_chat(cid))
+                .unwrap_or_else(|| LOBBY.to_string());
             let permitted = active.agreed
                 && shared
                     .perms
-                    .allows(&active.subject, "chat/lobby", Caps::CHAT_SEND);
+                    .allows(&active.subject, &format!("chat/{room}"), Caps::CHAT_SEND);
             if permitted {
                 // The bus broadcast (ServerEvent::Chat) fans the line out to
-                // every subscriber — native, telnet, and Hotline alike.
+                // every subscriber — native, telnet, and Hotline alike; the
+                // room service enforces membership for private rooms.
                 let _ = shared
                     .chat
-                    .send(LOBBY, active.session_id, &active.screen_name, &text);
+                    .send(&room, active.session_id, &active.screen_name, &text);
             }
             // ChatSend is a notify in the classic protocol: no reply expected.
         }
@@ -682,17 +785,18 @@ async fn handle_txn(
         transaction::SEND_INSTANT_MSG => {
             let target = field_int(txn, field::USER_ID).unwrap_or(0);
             let text = field_text(txn, field::DATA).unwrap_or_default();
-            let msg = Transaction::request(
-                transaction::SERVER_MSG,
-                0,
-                vec![
-                    Field::int(field::USER_ID, active.user_id),
-                    Field::text(field::USER_NAME, &active.screen_name),
-                    Field::int(field::OPTIONS, OPTIONS_IM),
-                    Field::new(field::DATA, text.into_bytes()),
-                ],
-            )
-            .encode();
+            let mut fields = vec![
+                Field::int(field::USER_ID, active.user_id),
+                Field::text(field::USER_NAME, &active.screen_name),
+                Field::int(field::OPTIONS, OPTIONS_IM),
+                Field::new(field::DATA, text.into_bytes()),
+            ];
+            // 1.5+ clients quote the message they reply to (field 214);
+            // relay it verbatim so the target renders the quoted original.
+            if let Some(quote) = field_bytes(txn, field::QUOTING_MSG) {
+                fields.push(Field::new(field::QUOTING_MSG, quote.to_vec()));
+            }
+            let msg = Transaction::request(transaction::SERVER_MSG, 0, fields).encode();
             let delivered = shared.hotline.deliver(target, msg);
             let (err, fields) = if delivered {
                 (0, Vec::new())
@@ -707,7 +811,33 @@ async fn handle_txn(
                     .encode(),
             )
             .await?;
+            // Away auto-response (once per sender→recipient away period) —
+            // the same rule and re-arm set as the native DM path.
+            if delivered {
+                if let Some(bytes) = im_auto_response(shared, active, target) {
+                    wr.write_all(&bytes).await?;
+                }
+            }
         }
+
+        // ---- Private chat rooms (112-120), on the shared rooms service ----
+        transaction::INVITE_NEW_CHAT => {
+            wr.write_all(&invite_new_chat(shared, active, txn).encode())
+                .await?;
+        }
+        transaction::INVITE_TO_CHAT => {
+            wr.write_all(&invite_to_chat(shared, active, txn).encode())
+                .await?;
+        }
+        transaction::JOIN_CHAT => {
+            wr.write_all(&join_chat(shared, active, txn).encode())
+                .await?;
+        }
+        // The remaining private-chat requests are notifies (no reply
+        // expected); their side effects fan out through the Hub.
+        transaction::REJECT_CHAT_INVITE => reject_chat_invite(shared, active, txn),
+        transaction::LEAVE_CHAT => leave_chat(shared, active, txn),
+        transaction::SET_CHAT_SUBJECT => set_chat_subject(shared, active, txn),
 
         // ---- Threaded news (boards subsystem) ----------------------------
         transaction::GET_NEWS_CAT_NAME_LIST => {
@@ -781,7 +911,7 @@ async fn handle_txn(
                 .await?;
         }
 
-        // Deferred transaction families (uploads/folder-download/private-chat):
+        // Deferred transaction families (uploads/folder-download):
         // reply with a bare success so a probing client keeps working.
         _ => {
             wr.write_all(&empty_reply(txn.header.type_, txn.header.id))
@@ -789,6 +919,314 @@ async fn handle_txn(
         }
     }
     Ok(())
+}
+
+// ========================================================================
+// Private chat rooms (112-120), mapped onto the shared chat service
+// ========================================================================
+//
+// A Hotline private chat is an ad-hoc **private room** in the shared
+// [`ChatService`], so native/telnet members share the very same room: the
+// invite-only privacy, ban list, and creator-or-moderator topic gate all come
+// from the service. The wire's 32-bit chat ids are projected onto room names
+// by the [`Hub`] (`new_chat` / `chat_id_for_room` / `room_for_chat`).
+//
+// Push scope: 117/118/119 (join/leave/subject) and the decline notice are
+// fanned out to the room's **Hotline** member sessions via the Hub — native
+// members learn the same facts through their own protocol. Invites ride the
+// shared `RoomInvited` bus event, so Hotline↔native invitations work in both
+// directions (a native invitee gets the native push, a Hotline invitee the
+// classic InviteToChat 113). One classic nicety is narrowed: only the room's
+// creator (or a chat moderator) may set the subject — the rooms service's
+// permission model — where vintage servers let any member.
+
+/// Resolve the room behind a request's CHAT_ID field.
+fn chat_room(shared: &Shared, txn: &Transaction) -> Option<(u32, String)> {
+    let cid = field_int(txn, field::CHAT_ID)?;
+    shared.hotline.room_for_chat(cid).map(|room| (cid, room))
+}
+
+/// The presence entry behind a wire user id (a session id's low 32 bits).
+fn entry_by_uid(shared: &Shared, uid: u32) -> Option<PresenceEntry> {
+    shared
+        .presence
+        .snapshot()
+        .into_iter()
+        .find(|e| e.session_id as u32 == uid)
+}
+
+/// Fan a pre-encoded push out to a room's Hotline member sessions,
+/// optionally skipping one (typically the actor, who got a reply instead).
+fn push_to_room(shared: &Shared, room: &str, skip: Option<u64>, bytes: &[u8]) {
+    for (sid, _) in shared.chat.member_sessions(room) {
+        if Some(sid) == skip {
+            continue;
+        }
+        shared.hotline.deliver(sid as u32, bytes.to_vec());
+    }
+}
+
+/// The classic reply to a successful invite request: the chat id plus the
+/// inviter's own identity record.
+fn invite_reply(ty: u16, id: u32, chat_id: u32, active: &Active) -> Transaction {
+    Transaction::reply(
+        ty,
+        id,
+        0,
+        vec![
+            Field::int(field::CHAT_ID, chat_id),
+            Field::int(field::USER_ID, active.user_id),
+            Field::text(field::USER_NAME, &active.screen_name),
+            Field::int(field::USER_ICON_ID, u32::from(active.icon)),
+            Field::int(field::USER_FLAGS, 0),
+        ],
+    )
+}
+
+/// InviteNewChat (112): create a private room and invite one user into it.
+/// The creator is its first member; the invite is pushed over the shared bus
+/// (native targets get `RoomInvited`, Hotline targets the classic 113).
+fn invite_new_chat(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
+    let ty = transaction::INVITE_NEW_CHAT;
+    let id = txn.header.id;
+    if !active.agreed
+        || !shared
+            .perms
+            .allows(&active.subject, "chat", Caps::CHAT_CREATE_ROOM)
+    {
+        return err_reply(ty, id, "not permitted");
+    }
+    let target = field_int(txn, field::USER_ID).unwrap_or(0);
+    let Some(target_entry) = entry_by_uid(shared, target) else {
+        return err_reply(ty, id, "no such user");
+    };
+    let (chat_id, room) = shared.hotline.new_chat();
+    if let Err(e) = shared.chat.create(
+        &room,
+        "Private",
+        "",
+        true,
+        active.subject.account_id,
+        &active.screen_name,
+        active.session_id,
+    ) {
+        shared.hotline.forget_chat(chat_id);
+        return err_reply(ty, id, &format!("{e}"));
+    }
+    let _ = shared
+        .chat
+        .invite(&room, active.session_id, target_entry.account_id);
+    shared.bus.publish(ServerEvent::RoomInvited {
+        to_account: target_entry.account_id,
+        room,
+        from: active.screen_name.clone(),
+    });
+    invite_reply(ty, id, chat_id, active)
+}
+
+/// InviteToChat (113): invite another user into an existing private chat.
+/// The rooms service requires the inviter to be a member.
+fn invite_to_chat(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
+    let ty = transaction::INVITE_TO_CHAT;
+    let id = txn.header.id;
+    if !active.agreed {
+        return err_reply(ty, id, "not permitted");
+    }
+    let Some((chat_id, room)) = chat_room(shared, txn) else {
+        return err_reply(ty, id, "no such chat");
+    };
+    let target = field_int(txn, field::USER_ID).unwrap_or(0);
+    let Some(target_entry) = entry_by_uid(shared, target) else {
+        return err_reply(ty, id, "no such user");
+    };
+    match shared
+        .chat
+        .invite(&room, active.session_id, target_entry.account_id)
+    {
+        Ok(()) => {
+            shared.bus.publish(ServerEvent::RoomInvited {
+                to_account: target_entry.account_id,
+                room,
+                from: active.screen_name.clone(),
+            });
+            invite_reply(ty, id, chat_id, active)
+        }
+        Err(e) => err_reply(ty, id, &format!("{e}")),
+    }
+}
+
+/// RejectChatInvite (114, no reply): tell the chat's members the invitee
+/// declined, as the classic italicized chat notice.
+fn reject_chat_invite(shared: &Arc<Shared>, active: &Active, txn: &Transaction) {
+    let Some((chat_id, room)) = chat_room(shared, txn) else {
+        return;
+    };
+    let notice = format!(
+        "\r*** {} declined the invitation to chat",
+        active.screen_name
+    );
+    let bytes = Transaction::request(
+        transaction::CHAT_MSG,
+        0,
+        vec![
+            Field::int(field::CHAT_ID, chat_id),
+            Field::new(field::CHAT_TEXT, notice.into_bytes()),
+        ],
+    )
+    .encode();
+    push_to_room(shared, &room, None, &bytes);
+}
+
+/// JoinChat (115): join a private chat (the rooms service enforces the
+/// invite-only privacy and ban list). Existing Hotline members get the 117
+/// join push; the reply carries the subject and the member list.
+fn join_chat(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
+    let ty = transaction::JOIN_CHAT;
+    let id = txn.header.id;
+    if !active.agreed {
+        return err_reply(ty, id, "not permitted");
+    }
+    let Some((chat_id, room)) = chat_room(shared, txn) else {
+        return err_reply(ty, id, "no such chat");
+    };
+    let summary = match shared.chat.join(
+        &room,
+        active.session_id,
+        active.subject.account_id,
+        &active.screen_name,
+    ) {
+        Ok(s) => s,
+        Err(e) => return err_reply(ty, id, &format!("{e}")),
+    };
+    let joined = Transaction::request(
+        transaction::NOTIFY_CHAT_CHANGE_USER,
+        0,
+        vec![
+            Field::int(field::CHAT_ID, chat_id),
+            Field::int(field::USER_ID, active.user_id),
+            Field::int(field::USER_ICON_ID, u32::from(active.icon)),
+            Field::int(field::USER_FLAGS, 0),
+            Field::text(field::USER_NAME, &active.screen_name),
+        ],
+    )
+    .encode();
+    push_to_room(shared, &room, Some(active.session_id), &joined);
+    let mut fields = vec![Field::text(field::CHAT_SUBJECT, &summary.topic)];
+    for (sid, name) in shared.chat.member_sessions(&room) {
+        let uid = sid as u32;
+        let state = shared.presence.get(sid).map(|e| e.state).unwrap_or(0);
+        fields.push(Field::new(
+            FIELD_USER_NAME_WITH_INFO,
+            pack_user(
+                uid,
+                shared.hotline.icon_for(uid),
+                flags_for_state(state),
+                &name,
+            ),
+        ));
+    }
+    Transaction::reply(ty, id, 0, fields)
+}
+
+/// LeaveChat (116, no reply): drop membership; remaining Hotline members get
+/// the 118 leave push. When the last member leaves, the rooms service reaps
+/// the room and the wire chat id is forgotten.
+fn leave_chat(shared: &Arc<Shared>, active: &Active, txn: &Transaction) {
+    let Some((chat_id, room)) = chat_room(shared, txn) else {
+        return;
+    };
+    if shared.chat.leave(&room, active.session_id).is_err() {
+        return;
+    }
+    let remaining = shared.chat.member_sessions(&room);
+    if remaining.is_empty() {
+        shared.hotline.forget_chat(chat_id);
+        return;
+    }
+    let bytes = Transaction::request(
+        transaction::NOTIFY_CHAT_DELETE_USER,
+        0,
+        vec![
+            Field::int(field::CHAT_ID, chat_id),
+            Field::int(field::USER_ID, active.user_id),
+        ],
+    )
+    .encode();
+    for (sid, _) in remaining {
+        shared.hotline.deliver(sid as u32, bytes.clone());
+    }
+}
+
+/// SetChatSubject (120, no reply): update the room topic (creator or chat
+/// moderator, per the rooms service), then push the 119 subject notify to
+/// every Hotline member — the setter included, as classic servers do.
+fn set_chat_subject(shared: &Arc<Shared>, active: &Active, txn: &Transaction) {
+    let Some((chat_id, room)) = chat_room(shared, txn) else {
+        return;
+    };
+    let subject = field_text(txn, field::CHAT_SUBJECT).unwrap_or_default();
+    let is_moderator = shared
+        .perms
+        .allows(&active.subject, "chat", Caps::CHAT_MODERATE);
+    if shared
+        .chat
+        .set_topic(&room, &subject, active.subject.account_id, is_moderator)
+        .is_err()
+    {
+        return; // not the creator/moderator; 120 has no error channel
+    }
+    let bytes = Transaction::request(
+        transaction::NOTIFY_CHAT_SUBJECT,
+        0,
+        vec![
+            Field::int(field::CHAT_ID, chat_id),
+            Field::text(field::CHAT_SUBJECT, subject.trim()),
+        ],
+    )
+    .encode();
+    push_to_room(shared, &room, None, &bytes);
+}
+
+/// The away auto-response for an instant message, if one is due: when every
+/// session of the target account is away/idle and one carries a status
+/// message, the sender gets it back once per away period as a ServerMsg with
+/// the automatic-response option. Mirrors `maybe_auto_respond` on the native
+/// DM path, sharing the same re-arm set (`Shared::auto_responded`); unlike a
+/// native DM the response is not stored durably, because Hotline IMs are
+/// themselves ephemeral.
+fn im_auto_response(shared: &Arc<Shared>, active: &Active, target_uid: u32) -> Option<Vec<u8>> {
+    let target = entry_by_uid(shared, target_uid)?;
+    let sessions: Vec<PresenceEntry> = shared
+        .presence
+        .snapshot()
+        .into_iter()
+        .filter(|e| e.account_id == target.account_id)
+        .collect();
+    let away_status = sessions
+        .iter()
+        .filter(|e| e.state == 1 || e.state == 2)
+        .find_map(|e| e.status.clone());
+    let all_away = !sessions.is_empty() && sessions.iter().all(|e| e.state == 1 || e.state == 2);
+    let status = away_status.filter(|_| all_away)?;
+    {
+        let mut seen = shared.auto_responded.lock().expect("lock");
+        if !seen.insert((active.subject.account_id, target.account_id)) {
+            return None; // already auto-responded this away period
+        }
+    }
+    Some(
+        Transaction::request(
+            transaction::SERVER_MSG,
+            0,
+            vec![
+                Field::int(field::USER_ID, target_uid),
+                Field::text(field::USER_NAME, &target.screen_name),
+                Field::int(field::OPTIONS, OPTIONS_AUTO_RESPONSE),
+                Field::new(field::DATA, status.into_bytes()),
+            ],
+        )
+        .encode(),
+    )
 }
 
 // ========================================================================
@@ -2067,20 +2505,70 @@ fn user_broadcast(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> T
 /// Project a server event into a Hotline push for this client, if relevant.
 ///
 /// A client seeing its own roster/chat delta is harmless in the classic
-/// protocol, so no self-filtering is applied here.
-fn project_event(shared: &Shared, event: &ServerEvent) -> Option<Vec<u8>> {
+/// protocol, so no self-filtering is applied here (private-room chat and
+/// invites are filtered by membership/recipient, of course).
+fn project_event(shared: &Shared, active: &Active, event: &ServerEvent) -> Option<Vec<u8>> {
     match event {
         ServerEvent::Chat { room, from, text } => {
-            if !room.eq_ignore_ascii_case(LOBBY) {
-                return None;
-            }
             // Classic chat lines are a single formatted string: "\r nick:  msg".
             let line = format!("\r{from}:  {text}");
+            let mut fields = Vec::with_capacity(2);
+            if !room.eq_ignore_ascii_case(LOBBY) {
+                // Room chat goes to members only, tagged with the wire chat id
+                // so the client routes it to the right private-chat window.
+                if !shared.chat.is_member(room, active.session_id) {
+                    return None;
+                }
+                fields.push(Field::int(
+                    field::CHAT_ID,
+                    shared.hotline.chat_id_for_room(room),
+                ));
+            }
+            fields.push(Field::new(field::CHAT_TEXT, line.into_bytes()));
+            Some(Transaction::request(transaction::CHAT_MSG, 0, fields).encode())
+        }
+        // A room invitation for this account (sent by a Hotline or native
+        // member alike): the classic InviteToChat push.
+        ServerEvent::RoomInvited {
+            to_account,
+            room,
+            from,
+        } => {
+            if *to_account != active.subject.account_id {
+                return None;
+            }
+            let from_uid = shared
+                .presence
+                .is_screen_name_online(from)
+                .map(|e| e.session_id as u32)
+                .unwrap_or(0);
             Some(
                 Transaction::request(
-                    transaction::CHAT_MSG,
+                    transaction::INVITE_TO_CHAT,
                     0,
-                    vec![Field::new(field::CHAT_TEXT, line.into_bytes())],
+                    vec![
+                        Field::int(field::CHAT_ID, shared.hotline.chat_id_for_room(room)),
+                        Field::int(field::USER_ID, from_uid),
+                        Field::text(field::USER_NAME, from),
+                    ],
+                )
+                .encode(),
+            )
+        }
+        // Kicked out of a room (native RoomKick): the classic delete-user
+        // push with our own id tells the client it left that chat.
+        ServerEvent::RoomKicked { account, room, .. } => {
+            if *account != active.subject.account_id {
+                return None;
+            }
+            Some(
+                Transaction::request(
+                    transaction::NOTIFY_CHAT_DELETE_USER,
+                    0,
+                    vec![
+                        Field::int(field::CHAT_ID, shared.hotline.chat_id_for_room(room)),
+                        Field::int(field::USER_ID, active.user_id),
+                    ],
                 )
                 .encode(),
             )

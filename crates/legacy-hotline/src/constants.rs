@@ -124,6 +124,16 @@ pub mod field {
     /// Count of items in a folder (220), integer.
     pub const FOLDER_ITEM_COUNT: u16 = 220;
 
+    /// Quoted original message (214), text — 1.5+ clients attach the text
+    /// being replied to when sending an instant message (108); the server
+    /// relays it verbatim in the ServerMsg (104) push.
+    pub const QUOTING_MSG: u16 = 214;
+
+    /// Automatic-response text (215), text — set via SetClientUserInfo (304);
+    /// a non-empty value marks the user away and is echoed back to anyone who
+    /// IMs them (an empty value clears it).
+    pub const AUTOMATIC_RESPONSE: u16 = 215;
+
     // ---- News (321-337) --------------------------------------------------
 
     /// Threaded-news article-list blob (321): the flattened list of a
@@ -371,6 +381,11 @@ mod tests {
         assert_eq!(field::USER_ACCESS, 110);
         assert_eq!(field::USER_FLAGS, 112);
         assert_eq!(field::OPTIONS, 113);
+        // Private-chat + IM field ids (added with the W7.6 private-chat slice).
+        assert_eq!(field::CHAT_ID, 114);
+        assert_eq!(field::CHAT_SUBJECT, 115);
+        assert_eq!(field::QUOTING_MSG, 214);
+        assert_eq!(field::AUTOMATIC_RESPONSE, 215);
     }
 
     #[test]
@@ -396,5 +411,15 @@ mod tests {
         assert_eq!(transaction::SET_USER, 353);
         assert_eq!(transaction::USER_ACCESS, 354);
         assert_eq!(transaction::USER_BROADCAST, 355);
+        // Private-chat transaction types (added with the W7.6 slice).
+        assert_eq!(transaction::INVITE_NEW_CHAT, 112);
+        assert_eq!(transaction::INVITE_TO_CHAT, 113);
+        assert_eq!(transaction::REJECT_CHAT_INVITE, 114);
+        assert_eq!(transaction::JOIN_CHAT, 115);
+        assert_eq!(transaction::LEAVE_CHAT, 116);
+        assert_eq!(transaction::NOTIFY_CHAT_CHANGE_USER, 117);
+        assert_eq!(transaction::NOTIFY_CHAT_DELETE_USER, 118);
+        assert_eq!(transaction::NOTIFY_CHAT_SUBJECT, 119);
+        assert_eq!(transaction::SET_CHAT_SUBJECT, 120);
     }
 }

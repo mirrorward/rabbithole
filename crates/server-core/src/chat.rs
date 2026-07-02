@@ -321,6 +321,22 @@ impl ChatService {
         Ok(kicked)
     }
 
+    /// `(session_id, screen_name)` pairs of a room's members, sorted by
+    /// session id — used by protocol bridges (e.g. the Hotline surface) to
+    /// fan pushes out to member sessions. Empty when the room doesn't exist.
+    /// This is an internal fan-out helper: callers gate visibility themselves
+    /// (the public member listing is [`members`](Self::members)).
+    pub fn member_sessions(&self, name: &str) -> Vec<(u64, String)> {
+        let rooms = self.rooms.read();
+        let Some(room) = rooms.get(&key(name)) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(u64, String)> =
+            room.members.iter().map(|(s, n)| (*s, n.clone())).collect();
+        out.sort_by_key(|(s, _)| *s);
+        out
+    }
+
     pub fn members(&self, name: &str, viewer_session: u64) -> Result<Vec<String>, ChatError> {
         let rooms = self.rooms.read();
         let room = rooms
@@ -447,6 +463,12 @@ mod tests {
         // Case-insensitive join.
         chat.join("TEA PARTY", 2, 20, "bob").unwrap();
         assert_eq!(chat.members("Tea Party", 1).unwrap(), vec!["alice", "bob"]);
+        // The fan-out helper pairs each member session with its name.
+        assert_eq!(
+            chat.member_sessions("tea party"),
+            vec![(1, "alice".to_string()), (2, "bob".to_string())]
+        );
+        assert!(chat.member_sessions("nowhere").is_empty());
         chat.send("Tea Party", 2, "bob", "more tea").unwrap();
 
         // Non-persistent room reaps when empty.
