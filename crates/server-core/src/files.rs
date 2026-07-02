@@ -260,6 +260,42 @@ impl FileService {
         Ok(())
     }
 
+    /// Every file at or below `folder_path` (recursively), each paired with
+    /// its path relative to `folder_path` — the input to a pipelined folder
+    /// transfer. Drop-box subfolders are not descended (their contents stay
+    /// hidden); aliases are skipped.
+    pub async fn manifest(
+        &self,
+        area_slug: &str,
+        folder_path: Option<&str>,
+    ) -> Result<Vec<(FileNodeRow, String)>, FileError> {
+        let area = self.area(area_slug).await?;
+        let start = self.resolve_parent(&area, folder_path).await?;
+        let base = folder_path.unwrap_or("").to_string();
+        let mut out = Vec::new();
+        let mut stack = vec![start];
+        while let Some(parent_id) = stack.pop() {
+            for node in self.repo().children(area.id, parent_id).await? {
+                match node.kind {
+                    KIND_FOLDER if !node.is_dropbox => stack.push(Some(node.id)),
+                    KIND_FILE => {
+                        let rel = match base.is_empty() {
+                            true => node.path.clone(),
+                            false => node
+                                .path
+                                .strip_prefix(&format!("{base}/"))
+                                .unwrap_or(&node.path)
+                                .to_string(),
+                        };
+                        out.push((node, rel));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn set_metadata(
         &self,
         id: i64,

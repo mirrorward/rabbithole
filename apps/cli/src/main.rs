@@ -145,6 +145,13 @@ enum FileAction {
     },
     /// Download a file by id to a local path.
     Get { id: i64, local: PathBuf },
+    /// Download a whole folder subtree into a local directory.
+    Getdir {
+        area: String,
+        dest: PathBuf,
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// Show a node's metadata.
     Info { id: i64 },
     /// Delete a node.
@@ -633,6 +640,10 @@ async fn cmd_file(json: bool, action: FileAction) -> Result<()> {
                 } else {
                     println!("uploaded {} ({} bytes) as #{}", n.path, n.size, n.id);
                 }
+            }
+            FileAction::Getdir { area, dest, path } => {
+                let count = c.folder_download(&area, path, &dest).await?;
+                println!("downloaded {} files → {}", count, dest.display());
             }
             FileAction::Get { id, local } => {
                 let n = c.transfer_download(id, &local).await?;

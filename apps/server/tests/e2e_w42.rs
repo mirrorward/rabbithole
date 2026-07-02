@@ -102,6 +102,63 @@ async fn upload_download_roundtrip_and_resume() {
 }
 
 #[tokio::test]
+async fn folder_download_pipelines_a_subtree() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("admin", "pw-pw-pw", Role::Admin)
+        .await
+        .unwrap();
+    let mut admin = login(&burrow, "admin").await;
+
+    // Build a tree: docs/ , docs/sub/ with a file in each.
+    admin.area_create("docs", "Docs", "").await.unwrap();
+    admin
+        .folder_create(&FolderCreate::new("docs", None, "sub"))
+        .await
+        .unwrap();
+
+    let a = work.path().join("a.bin");
+    std::fs::write(&a, payload(300 * 1024)).unwrap();
+    admin
+        .transfer_upload("docs", None, "a.bin", &a, "application/octet-stream", "")
+        .await
+        .unwrap();
+    let b = work.path().join("b.bin");
+    std::fs::write(&b, payload(400 * 1024)).unwrap();
+    admin
+        .transfer_upload(
+            "docs",
+            Some("sub".into()),
+            "b.bin",
+            &b,
+            "application/octet-stream",
+            "",
+        )
+        .await
+        .unwrap();
+
+    // Download the whole area into a local dir, preserving structure.
+    let dest = work.path().join("pulled");
+    let count = admin.folder_download("docs", None, &dest).await.unwrap();
+    assert_eq!(count, 2, "both files fetched in one manifest round trip");
+    assert_eq!(
+        std::fs::read(dest.join("a.bin")).unwrap(),
+        payload(300 * 1024)
+    );
+    assert_eq!(
+        std::fs::read(dest.join("sub").join("b.bin")).unwrap(),
+        payload(400 * 1024)
+    );
+
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
 async fn upload_requires_permission_and_verifies_hash() {
     let work = tempfile::tempdir().unwrap();
     let burrow = Burrow::start(test_config(&work.path().join("srv")))

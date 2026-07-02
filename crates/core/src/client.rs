@@ -895,6 +895,34 @@ impl Client {
         Ok(reply.node)
     }
 
+    /// Download a whole folder subtree into `dest_dir`, preserving structure.
+    /// One manifest round trip, then each file transfers (and resumes)
+    /// independently. Returns the number of files fetched.
+    pub async fn folder_download(
+        &mut self,
+        area: &str,
+        path: Option<String>,
+        dest_dir: &std::path::Path,
+    ) -> Result<usize, ClientError> {
+        let manifest: rabbithole_proto::transfer::FolderManifest = self
+            .request(&rabbithole_proto::transfer::FolderManifestRequest::new(
+                area, path,
+            ))
+            .await?;
+        for entry in &manifest.entries {
+            // Build the destination path component-wise (rel_path uses '/').
+            let mut dest = dest_dir.to_path_buf();
+            for comp in entry.rel_path.split('/').filter(|c| !c.is_empty()) {
+                dest.push(comp);
+            }
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            self.transfer_download(entry.node_id, &dest).await?;
+        }
+        Ok(manifest.entries.len())
+    }
+
     pub async fn close(&mut self) {
         self.conn.close().await;
     }

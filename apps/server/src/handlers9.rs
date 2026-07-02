@@ -7,8 +7,10 @@
 //! [`pt::FileChunkPut`] for uploads). Everything is resumable — a download
 //! resumes from the client's local offset, an upload from the server's
 //! verified staged prefix — and every finished file is checked against its
-//! blake3 root (== blob id). Dedicated QUIC bulk streams and folder-manifest
-//! pipelining build on these same messages next.
+//! blake3 root (== blob id). Folder transfers pipeline over a single
+//! [`pt::FolderManifest`] round trip. Dedicated QUIC bulk streams (the
+//! [`rabbithole_net::BulkStreams`] seam) are the transparent optimization
+//! that builds on these same messages next.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -402,6 +404,32 @@ pub async fn handle(
             let _ = tokio::fs::remove_file(p).await;
         }
         conn.send(Frame::ack(frame)).await?;
+        return Ok(true);
+    }
+
+    // ---- Folder manifest (pipelined transfers) ---------------------------
+    if let Some(Ok(req)) = frame.decode::<pt::FolderManifestRequest>() {
+        if !ctx.allows(
+            shared,
+            &resource(&req.area, req.path.as_deref()),
+            Caps::FILE_LIST,
+        ) {
+            fail!(ErrorCode::Forbidden);
+        }
+        let files = match shared.files.manifest(&req.area, req.path.as_deref()).await {
+            Ok(f) => f,
+            Err(_) => fail!(ErrorCode::NotFound),
+        };
+        let entries = files
+            .iter()
+            .filter_map(|(n, rel)| {
+                n.blob_id.map(|b| {
+                    pt::ManifestEntry::new(n.id, rel.clone(), b, n.size.max(0) as u64)
+                        .with_mime(n.mime.clone())
+                })
+            })
+            .collect();
+        reply!(&pt::FolderManifest::new(entries));
         return Ok(true);
     }
 

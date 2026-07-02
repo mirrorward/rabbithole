@@ -80,7 +80,7 @@
 - [x] Aliases; **drop boxes** (write-only, privilege-gated viewing); hide-vs-deny folder ACLs
 - [x] Background file indexer → instant search (projection-backed substring search; FTS5 later)
 - [x] Transfer engine: ticketed resumable transfer over both transports (QUIC bulk-stream primitive + WS ranged chunks), whole-file blake3 verify; per-chunk Bao verify shares the W5 swarm crate
-- [ ] Folder transfers (pipelined, no per-item lockstep) — FolderManifest message defined; scheduler pending
+- [x] Folder transfers (pipelined, no per-item lockstep) — one FolderManifest round trip, then independent per-file transfers (`rabbit file getdir`)
 - [ ] Quotas + per-class rate policy
 - [ ] Persistent client transfer queue: priorities, bandwidth caps, schedules, auto-resume across restarts
 - [x] CLI file browse + transfer UX (`rabbit file areas/ls/put/get/search/rate/…`); TUI + big-file transfers with W4.2
