@@ -130,14 +130,14 @@ fn author_seed(shared: &Shared, account_id: i64) -> [u8; 32] {
 }
 
 /// The stable Message-ID for a post: `<{hex(event_id)}@{origin}>`.
-fn message_id_for(event_id: &[u8; 32], origin: &str) -> MessageId {
+pub(crate) fn message_id_for(event_id: &[u8; 32], origin: &str) -> MessageId {
     // hex of 32 bytes + a sane origin is always well within the 250-octet
     // limit and printable US-ASCII, so construction cannot fail.
     MessageId::new(format!("<{}@{origin}>", hex::encode(event_id))).expect("valid message-id")
 }
 
 /// Recover a post's event id from a Message-ID by hex-decoding the local part.
-fn event_id_from_message_id(mid: &MessageId) -> Option<[u8; 32]> {
+pub(crate) fn event_id_from_message_id(mid: &MessageId) -> Option<[u8; 32]> {
     let inner = mid.as_str().trim_start_matches('<').trim_end_matches('>');
     let local = inner.split('@').next()?;
     let bytes = hex::decode(local).ok()?;
@@ -145,7 +145,7 @@ fn event_id_from_message_id(mid: &MessageId) -> Option<[u8; 32]> {
 }
 
 /// Every post in a board, numbered `1..=N` by `(created_at, event_id)`.
-async fn group_articles(shared: &Shared, slug: &str) -> Result<Vec<PostRow>> {
+pub(crate) async fn group_articles(shared: &Shared, slug: &str) -> Result<Vec<PostRow>> {
     let roots = shared
         .boards
         .threads(slug, 100_000)
@@ -1006,14 +1006,16 @@ where
 }
 
 /// A minimally-parsed inbound netnews article: headers until the first blank
-/// line, everything after is the body.
-struct ParsedArticle {
+/// line, everything after is the body. Shared with the peer-feed listener
+/// ([`crate::nntp_feed`]), which receives the same wire shape via `IHAVE`/
+/// `TAKETHIS`.
+pub(crate) struct ParsedArticle {
     headers: Vec<(String, String)>,
     body: Vec<String>,
 }
 
 impl ParsedArticle {
-    fn from_lines(lines: &[String]) -> ParsedArticle {
+    pub(crate) fn from_lines(lines: &[String]) -> ParsedArticle {
         let mut headers = Vec::new();
         let mut idx = 0;
         while idx < lines.len() {
@@ -1030,34 +1032,34 @@ impl ParsedArticle {
         ParsedArticle { headers, body }
     }
 
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, v)| v.as_str())
     }
 
-    fn subject(&self) -> Option<String> {
+    pub(crate) fn subject(&self) -> Option<String> {
         self.header("subject")
             .map(str::to_string)
             .filter(|s| !s.trim().is_empty())
     }
 
     /// The first newsgroup named in the `Newsgroups` header (a board slug).
-    fn newsgroup(&self) -> Option<String> {
+    pub(crate) fn newsgroup(&self) -> Option<String> {
         self.header("newsgroups")
             .and_then(|v| v.split(',').next())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
     }
 
-    fn references(&self) -> Vec<String> {
+    pub(crate) fn references(&self) -> Vec<String> {
         self.header("references")
             .map(|v| v.split_whitespace().map(str::to_string).collect())
             .unwrap_or_default()
     }
 
-    fn body(&self) -> String {
+    pub(crate) fn body(&self) -> String {
         self.body.join("\n")
     }
 }

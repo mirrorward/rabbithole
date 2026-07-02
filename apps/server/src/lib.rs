@@ -21,6 +21,7 @@ pub mod hotline;
 pub mod identity_store;
 pub mod legacy;
 pub mod nntp;
+pub mod nntp_feed;
 pub mod radio;
 pub mod session;
 pub mod syndication;
@@ -116,6 +117,9 @@ pub struct Burrow {
     pub finger_addr: Option<SocketAddr>,
     /// Bound NNTP address when `nntp_enabled` (else `None`).
     pub nntp_addr: Option<SocketAddr>,
+    /// Bound NNTP peer-feed (transit) address when `nntp_feed_enabled`
+    /// (else `None`).
+    pub nntp_feed_addr: Option<SocketAddr>,
     /// Bound radio (ICY) delivery address when `radio_enabled` (else `None`).
     pub radio_addr: Option<SocketAddr>,
     /// Bound radio DJ source-ingest address when `radio_source_enabled`
@@ -164,6 +168,7 @@ impl Burrow {
         let telnet = config.telnet_enabled.then_some(config.telnet_addr);
         let finger = config.finger_enabled.then_some(config.finger_addr);
         let nntp = config.nntp_enabled.then_some(config.nntp_addr);
+        let nntp_feed = config.nntp_feed_enabled.then_some(config.nntp_feed_addr);
         let radio = config.radio_enabled.then_some(config.radio_addr);
         let radio_source = config
             .radio_source_enabled
@@ -266,6 +271,13 @@ impl Burrow {
             nntp_addr = Some(bound);
             tasks.push(handle);
         }
+        let mut nntp_feed_addr = None;
+        if let Some(addr) = nntp_feed {
+            let (bound, handle) = nntp_feed::spawn_nntp_feed(shared.clone(), addr).await?;
+            tracing::info!(nntp_feed = %bound, "NNTP peer-feed (transit) listening");
+            nntp_feed_addr = Some(bound);
+            tasks.push(handle);
+        }
         let mut radio_addr = None;
         if let Some(addr) = radio {
             let (bound, handle) = radio::spawn_radio(shared.clone(), addr).await?;
@@ -325,6 +337,7 @@ impl Burrow {
             telnet_addr,
             finger_addr,
             nntp_addr,
+            nntp_feed_addr,
             radio_addr,
             radio_source_addr,
             hotline_addr,

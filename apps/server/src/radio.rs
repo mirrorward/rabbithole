@@ -46,8 +46,10 @@ use anyhow::{bail, Result};
 use parking_lot::Mutex;
 use rabbithole_audio::{NowPlaying, Station};
 use rabbithole_legacy_icecast::{
-    build_listener_response, parse_listener_request, parse_source_request, source_forbidden,
-    source_ok, source_unauthorized, IcyMetaInterleaver, StationMeta, DEFAULT_METAINT,
+    build_listener_response, metadata_update_failed, metadata_update_ok,
+    metadata_update_unauthorized, parse_listener_request, parse_metadata_update,
+    parse_source_request, source_forbidden, source_ok, source_unauthorized, IcyMetaInterleaver,
+    MetadataUpdate, StationMeta, DEFAULT_METAINT,
 };
 use rabbithole_radio::{
     BlobId, Playlist, RotationMode, StationConfig, StationController, StationRegistry, Track,
@@ -295,6 +297,59 @@ impl Stations {
         let mut v: Vec<String> = self.programs.lock().keys().cloned().collect();
         v.sort();
         v
+    }
+
+    /// The one live mount, when exactly one source is connected. Used to
+    /// resolve the SHOUTcast `admin.cgi` updinfo form, which carries no mount
+    /// (the station is implied by the port).
+    pub fn sole_mount(&self) -> Option<String> {
+        let mounts = self.mounts.lock();
+        if mounts.len() == 1 {
+            mounts.keys().next().cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Apply a mid-stream metadata (updinfo) title change to a live mount:
+    /// listeners' `StreamTitle` blocks pick it up via the mount's shared
+    /// now-playing, and a live program's DJ now-playing is updated in step
+    /// (keeping the DJ name). Returns the updated [`NowPlaying`], or `None`
+    /// when no source is live on `slug`.
+    pub fn update_live_metadata(
+        &self,
+        slug: &str,
+        title: &str,
+        artist: &str,
+    ) -> Option<NowPlaying> {
+        let updated = {
+            let mounts = self.mounts.lock();
+            let entry = mounts.get(slug)?;
+            let mut np = entry.now_playing.lock();
+            let dj = np.as_ref().map(|n| n.dj.clone()).unwrap_or_default();
+            let next = NowPlaying {
+                title: title.to_string(),
+                artist: artist.to_string(),
+                dj,
+            };
+            *np = Some(next.clone());
+            next
+        };
+        if let Some(p) = self.programs.lock().get_mut(slug) {
+            if p.live.is_some() {
+                p.live = Some(updated.clone());
+            }
+        }
+        Some(updated)
+    }
+}
+
+/// Split an updinfo `song` into `(artist, title)` on the conventional
+/// `"Artist - Title"` form; a song with no `" - "` is all title.
+fn split_song(song: &str) -> (String, String) {
+    match song.split_once(" - ") {
+        Some((artist, title)) => (artist.trim().to_string(), title.trim().to_string()),
+        None => (String::new(), song.trim().to_string()),
     }
 }
 
@@ -742,16 +797,89 @@ pub async fn spawn_radio_source(
 /// One DJ source connection: read the head, ingest, then shut the write half
 /// down gracefully (`.shutdown()` before drop) so the final response is not
 /// truncated by an RST on macOS/Windows.
+///
+/// Besides SOURCE/PUT streams, this surface also answers the short-lived
+/// `GET /admin/metadata` / `GET /admin.cgi` **updinfo** request encoders use
+/// to announce track changes mid-stream.
 async fn serve_ingest(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
     let (mut rd, mut wr) = sock.split();
     let (head, body) = read_head(&mut rd).await?;
     let result = if head.is_empty() {
         Ok(()) // client hung up before sending anything
+    } else if let Ok(update) = parse_metadata_update(&head) {
+        handle_metadata_update(update, &mut wr, &shared).await
     } else {
         ingest_source(&head, body, &mut rd, &mut wr, &shared).await
     };
     let _ = wr.shutdown().await;
     result
+}
+
+/// Apply a mid-stream metadata (updinfo) request: verify the credentials
+/// against the configured source user/password, update the mount's
+/// now-playing (splitting `"Artist - Title"`), republish presence, and answer
+/// with the codec's Icecast-convention XML reply (or `401`).
+async fn handle_metadata_update<W>(
+    update: MetadataUpdate,
+    wr: &mut W,
+    shared: &Arc<Shared>,
+) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    // Same discipline as `ingest_source`: an empty configured password
+    // refuses every update (fail safe); the username is matched only when the
+    // encoder supplied one (SHOUTcast v1 sends only a password).
+    let (want_user, want_pass) = {
+        let cfg = shared.config.read();
+        (
+            cfg.radio_source_user.clone(),
+            cfg.radio_source_password.clone(),
+        )
+    };
+    let user_ok = update.user.as_deref().is_none_or(|u| u == want_user);
+    let pass_ok = update.pass.as_deref() == Some(want_pass.as_str());
+    if want_pass.is_empty() || !pass_ok || !user_ok {
+        wr.write_all(metadata_update_unauthorized().as_bytes())
+            .await?;
+        return Ok(());
+    }
+
+    // Resolve the mount: explicit (`mount=`), else the sole live mount (the
+    // SHOUTcast admin.cgi form, where the port implies the station).
+    let slug = match update.mount.as_deref() {
+        Some(m) => Some(slug_of(m).to_string()),
+        None => shared.radio.sole_mount(),
+    };
+    let Some(slug) = slug.filter(|s| !s.is_empty()) else {
+        wr.write_all(metadata_update_failed("no mount").as_bytes())
+            .await?;
+        return Ok(());
+    };
+
+    let (artist, title) = split_song(&update.song);
+    let Some(np) = shared.radio.update_live_metadata(&slug, &title, &artist) else {
+        // Policy failure (no live source on that mount): Icecast keeps the
+        // 200 status and reports it in the XML body.
+        wr.write_all(metadata_update_failed("source not connected").as_bytes())
+            .await?;
+        return Ok(());
+    };
+
+    // Republish presence directly from the mount's now-playing so pure-DJ
+    // mounts (no library program) update too.
+    let listeners = shared.radio.registry.listener_count(&slug).unwrap_or(0);
+    shared.presence.set_radio_now_playing(RadioStatus {
+        station: slug.clone(),
+        title: np.title,
+        artist: np.artist,
+        dj: np.dj,
+        listeners,
+        live: true,
+    });
+    tracing::info!(mount = %slug, song = %update.song, "radio metadata updated");
+    wr.write_all(metadata_update_ok().as_bytes()).await?;
+    Ok(())
 }
 
 /// Authenticate a DJ source against the configured credentials, take over the

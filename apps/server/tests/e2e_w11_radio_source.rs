@@ -179,6 +179,118 @@ async fn dj_source_goes_live_bytes_reach_station_and_presence_updates() {
 }
 
 #[tokio::test]
+async fn updinfo_changes_now_playing_and_presence() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(source_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    install_live_program(&burrow).await;
+    let addr = burrow.radio_source_addr.expect("source ingest enabled");
+
+    // A DJ goes live on /live first (updinfo targets a live mount).
+    let mut source = TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "PUT /live HTTP/1.1\r\n\
+         Authorization: Basic {}\r\n\
+         ice-name: Live Set\r\n\
+         content-type: audio/mpeg\r\n\r\n",
+        basic_auth("source", "hackme")
+    );
+    source.write_all(head.as_bytes()).await.unwrap();
+    source.flush().await.unwrap();
+    let ack = read_at_least(&mut source, 12).await;
+    assert!(String::from_utf8_lossy(&ack).contains("200 OK"));
+    let radio = &burrow.shared.radio;
+    poll_until("station goes live", || radio.is_live("live")).await;
+
+    // The encoder announces a track change over a second, short-lived request.
+    let mut admin = TcpStream::connect(addr).await.unwrap();
+    admin
+        .write_all(
+            b"GET /admin/metadata?mode=updinfo&mount=/live&pass=hackme&song=Daft+Punk+-+Da+Funk HTTP/1.0\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    admin.flush().await.unwrap();
+    let reply = read_at_least(&mut admin, 12).await;
+    let reply = String::from_utf8_lossy(&reply);
+    assert!(reply.starts_with("HTTP/1.0 200 OK"), "reply: {reply:?}");
+    assert!(
+        reply.contains("<return>1</return>"),
+        "Icecast XML success body: {reply:?}"
+    );
+
+    // Now-playing switched, with the song split into artist/title, keeping
+    // the DJ; presence carries the same update.
+    let np = radio.now_playing("live").expect("live now-playing");
+    assert_eq!(np.title, "Da Funk");
+    assert_eq!(np.artist, "Daft Punk");
+    assert_eq!(np.dj, "source");
+    let status = burrow
+        .shared
+        .presence
+        .radio_status("live")
+        .expect("now-playing in presence");
+    assert!(status.live);
+    assert_eq!(status.title, "Da Funk");
+    assert_eq!(status.artist, "Daft Punk");
+
+    // A song without " - " is all title (empty artist).
+    let mut admin = TcpStream::connect(addr).await.unwrap();
+    admin
+        .write_all(
+            format!(
+                "GET /admin/metadata?mode=updinfo&mount=/live&song=Untitled+Jam HTTP/1.0\r\n\
+                 Authorization: Basic {}\r\n\r\n",
+                basic_auth("source", "hackme")
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    admin.flush().await.unwrap();
+    let reply = read_at_least(&mut admin, 12).await;
+    assert!(String::from_utf8_lossy(&reply).contains("<return>1</return>"));
+    let np = radio.now_playing("live").unwrap();
+    assert_eq!(np.title, "Untitled Jam");
+    assert_eq!(np.artist, "");
+
+    source.shutdown().await.unwrap();
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn updinfo_with_bad_credentials_is_401() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(source_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    install_live_program(&burrow).await;
+    let addr = burrow.radio_source_addr.expect("source ingest enabled");
+
+    let mut admin = TcpStream::connect(addr).await.unwrap();
+    admin
+        .write_all(
+            b"GET /admin/metadata?mode=updinfo&mount=/live&pass=wrong&song=Nope HTTP/1.0\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    admin.flush().await.unwrap();
+    let reply = read_at_least(&mut admin, 12).await;
+    let reply = String::from_utf8_lossy(&reply);
+    assert!(
+        reply.starts_with("HTTP/1.0 401"),
+        "bad creds refused: {reply:?}"
+    );
+    // Nothing changed: automation is still what is playing.
+    assert_eq!(
+        burrow.shared.radio.now_playing("live").unwrap().title,
+        "auto.mp3"
+    );
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
 async fn dj_source_with_bad_credentials_is_refused() {
     let work = tempfile::tempdir().unwrap();
     let burrow = Burrow::start(source_config(&work.path().join("srv")))

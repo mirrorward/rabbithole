@@ -88,6 +88,18 @@ pub struct ServerConfig {
     pub nntp_enabled: bool,
     /// NNTP listener address (default 0.0.0.0:1119 — 119 needs privilege).
     pub nntp_addr: SocketAddr,
+    /// Serve the NNTP peer-feed (transit) surface — `IHAVE` plus RFC 4644
+    /// streaming `CHECK`/`TAKETHIS` — on `nntp_feed_addr`. Distinct from the
+    /// reader surface (`nntp_enabled`): this one talks to *peers*, not
+    /// newsreaders. Off by default.
+    pub nntp_feed_enabled: bool,
+    /// NNTP peer-feed listener address (default 0.0.0.0:1120 — beside the
+    /// reader port 1119).
+    pub nntp_feed_addr: SocketAddr,
+    /// Peer credential allowlist for the feed surface: `AUTHINFO` user →
+    /// password. Empty = refuse every peer (fail safe). Serialized as a TOML
+    /// table and edited on disk (like `ftn_areas`), not via `ctl config set`.
+    pub nntp_feed_peers: std::collections::HashMap<String, String>,
     /// Serve the Icecast-compatible radio delivery surface on `radio_addr`.
     pub radio_enabled: bool,
     /// Radio listener address (default 0.0.0.0:8000 — the Icecast convention).
@@ -217,6 +229,9 @@ impl Default for ServerConfig {
             finger_addr: "0.0.0.0:7979".parse().expect("valid"),
             nntp_enabled: false,
             nntp_addr: "0.0.0.0:1119".parse().expect("valid"),
+            nntp_feed_enabled: false,
+            nntp_feed_addr: "0.0.0.0:1120".parse().expect("valid"),
+            nntp_feed_peers: std::collections::HashMap::new(),
             radio_enabled: false,
             radio_addr: "0.0.0.0:8000".parse().expect("valid"),
             radio_source_enabled: false,
@@ -343,6 +358,8 @@ impl ServerConfig {
             "finger_addr" => self.finger_addr.to_string(),
             "nntp_enabled" => self.nntp_enabled.to_string(),
             "nntp_addr" => self.nntp_addr.to_string(),
+            "nntp_feed_enabled" => self.nntp_feed_enabled.to_string(),
+            "nntp_feed_addr" => self.nntp_feed_addr.to_string(),
             "radio_enabled" => self.radio_enabled.to_string(),
             "radio_addr" => self.radio_addr.to_string(),
             "radio_source_enabled" => self.radio_source_enabled.to_string(),
@@ -529,6 +546,14 @@ impl ServerConfig {
             }
             "nntp_addr" => {
                 self.nntp_addr = parse_addr(key, value)?;
+                Ok(false)
+            }
+            "nntp_feed_enabled" => {
+                self.nntp_feed_enabled = parse_bool(key, value)?;
+                Ok(false)
+            }
+            "nntp_feed_addr" => {
+                self.nntp_feed_addr = parse_addr(key, value)?;
                 Ok(false)
             }
             "radio_enabled" => {
