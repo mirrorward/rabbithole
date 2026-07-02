@@ -178,7 +178,7 @@
 - [x] PKT codec: type-2+ w/ type-2 fallback (capability word), packed messages, golden-file round-trip tests — `rabbithole-legacy-ftn` (bounds-checked LE reader, 5D addresses, CP437; 31 tests incl. 2000-iter fuzz)
 - [x] Kludges: INTL/FMPT/TOPT/MSGID/REPLY/PID/TID; AREA:; Origin; SEEN-BY + PATH maintenance — `rabbithole-legacy-ftn::kludge` (canonical re-serialization, raw-CP437 text). Tosser/scanner/binkp/AreaFix/nodelist below are the service layer
 - [ ] Tosser + scanner services; ARCmail bundles (day-coded names + collision handling); BSO outbound
-- [ ] binkp mailer (FTS-1026, port 24554)
+- [~] binkp mailer (FTS-1026, port 24554) — codec + FSM landed: `rabbithole-legacy-binkp` (2-byte block framing, M_NUL..M_SKIP, CRAM-MD5 auth verified against RFC 2202 vectors, sans-IO originating+answering session state machine; 42 tests). TCP mailer service is the wiring slice
 - [ ] AreaFix (netmail commands: +/−/％LIST/％QUERY)
 - [ ] Nodelist + NODEDIFF parsing (CRC-16); echomail↔boards; netmail↔DM gateway; CP437 lossless round-trip
 
@@ -199,7 +199,7 @@
 - [ ] Playlist engine: library from file areas, rotation, **vote queue**, requests
 - [ ] DJ live source (Icecast SOURCE/PUT + Basic auth) — works with butt/ices
 - [ ] Encode pipelines: Opus/Ogg primary + MP3 legacy mount
-- [ ] Delivery: native QUIC uni-stream; HTTP streaming; ICY mounts w/ exact icy-metaint math (8192, len×16, 0x00 when unchanged); no ICY splicing into Ogg
+- [~] Delivery: native QUIC uni-stream; HTTP streaming; ICY mounts w/ exact icy-metaint math (8192, len×16, 0x00 when unchanged) — ICY codec landed: `rabbithole-legacy-icecast` (SOURCE/PUT source auth, listener headers, exact `IcyMetaInterleaver` metaint math with fuzz-verified boundary correctness; 43 tests). Server delivery wiring + QUIC/HTTP transports pending
 - [ ] Listener counts in presence; now-playing surfaced (presence line, TUI status, telnet, web)
 - [ ] Client players: GUI/web, TUI handoff, per-user enable + volume/ducking settings
 

@@ -1,0 +1,12 @@
+[package]
+name = "rabbithole-legacy-icecast"
+description = "Icecast/SHOUTcast (ICY) protocol codec — source auth, listener headers, and metaint metadata interleaving (pure logic, no I/O)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+data-encoding = { workspace = true }

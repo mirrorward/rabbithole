@@ -1,0 +1,13 @@
+[package]
+name = "rabbithole-legacy-binkp"
+description = "binkp mailer protocol codec (FTS-1026/1027/1028): 2-byte block framing, M_* command frames, CRAM-MD5 auth, sans-IO handshake + batch session FSM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+hmac.workspace = true
+md-5.workspace = true

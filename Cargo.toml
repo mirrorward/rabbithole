@@ -24,6 +24,8 @@ members = [
     "crates/legacy-ftn",
     "crates/legacy-qwk",
     "crates/legacy-zmodem",
+    "crates/legacy-binkp",
+    "crates/legacy-icecast",
     "crates/legacy-syndication",
     "crates/ui-web",
     "apps/cli",
@@ -34,7 +36,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]
@@ -67,6 +69,8 @@ rabbithole-legacy-nntp = { path = "crates/legacy-nntp" }
 rabbithole-legacy-ftn = { path = "crates/legacy-ftn" }
 rabbithole-legacy-qwk = { path = "crates/legacy-qwk" }
 rabbithole-legacy-zmodem = { path = "crates/legacy-zmodem" }
+rabbithole-legacy-binkp = { path = "crates/legacy-binkp" }
+rabbithole-legacy-icecast = { path = "crates/legacy-icecast" }
 rabbithole-legacy-syndication = { path = "crates/legacy-syndication" }
 
 # serialization
@@ -103,6 +107,7 @@ range-collections = "0.4"
 positioned-io = { version = "0.3", default-features = false }
 sha2 = "0.10"
 hmac = "0.12"
+md-5 = "0.10"
 subtle = "2"
 zeroize = "1"
 rand = "0.8"
