@@ -26,15 +26,37 @@
 //!   most stable identity an item offers (guid/id, then link, then
 //!   title+date), domain-separated so ids never collide with other
 //!   RabbitHole hash uses.
+//!
+//! Beyond parsing, three pure ingest layers build on this model — still
+//! sans-IO, still driven entirely by injected inputs, so a later server
+//! slice can wire them to a real fetcher and clock:
+//!
+//! - **[`mod@mapping`].** [`to_post_drafts`] turns a [`Feed`] into board-post
+//!   drafts ([`PostDraft`]), each carrying its stable [`dedup_id`].
+//! - **[`mod@seen`].** [`partition_fresh`] / [`SeenSet`] split a re-parsed
+//!   batch into genuinely-new items and duplicates, so re-ingesting a feed
+//!   never double-posts.
+//! - **[`mod@poll`].** [`PollState`] models conditional-GET fetch scheduling —
+//!   `ETag`/`Last-Modified` validators plus a next-poll time with error
+//!   backoff and feed-TTL honoring — as pure, clockless transitions.
 
 #![forbid(unsafe_code)]
 
 pub mod date;
 pub mod dedup;
 pub mod feed;
+pub mod mapping;
+pub mod poll;
+pub mod seen;
 pub mod text;
 mod xml;
 
 pub use dedup::dedup_id;
 pub use feed::{parse, parse_with_options, Feed, FeedError, FeedItem, ParseOptions};
+pub use mapping::{to_post_drafts, BoardMapping, PostDraft};
+pub use poll::{
+    next_poll_at, poll_interval_secs, sy_update_period_secs, ttl_minutes_to_secs, PollConfig,
+    PollDecision, PollState,
+};
+pub use seen::{partition_fresh, ItemId, Partition, SeenSet};
 pub use text::html_to_text;
