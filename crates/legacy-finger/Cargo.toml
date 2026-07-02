@@ -1,0 +1,16 @@
+[package]
+name = "rabbithole-legacy-finger"
+description = "Classic finger (RFC 1288) surface — who's-online list and member profile/.plan lookup over a pluggable directory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

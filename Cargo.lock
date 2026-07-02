@@ -2013,6 +2013,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rabbithole-legacy-finger"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rabbithole-legacy-ftn"
 version = "0.2.0"
 

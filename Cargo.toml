@@ -15,6 +15,7 @@ members = [
     "crates/audio",
     "crates/legacy-hotline",
     "crates/legacy-telnet",
+    "crates/legacy-finger",
     "crates/legacy-nntp",
     "crates/legacy-ftn",
     "crates/legacy-qwk",
@@ -51,6 +52,7 @@ rabbithole-screen = { path = "crates/screen" }
 rabbithole-audio = { path = "crates/audio" }
 rabbithole-legacy-hotline = { path = "crates/legacy-hotline" }
 rabbithole-legacy-telnet = { path = "crates/legacy-telnet" }
+rabbithole-legacy-finger = { path = "crates/legacy-finger" }
 rabbithole-legacy-nntp = { path = "crates/legacy-nntp" }
 rabbithole-legacy-ftn = { path = "crates/legacy-ftn" }
 rabbithole-legacy-qwk = { path = "crates/legacy-qwk" }
