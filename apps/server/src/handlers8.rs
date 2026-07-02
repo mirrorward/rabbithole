@@ -127,8 +127,11 @@ pub async fn handle(
                 }
             }
         }
+        // Quarantined file content is hidden from non-moderators.
+        let sees_quarantined = ctx.allows(shared, "moderation", Caps::MODERATE);
         let nodes = try_file!(shared.files.list(&req.area, req.path.as_deref()).await)
             .iter()
+            .filter(|n| sees_quarantined || !shared.moderation.file_quarantined(n.blob_id.as_ref()))
             .map(view)
             .collect();
         reply!(&pf::NodeList::new(nodes));
@@ -146,6 +149,12 @@ pub async fn handle(
             Caps::FILE_LIST,
         ) {
             fail!(ErrorCode::Forbidden);
+        }
+        // Quarantined = hidden (indistinguishable from absent) for non-mods.
+        if shared.moderation.file_quarantined(node.blob_id.as_ref())
+            && !ctx.allows(shared, "moderation", Caps::MODERATE)
+        {
+            fail!(ErrorCode::NotFound);
         }
         reply!(&pf::NodeReply::new(view(&node)));
         return Ok(true);
@@ -215,6 +224,14 @@ pub async fn handle(
                 fail!(ErrorCode::TooLarge);
             }
         }
+        // Hash-deny gate: refuse denied content before it touches the blob
+        // store (the blob id IS the blake3 of the bytes).
+        if shared
+            .moderation
+            .is_denied(blake3::hash(&req.bytes).as_bytes())
+        {
+            fail!(ErrorCode::Forbidden);
+        }
         let blobs = shared.blobs.clone();
         let bytes = req.bytes.clone();
         let size = bytes.len() as i64;
@@ -256,6 +273,12 @@ pub async fn handle(
         let target = try_file!(shared.files.resolve(node.id).await);
         if target.kind != KIND_FILE {
             fail!(ErrorCode::BadRequest);
+        }
+        // Quarantined content is not served to non-moderators.
+        if shared.moderation.file_quarantined(target.blob_id.as_ref())
+            && !ctx.allows(shared, "moderation", Caps::MODERATE)
+        {
+            fail!(ErrorCode::NotFound);
         }
         if !ctx.allows(
             shared,
@@ -331,6 +354,7 @@ pub async fn handle(
             fail!(ErrorCode::Forbidden);
         }
         let limit = req.limit.clamp(1, 200) as i64;
+        let sees_quarantined = ctx.allows(shared, "moderation", Caps::MODERATE);
         let nodes = try_file!(
             shared
                 .files
@@ -338,6 +362,7 @@ pub async fn handle(
                 .await
         )
         .iter()
+        .filter(|n| sees_quarantined || !shared.moderation.file_quarantined(n.blob_id.as_ref()))
         .map(view)
         .collect();
         reply!(&pf::SearchResults::new(nodes));

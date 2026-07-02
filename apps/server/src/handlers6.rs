@@ -96,6 +96,8 @@ pub async fn handle(
         if !ctx.allows(shared, "board", Caps::BOARD_READ) {
             fail!(ErrorCode::Forbidden);
         }
+        // Quarantined roots are hidden from non-moderators pending review.
+        let sees_quarantined = ctx.allows(shared, "moderation", Caps::MODERATE);
         match shared
             .boards
             .threads(&req.board, req.limit.clamp(1, 200) as i64)
@@ -104,6 +106,9 @@ pub async fn handle(
             Ok(rows) => {
                 let threads = rows
                     .into_iter()
+                    .filter(|(root, _, _)| {
+                        sees_quarantined || !shared.moderation.post_quarantined(&root.event_id)
+                    })
                     .map(|(root, replies, last)| {
                         pb::ThreadSummary::new(view(&root), replies as u64, last)
                     })
@@ -119,12 +124,26 @@ pub async fn handle(
         if !ctx.allows(shared, "board", Caps::BOARD_READ) {
             fail!(ErrorCode::Forbidden);
         }
+        // A quarantined root hides the whole thread from non-moderators
+        // (indistinguishable from absent); quarantined replies are elided.
+        let sees_quarantined = ctx.allows(shared, "moderation", Caps::MODERATE);
+        if !sees_quarantined && shared.moderation.post_quarantined(&req.root) {
+            fail!(ErrorCode::NotFound);
+        }
         match shared
             .boards
             .thread(&req.root, req.limit.clamp(1, 1000) as i64)
             .await
         {
-            Ok(rows) => reply!(&pb::ThreadPosts::new(rows.iter().map(view).collect())),
+            Ok(rows) => {
+                reply!(&pb::ThreadPosts::new(
+                    rows.iter()
+                        .filter(|r| sees_quarantined
+                            || !shared.moderation.post_quarantined(&r.event_id))
+                        .map(view)
+                        .collect()
+                ))
+            }
             Err(e) => fail!(map_err(e)),
         }
         return Ok(true);

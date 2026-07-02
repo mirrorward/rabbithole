@@ -506,6 +506,10 @@ async fn handle_request(
     if crate::handlers10::handle(conn, frame, shared, ctx).await? {
         return Ok(());
     }
+    // Wave 13: the moderation suite ---------------------------------------------
+    if crate::handlers11::handle(conn, frame, shared, ctx).await? {
+        return Ok(());
+    }
 
     // Anything else: tolerated, answered, never fatal.
     conn.send(Frame::error_reply(frame, ErrorCode::Unsupported))
@@ -668,6 +672,13 @@ pub(crate) fn push_for_event(
         }
         ServerEvent::Notice { text, from } => {
             Frame::push(&psess::ServerNotice::new(text.clone(), from.clone())).ok()
+        }
+        // Moderator-only notices (new report filed, …).
+        ServerEvent::ModNotice { text } => {
+            if !viewer_is_mod {
+                return None;
+            }
+            Frame::push(&psess::ServerNotice::new(text.clone(), "moderation")).ok()
         }
         // Radio now-playing rides the documented `[radio]` ServerNotice
         // bridge until a RADIO proto family lands (the TUI's

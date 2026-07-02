@@ -9,6 +9,7 @@ pub mod fed_catalog;
 pub mod federation;
 pub mod ftn;
 pub mod handlers10;
+pub mod handlers11;
 pub mod handlers2;
 pub mod handlers3;
 pub mod handlers4;
@@ -40,8 +41,8 @@ use rabbithole_net::Listener;
 use rabbithole_server_core::ratelimit::{self, Decision, LimitKey, Policy, Scope};
 use rabbithole_server_core::{
     AuthService, BoardService, ChatService, ClassCache, DedupStore, EventBus, FileService,
-    LiveConfig, PeerRegistry, PermissionEvaluator, PresenceRegistry, PushLog, RateLimiter,
-    RegistrationMode, ServerConfig, ServerEvent, SwarmCatalog,
+    LiveConfig, ModerationService, PeerRegistry, PermissionEvaluator, PresenceRegistry, PushLog,
+    RateLimiter, RegistrationMode, ServerConfig, ServerEvent, SwarmCatalog,
 };
 use rabbithole_store_server::SqlitePool;
 
@@ -86,6 +87,9 @@ pub struct Shared {
     /// Shared token-bucket rate limiter, per IP / account / endpoint class
     /// (Wave 13). Policies are resolved live from config on every check.
     pub ratelimit: RateLimiter,
+    /// The moderation suite: report queue, quarantine set, hash-deny list
+    /// (Wave 13). Quarantine/deny lookups are cheap in-memory mirrors.
+    pub moderation: ModerationService,
     next_session: AtomicU64,
 }
 
@@ -235,6 +239,14 @@ impl Burrow {
         // Door host: validates the `[[doors]]` list when doors are enabled.
         let door_host = doors::DoorService::from_config(&config, &data_dir)?;
 
+        // Moderation suite: warm the quarantine/deny mirrors before any
+        // session can read or upload.
+        let moderation = ModerationService::new(pool.clone());
+        moderation
+            .load()
+            .await
+            .map_err(|e| anyhow::anyhow!("moderation: {e}"))?;
+
         let shared = Arc::new(Shared {
             chat: ChatService::new(bus.clone(), config.chat_max_len),
             files: FileService::new(pool.clone()),
@@ -263,6 +275,7 @@ impl Burrow {
             // survives restarts (peers must never see a stale "fresh" gen 1).
             catalogs: fed_catalog::CatalogState::load(&data_dir, &identity.signing.public().0),
             ratelimit: RateLimiter::new(),
+            moderation,
             next_session: AtomicU64::new(1),
         });
 

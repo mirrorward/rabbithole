@@ -76,6 +76,9 @@ pub enum ServerEvent {
     },
     /// An operator notice for every session.
     Notice { text: String, from: String },
+    /// A notice for moderators only (e.g. "a new report was filed").
+    /// Surfaces deliver it solely to sessions holding moderator rank.
+    ModNotice { text: String },
     /// An operator disconnected a session; the session task closes itself.
     Kick { session_id: u64, reason: String },
     /// A new board post landed (broadcast so unread counts stay live).

@@ -321,6 +321,12 @@ pub async fn handle(
                 if target.kind != KIND_FILE {
                     fail!(ErrorCode::BadRequest);
                 }
+                // Quarantined content is not served to non-moderators.
+                if shared.moderation.file_quarantined(target.blob_id.as_ref())
+                    && !ctx.allows(shared, "moderation", Caps::MODERATE)
+                {
+                    fail!(ErrorCode::NotFound);
+                }
                 let res = resource(&target.area, Some(&target.path));
                 if !ctx.allows(shared, &res, Caps::FILE_DOWNLOAD) {
                     fail!(ErrorCode::Forbidden);
@@ -374,6 +380,12 @@ pub async fn handle(
                 }
                 if req.name.trim().is_empty() || req.name.contains('/') {
                     fail!(ErrorCode::BadRequest);
+                }
+                // Hash-deny gate: the declared blake3 root is checked here
+                // (fail fast) and again at UploadFinish (the enforcement
+                // point — the finished file must verify against this root).
+                if shared.moderation.is_denied(&req.root) {
+                    fail!(ErrorCode::Forbidden);
                 }
                 // Per-account storage quota (0 = unlimited).
                 let quota = shared.config.read().upload_quota_bytes;
@@ -568,6 +580,13 @@ pub async fn handle(
             Err(code) => fail!(code),
         };
         let staging = ticket.staging.clone().unwrap_or_default();
+        // Hash-deny gate at finalize: the staged bytes must verify against
+        // `ticket.root`, so a denied root can never be committed — even if
+        // the hash was denied after the transfer opened.
+        if shared.moderation.is_denied(&ticket.root) {
+            let _ = tokio::fs::remove_file(&staging).await;
+            fail!(ErrorCode::Forbidden);
+        }
         let blobs = shared.blobs.clone();
         let root = ticket.root;
         let staged = staging.clone();
@@ -632,8 +651,13 @@ pub async fn handle(
             Ok(f) => f,
             Err(_) => fail!(ErrorCode::NotFound),
         };
+        // Quarantined content is left out of manifests for non-moderators.
+        let sees_quarantined = ctx.allows(shared, "moderation", Caps::MODERATE);
         let entries = files
             .iter()
+            .filter(|(n, _)| {
+                sees_quarantined || !shared.moderation.file_quarantined(n.blob_id.as_ref())
+            })
             .filter_map(|(n, rel)| {
                 n.blob_id.map(|b| {
                     pt::ManifestEntry::new(n.id, rel.clone(), b, n.size.max(0) as u64)

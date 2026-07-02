@@ -218,6 +218,11 @@ pub async fn handle(
             if !shared.blobs.contains(&BlobId(*a)) {
                 fail!(ErrorCode::NotFound);
             }
+            // Hash-denied content can't ride DM attachments either (the
+            // blob id is the blake3 of the bytes).
+            if shared.moderation.is_denied(a) {
+                fail!(ErrorCode::Forbidden);
+            }
         }
 
         let at_ms = chrono::Utc::now().timestamp_millis();

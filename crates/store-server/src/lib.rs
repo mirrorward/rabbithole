@@ -13,6 +13,7 @@ pub mod repo3;
 pub mod repo4;
 pub mod repo5;
 pub mod repo6;
+pub mod repo7;
 
 use std::path::Path;
 

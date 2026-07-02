@@ -323,6 +323,16 @@ impl AclRepo<'_> {
 
 pub struct AuditRepo<'a>(pub &'a SqlitePool);
 
+/// One audit-log line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditRow {
+    pub id: i64,
+    pub at: i64,
+    pub actor: String,
+    pub action: String,
+    pub detail: String,
+}
+
 impl AuditRepo<'_> {
     pub async fn record(&self, actor: &str, action: &str, detail: &str) -> Result<(), StoreError> {
         sqlx::query(
@@ -334,6 +344,27 @@ impl AuditRepo<'_> {
         .execute(self.0)
         .await?;
         Ok(())
+    }
+
+    /// The most recent `limit` entries, oldest first (for AUDIT_READ views
+    /// and tests asserting the trail).
+    pub async fn recent(&self, limit: i64) -> Result<Vec<AuditRow>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM (SELECT * FROM audit_log ORDER BY id DESC LIMIT ?) ORDER BY id",
+        )
+        .bind(limit)
+        .fetch_all(self.0)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| AuditRow {
+                id: r.get("id"),
+                at: r.get("at"),
+                actor: r.get("actor"),
+                action: r.get("action"),
+                detail: r.get("detail"),
+            })
+            .collect())
     }
 }
 

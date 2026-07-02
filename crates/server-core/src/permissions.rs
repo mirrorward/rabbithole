@@ -66,6 +66,13 @@ impl Caps {
     pub const CONFIG_ADMIN: Caps = Caps(1 << 51);
     pub const BROADCAST: Caps = Caps(1 << 52);
     pub const AUDIT_READ: Caps = Caps(1 << 53);
+    /// The Wave 13 moderation suite: work the report queue, quarantine
+    /// content for review, and manage the hash-deny list. A dedicated bit
+    /// (the `DOOR_RUN` precedent) rather than a reuse of `BOARD_MODERATE`,
+    /// because the queue spans posts, DMs, files, *and* users — gating it on
+    /// a board-scoped bit would let a boards-only moderator act on files.
+    /// Moderator+ by default; grantable/revocable per class/account.
+    pub const MODERATE: Caps = Caps(1 << 54);
 
     pub const fn union(self, other: Caps) -> Caps {
         Caps(self.0 | other.0)
@@ -128,7 +135,8 @@ impl Role {
             | Caps::BOARD_MODERATE
             | Caps::USER_KICK
             | Caps::DROPBOX_VIEW
-            | Caps::AUDIT_READ;
+            | Caps::AUDIT_READ
+            | Caps::MODERATE;
         let admin = moderator
             | Caps::USER_BAN
             | Caps::ACCOUNT_ADMIN
