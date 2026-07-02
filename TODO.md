@@ -125,9 +125,9 @@
 *Depends on: W2, W3, W4*
 
 - [x] TRTP/HOTL handshake; 20-byte transaction codec; TLV fields w/ 16/32-bit size-dependent ints — `rabbithole-legacy-hotline` (handshake/transaction/field/reassembly/constants, big-endian, minimal-width int helpers, fragment reassembler with 16 MiB ceiling, fuzz-tolerant; 29 tests). Networking + login flow are later slices
-- [ ] Login (255−b obfuscation) + opt-in legacy credential; agreement/banner; Agreed/SetClientUserInfo flows; pipelined-early-request tolerance
-- [ ] User list + icon-ID mapping; NotifyChange/DeleteUser pushes; UserFlags
-- [ ] Public chat, private chat rooms (112–120), IM (108) w/ quoting + auto-response
+- [x] Login (255−b obfuscation) + opt-in legacy credential; agreement/banner; Agreed/SetClientUserInfo flows; pipelined-early-request tolerance — `apps/server/src/hotline.rs` bridges the wire codec to the shared services: TRTP/HOTL handshake + OK, login (107) de-obfuscates creds and authenticates via `AuthService` (guest fallback when enabled), pushes agreement (109), dedicated non-cancellable reader + reassembler tolerate pipelined early requests; `hotline_enabled`/`hotline_addr` (5500) config, off by default; 3 e2e tests
+- [x] User list + icon-ID mapping; NotifyChange/DeleteUser pushes; UserFlags — GetUserNameList (300) packs id/icon/flags/name from the presence snapshot (invisible users hidden); NotifyChange/DeleteUser (301/302) driven off the `EventBus`; SetClientUserInfo (304) re-publishes identity via `PresenceRegistry::rename`
+- [x] Public chat, private chat rooms (112–120), IM (108) w/ quoting + auto-response — public chat (105→106) bridged to the shared `ChatService` lobby (Hotline/native/telnet share one room); private IM (108) routed between online clients via a per-server `Hub` (delivered as SERVER_MSG 104). Private rooms (112–120) + auto-response deferred to a later slice
 - [ ] Threaded news transactions (370–411) mapped to boards; flat-news (101/102) projection
 - [ ] File transactions (200–213); HTXF channel (port+1); FFO encode/decode (INFO/DATA forks, MWIN); fork-offset resume; folder lockstep
 - [ ] Account admin transactions (348–355); access-mask projection (big-endian bit order, tested); kick/ban (110/111)

@@ -13,6 +13,7 @@ pub mod handlers6;
 pub mod handlers7;
 pub mod handlers8;
 pub mod handlers9;
+pub mod hotline;
 pub mod identity_store;
 pub mod legacy;
 pub mod nntp;
@@ -66,6 +67,8 @@ pub struct Shared {
     pub swarm: SwarmCatalog,
     /// Radio station directory + live ICY mount fan-out (Wave 11.4).
     pub radio: radio::Stations,
+    /// Connected Hotline clients for IM routing + user-list icons (Wave 7.3).
+    pub hotline: hotline::Hub,
     next_session: AtomicU64,
 }
 
@@ -103,6 +106,8 @@ pub struct Burrow {
     pub nntp_addr: Option<SocketAddr>,
     /// Bound radio (ICY) address when `radio_enabled` (else `None`).
     pub radio_addr: Option<SocketAddr>,
+    /// Bound Hotline address when `hotline_enabled` (else `None`).
+    pub hotline_addr: Option<SocketAddr>,
     pub fingerprint: CertFingerprint,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -141,6 +146,7 @@ impl Burrow {
         let finger = config.finger_enabled.then_some(config.finger_addr);
         let nntp = config.nntp_enabled.then_some(config.nntp_addr);
         let radio = config.radio_enabled.then_some(config.radio_addr);
+        let hotline = config.hotline_enabled.then_some(config.hotline_addr);
 
         let shared = Arc::new(Shared {
             chat: ChatService::new(bus.clone(), config.chat_max_len),
@@ -163,6 +169,7 @@ impl Burrow {
             transfers: handlers9::TransferRegistry::new(),
             swarm: SwarmCatalog::new(),
             radio: radio::Stations::new(),
+            hotline: hotline::Hub::new(),
             next_session: AtomicU64::new(1),
         });
 
@@ -217,6 +224,13 @@ impl Burrow {
             radio_addr = Some(bound);
             tasks.push(handle);
         }
+        let mut hotline_addr = None;
+        if let Some(addr) = hotline {
+            let (bound, handle) = hotline::spawn_hotline(shared.clone(), addr).await?;
+            tracing::info!(hotline = %bound, "Hotline listening");
+            hotline_addr = Some(bound);
+            tasks.push(handle);
+        }
 
         Ok(Burrow {
             shared,
@@ -226,6 +240,7 @@ impl Burrow {
             finger_addr,
             nntp_addr,
             radio_addr,
+            hotline_addr,
             fingerprint,
             tasks,
         })

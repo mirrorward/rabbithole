@@ -28,6 +28,7 @@ rabbithole-swarm.workspace = true
 rabbithole-legacy-telnet.workspace = true
 rabbithole-legacy-finger.workspace = true
 rabbithole-legacy-nntp.workspace = true
+rabbithole-legacy-hotline.workspace = true
 rabbithole-audio.workspace = true
 rabbithole-radio.workspace = true
 rabbithole-legacy-icecast.workspace = true
@@ -46,5 +47,6 @@ rustls-pki-types.workspace = true
 [dev-dependencies]
 data-encoding.workspace = true
 rabbithole-core = { workspace = true, features = ["native"] }
+rabbithole-legacy-hotline.workspace = true
 rabbithole-store-client.workspace = true
 tempfile.workspace = true

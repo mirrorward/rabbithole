@@ -71,6 +71,10 @@ pub struct ServerConfig {
     pub radio_enabled: bool,
     /// Radio listener address (default 0.0.0.0:8000 — the Icecast convention).
     pub radio_addr: SocketAddr,
+    /// Serve the Hotline-compatible surface on `hotline_addr`.
+    pub hotline_enabled: bool,
+    /// Hotline listener address (default 0.0.0.0:5500 — the classic Hotline port).
+    pub hotline_addr: SocketAddr,
     /// Welcome-screen featured block (title on first line, body after).
     pub welcome_featured: String,
     /// Welcome-screen one-line ticker.
@@ -113,6 +117,8 @@ impl Default for ServerConfig {
             nntp_addr: "0.0.0.0:1119".parse().expect("valid"),
             radio_enabled: false,
             radio_addr: "0.0.0.0:8000".parse().expect("valid"),
+            hotline_enabled: false,
+            hotline_addr: "0.0.0.0:5500".parse().expect("valid"),
             welcome_featured: String::new(),
             welcome_ticker: String::new(),
             theme_accent: String::new(),
@@ -212,6 +218,8 @@ impl ServerConfig {
             "nntp_addr" => self.nntp_addr.to_string(),
             "radio_enabled" => self.radio_enabled.to_string(),
             "radio_addr" => self.radio_addr.to_string(),
+            "hotline_enabled" => self.hotline_enabled.to_string(),
+            "hotline_addr" => self.hotline_addr.to_string(),
             "welcome_featured" => self.welcome_featured.clone(),
             "welcome_ticker" => self.welcome_ticker.clone(),
             "theme_accent" => self.theme_accent.clone(),
@@ -382,6 +390,14 @@ impl ServerConfig {
             }
             "radio_addr" => {
                 self.radio_addr = parse_addr(key, value)?;
+                Ok(false)
+            }
+            "hotline_enabled" => {
+                self.hotline_enabled = parse_bool(key, value)?;
+                Ok(false)
+            }
+            "hotline_addr" => {
+                self.hotline_addr = parse_addr(key, value)?;
                 Ok(false)
             }
             "quic_addr" => {
