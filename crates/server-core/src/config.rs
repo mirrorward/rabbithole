@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use rabbithole_legacy_doors::DoorDef;
 use serde::{Deserialize, Serialize};
 
 /// A configured server-to-server federation dial target (Wave 9). Entries are
@@ -110,6 +111,25 @@ pub struct ServerConfig {
     /// playlist engine. Serialized as a TOML table and edited on disk (like
     /// `ftn_areas`), not via `ctl config set`.
     pub radio_library_areas: std::collections::HashMap<String, String>,
+    /// Host classic door games on the telnet BBS surface. Off by default;
+    /// requires `telnet_enabled` and at least one `[[doors]]` entry to do
+    /// anything.
+    pub doors_enabled: bool,
+    /// Working root for door sessions: per-node drop directories
+    /// (`node1/`, `node2/`, …) are created under it and hold the drop files.
+    /// Relative paths resolve under `data_dir`.
+    pub doors_dir: PathBuf,
+    /// How many door nodes (simultaneous door sessions) the shared pool
+    /// offers. `0` refuses every door launch.
+    pub doors_max_nodes: u16,
+    /// Wall-clock cap on one door session, in seconds (`0` = unlimited).
+    /// A door's own `daily_limit_mins` lowers it further; whichever budget
+    /// is smaller wins.
+    pub doors_session_max_secs: u64,
+    /// Installed door games, a TOML `[[doors]]` array of tables (see
+    /// `rabbithole-legacy-doors` for the field reference). Edited on disk
+    /// (like `ftn_areas`), not via `ctl config set`.
+    pub doors: Vec<DoorDef>,
     /// Serve the Hotline-compatible surface on `hotline_addr`.
     pub hotline_enabled: bool,
     /// Hotline listener address (default 0.0.0.0:5500 — the classic Hotline port).
@@ -204,6 +224,11 @@ impl Default for ServerConfig {
             radio_source_user: "source".into(),
             radio_source_password: String::new(),
             radio_library_areas: std::collections::HashMap::new(),
+            doors_enabled: false,
+            doors_dir: PathBuf::from("doors"),
+            doors_max_nodes: 4,
+            doors_session_max_secs: 3600,
+            doors: Vec::new(),
             hotline_enabled: false,
             hotline_addr: "0.0.0.0:5500".parse().expect("valid"),
             ftn_enabled: false,
@@ -324,6 +349,10 @@ impl ServerConfig {
             "radio_source_addr" => self.radio_source_addr.to_string(),
             "radio_source_user" => self.radio_source_user.clone(),
             "radio_source_password" => self.radio_source_password.clone(),
+            "doors_enabled" => self.doors_enabled.to_string(),
+            "doors_dir" => self.doors_dir.display().to_string(),
+            "doors_max_nodes" => self.doors_max_nodes.to_string(),
+            "doors_session_max_secs" => self.doors_session_max_secs.to_string(),
             "hotline_enabled" => self.hotline_enabled.to_string(),
             "hotline_addr" => self.hotline_addr.to_string(),
             "ftn_enabled" => self.ftn_enabled.to_string(),
@@ -524,6 +553,28 @@ impl ServerConfig {
             }
             "radio_source_password" => {
                 self.radio_source_password = value.to_string();
+                Ok(false)
+            }
+            "doors_enabled" => {
+                self.doors_enabled = parse_bool(key, value)?;
+                Ok(false) // the door host is assembled at startup
+            }
+            "doors_dir" => {
+                self.doors_dir = PathBuf::from(value);
+                Ok(false)
+            }
+            "doors_max_nodes" => {
+                self.doors_max_nodes = value.parse().map_err(|_| ConfigError::BadValue {
+                    key: key.into(),
+                    detail: value.into(),
+                })?;
+                Ok(false)
+            }
+            "doors_session_max_secs" => {
+                self.doors_session_max_secs = value.parse().map_err(|_| ConfigError::BadValue {
+                    key: key.into(),
+                    detail: value.into(),
+                })?;
                 Ok(false)
             }
             "hotline_enabled" => {

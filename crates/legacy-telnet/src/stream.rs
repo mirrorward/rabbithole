@@ -250,6 +250,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TelnetStream<S> {
         self.io.flush().await
     }
 
+    /// Write raw bytes **verbatim** (no newline translation, no encoding, no
+    /// IAC escaping) and flush. This is the seam a door-game bridge pumps
+    /// 8-bit CP437 output through: the caller is responsible for telnet
+    /// safety (doubling `0xFF`, e.g. via a `BridgeBuffer`), because the
+    /// bytes may already contain deliberate escapes that a second pass here
+    /// would corrupt.
+    pub async fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.io.write_all(bytes).await?;
+        self.io.flush().await
+    }
+
     /// Are we echoing? True once we hold ECHO, or while our WILL ECHO offer
     /// is outstanding (classic BBS behavior; stops if the peer refuses).
     fn echo_active(&self) -> bool {

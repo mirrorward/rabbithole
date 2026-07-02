@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 rabbithole-proto.workspace = true
 rabbithole-identity.workspace = true
+rabbithole-legacy-doors.workspace = true
 rabbithole-store-server.workspace = true
 serde.workspace = true
 thiserror.workspace = true

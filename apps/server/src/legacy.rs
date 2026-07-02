@@ -2,44 +2,23 @@
 //! adapted onto the same accounts/personas/presence the native server uses.
 //!
 //! The `rabbithole-legacy-telnet` / `rabbithole-legacy-finger` crates are
-//! transport-only and depend on nothing server-side; here we bridge their
-//! pluggable seams (`TelnetAuth`, `FingerDirectory`) to [`Shared`] and spawn
-//! their accept loops. Both are opt-in via config (`telnet_enabled` /
-//! `finger_enabled`) and off by default.
+//! transport-only and depend on nothing server-side; the burrow-side telnet
+//! shell (login, main menu, doors) lives in [`crate::telnet`], and finger's
+//! pluggable `FingerDirectory` seam is bridged to [`Shared`] here. Both
+//! listeners are opt-in via config (`telnet_enabled` / `finger_enabled`)
+//! and off by default.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
 use rabbithole_legacy_finger::{FingerDirectory, FingerServer, Profile, WhoEntry};
-use rabbithole_legacy_telnet::{run_shell, Encoding, ShellOptions, TelnetAuth};
 use rabbithole_store_server::repo2::PersonasRepo;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 use crate::Shared;
-
-/// Bridges the telnet login prompt to the account authenticator. TOTP-gated
-/// accounts can't complete the minimal telnet prompt yet (no second-factor
-/// step), so they're rejected here — a later slice adds the prompt.
-struct TelnetAuthAdapter {
-    shared: Arc<Shared>,
-}
-
-#[async_trait::async_trait]
-impl TelnetAuth for TelnetAuthAdapter {
-    async fn login(&self, username: &str, password: &str) -> Option<String> {
-        match self
-            .shared
-            .auth
-            .login_password(username, password, None)
-            .await
-        {
-            Ok(user) => Some(user.persona.screen_name),
-            Err(_) => None,
-        }
-    }
-}
 
 /// Answers finger queries from live presence + persona profiles. Invisible
 /// (Cheshire-mode) sessions are omitted from the who-list, mirroring the
@@ -90,24 +69,28 @@ pub async fn spawn_telnet(
 ) -> Result<(SocketAddr, JoinHandle<()>)> {
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
-    let name = shared.config.read().name;
-    let auth: Arc<dyn TelnetAuth> = Arc::new(TelnetAuthAdapter {
-        shared: shared.clone(),
-    });
-    let opts = ShellOptions {
-        banner: format!("\n*** {name} ***\nDown the rabbit hole we go.\n\n"),
-        encoding: Encoding::Utf8,
-        max_attempts: 3,
-    };
     let handle = tokio::spawn(async move {
         loop {
-            let Ok((sock, _peer)) = listener.accept().await else {
+            let Ok((mut sock, _peer)) = listener.accept().await else {
                 break;
             };
-            let auth = auth.clone();
-            let opts = opts.clone();
+            let shared = shared.clone();
             tokio::spawn(async move {
-                let _ = run_shell(sock, auth.as_ref(), &opts).await;
+                let _ = crate::telnet::run_shell(&mut sock, &shared).await;
+                // Windows-safe close discipline (see `hotline::serve_htxf`):
+                // send FIN explicitly, then drain to the peer's FIN so
+                // buffered farewell bytes are delivered rather than
+                // discarded by an RST from a bare drop.
+                let _ = sock.shutdown().await;
+                let mut sink = [0u8; 1024];
+                let drain = async {
+                    while let Ok(n) = sock.read(&mut sink).await {
+                        if n == 0 {
+                            break;
+                        }
+                    }
+                };
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(30), drain).await;
             });
         }
     });

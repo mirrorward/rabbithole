@@ -4,6 +4,7 @@
 
 pub mod admin_store;
 pub mod ctl;
+pub mod doors;
 pub mod fed_catalog;
 pub mod federation;
 pub mod ftn;
@@ -23,6 +24,7 @@ pub mod nntp;
 pub mod radio;
 pub mod session;
 pub mod syndication;
+pub mod telnet;
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,6 +75,8 @@ pub struct Shared {
     pub radio: radio::Stations,
     /// Connected Hotline clients for IM routing + user-list icons (Wave 7.3).
     pub hotline: hotline::Hub,
+    /// Door-game host: registry, node pool, working root (Wave 6.x).
+    pub doors: doors::DoorService,
     /// Known/approved/pending S2S federation peers + their state (Wave 9).
     pub peers: PeerRegistry,
     /// Local signed file-catalog + verified peer catalogs (Wave 9.x).
@@ -174,6 +178,8 @@ impl Burrow {
         // FTN spool dirs resolve under data_dir when relative.
         let ftn_inbound = resolve_dir(&data_dir, &config.ftn_inbound_dir);
         let ftn_outbound = resolve_dir(&data_dir, &config.ftn_outbound_dir);
+        // Door host: validates the `[[doors]]` list when doors are enabled.
+        let door_host = doors::DoorService::from_config(&config, &data_dir)?;
 
         let shared = Arc::new(Shared {
             chat: ChatService::new(bus.clone(), config.chat_max_len),
@@ -197,6 +203,7 @@ impl Burrow {
             swarm: SwarmCatalog::new(),
             radio: radio::Stations::new(),
             hotline: hotline::Hub::new(),
+            doors: door_host,
             peers: PeerRegistry::new(),
             // Reload the last signed local catalog so the generation chain
             // survives restarts (peers must never see a stale "fresh" gen 1).
@@ -443,7 +450,7 @@ async fn install_radio_library(
 }
 
 /// Resolve a possibly-relative path under `base` (absolute paths pass through).
-fn resolve_dir(base: &std::path::Path, p: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn resolve_dir(base: &std::path::Path, p: &std::path::Path) -> std::path::PathBuf {
     if p.is_absolute() {
         p.to_path_buf()
     } else {

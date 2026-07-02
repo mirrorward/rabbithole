@@ -54,6 +54,11 @@ impl Caps {
     // -- swarm (40..44)
     pub const SWARM_ADVERTISE: Caps = Caps(1 << 40);
 
+    // -- legacy doors (44..48)
+    /// May launch door games on the telnet surface (member+ by default;
+    /// operators can grant it to guests or revoke it per class/account).
+    pub const DOOR_RUN: Caps = Caps(1 << 44);
+
     // -- admin (48..64)
     pub const USER_KICK: Caps = Caps(1 << 48);
     pub const USER_BAN: Caps = Caps(1 << 49);
@@ -116,7 +121,8 @@ impl Role {
             | Caps::FILE_DOWNLOAD
             | Caps::FILE_UPLOAD
             | Caps::CHAT_CREATE_ROOM
-            | Caps::SWARM_ADVERTISE;
+            | Caps::SWARM_ADVERTISE
+            | Caps::DOOR_RUN;
         let moderator = user
             | Caps::CHAT_MODERATE
             | Caps::BOARD_MODERATE

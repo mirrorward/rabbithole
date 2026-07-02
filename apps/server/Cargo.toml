@@ -26,6 +26,7 @@ rabbithole-blobs.workspace = true
 rabbithole-server-core.workspace = true
 rabbithole-store-server.workspace = true
 rabbithole-swarm.workspace = true
+rabbithole-legacy-doors.workspace = true
 rabbithole-legacy-telnet.workspace = true
 rabbithole-legacy-finger.workspace = true
 rabbithole-legacy-nntp.workspace = true
@@ -42,7 +43,7 @@ clap.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 rand.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde_json.workspace = true
