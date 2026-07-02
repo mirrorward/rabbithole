@@ -15,7 +15,7 @@ use rabbithole_blobs::BlobId;
 use rabbithole_net::Connection;
 use rabbithole_proto::swarm as ps;
 use rabbithole_proto::{ErrorCode, Frame};
-use rabbithole_server_core::swarm::NewAdvert;
+use rabbithole_server_core::swarm::{NewAdvert, PeerEndpoint};
 use rabbithole_server_core::{Caps, Role};
 
 use crate::session::SessionCtx;
@@ -37,6 +37,9 @@ const SOURCES_MAX: usize = 200;
 /// Granted TTL when the client asks for the default (`ttl_secs == 0`) and
 /// the server has no configured maximum to fall back on.
 const ADVERT_TTL_FALLBACK: u32 = 3600;
+/// Capability tokens authorize a fetch, not a subscription: keep them
+/// short-lived and let fetchers re-request.
+const TICKET_TTL_SECS: i64 = 600;
 
 pub async fn handle(
     conn: &mut Box<dyn Connection>,
@@ -143,7 +146,15 @@ pub async fn handle(
                         .is_some_and(|e| !e.is_invisible())
             })
             .take(SOURCES_MAX)
-            .map(|a| ps::SourceInfo::new(a.screen_name, a.size, a.name, a.mime))
+            .map(|a| {
+                let info = ps::SourceInfo::new(a.screen_name, a.size, a.name, a.mime);
+                // Join in the peer-wire contact card, if that session
+                // registered one — fetchers dial it with the pinned cert.
+                match shared.swarm.contact(a.session_id) {
+                    Some(c) => info.with_endpoint(c.endpoint, c.cert_fp),
+                    None => info,
+                }
+            })
             .collect();
         // Does the origin itself hold the blob? (Fetcher's fallback source.)
         let blobs = shared.blobs.clone();
@@ -159,6 +170,46 @@ pub async fn handle(
             server_size.unwrap_or(0),
             sources
         ));
+        return Ok(true);
+    }
+
+    // ---- Peer-wire contact card --------------------------------------------
+    if let Some(Ok(req)) = frame.decode::<ps::PeerContact>() {
+        if !ctx.allows(shared, RESOURCE, Caps::SWARM_ADVERTISE) {
+            fail!(ErrorCode::Forbidden);
+        }
+        if req.port == 0 {
+            fail!(ErrorCode::BadRequest);
+        }
+        // Pair the declared port with the *observed* remote IP: a client
+        // can't direct fetchers at an arbitrary host.
+        let ip = conn.peer().remote_addr.ip();
+        shared.swarm.set_contact(
+            ctx.session_id,
+            PeerEndpoint {
+                endpoint: format!("{ip}:{}", req.port),
+                cert_fp: req.cert_fp,
+            },
+        );
+        conn.send(Frame::ack(frame)).await?;
+        return Ok(true);
+    }
+
+    // ---- Capability ticket ---------------------------------------------------
+    if let Some(Ok(req)) = frame.decode::<ps::SourceTicketRequest>() {
+        // Fetching bytes from a peer is a download; gate it like one.
+        if !ctx.allows(shared, RESOURCE, Caps::FILE_DOWNLOAD) {
+            fail!(ErrorCode::Forbidden);
+        }
+        let expires_unix = chrono::Utc::now().timestamp() + TICKET_TTL_SECS;
+        let key = rabbithole_identity::IdentityKey::from_seed(&shared.server_signing_seed);
+        let token =
+            match rabbithole_swarm::CapToken::issue(&key, req.root, &ctx.screen_name, expires_unix)
+            {
+                Ok(t) => t,
+                Err(_) => fail!(ErrorCode::Internal),
+            };
+        reply!(&ps::SourceTicket::new(token.to_bytes(), expires_unix));
         return Ok(true);
     }
 

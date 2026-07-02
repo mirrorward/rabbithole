@@ -14,6 +14,8 @@
 //! | 1/2 | [`AdvertiseFiles`] → [`AdvertiseAck`] | Request/Reply |
 //! | 3 | [`AdvertWithdraw`] | Request → ack |
 //! | 4/5 | [`FindSources`] → [`SourceList`] | Request/Reply |
+//! | 6 | [`PeerContact`] | Request → ack |
+//! | 7/8 | [`SourceTicketRequest`] → [`SourceTicket`] | Request/Reply |
 
 use serde::{Deserialize, Serialize};
 
@@ -137,11 +139,16 @@ impl Message for FindSources {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceInfo {
-    /// The advertising persona (peer endpoints arrive with the peer wire).
+    /// The advertising persona.
     pub screen_name: String,
     pub size: u64,
     pub name: String,
     pub mime: String,
+    /// Peer-wire endpoint (`ip:port`), when the peer registered a
+    /// [`PeerContact`]; `None` means coordinator-only (origin fallback).
+    pub endpoint: Option<String>,
+    /// The peer's self-signed TLS cert fingerprint, pinned when dialing.
+    pub cert_fp: Option<[u8; 32]>,
 }
 
 impl SourceInfo {
@@ -156,7 +163,15 @@ impl SourceInfo {
             size,
             name: name.into(),
             mime: mime.into(),
+            endpoint: None,
+            cert_fp: None,
         }
+    }
+
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>, cert_fp: [u8; 32]) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self.cert_fp = Some(cert_fp);
+        self
     }
 }
 
@@ -193,6 +208,73 @@ impl SourceList {
 impl Message for SourceList {
     const FAMILY: Family = Family::SWARM;
     const MESSAGE_TYPE: u16 = 5;
+}
+
+/// Register this session's peer-wire contact card: the QUIC port it serves
+/// swarm requests on and its self-signed cert fingerprint. The server pairs
+/// the port with the connection's **observed** remote IP (a client can't
+/// claim an arbitrary host) and attaches both to this session's adverts in
+/// [`SourceList`] replies. Needs `SWARM_ADVERTISE`. → ack.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerContact {
+    pub port: u16,
+    pub cert_fp: [u8; 32],
+}
+
+impl PeerContact {
+    pub fn new(port: u16, cert_fp: [u8; 32]) -> Self {
+        Self { port, cert_fp }
+    }
+}
+
+impl Message for PeerContact {
+    const FAMILY: Family = Family::SWARM;
+    const MESSAGE_TYPE: u16 = 6;
+}
+
+/// Ask the origin to sign a capability authorizing this session to fetch
+/// `root` from peers. Needs `FILE_DOWNLOAD`. → [`SourceTicket`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceTicketRequest {
+    pub root: [u8; 32],
+}
+
+impl SourceTicketRequest {
+    pub fn new(root: [u8; 32]) -> Self {
+        Self { root }
+    }
+}
+
+impl Message for SourceTicketRequest {
+    const FAMILY: Family = Family::SWARM;
+    const MESSAGE_TYPE: u16 = 7;
+}
+
+/// A server-signed capability token (opaque `rabbithole-swarm` `CapToken`
+/// postcard bytes — peers decode and verify it against the server identity
+/// key they learned at hello).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceTicket {
+    pub token: Vec<u8>,
+    /// Convenience copy of the token's expiry (unix seconds).
+    pub expires_unix: i64,
+}
+
+impl SourceTicket {
+    pub fn new(token: Vec<u8>, expires_unix: i64) -> Self {
+        Self {
+            token,
+            expires_unix,
+        }
+    }
+}
+
+impl Message for SourceTicket {
+    const FAMILY: Family = Family::SWARM;
+    const MESSAGE_TYPE: u16 = 8;
 }
 
 #[cfg(test)]

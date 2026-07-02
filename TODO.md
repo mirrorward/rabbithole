@@ -92,11 +92,11 @@
 ## Wave 5 — Swarm ("the warren")
 *Depends on: W4*
 
-- [ ] Spike: iroh vs quinn+custom for hole punching/relay → decision
+- [x] Spike: iroh vs quinn+custom for hole punching/relay → **decision: quinn + custom** (stack is already quinn end-to-end with fingerprint pinning and the coordinator handles discovery; iroh is the documented fallback if NAT traversal underdelivers) — see docs/protocol/swarm.md
 - [x] Manifest format (per-file blake3 roots, 1 MiB chunks) + `rabbit://` links — `rabbithole-swarm` `Manifest`/`ManifestFile` (content-addressed id = blake3 over canonical postcard bytes; path-sorted for determinism) and `RabbitLink` (`rabbit://host[:port]/{files,manifest,blob}/…`, percent-encoded, root-pinned). CBOR interop deferred to a later slice.
 - [x] `AdvertiseFiles` (list-without-upload): metadata catalog, permission scopes, TTL soft state + re-announce — SWARM family (6) types 1-5, `SwarmCatalog` (TTL'd soft state, per-account cap `swarm_adverts_max`, session-scoped cleanup), gated by `SWARM_ADVERTISE` on the `swarm` resource; `rabbit swarm share/find/unshare`
 - [~] Coordinator: FindSources (scope-gated, reports origin-server fallback + source count as list-level rarity) done; per-chunk rarity annotation arrives with the peer wire/scheduler
-- [ ] Server-signed capability tokens; peer-side verification
+- [x] Server-signed capability tokens; peer-side verification — `rabbithole-swarm::CapToken` (ed25519 over `rhp-swarm-cap-v1`-separated claim {root, fetcher, expiry}), issued via `SourceTicketRequest` (FILE_DOWNLOAD-gated, 10 min TTL), verified against the hello-time server key; `PeerContact` cards (observed-IP + declared port + pinned cert fp) join `SourceList` entries
 - [ ] Peer wire over QUIC: Hello/Have/RequestRange/Cancel; Bao-verified responses
 - [ ] Multi-source scheduler: rarest-first, per-source speed assignment, endgame mode
 - [ ] Server chunk cache policies (none/LRU/mirror)

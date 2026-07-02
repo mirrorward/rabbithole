@@ -11,6 +11,8 @@ links live in the `rabbithole-swarm` crate.
 | 1/2 | AdvertiseFiles → AdvertiseAck | Request/Reply | entries {root, size, name, mime} + requested ttl; ack reports accepted / granted ttl / account total; needs SWARM_ADVERTISE |
 | 3 | AdvertWithdraw | Request → ack | roots (empty = everything this session advertised) |
 | 4/5 | FindSources → SourceList | Request/Reply | root → advertising peers + whether the origin's blob store has it; needs FILE_LIST |
+| 6 | PeerContact | Request → ack | this session's peer-wire port + cert fingerprint; needs SWARM_ADVERTISE |
+| 7/8 | SourceTicketRequest → SourceTicket | Request/Reply | root → server-signed capability token (opaque `CapToken` bytes + expiry); needs FILE_DOWNLOAD |
 
 ## List-without-upload
 
@@ -49,6 +51,38 @@ root's rarity signal until per-chunk rarity arrives with the scheduler.
 Cheshire mode is respected: sources whose session is invisible are
 omitted for sub-moderator callers (naming an advert's holder would also
 confirm they're online). Replies list at most 200 sources.
+
+## Peer contact cards
+
+A peer that wants to *serve* (not just be listed) registers a
+`PeerContact`: the QUIC port its peer-wire listener is on plus its
+self-signed cert fingerprint. The server pairs the port with the
+connection's **observed** remote IP — a client cannot point fetchers at
+an arbitrary host — and joins the card into that session's entries in
+`SourceList` (`endpoint`/`cert_fp`, `None` for coordinator-only
+sources). The card dies with the session, like the adverts themselves.
+
+## Capability tokens
+
+The origin server is the swarm's trust anchor. Before fetching from a
+peer, a client asks it for a `SourceTicket`: a `rabbithole-swarm`
+`CapToken` — `{root, fetcher screen name, expiry}` signed by the
+server's ed25519 identity key with the domain-separated context
+`rhp-swarm-cap-v1`. Serving peers verify the token against the server
+key they learned at hello (no round trip), check the root matches what
+is being requested, and refuse expired tokens. Tickets are short-lived
+(10 minutes) — fetchers re-request rather than hoard. Issuance is gated
+by `FILE_DOWNLOAD`, since a ticket authorizes moving file bytes.
+
+## Transport decision (the spike)
+
+The peer wire stays on **quinn + custom** coordination rather than
+adopting iroh: the stack already runs quinn everywhere (server listener,
+client transport, bulk streams), certificates are already pinned by
+fingerprint, and the coordinator gives us discovery. Hole punching and
+the server relay fallback (this wave, later slice) are tractable on raw
+quinn; iroh remains the documented fallback if real-world NAT traversal
+proves harder than expected.
 
 ## Permissions
 

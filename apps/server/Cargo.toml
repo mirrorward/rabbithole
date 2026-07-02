@@ -24,6 +24,7 @@ rabbithole-identity.workspace = true
 rabbithole-blobs.workspace = true
 rabbithole-server-core.workspace = true
 rabbithole-store-server.workspace = true
+rabbithole-swarm.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 parking_lot.workspace = true

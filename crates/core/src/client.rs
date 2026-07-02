@@ -813,6 +813,24 @@ impl Client {
             .await
     }
 
+    /// Register this session's peer-wire contact card (the QUIC port it
+    /// serves swarm fetches on + its cert fingerprint). The server pairs the
+    /// port with this connection's observed IP.
+    pub async fn swarm_contact(&mut self, port: u16, cert_fp: [u8; 32]) -> Result<(), ClientError> {
+        self.request_ack(&rabbithole_proto::swarm::PeerContact::new(port, cert_fp))
+            .await
+    }
+
+    /// Ask the origin for a capability token authorizing this session to
+    /// fetch `root` from peers (verify/decode via `rabbithole-swarm`).
+    pub async fn swarm_ticket(
+        &mut self,
+        root: [u8; 32],
+    ) -> Result<rabbithole_proto::swarm::SourceTicket, ClientError> {
+        self.request(&rabbithole_proto::swarm::SourceTicketRequest::new(root))
+            .await
+    }
+
     /// Cap transfer bandwidth to `bytes_per_sec` (`None`/0 = unlimited). The
     /// queue driver uses this to throttle background transfers; it applies to
     /// the ranged-chunk and dedicated-stream paths alike.

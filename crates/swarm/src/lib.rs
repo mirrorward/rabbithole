@@ -9,8 +9,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cap;
 pub mod link;
 pub mod manifest;
 
+pub use cap::{CapClaim, CapError, CapToken, CAP_CONTEXT};
 pub use link::{LinkError, LinkTarget, RabbitLink};
 pub use manifest::{Manifest, ManifestError, ManifestFile, CHUNK_SIZE};

@@ -43,10 +43,21 @@ pub struct NewAdvert {
     pub mime: String,
 }
 
+/// A session's peer-wire contact card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerEndpoint {
+    /// `ip:port` — observed IP paired with the client-declared port.
+    pub endpoint: String,
+    /// Self-signed TLS cert fingerprint peers pin when dialing.
+    pub cert_fp: [u8; 32],
+}
+
 #[derive(Default)]
 pub struct SwarmCatalog {
     /// root → live adverts for it (at most one per session per root).
     inner: RwLock<HashMap<[u8; 32], Vec<Advert>>>,
+    /// session → its peer-wire contact card (None until registered).
+    contacts: RwLock<HashMap<u64, PeerEndpoint>>,
 }
 
 impl SwarmCatalog {
@@ -155,9 +166,20 @@ impl SwarmCatalog {
     }
 
     /// Session teardown: every advert it held vanishes (a disconnected peer
-    /// can't serve bytes).
+    /// can't serve bytes), and so does its contact card.
     pub fn session_closed(&self, session_id: u64) {
         self.withdraw(session_id, &[]);
+        self.contacts.write().remove(&session_id);
+    }
+
+    /// Register (or replace) a session's peer-wire contact card.
+    pub fn set_contact(&self, session_id: u64, endpoint: PeerEndpoint) {
+        self.contacts.write().insert(session_id, endpoint);
+    }
+
+    /// The session's contact card, if it registered one.
+    pub fn contact(&self, session_id: u64) -> Option<PeerEndpoint> {
+        self.contacts.read().get(&session_id).cloned()
     }
 
     /// Persona switch/rename: keep the catalog's names in step with

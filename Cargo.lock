@@ -244,6 +244,7 @@ dependencies = [
  "rabbithole-server-core",
  "rabbithole-store-client",
  "rabbithole-store-server",
+ "rabbithole-swarm",
  "rustls-pki-types",
  "serde_json",
  "tempfile",
@@ -1963,6 +1964,7 @@ dependencies = [
  "blake3",
  "hex",
  "postcard",
+ "rabbithole-identity",
  "serde",
  "thiserror 2.0.18",
 ]
