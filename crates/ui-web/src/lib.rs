@@ -39,4 +39,4 @@ pub mod theme_css;
 
 pub use app::{mount, App, AppState};
 pub use client::{MockClient, UiClient};
-pub use state::{ChatLine, UiState};
+pub use state::{Board, ChatLine, DmMessage, DmThread, Member, Post, Thread, UiState};

@@ -12,7 +12,7 @@ use rabbithole_core::api::Command;
 use rabbithole_core::theme::Mode;
 
 use crate::client::{MockClient, UiClient, LOBBY};
-use crate::components::{Lobby, Login};
+use crate::components::{BoardView, Boards, Directory, Dms, Lobby, Login};
 use crate::state::UiState;
 use crate::theme_css::{root_vars, STYLESHEET};
 
@@ -55,6 +55,50 @@ impl AppState {
         let who = self.client.with_value(|client| client.who(LOBBY));
         self.state.update(|s| s.who = who);
     }
+
+    /// Load the board tree snapshot into state.
+    pub fn load_boards(&self) {
+        let boards = self.client.with_value(|c| c.boards());
+        self.state.update(|s| s.set_boards(boards));
+    }
+
+    /// Select a board and load its threads into state.
+    pub fn select_board(&self, slug: &str) {
+        let threads = self.client.with_value(|c| c.threads(slug));
+        self.state.update(|s| s.select_board(slug, threads));
+    }
+
+    /// Open a thread and load its posts into state.
+    pub fn open_thread(&self, id: u64) {
+        let posts = self.client.with_value(|c| c.posts(id));
+        self.state.update(|s| s.open_thread(id, posts));
+    }
+
+    /// Load the DM conversation snapshots into state.
+    pub fn load_dms(&self) {
+        let threads = self.client.with_value(|c| c.dm_threads());
+        self.state.update(|s| s.set_dm_threads(threads));
+    }
+
+    /// Send a DM into the selected conversation, appending it locally. The
+    /// real transport will echo a server event instead.
+    pub fn send_dm(&self, text: &str) {
+        let Some(id) = self.state.with(|s| s.selected_dm.clone()) else {
+            return;
+        };
+        let state = self.state;
+        self.client.update_value(|c| {
+            if let Some(msg) = c.send_dm(&id, text) {
+                state.update(|s| s.append_dm(&id, msg));
+            }
+        });
+    }
+
+    /// Load the member directory snapshot into state.
+    pub fn load_members(&self) {
+        let members = self.client.with_value(|c| c.members());
+        self.state.update(|s| s.set_members(members));
+    }
 }
 
 impl Default for AppState {
@@ -79,6 +123,10 @@ pub fn App() -> impl IntoView {
                 <Routes>
                     <Route path="/" view=Login/>
                     <Route path="/lobby" view=Lobby/>
+                    <Route path="/boards" view=Boards/>
+                    <Route path="/boards/:slug" view=BoardView/>
+                    <Route path="/dms" view=Dms/>
+                    <Route path="/directory" view=Directory/>
                 </Routes>
             </div>
         </Router>

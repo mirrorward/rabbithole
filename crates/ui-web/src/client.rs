@@ -17,7 +17,7 @@
 
 use rabbithole_core::api::{Command, Event};
 
-use crate::state::derive_server_name;
+use crate::state::{derive_server_name, Board, DmMessage, DmThread, Member, Post, Thread};
 
 /// The single room the mock exposes.
 pub const LOBBY: &str = "lobby";
@@ -33,6 +33,29 @@ pub trait UiClient {
     /// an [`Event`] yet (the core's `Event` enum has no who-list variant), so
     /// it is exposed as a direct query on the seam.
     fn who(&self, room: &str) -> Vec<String>;
+
+    /// Snapshot of the board tree. Boards have no [`Event`] variant yet, so —
+    /// like [`who`](Self::who) — they are a direct query until the board
+    /// protocol family and its events land.
+    fn boards(&self) -> Vec<Board>;
+
+    /// Threads belonging to the board identified by `slug`.
+    fn threads(&self, slug: &str) -> Vec<Thread>;
+
+    /// Posts belonging to the thread identified by `thread_id`.
+    fn posts(&self, thread_id: u64) -> Vec<Post>;
+
+    /// Snapshot of the member directory.
+    fn members(&self) -> Vec<Member>;
+
+    /// Snapshot of the direct-message conversations.
+    fn dm_threads(&self) -> Vec<DmThread>;
+
+    /// Append `text` to the DM conversation identified by `thread_id`, sent as
+    /// the current user, and return the stored message. Returns `None` if the
+    /// conversation is unknown. The real transport will echo a server event
+    /// instead of appending locally.
+    fn send_dm(&mut self, thread_id: &str, text: &str) -> Option<DmMessage>;
 }
 
 /// In-memory [`UiClient`] used until the real WebSocket transport lands.
@@ -43,6 +66,11 @@ pub struct MockClient {
     server_name: String,
     current_user: Option<String>,
     who: Vec<String>,
+    boards: Vec<Board>,
+    threads: Vec<Thread>,
+    posts: Vec<Post>,
+    members: Vec<Member>,
+    dm_threads: Vec<DmThread>,
 }
 
 impl Default for MockClient {
@@ -52,7 +80,8 @@ impl Default for MockClient {
 }
 
 impl MockClient {
-    /// A fresh, disconnected mock with a seeded member list.
+    /// A fresh, disconnected mock with a seeded member list, board tree, DM
+    /// conversations and directory.
     pub fn new() -> Self {
         Self {
             connected: false,
@@ -60,7 +89,129 @@ impl MockClient {
             server_name: String::new(),
             current_user: None,
             who: vec!["rabbit".to_string(), "alice".to_string(), "bob".to_string()],
+            boards: Self::seeded_boards(),
+            threads: Self::seeded_threads(),
+            posts: Self::seeded_posts(),
+            members: Self::seeded_members(),
+            dm_threads: Self::seeded_dms(),
         }
+    }
+
+    fn seeded_boards() -> Vec<Board> {
+        vec![
+            Board {
+                slug: "general".to_string(),
+                name: "General".to_string(),
+                description: "Warren-wide chatter and announcements.".to_string(),
+            },
+            Board {
+                slug: "tech".to_string(),
+                name: "Tech Talk".to_string(),
+                description: "Protocols, clients and self-hosting.".to_string(),
+            },
+        ]
+    }
+
+    fn seeded_threads() -> Vec<Thread> {
+        vec![
+            Thread {
+                id: 1,
+                board: "general".to_string(),
+                title: "Warren rules & etiquette".to_string(),
+                author: "rabbit".to_string(),
+            },
+            Thread {
+                id: 2,
+                board: "general".to_string(),
+                title: "Introduce yourself".to_string(),
+                author: "alice".to_string(),
+            },
+            Thread {
+                id: 3,
+                board: "tech".to_string(),
+                title: "Running your own burrow".to_string(),
+                author: "bob".to_string(),
+            },
+        ]
+    }
+
+    fn seeded_posts() -> Vec<Post> {
+        vec![
+            Post {
+                id: 11,
+                thread: 1,
+                author: "rabbit".to_string(),
+                body: "Be excellent to each other. No spam.".to_string(),
+            },
+            Post {
+                id: 12,
+                thread: 1,
+                author: "alice".to_string(),
+                body: "Sounds good to me!".to_string(),
+            },
+            Post {
+                id: 21,
+                thread: 2,
+                author: "alice".to_string(),
+                body: "Hi, I'm Alice. Long-time lurker.".to_string(),
+            },
+            Post {
+                id: 31,
+                thread: 3,
+                author: "bob".to_string(),
+                body: "Here's how I set up my burrow behind NAT.".to_string(),
+            },
+        ]
+    }
+
+    fn seeded_members() -> Vec<Member> {
+        vec![
+            Member {
+                handle: "rabbit".to_string(),
+                display_name: "The Rabbit".to_string(),
+                bio: "Warren keeper and host.".to_string(),
+                online: true,
+            },
+            Member {
+                handle: "alice".to_string(),
+                display_name: "Alice Down".to_string(),
+                bio: "Curious about everything.".to_string(),
+                online: true,
+            },
+            Member {
+                handle: "bob".to_string(),
+                display_name: "Bob Hutch".to_string(),
+                bio: "Self-hosting enthusiast.".to_string(),
+                online: false,
+            },
+        ]
+    }
+
+    fn seeded_dms() -> Vec<DmThread> {
+        vec![
+            DmThread {
+                id: "alice".to_string(),
+                peer: "alice".to_string(),
+                messages: vec![
+                    DmMessage {
+                        from: "alice".to_string(),
+                        text: "hey, did you see the new board?".to_string(),
+                    },
+                    DmMessage {
+                        from: "rabbit".to_string(),
+                        text: "yep, looks great".to_string(),
+                    },
+                ],
+            },
+            DmThread {
+                id: "bob".to_string(),
+                peer: "bob".to_string(),
+                messages: vec![DmMessage {
+                    from: "bob".to_string(),
+                    text: "ping me when you're around".to_string(),
+                }],
+            },
+        ]
     }
 
     /// The lobby scrollback every fresh session is seeded with.
@@ -135,6 +286,48 @@ impl UiClient for MockClient {
 
     fn who(&self, _room: &str) -> Vec<String> {
         self.who.clone()
+    }
+
+    fn boards(&self) -> Vec<Board> {
+        self.boards.clone()
+    }
+
+    fn threads(&self, slug: &str) -> Vec<Thread> {
+        self.threads
+            .iter()
+            .filter(|t| t.board == slug)
+            .cloned()
+            .collect()
+    }
+
+    fn posts(&self, thread_id: u64) -> Vec<Post> {
+        self.posts
+            .iter()
+            .filter(|p| p.thread == thread_id)
+            .cloned()
+            .collect()
+    }
+
+    fn members(&self) -> Vec<Member> {
+        self.members.clone()
+    }
+
+    fn dm_threads(&self) -> Vec<DmThread> {
+        self.dm_threads.clone()
+    }
+
+    fn send_dm(&mut self, thread_id: &str, text: &str) -> Option<DmMessage> {
+        let from = self
+            .current_user
+            .clone()
+            .unwrap_or_else(|| "me".to_string());
+        let thread = self.dm_threads.iter_mut().find(|t| t.id == thread_id)?;
+        let msg = DmMessage {
+            from,
+            text: text.to_string(),
+        };
+        thread.messages.push(msg.clone());
+        Some(msg)
     }
 }
 
@@ -229,6 +422,71 @@ mod tests {
             text: "hi".into(),
         });
         assert!(matches!(ev.as_slice(), [Event::CommandFailed { .. }]));
+    }
+
+    #[test]
+    fn boards_are_seeded() {
+        let c = MockClient::new();
+        let boards = c.boards();
+        assert_eq!(boards.len(), 2);
+        assert!(boards.iter().any(|b| b.slug == "general"));
+        assert!(boards.iter().any(|b| b.slug == "tech"));
+    }
+
+    #[test]
+    fn threads_filter_by_board_slug() {
+        let c = MockClient::new();
+        let general = c.threads("general");
+        assert_eq!(general.len(), 2);
+        assert!(general.iter().all(|t| t.board == "general"));
+        let tech = c.threads("tech");
+        assert_eq!(tech.len(), 1);
+        assert!(c.threads("nope").is_empty());
+    }
+
+    #[test]
+    fn posts_filter_by_thread_id() {
+        let c = MockClient::new();
+        let posts = c.posts(1);
+        assert_eq!(posts.len(), 2);
+        assert!(posts.iter().all(|p| p.thread == 1));
+        assert!(c.posts(999).is_empty());
+    }
+
+    #[test]
+    fn members_are_seeded() {
+        let c = MockClient::new();
+        assert_eq!(c.members().len(), 3);
+    }
+
+    #[test]
+    fn dm_threads_are_seeded() {
+        let c = MockClient::new();
+        let dms = c.dm_threads();
+        assert_eq!(dms.len(), 2);
+        assert_eq!(dms[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn send_dm_appends_as_current_user() {
+        let mut c = connect_and_sign_in("kevin");
+        let msg = c.send_dm("alice", "hello there").unwrap();
+        assert_eq!(msg.from, "kevin");
+        assert_eq!(msg.text, "hello there");
+        // The append persists on the mock.
+        let alice = c
+            .dm_threads()
+            .into_iter()
+            .find(|t| t.id == "alice")
+            .unwrap();
+        assert_eq!(alice.messages.len(), 3);
+        assert_eq!(alice.messages.last().unwrap().text, "hello there");
+    }
+
+    #[test]
+    fn send_dm_to_unknown_thread_returns_none() {
+        let mut c = connect_and_sign_in("kevin");
+        assert!(c.send_dm("nobody", "hi").is_none());
     }
 
     #[test]

@@ -16,6 +16,89 @@ pub struct ChatLine {
     pub text: String,
 }
 
+/// A board in the board tree.
+///
+/// Boards, threads and posts have **no** [`Event`]/[`Command`] variants in
+/// [`rabbithole_core::api`] yet, so they are modelled here as view-local
+/// state seeded by [`crate::client::MockClient`]. When the board protocol
+/// family lands, the transport slice will map real events onto the same
+/// [`UiState::set_boards`] / [`UiState::select_board`] / [`UiState::open_thread`]
+/// mutators — the reducer surface is intentionally kept transport-shaped.
+///
+/// [`Command`]: rabbithole_core::api::Command
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Board {
+    /// URL-safe identifier used in the `/boards/:slug` route.
+    pub slug: String,
+    /// Human-readable board name.
+    pub name: String,
+    /// One-line description shown in the tree.
+    pub description: String,
+}
+
+/// A discussion thread within a [`Board`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Thread {
+    /// Stable thread identifier.
+    pub id: u64,
+    /// Slug of the [`Board`] this thread belongs to.
+    pub board: String,
+    /// Thread subject line.
+    pub title: String,
+    /// Handle of the thread starter.
+    pub author: String,
+}
+
+/// A single post inside a [`Thread`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Post {
+    /// Stable post identifier.
+    pub id: u64,
+    /// Identifier of the owning [`Thread`].
+    pub thread: u64,
+    /// Handle of the poster.
+    pub author: String,
+    /// Post body text.
+    pub body: String,
+}
+
+/// One message in a direct-message conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DmMessage {
+    /// Handle of the sender.
+    pub from: String,
+    /// Message body.
+    pub text: String,
+}
+
+/// A direct-message conversation with a single peer.
+///
+/// Like boards, DMs are view-local until the DM protocol family lands; the
+/// transport slice will replace [`UiState::append_dm`]'s local append with an
+/// echoed server event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DmThread {
+    /// Stable conversation identifier.
+    pub id: String,
+    /// Handle of the other party.
+    pub peer: String,
+    /// Messages, oldest first.
+    pub messages: Vec<DmMessage>,
+}
+
+/// A member listed in the directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    /// Login handle.
+    pub handle: String,
+    /// Friendly display name.
+    pub display_name: String,
+    /// Short profile blurb shown on the profile card.
+    pub bio: String,
+    /// Whether the member is currently online.
+    pub online: bool,
+}
+
 /// The full, flat UI model. `Default` is the pre-connection state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UiState {
@@ -29,6 +112,26 @@ pub struct UiState {
     pub messages: Vec<ChatLine>,
     /// Handles currently present in the room.
     pub who: Vec<String>,
+    /// The board tree.
+    pub boards: Vec<Board>,
+    /// Threads of the currently selected board.
+    pub threads: Vec<Thread>,
+    /// Posts of the currently opened thread.
+    pub posts: Vec<Post>,
+    /// Slug of the selected board, if any.
+    pub selected_board: Option<String>,
+    /// Id of the opened thread, if any.
+    pub selected_thread: Option<u64>,
+    /// Direct-message conversations.
+    pub dm_threads: Vec<DmThread>,
+    /// Id of the selected DM conversation, if any.
+    pub selected_dm: Option<String>,
+    /// Member directory.
+    pub members: Vec<Member>,
+    /// Current directory search query.
+    pub directory_query: String,
+    /// Handle of the member whose profile card is shown, if any.
+    pub selected_member: Option<String>,
 }
 
 impl UiState {
@@ -60,6 +163,87 @@ impl UiState {
             }
             _ => {}
         }
+    }
+
+    /// Replace the board tree (from a client snapshot).
+    pub fn set_boards(&mut self, boards: Vec<Board>) {
+        self.boards = boards;
+    }
+
+    /// Select a board: record the slug, load its threads and reset any open
+    /// thread. Mirrors the shape a future `Event::BoardSelected` would take.
+    pub fn select_board(&mut self, slug: &str, threads: Vec<Thread>) {
+        self.selected_board = Some(slug.to_string());
+        self.threads = threads;
+        self.selected_thread = None;
+        self.posts.clear();
+    }
+
+    /// Open a thread within the selected board and load its posts.
+    pub fn open_thread(&mut self, id: u64, posts: Vec<Post>) {
+        self.selected_thread = Some(id);
+        self.posts = posts;
+    }
+
+    /// Replace the DM conversation list (from a client snapshot).
+    pub fn set_dm_threads(&mut self, threads: Vec<DmThread>) {
+        self.dm_threads = threads;
+    }
+
+    /// Select a DM conversation by id.
+    pub fn select_dm(&mut self, id: &str) {
+        self.selected_dm = Some(id.to_string());
+    }
+
+    /// Append a message to the identified DM conversation. No-op if the id is
+    /// unknown.
+    pub fn append_dm(&mut self, id: &str, msg: DmMessage) {
+        if let Some(t) = self.dm_threads.iter_mut().find(|t| t.id == id) {
+            t.messages.push(msg);
+        }
+    }
+
+    /// The currently selected DM conversation, if any.
+    pub fn active_dm(&self) -> Option<&DmThread> {
+        let id = self.selected_dm.as_deref()?;
+        self.dm_threads.iter().find(|t| t.id == id)
+    }
+
+    /// Replace the member directory (from a client snapshot).
+    pub fn set_members(&mut self, members: Vec<Member>) {
+        self.members = members;
+    }
+
+    /// Update the directory search query.
+    pub fn set_directory_query(&mut self, query: String) {
+        self.directory_query = query;
+    }
+
+    /// Members matching the current, case-insensitive directory query on
+    /// either handle or display name. An empty query matches everyone.
+    pub fn matching_members(&self) -> Vec<Member> {
+        let q = self.directory_query.trim().to_lowercase();
+        if q.is_empty() {
+            return self.members.clone();
+        }
+        self.members
+            .iter()
+            .filter(|m| {
+                m.handle.to_lowercase().contains(&q) || m.display_name.to_lowercase().contains(&q)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Show a member's profile card by handle.
+    pub fn select_member(&mut self, handle: &str) {
+        self.selected_member = Some(handle.to_string());
+    }
+
+    /// The member whose profile card is shown, if any.
+    pub fn active_member(&self) -> Option<&Member> {
+        let handle = self.selected_member.as_deref()?;
+        self.members.iter().find(|m| m.handle == handle)
     }
 }
 
@@ -137,6 +321,133 @@ mod tests {
             detail: "nope".into(),
         });
         assert!(s.status.contains("nope"));
+    }
+
+    #[test]
+    fn select_board_loads_threads_and_resets_open_thread() {
+        let mut s = UiState::default();
+        s.open_thread(7, vec![]);
+        assert_eq!(s.selected_thread, Some(7));
+        let threads = vec![Thread {
+            id: 1,
+            board: "general".into(),
+            title: "hello".into(),
+            author: "rabbit".into(),
+        }];
+        s.select_board("general", threads.clone());
+        assert_eq!(s.selected_board.as_deref(), Some("general"));
+        assert_eq!(s.threads, threads);
+        assert_eq!(s.selected_thread, None);
+        assert!(s.posts.is_empty());
+    }
+
+    #[test]
+    fn open_thread_loads_posts() {
+        let mut s = UiState::default();
+        let posts = vec![Post {
+            id: 10,
+            thread: 1,
+            author: "alice".into(),
+            body: "first".into(),
+        }];
+        s.open_thread(1, posts.clone());
+        assert_eq!(s.selected_thread, Some(1));
+        assert_eq!(s.posts, posts);
+    }
+
+    #[test]
+    fn dm_append_targets_selected_thread() {
+        let mut s = UiState::default();
+        s.set_dm_threads(vec![
+            DmThread {
+                id: "a".into(),
+                peer: "alice".into(),
+                messages: vec![],
+            },
+            DmThread {
+                id: "b".into(),
+                peer: "bob".into(),
+                messages: vec![],
+            },
+        ]);
+        s.select_dm("b");
+        s.append_dm(
+            "b",
+            DmMessage {
+                from: "kevin".into(),
+                text: "yo".into(),
+            },
+        );
+        assert_eq!(s.active_dm().unwrap().peer, "bob");
+        assert_eq!(s.active_dm().unwrap().messages.len(), 1);
+        // The other conversation is untouched.
+        assert_eq!(s.dm_threads[0].messages.len(), 0);
+    }
+
+    #[test]
+    fn dm_append_to_unknown_id_is_noop() {
+        let mut s = UiState::default();
+        s.set_dm_threads(vec![DmThread {
+            id: "a".into(),
+            peer: "alice".into(),
+            messages: vec![],
+        }]);
+        s.append_dm(
+            "missing",
+            DmMessage {
+                from: "x".into(),
+                text: "y".into(),
+            },
+        );
+        assert_eq!(s.dm_threads[0].messages.len(), 0);
+    }
+
+    #[test]
+    fn directory_search_filters_by_handle_and_name() {
+        let mut s = UiState::default();
+        s.set_members(vec![
+            Member {
+                handle: "alice".into(),
+                display_name: "Alice Down".into(),
+                bio: "".into(),
+                online: true,
+            },
+            Member {
+                handle: "bob".into(),
+                display_name: "Bob Hutch".into(),
+                bio: "".into(),
+                online: false,
+            },
+        ]);
+        // Empty query matches everyone.
+        assert_eq!(s.matching_members().len(), 2);
+        // Handle match, case-insensitive.
+        s.set_directory_query("ALI".into());
+        let m = s.matching_members();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].handle, "alice");
+        // Display-name match.
+        s.set_directory_query("hutch".into());
+        let m = s.matching_members();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].handle, "bob");
+        // No match.
+        s.set_directory_query("zzz".into());
+        assert!(s.matching_members().is_empty());
+    }
+
+    #[test]
+    fn select_member_exposes_profile() {
+        let mut s = UiState::default();
+        s.set_members(vec![Member {
+            handle: "alice".into(),
+            display_name: "Alice".into(),
+            bio: "hi".into(),
+            online: true,
+        }]);
+        assert!(s.active_member().is_none());
+        s.select_member("alice");
+        assert_eq!(s.active_member().unwrap().bio, "hi");
     }
 
     #[test]
