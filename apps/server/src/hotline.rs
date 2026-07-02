@@ -236,8 +236,13 @@ async fn serve_htxf(sock: TcpStream, shared: Arc<Shared>) -> Result<()> {
     let refnum = u32::from_be_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
     if let Some(bytes) = shared.hotline.take_download(refnum) {
         wr.write_all(&bytes).await?;
-        wr.flush().await?;
     }
+    // Gracefully shut the write half down (FIN) rather than letting the socket
+    // drop close it. On Windows a bare drop can RST the connection and discard
+    // still-buffered bytes, so the client sees an early EOF mid-download; an
+    // explicit shutdown drains the send buffer first. (`flush` alone does not
+    // wait for delivery on a TCP stream.)
+    wr.shutdown().await?;
     Ok(())
 }
 
