@@ -11,22 +11,20 @@ use rabbithole_core::api::Command;
 
 use crate::app::AppState;
 use crate::client::LOBBY;
-use crate::theme_css::toggle;
-use rabbithole_core::theme::Mode;
+use crate::files::{human_size, node_kind_label, TransferStatus, KIND_FOLDER};
+use crate::theme_css::choice_label;
 
-/// Light/dark switch. Persists the choice in the shared `mode` signal and
-/// re-themes the whole app via the root CSS variables.
+/// Appearance switch, cycling System → Light → Dark. The choice is persisted to
+/// `localStorage` and re-themes the whole app via the root CSS variables.
 #[component]
 pub fn ThemeToggle() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let label = move || match app.mode.get() {
-        Mode::Dark => "\u{2600} Light",
-        Mode::Light => "\u{263D} Dark",
-    };
+    let label = move || choice_label(app.theme.get());
     view! {
         <button
             class="rh-btn ghost"
-            on:click=move |_| app.mode.update(|m| *m = toggle(*m))
+            title="Cycle appearance: Auto / Light / Dark"
+            on:click=move |_| app.cycle_theme()
         >
             {label}
         </button>
@@ -43,6 +41,8 @@ pub fn Nav() -> impl IntoView {
             <A href="/boards">"Boards"</A>
             <A href="/dms">"DMs"</A>
             <A href="/directory">"Directory"</A>
+            <A href="/files">"Files"</A>
+            <A href="/art">"Art"</A>
         </nav>
     }
 }
@@ -496,6 +496,286 @@ pub fn Directory() -> impl IntoView {
                         })
                     })}
                 </Show>
+            </section>
+        </div>
+    }
+}
+
+/// A tiny built-in ANSI sample so the art gallery renders something without a
+/// live file transfer. Real art will come from the file library once download
+/// bytes flow through the transport.
+const SAMPLE_ANSI: &[u8] =
+    b"\x1b[1;36m  RabbitHole \x1b[0;35mANSI\x1b[0m\r\n\x1b[1;33m  \xDB\xDB\xB2\xB1\xB0\x1b[0;32m warren art \x1b[1;31m\xDB\xDB\x1b[0m\r\n\x1b[0;44;37m  press any key  \x1b[0m\r\n";
+
+/// The file library: browse areas → folders, inspect metadata, download/upload,
+/// and watch the transfer queue. Mirrors the boards/directory component style.
+#[component]
+pub fn Files() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let files = app.files;
+    app.load_areas();
+
+    view! {
+        <StatusBar/>
+        <div class="rh-body">
+            <section class="rh-panel rh-files">
+                <Show
+                    when=move || files.with(|f| f.current_area.is_some())
+                    fallback=move || view! { <AreaList/> }
+                >
+                    <FolderBrowser/>
+                </Show>
+            </section>
+            <section class="rh-panel">
+                <FileDetail/>
+                <TransferQueue/>
+            </section>
+        </div>
+    }
+}
+
+/// The list of file areas shown before one is opened.
+#[component]
+fn AreaList() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let files = app.files;
+    view! {
+        <h2 class="rh-panel-title">"File areas"</h2>
+        <ul class="rh-tree">
+            <For
+                each=move || files.with(|f| f.areas.clone())
+                key=|a| a.slug.clone()
+                children=move |a| {
+                    let slug = a.slug.clone();
+                    view! {
+                        <li class="rh-tree-item">
+                            <button
+                                class="rh-board-link"
+                                on:click=move |_| app.open_area(&slug)
+                            >
+                                <span class="rh-board-name">{a.title}</span>
+                                <span class="rh-board-desc">{a.description}</span>
+                            </button>
+                        </li>
+                    }
+                }
+            />
+        </ul>
+    }
+}
+
+/// The folder browser for an open area: breadcrumbs, an upload action, and the
+/// child-node list.
+#[component]
+fn FolderBrowser() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let files = app.files;
+
+    let leave = move |_| {
+        files.update(|f| {
+            f.current_area = None;
+            f.path.clear();
+            f.nodes.clear();
+            f.selected = None;
+        });
+    };
+
+    view! {
+        <button class="rh-back" on:click=leave>"\u{2190} All areas"</button>
+        <div class="rh-crumbs">
+            <For
+                each=move || {
+                    files.with(|f| f.breadcrumbs().into_iter().enumerate().collect::<Vec<_>>())
+                }
+                key=|(i, (label, _))| format!("{i}:{label}")
+                children=move |(i, (label, path))| {
+                    view! {
+                        {(i > 0).then(|| view! { <span class="rh-crumb sep">"/"</span> })}
+                        <button
+                            class="rh-crumb"
+                            on:click=move |_| app.go_to_path(path.clone())
+                        >
+                            {label}
+                        </button>
+                    }
+                }
+            />
+        </div>
+        <div class="rh-toolbar">
+            <button
+                class="rh-btn small"
+                on:click=move |_| app.upload("note.txt", b"hello from the web client".to_vec())
+            >
+                "Upload sample"
+            </button>
+        </div>
+        <ul class="rh-tree">
+            <For
+                each=move || files.with(|f| f.nodes.clone())
+                key=|n| n.id
+                children=move |n| {
+                    let id = n.id;
+                    let is_folder = n.kind == KIND_FOLDER;
+                    let name = n.name.clone();
+                    let icon = if is_folder { "\u{1F4C1}" } else { "\u{1F4C4}" };
+                    let meta = if is_folder {
+                        node_kind_label(n.kind).to_string()
+                    } else {
+                        human_size(n.size)
+                    };
+                    let selected = move || files.with(|f| f.selected == Some(id));
+                    let class = move || {
+                        if selected() {
+                            "rh-file-link active"
+                        } else {
+                            "rh-file-link"
+                        }
+                    };
+                    let on_click = move |_| {
+                        if is_folder {
+                            app.open_subfolder(&name);
+                        } else {
+                            app.select_file(id);
+                        }
+                    };
+                    view! {
+                        <li class="rh-tree-item">
+                            <button class=class on:click=on_click>
+                                <span class="rh-file-icon">{icon}</span>
+                                <span class="rh-file-name">{n.name.clone()}</span>
+                                <span class="rh-file-meta">{meta}</span>
+                            </button>
+                        </li>
+                    }
+                }
+            />
+        </ul>
+    }
+}
+
+/// The metadata card and download action for the selected file.
+#[component]
+fn FileDetail() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let files = app.files;
+    view! {
+        <Show
+            when=move || files.with(|f| f.selected_node().is_some())
+            fallback=|| view! { <p class="rh-empty">"Select a file to see its details."</p> }
+        >
+            {move || {
+                files.with(|f| {
+                    f.selected_node().map(|n| {
+                        let id = n.id;
+                        view! {
+                            <div class="rh-card">
+                                <h3 class="rh-card-name">{n.name.clone()}</h3>
+                                <dl class="rh-meta-grid">
+                                    <dt>"Type"</dt>
+                                    <dd>{n.mime.clone()}</dd>
+                                    <dt>"Size"</dt>
+                                    <dd>{human_size(n.size)}</dd>
+                                    <dt>"Uploader"</dt>
+                                    <dd>{n.uploader.clone()}</dd>
+                                    <dt>"Downloads"</dt>
+                                    <dd>{n.downloads.to_string()}</dd>
+                                    <dt>"Comment"</dt>
+                                    <dd>{n.comment.clone()}</dd>
+                                </dl>
+                                <button class="rh-btn" on:click=move |_| app.download(id)>
+                                    "Download"
+                                </button>
+                            </div>
+                        }
+                    })
+                })
+            }}
+        </Show>
+    }
+}
+
+/// The transfer queue: queued / active / done / failed with progress bars.
+#[component]
+fn TransferQueue() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let files = app.files;
+    view! {
+        <Show when=move || files.with(|f| !f.transfers.is_empty()) fallback=|| ()>
+            <h2 class="rh-panel-title">"Transfers"</h2>
+            <ul class="rh-queue">
+                <For
+                    each=move || files.with(|f| f.transfers.clone())
+                    key=|t| format!("{}:{}:{:?}", t.id, t.percent(), t.status)
+                    children=move |t| {
+                        let pct = t.percent();
+                        let (badge, bar) = match t.status {
+                            TransferStatus::Queued => ("rh-badge", "rh-bar-fill"),
+                            TransferStatus::Active => ("rh-badge active", "rh-bar-fill"),
+                            TransferStatus::Done => ("rh-badge done", "rh-bar-fill"),
+                            TransferStatus::Failed => ("rh-badge failed", "rh-bar-fill failed"),
+                        };
+                        let status = match t.status {
+                            TransferStatus::Queued => "queued",
+                            TransferStatus::Active => "active",
+                            TransferStatus::Done => "done",
+                            TransferStatus::Failed => "failed",
+                        };
+                        let width = format!("width:{pct}%");
+                        view! {
+                            <li class="rh-queue-item">
+                                <div class="rh-queue-head">
+                                    <span class="rh-queue-name">{t.name.clone()}</span>
+                                    <span class=badge>{status}</span>
+                                    <span class="rh-queue-pct">{format!("{pct}%")}</span>
+                                </div>
+                                <div class="rh-bar">
+                                    <div class=bar style=width></div>
+                                </div>
+                            </li>
+                        }
+                    }
+                />
+            </ul>
+        </Show>
+    }
+}
+
+/// Render CP437/ANSI `bytes` to an HTML `<canvas>`. Parsing and the
+/// cells→draw-ops transform are pure ([`crate::art`]); only the paint call is
+/// wasm-gated.
+#[component]
+pub fn ArtCanvas(#[prop(into)] bytes: Vec<u8>) -> impl IntoView {
+    let canvas = crate::art::parse_art(&bytes);
+    let (w, h) = crate::art::pixel_size(&canvas);
+    let node = create_node_ref::<leptos::html::Canvas>();
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let canvas = canvas.clone();
+        create_effect(move |_| {
+            if let Some(el) = node.get() {
+                crate::art::paint(&el, &canvas);
+            }
+        });
+    }
+
+    view! { <canvas node_ref=node width=w height=h class="rh-art"></canvas> }
+}
+
+/// The ANSI art gallery: renders a built-in sample to a canvas.
+#[component]
+pub fn ArtGallery() -> impl IntoView {
+    view! {
+        <StatusBar/>
+        <div class="rh-body">
+            <section class="rh-panel">
+                <h2 class="rh-panel-title">"ANSI Art"</h2>
+                <p class="rh-empty">
+                    "CP437/ANSI rendered to a canvas through the shared art pipeline."
+                </p>
+                <div class="rh-art-wrap">
+                    <ArtCanvas bytes=SAMPLE_ANSI.to_vec()/>
+                </div>
             </section>
         </div>
     }

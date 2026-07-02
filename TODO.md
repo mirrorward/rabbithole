@@ -138,9 +138,9 @@
 *Depends on: W2–W4 (W5 for transfer UI); parallel with W6/W7*
 
 - [~] `ui-web` Leptos SPA — `rabbithole-ui-web` (Leptos 0.6 CSR: router + Login, Lobby chat + WhoList, **Boards** tree/thread views, **DMs** conversation+compose, **member Directory** with live search, nav bar, ThemeToggle, StatusBar; DOM-free `UiState`/`apply` reducer + `UiClient`/`MockClient` seam; **browser WebSocket transport** (`ws.rs`, web-sys, RHP-over-ws hello + command↔frame mapping + keepalive) behind a host-testable `wire`/`EventClient` seam; wasm-check in CI; 37 host tests). Reconnect/backoff + profiles/keyword-bar views are the next slices
-- [ ] Files UI: browse, upload/download (WS + fetch), transfer queue
-- [ ] Art rendering (canvas)
-- [ ] Design tokens; **light/dark mode** (OS-follow + manual override) across all rich clients
+- [~] Files UI: browse, upload/download (WS + fetch), transfer queue — `ui-web`: `files.rs` (`FilesState` reducer + `Transfer` queue model), FILE-family `FileCommand`/`FileEvent` + `file_command_to_frame`/`frame_to_file_events` in `wire.rs` (host-tested), FolderBrowser/FileDetail/TransferQueue components + `MockClient::dispatch_file`. Live async transfer progress + real download bytes land when `WsClient` grows FILE-family dispatch
+- [x] Art rendering (canvas) — `ui-web::art`: pure `parse_art`/`to_draw_ops` (reusing `rabbithole-art`'s Canvas/Cell/PALETTE, no parser duplication) + wasm-gated `paint` to an HTML canvas; ArtCanvas/ArtGallery components; 7 host tests
+- [~] Design tokens; **light/dark mode** (OS-follow + manual override) across all rich clients — `ui-web::theme_css`: design tokens as CSS custom properties, `ThemeChoice` + pure `effective_mode(os_pref, override)` resolution (host-tested), wasm-gated localStorage persistence + reworked ThemeToggle. Retro/HighContrast pack plumbing (`root_style(pack, mode)`) is in place; TUI/desktop parity is a later slice
 - [ ] Theme packs: Clean (default), Retro (CP437/scanlines/ANSI palette), High Contrast; shareable token files
 - [ ] Server theme bundle application (accents, icons, art, sounds) w/ safety rails (structured tokens only, contrast minimums, user cap/disable)
 - [ ] Theme editor panel in web admin (upload assets, accents, live light/dark/retro preview)

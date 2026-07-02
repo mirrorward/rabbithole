@@ -14,13 +14,26 @@ leptos_router.workspace = true
 # wasm-clean (no tokio / net / store-client pulled in).
 rabbithole-core.workspace = true
 rabbithole-proto.workspace = true
+# CP437/ANSI cell + palette model reused by `src/art.rs`. Pure Rust (its only
+# dependency is `png`), so it stays wasm-clean and we avoid duplicating the
+# ANSI parser that already lives here.
+rabbithole-art.workspace = true
 
-# The browser WebSocket transport (`src/ws.rs`) is wasm-only. These deps are
-# target-gated so the host build (`cargo test`, `cargo clippy`) never pulls
-# them in and stays wasm-clean.
+# The browser WebSocket transport (`src/ws.rs`) plus the wasm-only DOM glue in
+# `src/art.rs` (canvas) and `src/theme.rs` (localStorage / matchMedia). These
+# deps are target-gated so the host build (`cargo test`, `cargo clippy`) never
+# pulls them in and stays wasm-clean.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 js-sys.workspace = true
-web-sys.workspace = true
+# Extra features (canvas + storage + OS colour-scheme query) are additive on
+# top of the workspace-defined set, so the root `Cargo.toml` is untouched.
+web-sys = { workspace = true, features = [
+    "Window",
+    "Storage",
+    "MediaQueryList",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+] }
 gloo-timers.workspace = true

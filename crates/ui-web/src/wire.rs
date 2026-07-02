@@ -54,9 +54,16 @@ use std::rc::Rc;
 
 use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::chat::{ChatMessage, ChatSend};
+use rabbithole_proto::filelib::{
+    AreaList, AreaListRequest, FileAdded, FileAreaView, FileContent, FileDownloadRequest,
+    FileNodeView, FileUpload, FolderListRequest, NodeGet, NodeList, NodeReply,
+};
 use rabbithole_proto::hello::{CapabilitySet, Hello, HelloAck};
 use rabbithole_proto::presence::Who;
 use rabbithole_proto::session::{AuthPassword, Ping};
+use rabbithole_proto::transfer::{
+    FileChunk, FileChunkRequest, TransferAbort, TransferOpen, TransferTicket,
+};
 use rabbithole_proto::{Frame, ProtoError, RequestId};
 
 /// Client software name announced in the [`Hello`] handshake.
@@ -171,6 +178,220 @@ pub fn frame_to_events(frame: &Frame) -> Vec<Event> {
 
     // Presence rosters, auth acks, welcomes, pongs and not-yet-mapped families
     // decode fine but have no api::Event counterpart — see module docs.
+    Vec::new()
+}
+
+// ---------------------------------------------------------------------------
+// FILE family (family 5): libraries, folders, metadata, and transfers.
+//
+// The core [`Command`]/[`Event`] enums carry no file variants yet (and this
+// crate must not modify the core), so the SPA drives file libraries through a
+// *local*, file-specific vocabulary. The mapping mirrors [`command_to_frame`]
+// / [`frame_to_events`] exactly — pure, DOM-free, and host-tested — so it is
+// ready to plug into either transport unchanged. When the core api grows file
+// variants, these fold into the shared enums with no shape change.
+// ---------------------------------------------------------------------------
+
+/// A file-library action the SPA issues, mapped to a FILE-family request
+/// [`Frame`] by [`file_command_to_frame`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileCommand {
+    /// List every file area. → [`AreaList`].
+    ListAreas,
+    /// List a folder's children (`path` `None`/empty = area root).
+    /// → [`NodeList`].
+    ListFolder {
+        /// Area slug to browse.
+        area: String,
+        /// Folder path within the area, or `None` for the root.
+        path: Option<String>,
+    },
+    /// Fetch a single node's metadata. → [`NodeReply`].
+    GetNode {
+        /// Node id.
+        id: i64,
+    },
+    /// Download a small file inline. → [`FileContent`].
+    Download {
+        /// Node id to download.
+        id: i64,
+    },
+    /// Upload a small file inline. → [`NodeReply`] (+ a [`FileAdded`] push).
+    Upload {
+        /// Destination area slug.
+        area: String,
+        /// Destination folder path, or `None` for the area root.
+        parent: Option<String>,
+        /// File name.
+        name: String,
+        /// MIME type.
+        mime: String,
+        /// Uploader comment.
+        comment: String,
+        /// File bytes.
+        bytes: Vec<u8>,
+    },
+    /// Open a ticketed (resumable) download. → [`TransferTicket`].
+    OpenDownload {
+        /// Node id to transfer.
+        node_id: i64,
+    },
+    /// Request one byte range of an open transfer. → [`FileChunk`].
+    RequestChunk {
+        /// Transfer id from the ticket.
+        transfer_id: u64,
+        /// Byte offset.
+        offset: u64,
+        /// Range length.
+        len: u32,
+    },
+    /// Abandon an open transfer. → ack.
+    AbortTransfer {
+        /// Transfer id to abort.
+        transfer_id: u64,
+    },
+}
+
+/// A file-library event decoded from an inbound FILE-family [`Frame`] by
+/// [`frame_to_file_events`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub enum FileEvent {
+    /// The area list arrived.
+    AreasListed(Vec<FileAreaView>),
+    /// A folder listing arrived.
+    FolderListed {
+        /// The folder's child nodes.
+        nodes: Vec<FileNodeView>,
+    },
+    /// A single node's metadata arrived (from a get, upload, edit, or rate).
+    NodeUpdated(FileNodeView),
+    /// An inline download completed.
+    FileDownloaded {
+        /// The downloaded node.
+        node: FileNodeView,
+        /// Number of bytes received.
+        size: usize,
+    },
+    /// A file landed in an area (a push): clients refresh listings.
+    FileAdded {
+        /// Area slug.
+        area: String,
+        /// New node id.
+        id: i64,
+    },
+    /// A ticketed transfer was authorised.
+    TransferOpened {
+        /// Transfer id.
+        transfer_id: u64,
+        /// Total size in bytes.
+        size: u64,
+        /// Bytes the server already holds (resume point).
+        server_have: u64,
+    },
+    /// A transfer byte range arrived.
+    ChunkReceived {
+        /// Transfer id.
+        transfer_id: u64,
+        /// Range offset.
+        offset: u64,
+        /// Whether this was the final chunk.
+        last: bool,
+        /// Range length in bytes.
+        len: usize,
+    },
+    /// A FILE request failed.
+    Failed(String),
+}
+
+/// Map a [`FileCommand`] to the FILE-family request [`Frame`] that carries it.
+pub fn file_command_to_frame(
+    command: &FileCommand,
+    id: RequestId,
+) -> Result<Option<Frame>, ProtoError> {
+    let frame =
+        match command {
+            FileCommand::ListAreas => Frame::request(id, &AreaListRequest)?,
+            FileCommand::ListFolder { area, path } => {
+                Frame::request(id, &FolderListRequest::new(area.clone(), path.clone()))?
+            }
+            FileCommand::GetNode { id: node_id } => Frame::request(id, &NodeGet::new(*node_id))?,
+            FileCommand::Download { id: node_id } => {
+                Frame::request(id, &FileDownloadRequest::new(*node_id))?
+            }
+            FileCommand::Upload {
+                area,
+                parent,
+                name,
+                mime,
+                comment,
+                bytes,
+            } => Frame::request(
+                id,
+                &FileUpload::new(area.clone(), parent.clone(), name.clone(), bytes.clone())
+                    .with_meta(mime.clone(), String::new(), comment.clone()),
+            )?,
+            FileCommand::OpenDownload { node_id } => {
+                Frame::request(id, &TransferOpen::download(*node_id))?
+            }
+            FileCommand::RequestChunk {
+                transfer_id,
+                offset,
+                len,
+            } => Frame::request(id, &FileChunkRequest::new(*transfer_id, *offset, *len))?,
+            FileCommand::AbortTransfer { transfer_id } => {
+                Frame::request(id, &TransferAbort::new(*transfer_id))?
+            }
+        };
+    Ok(Some(frame))
+}
+
+/// Map an inbound FILE-family [`Frame`] to the [`FileEvent`]s it produces.
+///
+/// Frames from other families, or FILE frames carrying a not-yet-mapped
+/// message type, produce an empty vector — matching the "tolerate unknown
+/// messages" contract.
+pub fn frame_to_file_events(frame: &Frame) -> Vec<FileEvent> {
+    if let Some(code) = frame.error {
+        return vec![FileEvent::Failed(format!("server error: {code:?}"))];
+    }
+    if let Some(Ok(m)) = frame.decode::<AreaList>() {
+        return vec![FileEvent::AreasListed(m.areas)];
+    }
+    if let Some(Ok(m)) = frame.decode::<NodeList>() {
+        return vec![FileEvent::FolderListed { nodes: m.nodes }];
+    }
+    if let Some(Ok(m)) = frame.decode::<FileContent>() {
+        let size = m.bytes.len();
+        return vec![FileEvent::FileDownloaded { node: m.node, size }];
+    }
+    // NodeReply backs get/upload/edit/rate/alias: the reducer upserts it.
+    if let Some(Ok(m)) = frame.decode::<NodeReply>() {
+        return vec![FileEvent::NodeUpdated(m.node)];
+    }
+    if let Some(Ok(m)) = frame.decode::<FileAdded>() {
+        return vec![FileEvent::FileAdded {
+            area: m.area,
+            id: m.id,
+        }];
+    }
+    if let Some(Ok(m)) = frame.decode::<TransferTicket>() {
+        return vec![FileEvent::TransferOpened {
+            transfer_id: m.transfer_id,
+            size: m.size,
+            server_have: m.server_have,
+        }];
+    }
+    if let Some(Ok(m)) = frame.decode::<FileChunk>() {
+        let len = m.bytes.len();
+        return vec![FileEvent::ChunkReceived {
+            transfer_id: m.transfer_id,
+            offset: m.offset,
+            last: m.last,
+            len,
+        }];
+    }
     Vec::new()
 }
 
@@ -337,6 +558,161 @@ mod tests {
         assert_eq!(normalize_ws_url("ws://host:9000"), "ws://host:9000");
         assert_eq!(normalize_ws_url("wss://host:9000"), "wss://host:9000");
         assert_eq!(normalize_ws_url("  host:1  "), "ws://host:1");
+    }
+
+    #[test]
+    fn file_list_areas_maps_to_area_list_request() {
+        let frame = file_command_to_frame(&FileCommand::ListAreas, RequestId(1))
+            .unwrap()
+            .expect("list-areas produces a frame");
+        assert_eq!(frame.family, Family::FILE);
+        assert!(frame.decode::<AreaListRequest>().unwrap().is_ok());
+    }
+
+    #[test]
+    fn file_list_folder_carries_area_and_path() {
+        let frame = file_command_to_frame(
+            &FileCommand::ListFolder {
+                area: "warez".into(),
+                path: Some("utils".into()),
+            },
+            RequestId(2),
+        )
+        .unwrap()
+        .expect("folder listing produces a frame");
+        let decoded = frame.decode::<FolderListRequest>().unwrap().unwrap();
+        assert_eq!(decoded.area, "warez");
+        assert_eq!(decoded.path.as_deref(), Some("utils"));
+    }
+
+    #[test]
+    fn file_upload_carries_bytes_and_meta() {
+        let frame = file_command_to_frame(
+            &FileCommand::Upload {
+                area: "warez".into(),
+                parent: None,
+                name: "a.txt".into(),
+                mime: "text/plain".into(),
+                comment: "hi".into(),
+                bytes: vec![1, 2, 3],
+            },
+            RequestId(3),
+        )
+        .unwrap()
+        .expect("upload produces a frame");
+        let decoded = frame.decode::<FileUpload>().unwrap().unwrap();
+        assert_eq!(decoded.name, "a.txt");
+        assert_eq!(decoded.mime, "text/plain");
+        assert_eq!(decoded.comment, "hi");
+        assert_eq!(decoded.bytes, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn file_transfer_commands_target_file_family() {
+        for cmd in [
+            FileCommand::GetNode { id: 1 },
+            FileCommand::Download { id: 1 },
+            FileCommand::OpenDownload { node_id: 1 },
+            FileCommand::RequestChunk {
+                transfer_id: 1,
+                offset: 0,
+                len: 64,
+            },
+            FileCommand::AbortTransfer { transfer_id: 1 },
+        ] {
+            let frame = file_command_to_frame(&cmd, RequestId(9))
+                .unwrap()
+                .expect("command produces a frame");
+            assert_eq!(frame.family, Family::FILE, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn area_list_reply_maps_to_areas_listed() {
+        let reply = AreaList::new(vec![FileAreaView::new("warez", "Warez", "the goods")]);
+        let frame = Frame::push(&reply).unwrap();
+        assert_eq!(
+            frame_to_file_events(&frame),
+            vec![FileEvent::AreasListed(vec![FileAreaView::new(
+                "warez",
+                "Warez",
+                "the goods"
+            )])]
+        );
+    }
+
+    #[test]
+    fn node_list_reply_maps_to_folder_listed() {
+        let node = FileNodeView::new(7, "warez", 1, "a.lha", "a.lha");
+        let frame = Frame::push(&NodeList::new(vec![node.clone()])).unwrap();
+        assert_eq!(
+            frame_to_file_events(&frame),
+            vec![FileEvent::FolderListed { nodes: vec![node] }]
+        );
+    }
+
+    #[test]
+    fn file_content_maps_to_downloaded_with_size() {
+        let node = FileNodeView::new(7, "warez", 1, "a.lha", "a.lha");
+        let frame = Frame::push(&FileContent::new(node.clone(), vec![0u8; 42])).unwrap();
+        assert_eq!(
+            frame_to_file_events(&frame),
+            vec![FileEvent::FileDownloaded { node, size: 42 }]
+        );
+    }
+
+    #[test]
+    fn node_reply_maps_to_node_updated() {
+        let node = FileNodeView::new(7, "warez", 1, "a.lha", "a.lha");
+        let frame = Frame::push(&NodeReply::new(node.clone())).unwrap();
+        assert_eq!(
+            frame_to_file_events(&frame),
+            vec![FileEvent::NodeUpdated(node)]
+        );
+    }
+
+    #[test]
+    fn ticket_and_chunk_map_to_transfer_events() {
+        let ticket = TransferTicket::new(5, [0; 32], 1024, [0; 16]).with_server_have(256);
+        let frame = Frame::push(&ticket).unwrap();
+        assert_eq!(
+            frame_to_file_events(&frame),
+            vec![FileEvent::TransferOpened {
+                transfer_id: 5,
+                size: 1024,
+                server_have: 256,
+            }]
+        );
+
+        let chunk = FileChunk::new(5, 256, true, vec![0u8; 64]);
+        let frame = Frame::push(&chunk).unwrap();
+        assert_eq!(
+            frame_to_file_events(&frame),
+            vec![FileEvent::ChunkReceived {
+                transfer_id: 5,
+                offset: 256,
+                last: true,
+                len: 64,
+            }]
+        );
+    }
+
+    #[test]
+    fn file_error_reply_maps_to_failed() {
+        let req = file_command_to_frame(&FileCommand::ListAreas, RequestId(1))
+            .unwrap()
+            .unwrap();
+        let reply = Frame::error_reply(&req, ErrorCode::Forbidden);
+        assert!(matches!(
+            frame_to_file_events(&reply).as_slice(),
+            [FileEvent::Failed(detail)] if detail.contains("Forbidden")
+        ));
+    }
+
+    #[test]
+    fn non_file_frame_yields_no_file_events() {
+        let push = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
+        assert!(frame_to_file_events(&push).is_empty());
     }
 
     #[test]

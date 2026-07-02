@@ -16,8 +16,15 @@
 //! command-in / event-out shape stays the same.
 
 use rabbithole_core::api::{Command, Event};
+use rabbithole_proto::filelib::{
+    AreaList, FileAdded, FileAreaView, FileContent, FileNodeView, NodeList, NodeReply,
+};
+use rabbithole_proto::transfer::{FileChunk, TransferTicket};
+use rabbithole_proto::{Frame, Message, RequestId};
 
+use crate::files::{KIND_FILE, KIND_FOLDER};
 use crate::state::{derive_server_name, Board, DmMessage, DmThread, Member, Post, Thread};
+use crate::wire::{frame_to_file_events, FileCommand, FileEvent};
 
 /// The single room the mock exposes.
 pub const LOBBY: &str = "lobby";
@@ -75,6 +82,8 @@ pub struct MockClient {
     posts: Vec<Post>,
     members: Vec<Member>,
     dm_threads: Vec<DmThread>,
+    file_areas: Vec<FileAreaView>,
+    file_nodes: Vec<FileNodeView>,
     /// Sink registered through the async [`EventClient`] seam, if any. Skipped
     /// by [`Debug`] (closures are not `Debug`).
     sink: Option<crate::wire::EventSink>,
@@ -93,6 +102,8 @@ impl std::fmt::Debug for MockClient {
             .field("posts", &self.posts)
             .field("members", &self.members)
             .field("dm_threads", &self.dm_threads)
+            .field("file_areas", &self.file_areas)
+            .field("file_nodes", &self.file_nodes)
             .field("sink", &self.sink.as_ref().map(|_| "<fn>"))
             .finish()
     }
@@ -119,6 +130,8 @@ impl MockClient {
             posts: Self::seeded_posts(),
             members: Self::seeded_members(),
             dm_threads: Self::seeded_dms(),
+            file_areas: Self::seeded_file_areas(),
+            file_nodes: Self::seeded_file_nodes(),
             sink: None,
         }
     }
@@ -255,6 +268,144 @@ impl MockClient {
         ]
     }
 
+    fn seeded_file_areas() -> Vec<FileAreaView> {
+        vec![
+            FileAreaView::new("warez", "Warez", "Utilities and demos for the warren."),
+            FileAreaView::new("art", "ANSI Gallery", "CP437 art and loaders."),
+        ]
+    }
+
+    fn seeded_file_nodes() -> Vec<FileNodeView> {
+        let file = |id, area: &str, name: &str, path: &str, size, mime: &str, comment: &str| {
+            let mut n = FileNodeView::new(id, area, KIND_FILE, name, path);
+            n.size = size;
+            n.mime = mime.into();
+            n.comment = comment.into();
+            n.uploader = "rabbit".into();
+            n.blob_id = Some([0u8; 32]);
+            n
+        };
+        vec![
+            FileNodeView::new(1, "warez", KIND_FOLDER, "utils", "utils"),
+            file(
+                2,
+                "warez",
+                "readme.txt",
+                "readme.txt",
+                734,
+                "text/plain",
+                "Start here.",
+            ),
+            file(
+                3,
+                "warez",
+                "lister.lha",
+                "utils/lister.lha",
+                40_960,
+                "application/x-lzh",
+                "Classic file lister.",
+            ),
+            file(
+                4,
+                "art",
+                "welcome.ans",
+                "welcome.ans",
+                2_048,
+                "text/x-ansi",
+                "Warren welcome screen.",
+            ),
+        ]
+    }
+
+    /// The next free node id (max existing + 1).
+    fn next_node_id(&self) -> i64 {
+        self.file_nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1
+    }
+
+    /// Serve a file-library [`FileCommand`] from the in-memory library.
+    ///
+    /// Replies are built as real FILE-family [`Frame`]s from seeded data and
+    /// decoded back through [`frame_to_file_events`], so the mock exercises the
+    /// exact host-tested wire mapping the browser transport uses — no parallel
+    /// decode path.
+    pub fn dispatch_file(&mut self, command: FileCommand) -> Vec<FileEvent> {
+        match command {
+            FileCommand::ListAreas => file_events(&AreaList::new(self.file_areas.clone())),
+            FileCommand::ListFolder { area, path } => {
+                let want = path.unwrap_or_default();
+                let nodes: Vec<FileNodeView> = self
+                    .file_nodes
+                    .iter()
+                    .filter(|n| n.area == area && parent_path(&n.path) == want)
+                    .cloned()
+                    .collect();
+                file_events(&NodeList::new(nodes))
+            }
+            FileCommand::GetNode { id } => match self.file_nodes.iter().find(|n| n.id == id) {
+                Some(n) => file_events(&NodeReply::new(n.clone())),
+                None => vec![FileEvent::Failed(format!("no node #{id}"))],
+            },
+            FileCommand::Download { id } => match self.file_nodes.iter().find(|n| n.id == id) {
+                Some(n) => {
+                    let bytes = vec![0u8; n.size.max(0) as usize];
+                    file_events(&FileContent::new(n.clone(), bytes))
+                }
+                None => vec![FileEvent::Failed(format!("no node #{id}"))],
+            },
+            FileCommand::Upload {
+                area,
+                parent,
+                name,
+                mime,
+                comment,
+                bytes,
+            } => {
+                let id = self.next_node_id();
+                let path = match &parent {
+                    Some(p) if !p.is_empty() => format!("{p}/{name}"),
+                    _ => name.clone(),
+                };
+                let mut node = FileNodeView::new(id, area.clone(), KIND_FILE, name, path);
+                node.size = bytes.len() as i64;
+                node.mime = mime;
+                node.comment = comment;
+                node.uploader = self
+                    .current_user
+                    .clone()
+                    .unwrap_or_else(|| "me".to_string());
+                node.blob_id = Some([0u8; 32]);
+                self.file_nodes.push(node.clone());
+                let mut events = file_events(&NodeReply::new(node));
+                events.extend(file_events(&FileAdded::new(area, id)));
+                events
+            }
+            FileCommand::OpenDownload { node_id } => {
+                match self.file_nodes.iter().find(|n| n.id == node_id) {
+                    Some(n) => {
+                        let size = n.size.max(0) as u64;
+                        // Mock: reuse the node id as the transfer id so the
+                        // queue can name the transfer from the loaded listing.
+                        let ticket = TransferTicket::new(node_id as u64, [0; 32], size, [0; 16])
+                            .with_server_have(0);
+                        file_events(&ticket)
+                    }
+                    None => vec![FileEvent::Failed(format!("no node #{node_id}"))],
+                }
+            }
+            FileCommand::RequestChunk {
+                transfer_id,
+                offset,
+                len,
+            } => file_events(&FileChunk::new(
+                transfer_id,
+                offset,
+                true,
+                vec![0u8; len as usize],
+            )),
+            FileCommand::AbortTransfer { .. } => Vec::new(),
+        }
+    }
+
     /// The lobby scrollback every fresh session is seeded with.
     fn seeded_messages() -> Vec<Event> {
         [
@@ -369,6 +520,23 @@ impl UiClient for MockClient {
         };
         thread.messages.push(msg.clone());
         Some(msg)
+    }
+}
+
+/// Build [`FileEvent`]s from a seeded FILE-family message by round-tripping it
+/// through a [`Frame`] and [`frame_to_file_events`].
+fn file_events<M: Message>(msg: &M) -> Vec<FileEvent> {
+    match Frame::request(RequestId(0), msg) {
+        Ok(frame) => frame_to_file_events(&frame),
+        Err(err) => vec![FileEvent::Failed(format!("encode: {err}"))],
+    }
+}
+
+/// The parent folder path of `path` (`""` for a root-level node).
+fn parent_path(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((parent, _)) => parent.to_string(),
+        None => String::new(),
     }
 }
 
@@ -528,6 +696,115 @@ mod tests {
     fn send_dm_to_unknown_thread_returns_none() {
         let mut c = connect_and_sign_in("kevin");
         assert!(c.send_dm("nobody", "hi").is_none());
+    }
+
+    #[test]
+    fn file_list_areas_returns_seeded_areas() {
+        let c = MockClient::new();
+        let ev = c.clone().dispatch_file(FileCommand::ListAreas);
+        match ev.as_slice() {
+            [FileEvent::AreasListed(areas)] => {
+                assert_eq!(areas.len(), 2);
+                assert!(areas.iter().any(|a| a.slug == "warez"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_list_folder_filters_by_parent() {
+        let mut c = MockClient::new();
+        // Root of "warez": the utils folder + readme.txt (not the nested lha).
+        let root = c.dispatch_file(FileCommand::ListFolder {
+            area: "warez".into(),
+            path: None,
+        });
+        let [FileEvent::FolderListed { nodes }] = root.as_slice() else {
+            panic!("expected a folder listing");
+        };
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.iter().any(|n| n.name == "utils"));
+        assert!(nodes.iter().any(|n| n.name == "readme.txt"));
+
+        // Inside utils: just the nested archive.
+        let sub = c.dispatch_file(FileCommand::ListFolder {
+            area: "warez".into(),
+            path: Some("utils".into()),
+        });
+        let [FileEvent::FolderListed { nodes }] = sub.as_slice() else {
+            panic!("expected a folder listing");
+        };
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "lister.lha");
+    }
+
+    #[test]
+    fn file_download_yields_content_sized_to_node() {
+        let mut c = MockClient::new();
+        let ev = c.dispatch_file(FileCommand::Download { id: 3 });
+        match ev.as_slice() {
+            [FileEvent::FileDownloaded { node, size }] => {
+                assert_eq!(node.id, 3);
+                assert_eq!(*size, 40_960);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_upload_adds_node_and_announces_it() {
+        let mut c = connect_and_sign_in("kevin");
+        let ev = c.dispatch_file(FileCommand::Upload {
+            area: "warez".into(),
+            parent: None,
+            name: "hi.txt".into(),
+            mime: "text/plain".into(),
+            comment: "mine".into(),
+            bytes: vec![1, 2, 3, 4],
+        });
+        assert!(ev
+            .iter()
+            .any(|e| matches!(e, FileEvent::NodeUpdated(n) if n.name == "hi.txt" && n.uploader == "kevin")));
+        assert!(ev.iter().any(|e| matches!(e, FileEvent::FileAdded { .. })));
+        // The new node is now listed at the root.
+        let root = c.dispatch_file(FileCommand::ListFolder {
+            area: "warez".into(),
+            path: None,
+        });
+        let [FileEvent::FolderListed { nodes }] = root.as_slice() else {
+            panic!("expected a folder listing");
+        };
+        assert!(nodes.iter().any(|n| n.name == "hi.txt"));
+    }
+
+    #[test]
+    fn file_open_download_and_chunk_drive_a_transfer() {
+        let mut c = MockClient::new();
+        let opened = c.dispatch_file(FileCommand::OpenDownload { node_id: 4 });
+        let [FileEvent::TransferOpened {
+            transfer_id, size, ..
+        }] = opened.as_slice()
+        else {
+            panic!("expected a ticket");
+        };
+        assert_eq!(*transfer_id, 4);
+        assert_eq!(*size, 2_048);
+        let chunk = c.dispatch_file(FileCommand::RequestChunk {
+            transfer_id: 4,
+            offset: 0,
+            len: 2_048,
+        });
+        assert!(matches!(
+            chunk.as_slice(),
+            [FileEvent::ChunkReceived { last: true, .. }]
+        ));
+    }
+
+    #[test]
+    fn file_get_unknown_node_fails() {
+        let mut c = MockClient::new();
+        let ev = c.dispatch_file(FileCommand::GetNode { id: 999 });
+        assert!(matches!(ev.as_slice(), [FileEvent::Failed(_)]));
     }
 
     #[test]

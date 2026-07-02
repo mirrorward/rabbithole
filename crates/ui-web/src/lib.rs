@@ -23,8 +23,12 @@
 //!   transport that speaks RHP over `ws://`/`wss://`.
 //! - [`state`] holds the DOM-free [`UiState`](state::UiState) reducer, unit
 //!   tested on the host.
+//! - [`files`] holds the DOM-free file-library reducer and transfer-queue model
+//!   (the FILE-family `command`/`event` mapping lives in [`wire`]).
+//! - [`art`] turns parsed CP437/ANSI art (via `rabbithole-art`) into pure,
+//!   host-tested canvas draw ops; only the paint call is wasm-gated.
 //! - [`theme_css`] maps [`rabbithole_core::theme`] design tokens to CSS custom
-//!   properties for light/dark theming.
+//!   properties and resolves light/dark from `(choice, os_pref)`.
 //! - [`app`] and [`components`] are the Leptos view layer.
 //!
 //! ## wasm hygiene
@@ -35,8 +39,10 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod art;
 pub mod client;
 pub mod components;
+pub mod files;
 pub mod state;
 pub mod theme_css;
 pub mod wire;
@@ -47,10 +53,11 @@ pub mod ws;
 
 pub use app::{mount, App, AppState};
 pub use client::{MockClient, UiClient};
+pub use files::{FilesState, Transfer, TransferDir, TransferStatus};
 pub use state::{Board, ChatLine, DmMessage, DmThread, Member, Post, Thread, UiState};
 pub use wire::{
-    command_to_frame, frame_to_events, hello_request, normalize_ws_url, ping_request, who_request,
-    EventClient, EventSink,
+    command_to_frame, file_command_to_frame, frame_to_events, frame_to_file_events, hello_request,
+    normalize_ws_url, ping_request, who_request, EventClient, EventSink, FileCommand, FileEvent,
 };
 
 #[cfg(target_arch = "wasm32")]
