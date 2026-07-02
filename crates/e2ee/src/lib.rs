@@ -22,6 +22,10 @@
 //!   out-of-order and skipped-message handling (bounded to resist DoS).
 //! - [`sealed`] — a **sealed-sender** envelope: encrypt-to-a-public-key using a
 //!   fresh ephemeral X25519 key so the transport never sees the sender's identity.
+//! - [`group`] — **Sender Keys** ([Signal Sender Keys design]) for encrypted group
+//!   rooms: each member ratchets its own signed sender chain (Ed25519 authenticity
+//!   per ciphertext) instead of maintaining a pairwise ratchet with every peer, so
+//!   an N-member room encrypts each message once rather than N-1 times.
 //!
 //! # KDF choice
 //!
@@ -45,17 +49,23 @@
 //! [RFC 8439]: https://www.rfc-editor.org/rfc/rfc8439
 //! [Signal X3DH spec]: https://signal.org/docs/specifications/x3dh/
 //! [Signal Double Ratchet spec]: https://signal.org/docs/specifications/doubleratchet/
+//! [Signal Sender Keys design]: https://signal.org/blog/private-groups/
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod aead;
+pub mod group;
 pub mod kdf;
 pub mod keys;
 pub mod ratchet;
 pub mod sealed;
 pub mod x3dh;
 
+pub use group::{
+    GroupId, GroupMessage, GroupSession, MemberId, SenderKeyDistributionMessage, Signature,
+    SigningPublicKey,
+};
 pub use keys::{IdentityKeyPair, PreKeyPair, PublicKey};
 pub use ratchet::{Header, Message, Session};
 pub use sealed::{sealed_open, sealed_seal, SealedEnvelope};
@@ -85,6 +95,19 @@ pub enum Error {
     /// message (that is what establishes its sending chain).
     #[error("session has no sending chain yet")]
     NoSendingChain,
+    /// A group message arrived from a member whose sender key we have not
+    /// registered (no [`group::SenderKeyDistributionMessage`] processed yet).
+    #[error("unknown group sender")]
+    UnknownSender,
+    /// The Ed25519 signature on a group message failed to verify.
+    ///
+    /// Checked *before* AEAD decryption, so a forged or wrong-signer message is
+    /// rejected without touching the receiving sender chain.
+    #[error("group message signature invalid")]
+    BadSignature,
+    /// A group message or distribution message referenced a different group id.
+    #[error("group id mismatch")]
+    WrongGroup,
 }
 
 /// Convenience alias for results in this crate.

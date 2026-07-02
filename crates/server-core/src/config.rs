@@ -67,6 +67,10 @@ pub struct ServerConfig {
     pub nntp_enabled: bool,
     /// NNTP listener address (default 0.0.0.0:1119 — 119 needs privilege).
     pub nntp_addr: SocketAddr,
+    /// Serve the Icecast-compatible radio delivery surface on `radio_addr`.
+    pub radio_enabled: bool,
+    /// Radio listener address (default 0.0.0.0:8000 — the Icecast convention).
+    pub radio_addr: SocketAddr,
     /// Welcome-screen featured block (title on first line, body after).
     pub welcome_featured: String,
     /// Welcome-screen one-line ticker.
@@ -107,6 +111,8 @@ impl Default for ServerConfig {
             finger_addr: "0.0.0.0:7979".parse().expect("valid"),
             nntp_enabled: false,
             nntp_addr: "0.0.0.0:1119".parse().expect("valid"),
+            radio_enabled: false,
+            radio_addr: "0.0.0.0:8000".parse().expect("valid"),
             welcome_featured: String::new(),
             welcome_ticker: String::new(),
             theme_accent: String::new(),
@@ -204,6 +210,8 @@ impl ServerConfig {
             "finger_addr" => self.finger_addr.to_string(),
             "nntp_enabled" => self.nntp_enabled.to_string(),
             "nntp_addr" => self.nntp_addr.to_string(),
+            "radio_enabled" => self.radio_enabled.to_string(),
+            "radio_addr" => self.radio_addr.to_string(),
             "welcome_featured" => self.welcome_featured.clone(),
             "welcome_ticker" => self.welcome_ticker.clone(),
             "theme_accent" => self.theme_accent.clone(),
@@ -366,6 +374,14 @@ impl ServerConfig {
             }
             "nntp_addr" => {
                 self.nntp_addr = parse_addr(key, value)?;
+                Ok(false)
+            }
+            "radio_enabled" => {
+                self.radio_enabled = parse_bool(key, value)?;
+                Ok(false)
+            }
+            "radio_addr" => {
+                self.radio_addr = parse_addr(key, value)?;
                 Ok(false)
             }
             "quic_addr" => {

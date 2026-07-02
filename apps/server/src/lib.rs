@@ -16,6 +16,7 @@ pub mod handlers9;
 pub mod identity_store;
 pub mod legacy;
 pub mod nntp;
+pub mod radio;
 pub mod session;
 
 use std::net::SocketAddr;
@@ -63,6 +64,8 @@ pub struct Shared {
     pub transfers: handlers9::TransferRegistry,
     /// TTL'd who-has-what soft state for the Warren (Wave 5).
     pub swarm: SwarmCatalog,
+    /// Radio station directory + live ICY mount fan-out (Wave 11.4).
+    pub radio: radio::Stations,
     next_session: AtomicU64,
 }
 
@@ -98,6 +101,8 @@ pub struct Burrow {
     pub finger_addr: Option<SocketAddr>,
     /// Bound NNTP address when `nntp_enabled` (else `None`).
     pub nntp_addr: Option<SocketAddr>,
+    /// Bound radio (ICY) address when `radio_enabled` (else `None`).
+    pub radio_addr: Option<SocketAddr>,
     pub fingerprint: CertFingerprint,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -135,6 +140,7 @@ impl Burrow {
         let telnet = config.telnet_enabled.then_some(config.telnet_addr);
         let finger = config.finger_enabled.then_some(config.finger_addr);
         let nntp = config.nntp_enabled.then_some(config.nntp_addr);
+        let radio = config.radio_enabled.then_some(config.radio_addr);
 
         let shared = Arc::new(Shared {
             chat: ChatService::new(bus.clone(), config.chat_max_len),
@@ -156,6 +162,7 @@ impl Burrow {
             dedup: DedupStore::with_defaults(),
             transfers: handlers9::TransferRegistry::new(),
             swarm: SwarmCatalog::new(),
+            radio: radio::Stations::new(),
             next_session: AtomicU64::new(1),
         });
 
@@ -203,6 +210,13 @@ impl Burrow {
             nntp_addr = Some(bound);
             tasks.push(handle);
         }
+        let mut radio_addr = None;
+        if let Some(addr) = radio {
+            let (bound, handle) = radio::spawn_radio(shared.clone(), addr).await?;
+            tracing::info!(radio = %bound, "radio (ICY) listening");
+            radio_addr = Some(bound);
+            tasks.push(handle);
+        }
 
         Ok(Burrow {
             shared,
@@ -211,6 +225,7 @@ impl Burrow {
             telnet_addr,
             finger_addr,
             nntp_addr,
+            radio_addr,
             fingerprint,
             tasks,
         })

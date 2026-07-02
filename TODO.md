@@ -199,7 +199,7 @@
 - [x] Playlist engine: rotation (Sequential/seeded-Shuffle/RepeatOne), **vote queue** + requests, `StationController` tying playlist→audio Station with now-playing/metadata — `rabbithole-radio`. Library-from-file-areas source wiring is the server slice
 - [ ] DJ live source (Icecast SOURCE/PUT + Basic auth) — works with butt/ices
 - [ ] Encode pipelines: Opus/Ogg primary + MP3 legacy mount
-- [~] Delivery: native QUIC uni-stream; HTTP streaming; ICY mounts w/ exact icy-metaint math (8192, len×16, 0x00 when unchanged) — ICY codec landed: `rabbithole-legacy-icecast` (SOURCE/PUT source auth, listener headers, exact `IcyMetaInterleaver` metaint math with fuzz-verified boundary correctness; 43 tests). Server delivery wiring + QUIC/HTTP transports pending
+- [x] Delivery: ICY mounts w/ exact icy-metaint math — codec (`rabbithole-legacy-icecast`, 43 tests) + a live listener wired into burrow (`apps/server/src/radio.rs`, config-gated `radio_enabled`/`radio_addr`): SOURCE/PUT DJ auth via AuthService+`Caps::BROADCAST`, per-mount broadcast fan-out, listeners get metaint-spliced `StreamTitle`, lagging listeners dropped; e2e-tested. Native QUIC uni-stream + HTTP/Ogg transports are later refinements
 - [ ] Listener counts in presence; now-playing surfaced (presence line, TUI status, telnet, web)
 - [ ] Client players: GUI/web, TUI handoff, per-user enable + volume/ducking settings
 
@@ -216,7 +216,7 @@
 ## Wave 13 — Hardening & 1.0
 *Depends on: all*
 
-- [~] E2EE DMs: X25519 + Double Ratchet, ChaCha20-Poly1305, sealed sender — crypto core landed: `rabbithole-e2ee` (X25519, Signal Double Ratchet w/ bounded skipped-key store + transactional decrypt, X3DH-lite, sealed sender; RNG-generic, wasm-friendly; 23 tests). Per-thread opt-in wiring into the DM proto + key-backup UX pending
+- [~] E2EE DMs + private rooms: X25519 + Double Ratchet (1:1) + **Sender Keys (groups)**, ChaCha20-Poly1305, sealed sender — crypto core complete: `rabbithole-e2ee` (Double Ratchet w/ bounded skipped-key store + transactional decrypt, X3DH-lite, sealed sender, Ed25519-signed sender-key group messaging w/ bounded skip + rekey; RNG-generic, wasm-friendly; 38 tests). Per-thread opt-in wiring into the DM/room proto + key-backup UX pending
 - [ ] Moderation suite: report queues, quarantine-for-review, shared blocklists + blake3 hash-deny lists, moderation audit UI
 - [ ] Rate limiting everywhere (governor buckets per IP/account/endpoint-class); mCaptcha option; invite trees
 - [ ] Fuzzing coverage goals (all codecs); RUSTSEC audit gate in CI; security review checklist/pen-test pass

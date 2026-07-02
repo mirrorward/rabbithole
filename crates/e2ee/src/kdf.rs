@@ -16,6 +16,8 @@ const AEAD_KEY_CTX: &str = "RabbitHole-E2EE v1 aead key";
 const AEAD_NONCE_CTX: &str = "RabbitHole-E2EE v1 aead nonce";
 const X3DH_CTX: &str = "RabbitHole-E2EE v1 x3dh-lite shared-secret";
 const SEALED_CTX: &str = "RabbitHole-E2EE v1 sealed-sender message-key";
+const SENDER_CHAIN_STEP_CTX: &str = "RabbitHole-E2EE v1 sender-key chain-step";
+const SENDER_MESSAGE_KEY_CTX: &str = "RabbitHole-E2EE v1 sender-key message-key";
 
 /// Root-key KDF (`KDF_RK` in the Double Ratchet spec).
 ///
@@ -42,6 +44,22 @@ pub(crate) fn kdf_rk(root_key: &[u8; 32], dh_out: &[u8; 32]) -> ([u8; 32], [u8; 
 pub(crate) fn kdf_ck(chain_key: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
     let next_chain = blake3::derive_key(CHAIN_STEP_CTX, chain_key);
     let message_key = blake3::derive_key(MESSAGE_KEY_CTX, chain_key);
+    (next_chain, message_key)
+}
+
+/// Sender-key chain KDF (the group-messaging analogue of [`kdf_ck`]).
+///
+/// Ratchets a per-sender chain key forward, yielding the next chain key and the
+/// message key for the current iteration. Distinct BLAKE3 context strings keep
+/// sender-key material domain-separated from the 1:1 Double Ratchet chain, so an
+/// identical chain-key value could never yield a colliding key across protocols.
+/// Because the KDF is one-way, a member handed the chain key at iteration `n`
+/// (via a [`crate::group::SenderKeyDistributionMessage`]) can derive keys for
+/// iterations `>= n` but can never recover an earlier iteration's key — this is
+/// the forward secrecy of the Signal Sender Keys design.
+pub(crate) fn kdf_sender_ck(chain_key: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+    let next_chain = blake3::derive_key(SENDER_CHAIN_STEP_CTX, chain_key);
+    let message_key = blake3::derive_key(SENDER_MESSAGE_KEY_CTX, chain_key);
     (next_chain, message_key)
 }
 
