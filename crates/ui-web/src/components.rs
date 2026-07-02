@@ -12,22 +12,34 @@ use rabbithole_core::api::Command;
 use crate::app::AppState;
 use crate::client::LOBBY;
 use crate::files::{human_size, node_kind_label, TransferStatus, KIND_FOLDER};
-use crate::theme_css::choice_label;
+use crate::theme_css::{mode_label, pack_label};
 
-/// Appearance switch, cycling System → Light → Dark. The choice is persisted to
-/// `localStorage` and re-themes the whole app via the root CSS variables.
+/// Appearance picker: a pack button cycling Clean → Retro → High Contrast and
+/// a mode button cycling System → Light → Dark. Together they cover the full
+/// pack × mode grid; the combined choice is persisted to `localStorage` and
+/// re-themes the whole app via the root CSS variables.
 #[component]
 pub fn ThemeToggle() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let label = move || choice_label(app.theme.get());
+    let pack = move || pack_label(app.theme.get().pack);
+    let mode = move || mode_label(app.theme.get().mode);
     view! {
-        <button
-            class="rh-btn ghost"
-            title="Cycle appearance: Auto / Light / Dark"
-            on:click=move |_| app.cycle_theme()
-        >
-            {label}
-        </button>
+        <span class="rh-theme-menu">
+            <button
+                class="rh-btn ghost"
+                title="Cycle theme pack: Clean / Retro / High Contrast"
+                on:click=move |_| app.cycle_pack()
+            >
+                {pack}
+            </button>
+            <button
+                class="rh-btn ghost"
+                title="Cycle appearance: Auto / Light / Dark"
+                on:click=move |_| app.cycle_theme()
+            >
+                {mode}
+            </button>
+        </span>
     }
 }
 

@@ -18,6 +18,10 @@ rabbithole-proto.workspace = true
 # dependency is `png`), so it stays wasm-clean and we avoid duplicating the
 # ANSI parser that already lives here.
 rabbithole-art.workspace = true
+# Theme-pack token files: packs round-trip as JSON (`src/packs.rs`) — the seam
+# a future server theme bundle plugs into. Both wasm-clean.
+serde.workspace = true
+serde_json.workspace = true
 
 # The browser WebSocket transport (`src/ws.rs`) plus the wasm-only DOM glue in
 # `src/art.rs` (canvas) and `src/theme.rs` (localStorage / matchMedia). These

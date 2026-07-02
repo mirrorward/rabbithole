@@ -18,7 +18,7 @@ use crate::components::{
 };
 use crate::files::{join_path, FilesState};
 use crate::state::UiState;
-use crate::theme_css::{next_choice, root_style, ThemeChoice, DEFAULT_PACK, STYLESHEET};
+use crate::theme_css::{next_mode, next_pack, root_style, ThemeChoice, STYLESHEET};
 use crate::wire::{AdminCommand, AdminEvent, FileCommand, FileEvent};
 
 /// Reactive, `Copy` handle bundle shared through context.
@@ -33,8 +33,9 @@ pub struct AppState {
     /// Whether the signed-in session holds an admin capability. Gates the admin
     /// nav entry and routes.
     pub is_admin: RwSignal<bool>,
-    /// The user's appearance choice (System/Light/Dark). The effective
-    /// [`Mode`] is derived from this plus the OS hint via [`AppState::mode`].
+    /// The user's appearance choice: theme pack (Clean/Retro/HighContrast)
+    /// plus mode policy (System/Light/Dark). The effective [`Mode`] is
+    /// derived from this plus the OS hint via [`AppState::mode`].
     pub theme: RwSignal<ThemeChoice>,
     /// The command seam. `MockClient` today; a real transport later.
     pub client: StoredValue<MockClient>,
@@ -57,12 +58,24 @@ impl AppState {
     /// [`ThemeChoice`] and the OS `prefers-color-scheme` hint. Reactive on the
     /// theme signal.
     pub fn mode(&self) -> Mode {
-        crate::theme_css::effective_mode(self.theme.get(), os_prefers_dark())
+        crate::theme_css::effective_mode(self.theme.get().mode, os_prefers_dark())
     }
 
-    /// Advance the theme choice (System → Light → Dark → …) and persist it.
+    /// Advance the mode choice (System → Light → Dark → …) and persist it.
     pub fn cycle_theme(&self) {
-        self.theme.update(|c| *c = next_choice(*c));
+        self.theme.update(|c| c.mode = next_mode(c.mode));
+        self.persist_theme();
+    }
+
+    /// Advance the theme pack (Clean → Retro → HighContrast → …) and persist
+    /// it.
+    pub fn cycle_pack(&self) {
+        self.theme.update(|c| c.pack = next_pack(c.pack));
+        self.persist_theme();
+    }
+
+    /// Persist the current theme choice (browser only; no-op on the host).
+    fn persist_theme(&self) {
         #[cfg(target_arch = "wasm32")]
         crate::theme_css::storage::save_choice(self.theme.get_untracked());
     }
@@ -352,7 +365,7 @@ pub fn App() -> impl IntoView {
     let app = AppState::new();
     provide_context(app);
 
-    let style = move || root_style(DEFAULT_PACK, app.mode());
+    let style = move || root_style(app.theme.get().pack, app.mode());
 
     view! {
         <style>{STYLESHEET}</style>

@@ -35,8 +35,12 @@
 //!   [`wire`].
 //! - [`art`] turns parsed CP437/ANSI art (via `rabbithole-art`) into pure,
 //!   host-tested canvas draw ops; only the paint call is wasm-gated.
-//! - [`theme_css`] maps [`rabbithole_core::theme`] design tokens to CSS custom
-//!   properties and resolves light/dark from `(choice, os_pref)`.
+//! - [`packs`] defines the theme packs (Clean / Retro / High Contrast) as
+//!   complete CSS-variable token sets that round-trip as JSON token files —
+//!   the future server-theme-bundle seam.
+//! - [`theme_css`] holds the app stylesheet, the pack+mode
+//!   [`ThemeChoice`](theme_css::ThemeChoice) model, and resolves light/dark
+//!   from `(choice, os_pref)`.
 //! - [`app`] and [`components`] are the Leptos view layer.
 //!
 //! ## wasm hygiene
@@ -53,6 +57,7 @@ pub mod client;
 pub mod components;
 pub mod conn;
 pub mod files;
+pub mod packs;
 pub mod state;
 pub mod theme_css;
 pub mod wire;
@@ -66,6 +71,7 @@ pub use app::{mount, App, AppState};
 pub use client::{MockClient, UiClient};
 pub use conn::{backoff_delay, ConnState};
 pub use files::{FilesState, Transfer, TransferDir, TransferStatus};
+pub use packs::PackTokens;
 pub use state::{Board, ChatLine, DmMessage, DmThread, Member, Post, Thread, UiState};
 pub use wire::{
     admin_command_to_frame, command_to_frame, file_command_to_frame, frame_to_admin_events,

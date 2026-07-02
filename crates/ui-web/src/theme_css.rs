@@ -1,73 +1,39 @@
 //! Design tokens, theme resolution, and the app stylesheet.
 //!
 //! The colour palette lives in [`rabbithole_core::theme`] so every client means
-//! the same thing by "accent" or "surface". This module turns a resolved
-//! [`Palette`] plus a set of non-colour **design tokens** (spacing, typography,
-//! radii) into CSS custom properties (`--rh-*`) that the static
-//! [`STYLESHEET`] consumes. Applying the variables as an inline `style` on the
-//! app root re-themes the whole subtree reactively — no `web_sys` DOM poking.
+//! the same thing by "accent" or "surface". The [`crate::packs`] module turns a
+//! [`ThemePack`] into a complete set of CSS custom properties (`--rh-*`) —
+//! colours per mode plus non-colour design tokens (spacing, typography, radii)
+//! — that the static [`STYLESHEET`] consumes. Applying the variables as an
+//! inline `style` on the app root re-themes the whole subtree reactively — no
+//! `web_sys` DOM poking.
 //!
-//! ## Light / dark
+//! ## Choice model
 //!
-//! Appearance is a two-part decision, kept **pure and host-tested**:
-//!
-//! - the user's [`ThemeChoice`] — follow the OS, or force light/dark, and
-//! - the OS `prefers-color-scheme` hint,
-//!
-//! combined by [`effective_mode`]. The choice is persisted to `localStorage`
-//! and the OS hint read via `matchMedia`, both wasm-gated in [`storage`] behind
-//! this pure core.
-//!
-//! ## Packs
-//!
-//! [`ThemePack`] (Clean / Retro / HighContrast) already lives in the core; the
-//! SPA ships [`DEFAULT_PACK`] (Clean) but [`root_style`] takes the pack as a
-//! parameter, so wiring a pack selector later is additive.
+//! Appearance is a [`ThemeChoice`]: which pack (Clean / Retro / High Contrast)
+//! **and** how to pick light vs dark (follow the OS, or force one) — a
+//! [`ModeChoice`]. Resolution is kept **pure and host-tested**:
+//! [`effective_mode`] combines the mode choice with the OS
+//! `prefers-color-scheme` hint. The whole choice is persisted to
+//! `localStorage` and the OS hint read via `matchMedia`, both wasm-gated in
+//! [`storage`] behind this pure core.
 
-use rabbithole_core::theme::{Mode, Palette, Rgb, ThemePack};
+use rabbithole_core::theme::{Mode, ThemePack};
 
-/// The pack the SPA renders with today. Retro / HighContrast are one signal
-/// away once a selector is added.
+use crate::packs::PackTokens;
+
+/// The pack a fresh session renders with before any persisted choice.
 pub const DEFAULT_PACK: ThemePack = ThemePack::Clean;
 
-fn hex(c: Rgb) -> String {
-    format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2)
-}
-
-/// Render a palette as `--rh-*: #rrggbb; …` for a `style` attribute.
-pub fn palette_vars(p: &Palette) -> String {
-    format!(
-        "--rh-bg:{};--rh-surface:{};--rh-text:{};--rh-muted:{};--rh-accent:{};--rh-error:{};",
-        hex(p.background),
-        hex(p.surface),
-        hex(p.text),
-        hex(p.muted),
-        hex(p.accent),
-        hex(p.error),
-    )
-}
-
-/// Non-colour design tokens (spacing, radii, typography). Mode-independent, so
-/// they are a single static string appended after the palette variables.
-pub const DESIGN_TOKENS: &str = "\
---rh-space-1:.25rem;--rh-space-2:.5rem;--rh-space-3:.75rem;--rh-space-4:1rem;\
---rh-space-6:1.5rem;--rh-radius:.4rem;--rh-radius-lg:.6rem;\
---rh-font-sans:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;\
---rh-font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;\
---rh-font-size:1rem;--rh-font-sm:.85rem;--rh-font-xs:.8rem;";
-
-/// The full inline `style` string for the app root: the palette for `pack` at
-/// `mode`, followed by the design tokens.
+/// The full inline `style` string for the app root: every `--rh-*` variable
+/// of `pack` at `mode` (colours for the mode, then the shared design tokens).
 pub fn root_style(pack: ThemePack, mode: Mode) -> String {
-    format!(
-        "{}{DESIGN_TOKENS}",
-        palette_vars(&Palette::builtin(pack, mode))
-    )
+    PackTokens::builtin(pack).style_for(mode)
 }
 
-/// How the user wants the appearance chosen.
+/// How the user wants light vs dark chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ThemeChoice {
+pub enum ModeChoice {
     /// Follow the operating system's `prefers-color-scheme`.
     #[default]
     System,
@@ -77,13 +43,31 @@ pub enum ThemeChoice {
     Dark,
 }
 
-/// Resolve the effective [`Mode`] from the user's [`ThemeChoice`] and the OS's
+/// The user's complete appearance choice: a theme pack plus a mode policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeChoice {
+    /// Which token pack to render with.
+    pub pack: ThemePack,
+    /// How to resolve light vs dark.
+    pub mode: ModeChoice,
+}
+
+impl Default for ThemeChoice {
+    fn default() -> Self {
+        Self {
+            pack: DEFAULT_PACK,
+            mode: ModeChoice::default(),
+        }
+    }
+}
+
+/// Resolve the effective [`Mode`] from the user's [`ModeChoice`] and the OS's
 /// dark-mode preference. Pure — the whole point of the split.
-pub fn effective_mode(choice: ThemeChoice, os_prefers_dark: bool) -> Mode {
+pub fn effective_mode(choice: ModeChoice, os_prefers_dark: bool) -> Mode {
     match choice {
-        ThemeChoice::Light => Mode::Light,
-        ThemeChoice::Dark => Mode::Dark,
-        ThemeChoice::System => {
+        ModeChoice::Light => Mode::Light,
+        ModeChoice::Dark => Mode::Dark,
+        ModeChoice::System => {
             if os_prefers_dark {
                 Mode::Dark
             } else {
@@ -93,40 +77,100 @@ pub fn effective_mode(choice: ThemeChoice, os_prefers_dark: bool) -> Mode {
     }
 }
 
-/// Cycle to the next choice for the toggle: System → Light → Dark → System.
-pub fn next_choice(choice: ThemeChoice) -> ThemeChoice {
+/// Cycle to the next mode choice for the toggle: System → Light → Dark → …
+pub fn next_mode(choice: ModeChoice) -> ModeChoice {
     match choice {
-        ThemeChoice::System => ThemeChoice::Light,
-        ThemeChoice::Light => ThemeChoice::Dark,
-        ThemeChoice::Dark => ThemeChoice::System,
+        ModeChoice::System => ModeChoice::Light,
+        ModeChoice::Light => ModeChoice::Dark,
+        ModeChoice::Dark => ModeChoice::System,
     }
 }
 
-/// A short button label for a choice.
-pub fn choice_label(choice: ThemeChoice) -> &'static str {
-    match choice {
-        ThemeChoice::System => "\u{25D0} Auto",
-        ThemeChoice::Light => "\u{2600} Light",
-        ThemeChoice::Dark => "\u{263D} Dark",
+/// Cycle to the next pack for the picker: Clean → Retro → High Contrast → …
+pub fn next_pack(pack: ThemePack) -> ThemePack {
+    match pack {
+        ThemePack::Clean => ThemePack::Retro,
+        ThemePack::Retro => ThemePack::HighContrast,
+        ThemePack::HighContrast => ThemePack::Clean,
     }
 }
 
-/// Serialise a choice for persistence.
-pub fn choice_to_str(choice: ThemeChoice) -> &'static str {
+/// A short button label for a mode choice.
+pub fn mode_label(choice: ModeChoice) -> &'static str {
     match choice {
-        ThemeChoice::System => "system",
-        ThemeChoice::Light => "light",
-        ThemeChoice::Dark => "dark",
+        ModeChoice::System => "\u{25D0} Auto",
+        ModeChoice::Light => "\u{2600} Light",
+        ModeChoice::Dark => "\u{263D} Dark",
     }
+}
+
+/// A short button label for a pack.
+pub fn pack_label(pack: ThemePack) -> &'static str {
+    match pack {
+        ThemePack::Clean => "Clean",
+        ThemePack::Retro => "Retro",
+        ThemePack::HighContrast => "Contrast",
+    }
+}
+
+/// Serialise a mode choice for persistence.
+pub fn mode_to_str(choice: ModeChoice) -> &'static str {
+    match choice {
+        ModeChoice::System => "system",
+        ModeChoice::Light => "light",
+        ModeChoice::Dark => "dark",
+    }
+}
+
+/// Parse a persisted mode choice; unknown strings yield `None`.
+pub fn mode_from_str(s: &str) -> Option<ModeChoice> {
+    match s {
+        "system" => Some(ModeChoice::System),
+        "light" => Some(ModeChoice::Light),
+        "dark" => Some(ModeChoice::Dark),
+        _ => None,
+    }
+}
+
+/// Serialise a pack for persistence.
+pub fn pack_to_str(pack: ThemePack) -> &'static str {
+    match pack {
+        ThemePack::Clean => "clean",
+        ThemePack::Retro => "retro",
+        ThemePack::HighContrast => "high-contrast",
+    }
+}
+
+/// Parse a persisted pack; unknown strings yield `None`.
+pub fn pack_from_str(s: &str) -> Option<ThemePack> {
+    match s {
+        "clean" => Some(ThemePack::Clean),
+        "retro" => Some(ThemePack::Retro),
+        "high-contrast" => Some(ThemePack::HighContrast),
+        _ => None,
+    }
+}
+
+/// Serialise the full choice for persistence: `pack:mode`.
+pub fn choice_to_str(choice: ThemeChoice) -> String {
+    format!("{}:{}", pack_to_str(choice.pack), mode_to_str(choice.mode))
 }
 
 /// Parse a persisted choice; unknown strings yield `None`.
+///
+/// Bare mode strings (`"dark"`) — the pre-pack storage format — still parse,
+/// resolving to the default pack, so an existing user's mode survives the
+/// upgrade.
 pub fn choice_from_str(s: &str) -> Option<ThemeChoice> {
-    match s {
-        "system" => Some(ThemeChoice::System),
-        "light" => Some(ThemeChoice::Light),
-        "dark" => Some(ThemeChoice::Dark),
-        _ => None,
+    match s.split_once(':') {
+        Some((pack, mode)) => Some(ThemeChoice {
+            pack: pack_from_str(pack)?,
+            mode: mode_from_str(mode)?,
+        }),
+        None => Some(ThemeChoice {
+            pack: DEFAULT_PACK,
+            mode: mode_from_str(s)?,
+        }),
     }
 }
 
@@ -150,7 +194,7 @@ pub mod storage {
     /// Persist the theme choice (best-effort; storage may be unavailable).
     pub fn save_choice(choice: ThemeChoice) {
         if let Some(Ok(Some(storage))) = web_sys::window().map(|w| w.local_storage()) {
-            let _ = storage.set_item(KEY, choice_to_str(choice));
+            let _ = storage.set_item(KEY, &choice_to_str(choice));
         }
     }
 
@@ -168,7 +212,8 @@ pub mod storage {
 pub const STYLESHEET: &str = "\
 *{box-sizing:border-box}\
 .rh-app{font-family:var(--rh-font-sans);font-size:var(--rh-font-size);\
-color:var(--rh-text);background:var(--rh-bg);min-height:100vh;\
+color:var(--rh-text);background-color:var(--rh-bg);\
+background-image:var(--rh-bg-image);min-height:100vh;\
 display:flex;flex-direction:column}\
 .rh-header{display:flex;align-items:center;gap:var(--rh-space-3);\
 padding:.6rem var(--rh-space-4);\
@@ -184,6 +229,7 @@ background:var(--rh-accent);color:var(--rh-bg);border-radius:var(--rh-radius);\
 padding:var(--rh-space-2) var(--rh-space-3)}\
 .rh-btn.ghost{background:transparent;color:var(--rh-accent)}\
 .rh-btn.small{padding:.2rem var(--rh-space-2);font-size:var(--rh-font-xs)}\
+.rh-theme-menu{display:inline-flex;gap:.35rem;align-items:center}\
 .rh-input{font:inherit;padding:.45rem var(--rh-space-2);\
 border-radius:var(--rh-radius);\
 border:1px solid var(--rh-muted);background:var(--rh-bg);color:var(--rh-text)}\
@@ -304,37 +350,116 @@ gap:var(--rh-space-2);flex-wrap:wrap}\
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    const PACKS: [ThemePack; 3] = [ThemePack::Clean, ThemePack::Retro, ThemePack::HighContrast];
+    const MODES: [Mode; 2] = [Mode::Light, Mode::Dark];
 
     #[test]
     fn effective_mode_honors_explicit_choice() {
-        assert_eq!(effective_mode(ThemeChoice::Light, true), Mode::Light);
-        assert_eq!(effective_mode(ThemeChoice::Dark, false), Mode::Dark);
+        assert_eq!(effective_mode(ModeChoice::Light, true), Mode::Light);
+        assert_eq!(effective_mode(ModeChoice::Dark, false), Mode::Dark);
     }
 
     #[test]
     fn system_choice_follows_os() {
-        assert_eq!(effective_mode(ThemeChoice::System, true), Mode::Dark);
-        assert_eq!(effective_mode(ThemeChoice::System, false), Mode::Light);
+        assert_eq!(effective_mode(ModeChoice::System, true), Mode::Dark);
+        assert_eq!(effective_mode(ModeChoice::System, false), Mode::Light);
     }
 
     #[test]
-    fn choice_cycles_through_all_three() {
-        let mut c = ThemeChoice::default();
-        assert_eq!(c, ThemeChoice::System);
-        c = next_choice(c);
-        assert_eq!(c, ThemeChoice::Light);
-        c = next_choice(c);
-        assert_eq!(c, ThemeChoice::Dark);
-        c = next_choice(c);
-        assert_eq!(c, ThemeChoice::System);
+    fn mode_choice_cycles_through_all_three() {
+        let mut c = ModeChoice::default();
+        assert_eq!(c, ModeChoice::System);
+        c = next_mode(c);
+        assert_eq!(c, ModeChoice::Light);
+        c = next_mode(c);
+        assert_eq!(c, ModeChoice::Dark);
+        c = next_mode(c);
+        assert_eq!(c, ModeChoice::System);
     }
 
     #[test]
-    fn choice_serialisation_roundtrips() {
-        for c in [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark] {
-            assert_eq!(choice_from_str(choice_to_str(c)), Some(c));
+    fn pack_cycles_through_all_three() {
+        let mut p = DEFAULT_PACK;
+        assert_eq!(p, ThemePack::Clean);
+        p = next_pack(p);
+        assert_eq!(p, ThemePack::Retro);
+        p = next_pack(p);
+        assert_eq!(p, ThemePack::HighContrast);
+        p = next_pack(p);
+        assert_eq!(p, ThemePack::Clean);
+    }
+
+    #[test]
+    fn choice_serialisation_roundtrips_all_nine_combinations() {
+        for pack in PACKS {
+            for mode in [ModeChoice::System, ModeChoice::Light, ModeChoice::Dark] {
+                let choice = ThemeChoice { pack, mode };
+                assert_eq!(choice_from_str(&choice_to_str(choice)), Some(choice));
+            }
         }
+    }
+
+    #[test]
+    fn legacy_bare_mode_strings_resolve_to_the_default_pack() {
+        // The pre-pack storage format was just the mode.
+        for (raw, mode) in [
+            ("system", ModeChoice::System),
+            ("light", ModeChoice::Light),
+            ("dark", ModeChoice::Dark),
+        ] {
+            assert_eq!(
+                choice_from_str(raw),
+                Some(ThemeChoice {
+                    pack: DEFAULT_PACK,
+                    mode
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_persisted_strings_are_rejected() {
         assert_eq!(choice_from_str("nonsense"), None);
+        assert_eq!(choice_from_str("retro:banana"), None);
+        assert_eq!(choice_from_str("banana:dark"), None);
+        assert_eq!(choice_from_str(""), None);
+    }
+
+    /// Every `--rh-*` variable the stylesheet references.
+    fn referenced_vars(css: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        let mut rest = css;
+        while let Some(i) = rest.find("var(--") {
+            let name = &rest[i + 4..];
+            let end = name
+                .find([')', ','])
+                .expect("var() reference is terminated");
+            out.insert(name[..end].to_string());
+            rest = &name[end..];
+        }
+        out
+    }
+
+    #[test]
+    fn every_referenced_variable_exists_in_every_pack_and_mode() {
+        let vars = referenced_vars(STYLESHEET);
+        assert!(
+            vars.len() >= 15,
+            "sanity: the stylesheet references a real token set, got {vars:?}"
+        );
+        for pack in PACKS {
+            for mode in MODES {
+                let style = root_style(pack, mode);
+                for var in &vars {
+                    assert!(
+                        style.contains(&format!("{var}:")),
+                        "{pack:?}/{mode:?} is missing {var}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -346,9 +471,21 @@ mod tests {
     }
 
     #[test]
-    fn light_and_dark_styles_differ() {
-        let light = root_style(DEFAULT_PACK, Mode::Light);
-        let dark = root_style(DEFAULT_PACK, Mode::Dark);
-        assert_ne!(light, dark);
+    fn light_and_dark_styles_differ_in_every_pack() {
+        for pack in PACKS {
+            assert_ne!(
+                root_style(pack, Mode::Light),
+                root_style(pack, Mode::Dark),
+                "{pack:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn packs_render_distinct_styles() {
+        for mode in MODES {
+            let styles: BTreeSet<String> = PACKS.iter().map(|&p| root_style(p, mode)).collect();
+            assert_eq!(styles.len(), PACKS.len(), "{mode:?}");
+        }
     }
 }
