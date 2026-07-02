@@ -6,8 +6,14 @@
 //! server publishes a verified bundle).
 //!
 //! Keys: Enter send · Ctrl-T toggle light/dark · Ctrl-R retro theme ·
-//! Ctrl-C / Esc quit. Lines starting with `/go <word>` teleport (a room
-//! join or a printed target).
+//! Ctrl-N radio panel · Ctrl-C / Esc quit. Lines starting with `/go <word>`
+//! teleport (a room join or a printed target).
+//!
+//! A one-line status bar under the input surfaces radio now-playing (see
+//! `radio` for the state reducer and the interim `ServerNotice` bridge that
+//! feeds it until the RADIO proto slice lands).
+
+mod radio;
 
 use std::io::Stdout;
 use std::time::Duration;
@@ -23,6 +29,7 @@ use rabbithole_core::theme::{self, Mode, Palette, Rgb, ThemePack};
 use rabbithole_core::Client;
 use rabbithole_proto::chat::ChatMessage;
 use rabbithole_proto::presence::{UserJoined, UserLeft};
+use rabbithole_proto::session::ServerNotice;
 use rabbithole_proto::welcome::KeywordKind;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -62,6 +69,8 @@ struct App {
     mode: Mode,
     server_theme: Option<rabbithole_proto::welcome::ThemeBundle>,
     server_name: String,
+    radio: radio::RadioState,
+    show_radio: bool,
     should_quit: bool,
 }
 
@@ -118,6 +127,8 @@ async fn main() -> Result<()> {
         mode: Mode::Dark,
         server_theme,
         server_name: client.server.server_name.clone(),
+        radio: radio::RadioState::default(),
+        show_radio: false,
         should_quit: false,
     };
     app.sys(format!("— signed in as {} —", ok.screen_name));
@@ -193,6 +204,14 @@ fn apply_push(app: &mut App, frame: &rabbithole_proto::Frame) {
         if !l.screen_name.is_empty() {
             app.sys(format!("* {} left", l.screen_name));
         }
+    } else if let Some(Ok(n)) = frame.decode::<ServerNotice>() {
+        // Radio bridge notices update the now-playing state silently;
+        // everything else is an operator notice for the chat log.
+        match radio::parse_notice(&n.text) {
+            Some(radio::NoticeUpdate::Playing(status)) => app.radio.apply_radio_status(status),
+            Some(radio::NoticeUpdate::Off(station)) => app.radio.clear_station(&station),
+            None => app.sys(format!("! {}: {}", n.from, n.text)),
+        }
     }
 }
 
@@ -213,6 +232,7 @@ async fn handle_key(client: &mut Client, app: &mut App, key: KeyEvent) -> Result
                 _ => ThemePack::Retro,
             };
         }
+        KeyCode::Char('n') if ctrl => app.show_radio = !app.show_radio,
         KeyCode::Backspace => {
             app.input.pop();
         }
@@ -253,10 +273,14 @@ fn draw(f: &mut Frame, app: &App) {
         .fg(to_color(pal.text));
     f.render_widget(Block::default().style(bg), f.area());
 
+    let bands = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(6), Constraint::Length(1)])
+        .split(f.area());
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(20), Constraint::Length(22)])
-        .split(f.area());
+        .split(bands[0]);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(3)])
@@ -296,25 +320,59 @@ fn draw(f: &mut Frame, app: &App) {
         Paragraph::new(format!("> {}", app.input)).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" say (Enter) · Ctrl-T light/dark · Ctrl-R retro · Esc quit ")
+                .title(" say (Enter) · Ctrl-T light/dark · Ctrl-R retro · Ctrl-N radio · Esc quit ")
                 .border_style(muted),
         ),
         rows[1],
     );
 
-    // Who sidebar.
-    let who: Vec<ListItem> = app
-        .online
-        .iter()
-        .map(|n| ListItem::new(Line::from(n.clone())))
-        .collect();
+    // Sidebar: the who-list, or the radio panel while toggled (Ctrl-N).
+    if app.show_radio {
+        let inner_width = cols[1].width.saturating_sub(2) as usize;
+        let items: Vec<ListItem> = radio::panel_lines(&app.radio, inner_width)
+            .into_iter()
+            .map(|l| {
+                let style = if l.live { accent } else { muted };
+                ListItem::new(Line::from(Span::styled(l.text, style)))
+            })
+            .collect();
+        f.render_widget(
+            List::new(items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" radio ")
+                    .border_style(accent),
+            ),
+            cols[1],
+        );
+    } else {
+        let who: Vec<ListItem> = app
+            .online
+            .iter()
+            .map(|n| ListItem::new(Line::from(n.clone())))
+            .collect();
+        f.render_widget(
+            List::new(who).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" online {} ", app.online.len()))
+                    .border_style(accent),
+            ),
+            cols[1],
+        );
+    }
+
+    // Status bar: radio now-playing (or off-air) beside the server name.
+    let width = bands[1].width as usize;
+    let (np, np_style) = match radio::status_segment(&app.radio, width.saturating_sub(3)) {
+        Some(seg) => (seg, accent),
+        None => ("♪ off the air".to_string(), muted),
+    };
     f.render_widget(
-        List::new(who).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" online {} ", app.online.len()))
-                .border_style(accent),
-        ),
-        cols[1],
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" {} ", np), np_style),
+            Span::styled(format!("· {}", app.server_name), muted),
+        ])),
+        bands[1],
     );
 }
