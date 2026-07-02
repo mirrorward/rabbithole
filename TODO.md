@@ -5,13 +5,11 @@
 > dependency edges shown in PLAN.md §15. ⛔ = do not start until PLAN.md is
 > reviewed and approved by the project owner.
 
-**Status: Wave 4.2 (transfer engine) functionally complete — Wave 4.3 (quotas/rate policy, persistent client queue) is next.**
+**Status: Wave 4.2 (transfer engine) complete — Wave 4.3 (quotas/rate policy, persistent client queue) is next.**
 
-> W4.2 note: transfers are resumable + integrity-checked over both transports
-> and folder-pipelined. The dedicated-QUIC-bulk-stream *data plane* (moving
-> bytes off the control stream) is the one deferred optimization — its
-> transport primitive (`net::BulkStreams` / `Connection::bulk()`) and the
-> `BulkPreamble` wire type are already in place and tested.
+> W4.2: transfers are resumable + integrity-checked, folder-pipelined, and
+> move bytes over dedicated QUIC bulk streams (off the control channel) with
+> a WebSocket ranged-chunk fallback — one protocol, one verification path.
 
 ---
 
@@ -85,7 +83,7 @@
 - [x] Areas + folder trees; metadata: icons (retro set + custom), comments, uploader, dates, download counters, ratings
 - [x] Aliases; **drop boxes** (write-only, privilege-gated viewing); hide-vs-deny folder ACLs
 - [x] Background file indexer → instant search (projection-backed substring search; FTS5 later)
-- [x] Transfer engine: ticketed resumable transfer over both transports (QUIC bulk-stream primitive + WS ranged chunks), whole-file blake3 verify; per-chunk Bao verify shares the W5 swarm crate
+- [x] Transfer engine: ticketed resumable transfer with dedicated QUIC bulk streams (WS ranged-chunk fallback), whole-file blake3 verify; per-chunk Bao verify shares the W5 swarm crate
 - [x] Folder transfers (pipelined, no per-item lockstep) — one FolderManifest round trip, then independent per-file transfers (`rabbit file getdir`)
 - [ ] Quotas + per-class rate policy
 - [ ] Persistent client transfer queue: priorities, bandwidth caps, schedules, auto-resume across restarts

@@ -65,12 +65,15 @@ resumable, integrity-checked way. Messages (types 20-42):
 | 40/41 | FileChunkRequest → FileChunk | Request/Reply | ranged download (WS / control-stream path) |
 | 42 | FileChunkPut | Request → ack | ranged upload |
 
-**Transports.** On QUIC, `Connection::bulk()` yields a `BulkStreams` handle
-that opens dedicated bi-streams (bytes off the control channel). On
-WebSocket/wasm there are no extra streams, so the same byte ranges ride the
-control connection as windowed `FileChunk` frames (bounded well under the
-1 MiB cap so chat/presence still interleave). One transfer protocol, two
-framings.
+**Transports.** On QUIC, `Connection::bulk()` yields a `BulkStreams` handle:
+the client opens a dedicated bi-stream, writes a length-prefixed
+`BulkPreamble` (binding it to the ticket), then bytes flow **off the control
+channel** — the server streams the range (download) or consumes the
+remainder into staging then acks one byte so the client knows staging is
+durable before `UploadFinish` (upload). On WebSocket/wasm there are no extra
+streams, so the same byte ranges ride the control connection as windowed
+`FileChunk` frames (bounded well under the 1 MiB cap so chat/presence still
+interleave). One transfer protocol, one verification path, two framings.
 
 **Resume.** A download resumes from the client's local partial offset; an
 upload resumes from the server's verified staged prefix (`server_have`).

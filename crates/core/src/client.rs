@@ -815,22 +815,47 @@ impl Client {
             .write(true)
             .open(dest)?;
         file.seek(SeekFrom::Start(have))?;
-        while have < ticket.size {
-            let want = ((ticket.size - have).min(Self::TRANSFER_CHUNK as u64)) as u32;
-            let chunk: rabbithole_proto::transfer::FileChunk = self
-                .request(&rabbithole_proto::transfer::FileChunkRequest::new(
-                    ticket.transfer_id,
-                    have,
-                    want,
-                ))
-                .await?;
-            if chunk.bytes.is_empty() {
-                break;
+        if let Some(bulk) = self.conn.bulk() {
+            // Dedicated QUIC stream: bytes flow off the control channel.
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut send, mut recv) = bulk.open().await?;
+            let pre = postcard::to_allocvec(&rabbithole_proto::transfer::BulkPreamble::new(
+                ticket.transfer_id,
+                ticket.token,
+                have,
+                rabbithole_proto::transfer::DIR_DOWNLOAD,
+            ))
+            .expect("preamble serializes");
+            rabbithole_net::write_framed(&mut send, &pre).await?;
+            send.shutdown().await?; // no more client→server on this stream
+            let mut buf = vec![0u8; Self::TRANSFER_CHUNK];
+            loop {
+                let n = recv.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                file.write_all(&buf[..n])?;
+                have += n as u64;
             }
-            file.write_all(&chunk.bytes)?;
-            have += chunk.bytes.len() as u64;
-            if chunk.last {
-                break;
+        } else {
+            // WebSocket / no-multiplex: ranged chunks on the control stream.
+            while have < ticket.size {
+                let want = ((ticket.size - have).min(Self::TRANSFER_CHUNK as u64)) as u32;
+                let chunk: rabbithole_proto::transfer::FileChunk = self
+                    .request(&rabbithole_proto::transfer::FileChunkRequest::new(
+                        ticket.transfer_id,
+                        have,
+                        want,
+                    ))
+                    .await?;
+                if chunk.bytes.is_empty() {
+                    break;
+                }
+                file.write_all(&chunk.bytes)?;
+                have += chunk.bytes.len() as u64;
+                if chunk.last {
+                    break;
+                }
             }
         }
         file.flush()?;
@@ -863,29 +888,64 @@ impl Client {
         let mut file = std::fs::File::open(src)?;
         file.seek(SeekFrom::Start(have))?;
         let mut buf = vec![0u8; Self::TRANSFER_CHUNK];
-        while have < size {
-            let want = ((size - have).min(Self::TRANSFER_CHUNK as u64)) as usize;
-            // Read up to `want` bytes (files can short-read).
-            let mut filled = 0;
-            while filled < want {
-                let n = file.read(&mut buf[filled..want])?;
-                if n == 0 {
+        if let Some(bulk) = self.conn.bulk() {
+            // Dedicated QUIC stream: stream the remainder, then wait for the
+            // server's one-byte ack so staging is durable before UploadFinish.
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut send, mut recv) = bulk.open().await?;
+            let pre = postcard::to_allocvec(&rabbithole_proto::transfer::BulkPreamble::new(
+                ticket.transfer_id,
+                ticket.token,
+                have,
+                rabbithole_proto::transfer::DIR_UPLOAD,
+            ))
+            .expect("preamble serializes");
+            rabbithole_net::write_framed(&mut send, &pre).await?;
+            while have < size {
+                let want = ((size - have).min(Self::TRANSFER_CHUNK as u64)) as usize;
+                let mut filled = 0;
+                while filled < want {
+                    let n = file.read(&mut buf[filled..want])?;
+                    if n == 0 {
+                        break;
+                    }
+                    filled += n;
+                }
+                if filled == 0 {
                     break;
                 }
-                filled += n;
+                send.write_all(&buf[..filled]).await?;
+                have += filled as u64;
             }
-            if filled == 0 {
-                break;
+            send.shutdown().await?; // FIN → server reads to EOF
+            let mut ack = [0u8; 1];
+            recv.read_exact(&mut ack).await?; // staging is now durable
+        } else {
+            // WebSocket / no-multiplex: ranged chunks on the control stream.
+            while have < size {
+                let want = ((size - have).min(Self::TRANSFER_CHUNK as u64)) as usize;
+                // Read up to `want` bytes (files can short-read).
+                let mut filled = 0;
+                while filled < want {
+                    let n = file.read(&mut buf[filled..want])?;
+                    if n == 0 {
+                        break;
+                    }
+                    filled += n;
+                }
+                if filled == 0 {
+                    break;
+                }
+                let last = have + filled as u64 >= size;
+                self.request_ack(&rabbithole_proto::transfer::FileChunkPut::new(
+                    ticket.transfer_id,
+                    have,
+                    last,
+                    buf[..filled].to_vec(),
+                ))
+                .await?;
+                have += filled as u64;
             }
-            let last = have + filled as u64 >= size;
-            self.request_ack(&rabbithole_proto::transfer::FileChunkPut::new(
-                ticket.transfer_id,
-                have,
-                last,
-                buf[..filled].to_vec(),
-            ))
-            .await?;
-            have += filled as u64;
         }
         let reply: rabbithole_proto::filelib::NodeReply = self
             .request(&rabbithole_proto::transfer::UploadFinish::new(

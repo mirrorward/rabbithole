@@ -250,6 +250,24 @@ pub async fn run_session(
         }
     }
 
+    // Bulk-transfer accept loop (QUIC only): dedicated streams carry file
+    // bytes off the control channel. Each accepted stream is served
+    // concurrently; the task ends when the connection closes.
+    let bulk_task = conn.bulk().map(|bulk| {
+        let shared = shared.clone();
+        let account_id = ctx.account_id;
+        tokio::spawn(async move {
+            while let Ok((send, recv)) = bulk.accept().await {
+                tokio::spawn(crate::handlers9::serve_bulk_stream(
+                    shared.clone(),
+                    account_id,
+                    send,
+                    recv,
+                ));
+            }
+        })
+    });
+
     let result: anyhow::Result<()> = async {
         loop {
             tokio::select! {
@@ -291,6 +309,9 @@ pub async fn run_session(
     }
     .await;
 
+    if let Some(task) = bulk_task {
+        task.abort();
+    }
     shared.chat.session_closed(session_id);
     shared.presence.leave(session_id);
     conn.close().await;

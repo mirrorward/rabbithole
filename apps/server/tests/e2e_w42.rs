@@ -1,6 +1,7 @@
 //! Wave 4.2 end-to-end tests: bulk transfers — multi-chunk upload/download,
-//! whole-file integrity, resume, and upload permissions. Runs over WebSocket,
-//! which has no bulk streams, so it exercises the ranged control-frame path.
+//! whole-file integrity, resume, folder pipelining, and upload permissions.
+//! Most run over WebSocket (the ranged control-frame path); one runs over
+//! QUIC to cover the dedicated bulk-stream data plane.
 
 use burrow::Burrow;
 use rabbithole_core::{Client, ClientError};
@@ -33,9 +34,80 @@ async fn login(burrow: &Burrow, user: &str) -> Client {
     c
 }
 
+/// Log in over QUIC (which offers dedicated bulk streams, unlike WS).
+async fn login_quic(burrow: &Burrow, user: &str) -> Client {
+    let fp = burrow.fingerprint.to_hex();
+    let mut c = Client::connect(
+        &format!("127.0.0.1:{}", burrow.quic_addr.port()),
+        Some("localhost"),
+        Some(&fp),
+        "e2e",
+        "0",
+    )
+    .await
+    .unwrap();
+    c.auth_password(user, "pw-pw-pw").await.unwrap();
+    c.expect_welcome().await.unwrap();
+    c
+}
+
 /// A deterministic multi-chunk payload (larger than the 256 KiB chunk).
 fn payload(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+#[tokio::test]
+async fn bulk_transfer_over_quic_dedicated_streams() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("admin", "pw-pw-pw", Role::Admin)
+        .await
+        .unwrap();
+
+    // Over QUIC the client uses dedicated bulk streams (bytes off the control
+    // channel), so this covers the path WS can't exercise.
+    let mut admin = login_quic(&burrow, "admin").await;
+    admin.area_create("warez", "Warez", "").await.unwrap();
+
+    let body = payload(600 * 1024);
+    let src = work.path().join("big.bin");
+    std::fs::write(&src, &body).unwrap();
+    let node = admin
+        .transfer_upload(
+            "warez",
+            None,
+            "big.bin",
+            &src,
+            "application/octet-stream",
+            "over quic",
+        )
+        .await
+        .unwrap();
+    assert_eq!(node.size, body.len() as i64);
+
+    // Fresh download over a bulk stream.
+    let dst = work.path().join("got.bin");
+    let n = admin.transfer_download(node.id, &dst).await.unwrap();
+    assert_eq!(n, body.len() as u64);
+    assert_eq!(std::fs::read(&dst).unwrap(), body, "bulk download matches");
+
+    // Resume a partial download over a bulk stream.
+    let resume_dst = work.path().join("resume.bin");
+    std::fs::write(&resume_dst, &body[..150 * 1024]).unwrap();
+    let n = admin.transfer_download(node.id, &resume_dst).await.unwrap();
+    assert_eq!(n, body.len() as u64);
+    assert_eq!(
+        std::fs::read(&resume_dst).unwrap(),
+        body,
+        "bulk resume matches"
+    );
+
+    burrow.shutdown().await;
 }
 
 #[tokio::test]

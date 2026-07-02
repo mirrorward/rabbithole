@@ -119,3 +119,37 @@ pub trait Listener: Send {
 
     fn local_addr(&self) -> Result<std::net::SocketAddr, NetError>;
 }
+
+/// Write a length-prefixed (`u32` big-endian) message to a bulk stream — the
+/// framing for the [`crate::BulkStreams`] preamble and any framed bulk
+/// payloads (Wave 4.2).
+pub async fn write_framed<W: tokio::io::AsyncWrite + Unpin>(
+    w: &mut W,
+    bytes: &[u8],
+) -> Result<(), NetError> {
+    use tokio::io::AsyncWriteExt;
+    w.write_all(&(bytes.len() as u32).to_be_bytes()).await?;
+    w.write_all(bytes).await?;
+    Ok(())
+}
+
+/// Read a length-prefixed message written by [`write_framed`]. `max` bounds
+/// the accepted length (a hostile peer can't force a huge allocation).
+pub async fn read_framed<R: tokio::io::AsyncRead + Unpin>(
+    r: &mut R,
+    max: usize,
+) -> Result<Vec<u8>, NetError> {
+    use tokio::io::AsyncReadExt;
+    let mut len_be = [0u8; 4];
+    r.read_exact(&mut len_be).await?;
+    let len = u32::from_be_bytes(len_be) as usize;
+    if len > max {
+        return Err(NetError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "framed message exceeds maximum length",
+        )));
+    }
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf).await?;
+    Ok(buf)
+}

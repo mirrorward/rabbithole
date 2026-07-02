@@ -8,9 +8,10 @@
 //! resumes from the client's local offset, an upload from the server's
 //! verified staged prefix — and every finished file is checked against its
 //! blake3 root (== blob id). Folder transfers pipeline over a single
-//! [`pt::FolderManifest`] round trip. Dedicated QUIC bulk streams (the
-//! [`rabbithole_net::BulkStreams`] seam) are the transparent optimization
-//! that builds on these same messages next.
+//! [`pt::FolderManifest`] round trip. On QUIC, [`serve_bulk_stream`] moves
+//! the bytes onto a dedicated bi-stream (off the control channel) via the
+//! [`rabbithole_net::BulkStreams`] seam; WebSocket uses the ranged-chunk
+//! path over the control stream. Same tickets, same verification.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,7 +20,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rabbithole_blobs::BlobId;
-use rabbithole_net::Connection;
+use rabbithole_net::{read_framed, BulkRecv, BulkSend, Connection};
 use rabbithole_proto::filelib as pf;
 use rabbithole_proto::transfer as pt;
 use rabbithole_proto::{ErrorCode, Frame};
@@ -77,6 +78,113 @@ impl TransferRegistry {
 impl Default for TransferRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Serve one dedicated bulk stream (QUIC only). The client opens a fresh
+/// bi-stream, writes a length-prefixed [`pt::BulkPreamble`] binding it to a
+/// ticket, then bytes flow off the control channel: the server streams the
+/// requested range (download) or consumes the remainder into staging
+/// (upload), acking with one byte so the client knows staging is durable
+/// before it sends `UploadFinish`. Errors just drop the stream — the client
+/// falls back or retries; the control-plane invariants (ticket, whole-file
+/// verification at finish) are unchanged.
+pub async fn serve_bulk_stream(
+    shared: Arc<Shared>,
+    account_id: i64,
+    mut send: BulkSend,
+    mut recv: BulkRecv,
+) {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    let Ok(bytes) = read_framed(&mut recv, 4096).await else {
+        return;
+    };
+    let Ok(pre) = postcard::from_bytes::<pt::BulkPreamble>(&bytes) else {
+        return;
+    };
+    // Authorize against the ticket (token is unguessable; account must match).
+    let info = {
+        let map = shared.transfers.inner.lock();
+        match map.get(&pre.transfer_id) {
+            Some(t)
+                if t.account_id == account_id
+                    && t.token == pre.token
+                    && t.direction == pre.direction =>
+            {
+                Some((t.direction, t.blob_id, t.size, t.staging.clone()))
+            }
+            _ => None,
+        }
+    };
+    let Some((direction, blob_id, size, staging)) = info else {
+        return;
+    };
+
+    match direction {
+        pt::DIR_DOWNLOAD => {
+            let Some(blob_id) = blob_id else { return };
+            let mut offset = pre.offset;
+            while offset < size {
+                let want = ((size - offset).min(CHUNK_MAX as u64)) as usize;
+                let blobs = shared.blobs.clone();
+                let at = offset;
+                let chunk = match tokio::task::spawn_blocking(move || {
+                    blobs.read_range(&BlobId(blob_id), at, want)
+                })
+                .await
+                {
+                    Ok(Ok(c)) => c,
+                    _ => return,
+                };
+                if chunk.is_empty() {
+                    break;
+                }
+                if send.write_all(&chunk).await.is_err() {
+                    return;
+                }
+                offset += chunk.len() as u64;
+            }
+            let _ = send.shutdown().await;
+        }
+        pt::DIR_UPLOAD => {
+            let Some(staging) = staging else { return };
+            let Ok(mut f) = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&staging)
+                .await
+            else {
+                return;
+            };
+            if f.seek(std::io::SeekFrom::Start(pre.offset)).await.is_err() {
+                return;
+            }
+            let mut offset = pre.offset;
+            let mut buf = vec![0u8; CHUNK_MAX];
+            loop {
+                match recv.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if f.write_all(&buf[..n]).await.is_err() {
+                            return;
+                        }
+                        offset += n as u64;
+                    }
+                    Err(_) => return,
+                }
+            }
+            let _ = f.flush().await;
+            {
+                let mut map = shared.transfers.inner.lock();
+                if let Some(t) = map.get_mut(&pre.transfer_id) {
+                    t.have = t.have.max(offset);
+                }
+            }
+            // One ack byte: staging is fully written and durable.
+            let _ = send.write_all(&[1u8]).await;
+            let _ = send.shutdown().await;
+        }
+        _ => {}
     }
 }
 
