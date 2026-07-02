@@ -233,20 +233,38 @@ pub async fn spawn_hotline(
     shared: Arc<Shared>,
     addr: SocketAddr,
 ) -> Result<(SocketAddr, JoinHandle<()>)> {
-    let listener = TcpListener::bind(addr).await?;
-    let local = listener.local_addr()?;
+    let mut listener = TcpListener::bind(addr).await?;
+    let mut local = listener.local_addr()?;
 
-    // The classic HTXF bulk-transfer channel is the control port + 1. A bind
-    // failure there (e.g. the port is already taken) only disables downloads —
-    // the control surface still comes up — so it never fails the whole server.
-    let htxf_addr = SocketAddr::new(local.ip(), local.port().wrapping_add(1));
-    let htxf_listener = match TcpListener::bind(htxf_addr).await {
-        Ok(l) => Some(l),
-        Err(e) => {
-            tracing::warn!("hotline HTXF bind on {htxf_addr} failed: {e}; downloads disabled");
-            None
+    // The classic HTXF bulk-transfer channel is the control port + 1. With a
+    // fixed control port (5500 -> 5501) a bind failure there just disables
+    // downloads. With an OS-assigned control port (port 0, as tests use), the
+    // adjacent port is frequently already owned — Windows/macOS hand out
+    // ephemeral ports sequentially — and clients that derive port+1 would then
+    // reach a stranger's socket (early EOF mid-download). So when the caller
+    // asked for port 0, re-roll BOTH ports together until port+1 also binds.
+    let mut htxf_listener = None;
+    for _ in 0..16 {
+        let htxf_addr = SocketAddr::new(local.ip(), local.port().wrapping_add(1));
+        match TcpListener::bind(htxf_addr).await {
+            Ok(l) => {
+                htxf_listener = Some(l);
+                break;
+            }
+            Err(e) if addr.port() == 0 => {
+                tracing::debug!("hotline HTXF bind on {htxf_addr} taken ({e}); re-rolling pair");
+                listener = TcpListener::bind(addr).await?;
+                local = listener.local_addr()?;
+            }
+            Err(e) => {
+                tracing::warn!("hotline HTXF bind on {htxf_addr} failed: {e}; downloads disabled");
+                break;
+            }
         }
-    };
+    }
+    if htxf_listener.is_none() && addr.port() == 0 {
+        tracing::warn!("hotline HTXF pair bind kept failing; downloads disabled");
+    }
 
     let handle = tokio::spawn(async move {
         let ctrl_shared = shared.clone();
