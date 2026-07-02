@@ -101,12 +101,29 @@ impl MessagesDat {
         let mut messages = Vec::new();
         let mut pos = BLOCK;
         while pos < bytes.len() {
-            let (msg, consumed) = decode_message(&bytes[pos..])?;
+            let (msg, _logical, consumed) = decode_message(&bytes[pos..])?;
             messages.push(msg);
             pos += consumed;
         }
         Ok(Self { producer, messages })
     }
+}
+
+/// Number of body blocks a `body_len`-byte (already `0xE3`-encoded) body needs.
+///
+/// A body always occupies at least one block, even when empty.
+fn body_blocks(body_len: usize) -> usize {
+    body_len.div_ceil(BLOCK).max(1)
+}
+
+/// Total 128-byte blocks a message occupies on disk (header + body), matching
+/// exactly what [`encode_message`] writes.
+///
+/// Delivery/index builders (see [`crate::packet`]) need this to compute the
+/// 1-based `MESSAGES.DAT` block pointer of each message header without having to
+/// re-decode the encoded stream.
+pub fn block_len(msg: &QwkMessage) -> usize {
+    1 + body_blocks(encode_body(&msg.body).len())
 }
 
 /// Convert a normalized (`\n`) body into on-disk bytes (`0xE3` line endings).
@@ -133,12 +150,16 @@ fn decode_body(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Append one message (header block + padded body blocks) to `out`.
-fn encode_message(msg: &QwkMessage, logical: u16, out: &mut Vec<u8>) {
+/// Append one message (header block + padded body blocks) to `out`, writing
+/// `logical` into the two-byte reader-index slot (offsets 125..127).
+///
+/// `MESSAGES.DAT` uses `logical` as the 1-based packet index; the `.REP` layout
+/// reuses that same slot to carry the reply's conference number (see
+/// [`crate::reply`]). Everything else about the record is identical, so both
+/// paths share this encoder.
+pub(crate) fn encode_message(msg: &QwkMessage, logical: u16, out: &mut Vec<u8>) {
     let body = encode_body(&msg.body);
-    // Body occupies at least one block even when empty.
-    let body_blocks = body.len().div_ceil(BLOCK).max(1);
-    let total_blocks = 1 + body_blocks;
+    let total_blocks = 1 + body_blocks(body.len());
 
     let start = out.len();
     out.resize(start + total_blocks * BLOCK, b' ');
@@ -168,9 +189,13 @@ fn encode_message(msg: &QwkMessage, logical: u16, out: &mut Vec<u8>) {
     // Remaining body bytes are already the space fill from `resize`.
 }
 
-/// Decode one message starting at the front of `bytes`; returns the message and
-/// the number of bytes it consumed.
-fn decode_message(bytes: &[u8]) -> Result<(QwkMessage, usize), QwkError> {
+/// Decode one message starting at the front of `bytes`.
+///
+/// Returns `(message, logical_index, consumed)` where `logical_index` is the raw
+/// two-byte reader-index slot (offsets 125..127). `MESSAGES.DAT` decoding
+/// ignores it, but `.REP` decoding reads the reply's conference number out of it
+/// (see [`crate::reply`]).
+pub(crate) fn decode_message(bytes: &[u8]) -> Result<(QwkMessage, u16, usize), QwkError> {
     if bytes.len() < BLOCK {
         return Err(QwkError::Truncated {
             need: BLOCK,
@@ -209,6 +234,7 @@ fn decode_message(bytes: &[u8]) -> Result<(QwkMessage, usize), QwkError> {
     let number = read_field(&hdr[1..8]).trim().parse().unwrap_or(0);
     let reference = read_field(&hdr[108..116]).trim().parse().unwrap_or(0);
     let conference = u16::from_le_bytes([hdr[123], hdr[124]]);
+    let logical = u16::from_le_bytes([hdr[125], hdr[126]]);
     let body = decode_body(&bytes[BLOCK..total_len]);
 
     let msg = QwkMessage {
@@ -225,7 +251,7 @@ fn decode_message(bytes: &[u8]) -> Result<(QwkMessage, usize), QwkError> {
         active: hdr[122] == ACTIVE,
         body,
     };
-    Ok((msg, total_len))
+    Ok((msg, logical, total_len))
 }
 
 #[cfg(test)]
@@ -335,6 +361,19 @@ mod tests {
                 .collect();
             let _ = MessagesDat::decode(&bytes);
         }
+    }
+
+    #[test]
+    fn block_len_matches_encoded_size() {
+        // An empty body still occupies one block, so total is 2.
+        assert_eq!(block_len(&QwkMessage::new(0, 1, "A", "B", "S", "")), 2);
+        // A body spilling to a second block reports 3 (header + two body blocks).
+        let big = "x".repeat(BLOCK + 1);
+        let msg = QwkMessage::new(0, 1, "A", "B", "S", &big);
+        let encoded = MessagesDat::new(vec![msg.clone()]).encode();
+        // The producer block plus this message equals the reported block count.
+        assert_eq!(encoded.len() / BLOCK, 1 + block_len(&msg));
+        assert_eq!(block_len(&msg), 3);
     }
 
     #[test]

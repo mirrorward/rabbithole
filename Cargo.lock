@@ -2890,6 +2890,7 @@ dependencies = [
 name = "rabbithole-legacy-qwk"
 version = "0.14.0"
 dependencies = [
+ "blake3",
  "thiserror 2.0.18",
 ]
 

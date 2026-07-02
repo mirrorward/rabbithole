@@ -188,8 +188,8 @@
 **QWK/QWKE**
 - [~] Packer: MESSAGES.DAT 128-byte blocks (0xE3 EOL, conf# @124–125), CONTROL.DAT, per-conf NDX with **MBF float** encode, DOOR.ID (QWKE advertised), bulletins — codec landed: `rabbithole-legacy-qwk` (MBF float verified against known vectors, Latin-1 fields; 40 tests incl. fuzz). ZIP bundling is the documented seam
 - [x] QWKE long To/From/Subject kludges (both directions) — `rabbithole-legacy-qwk::qwke`
-- [ ] REP ingest: validate, dedupe, post as signed events
-- [ ] Delivery: CLI/web export, telnet surface, scheduled per-user packets; read pointers shared with offline mode
+- [~] REP ingest: validate, dedupe, post as signed events — `rabbithole-legacy-qwk::reply`: `ReplyPacket::parse/encode` over `<BBSID>.MSG` → `Vec<ReplyMessage>` (conference from the to-reader slot, reusing the MESSAGES.DAT record codec); `validate()` surfaces per-record `ReplyProblem` (conf out-of-range / empty body / malformed header); `content_hash` (blake3 over semantic fields) + `dedupe()` catches re-uploads and within-batch repeats. Posting the accepted set as signed board events is the server-wiring slice
+- [~] Delivery: CLI/web export, telnet surface, scheduled per-user packets; read pointers shared with offline mode — `rabbithole-legacy-qwk::packet::build_packet` assembles MESSAGES.DAT/CONTROL.DAT/per-conf NDX/DOOR.ID (reusing existing encoders) and exposes `QwkPacket::members()` named buffers for the ZIP/export seam. CLI/web/telnet surfaces + scheduling are the server slice
 - [ ] Syndication admin UI: per-board network mappings, feed monitor, dupe stats
 
 ## Wave 11 — Radio

@@ -25,6 +25,11 @@
 //! - [`qwke`] — QWKE `DOOR.ID` advertisement and long To/From/Subject body
 //!   kludges.
 //! - [`model`] — the shared [`QwkMessage`] with `\n`-normalized body text.
+//! - [`reply`] — `.REP` reply-packet ingest (the `<BBSID>.MSG` member), with
+//!   per-record validation and blake3 dedupe of uploaded replies.
+//! - [`packet`] — a pure high-level builder assembling the outbound QWK packet
+//!   members (`MESSAGES.DAT` / `CONTROL.DAT` / `*.NDX` / `DOOR.ID`) from messages
+//!   and conference metadata, for CLI/web export.
 //!
 //! ## The 128-byte message header (0-based offsets)
 //!
@@ -55,7 +60,9 @@ pub mod mbf;
 pub mod messages;
 pub mod model;
 pub mod ndx;
+pub mod packet;
 pub mod qwke;
+pub mod reply;
 
 mod text;
 
@@ -64,4 +71,8 @@ pub use error::QwkError;
 pub use messages::MessagesDat;
 pub use model::QwkMessage;
 pub use ndx::NdxRecord;
+pub use packet::{build_packet, NdxFile, QwkPacket};
 pub use qwke::{DoorId, QwkeKludges};
+pub use reply::{
+    content_hash, dedupe, validate, ReplyDigest, ReplyMessage, ReplyPacket, ReplyProblem, Validated,
+};
