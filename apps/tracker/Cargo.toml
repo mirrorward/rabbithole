@@ -7,4 +7,18 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "looking_glass"
+path = "src/lib.rs"
+
+[[bin]]
+name = "looking-glass"
+path = "src/main.rs"
+
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

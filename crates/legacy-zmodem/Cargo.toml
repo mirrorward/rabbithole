@@ -1,6 +1,6 @@
 [package]
-name = "rabbithole-legacy-ftn"
-description = "FidoNet: PKT codec, tosser/scanner, binkp mailer, AreaFix"
+name = "rabbithole-legacy-zmodem"
+description = "ZMODEM protocol codec (Forsberg 1988): CRC16/32, ZDLE escaping, hex/binary headers, data subpackets, ZFILE info, sans-IO session sketch"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

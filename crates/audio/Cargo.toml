@@ -1,6 +1,6 @@
 [package]
 name = "rabbithole-audio"
-description = "Audio decode/playback and Opus streaming for radio"
+description = "Transport-agnostic audio core for radio: PCM frames, mixing, station fan-out, jitter buffering"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,3 +8,5 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+thiserror = { workspace = true }
+tokio = { workspace = true }
