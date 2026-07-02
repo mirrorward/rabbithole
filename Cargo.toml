@@ -11,6 +11,8 @@ members = [
     "crates/store-server",
     "crates/store-client",
     "crates/swarm",
+    "crates/federation",
+    "crates/reticulum",
     "crates/art",
     "crates/screen",
     "crates/audio",
@@ -32,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]
@@ -52,6 +54,8 @@ rabbithole-blobs = { path = "crates/blobs" }
 rabbithole-store-server = { path = "crates/store-server" }
 rabbithole-store-client = { path = "crates/store-client" }
 rabbithole-swarm = { path = "crates/swarm" }
+rabbithole-federation = { path = "crates/federation" }
+rabbithole-reticulum = { path = "crates/reticulum" }
 rabbithole-art = { path = "crates/art" }
 rabbithole-screen = { path = "crates/screen" }
 rabbithole-audio = { path = "crates/audio" }
@@ -91,6 +95,7 @@ tokio-tungstenite = "0.26"
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 chacha20poly1305 = "0.10"
+hkdf = "0.12"
 argon2 = "0.5"
 blake3 = "1"
 bao-tree = "0.16"

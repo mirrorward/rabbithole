@@ -1,0 +1,15 @@
+[package]
+name = "rabbithole-federation"
+description = "Server-to-server federation data model: signed descriptors, board flood-fill, bloom seen-set, ingest policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rabbithole-identity.workspace = true
+serde.workspace = true
+postcard.workspace = true
+blake3.workspace = true
+thiserror.workspace = true

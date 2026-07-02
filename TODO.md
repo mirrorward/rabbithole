@@ -115,7 +115,7 @@
 - [~] BBS surface: telnet login shell + MAIN MENU stub (`legacy-telnet::shell`, pluggable `TelnetAuth`); full welcome art / boards / chat / DMs / keyword nav still to wire into burrow
 - [ ] File browse + HTTP-link handoff
 - [~] Zmodem transfers over telnet — codec landed: `rabbithole-legacy-zmodem` (CRC16/32, ZDLE, hex/bin16/bin32 headers, data subpackets, ZFILE, sans-IO Sender/Receiver state machine, fuzz-tolerant; 61 tests). Telnet-stream wiring + resume + client-interop testing (SyncTERM/NetRunner/qodem) is the next slice
-- [ ] Door games: DOOR32.SYS (+DOOR.SYS/DORINFO1.DEF) dropfiles; telnet/PTY bridge (no fd inheritance); door menu + per-door ACLs + time limits
+- [~] Door games: DOOR32.SYS (+DOOR.SYS/DORINFO1.DEF) dropfiles — landed: `rabbithole-legacy-doors` (`DoorContext` + faithful writers/readers for all three formats, never-panic parsers; 13 tests). telnet/PTY bridge (no fd inheritance) + door menu + per-door ACLs + time limits are the runner slice
 - [ ] Legacy security-level projection (RBAC → 0–255 SL + flags) for dropfiles
 - [x] finger (79): empty = who list; user = profile+presence+.plan; /W; **forwarding refused**; output caps — `rabbithole-legacy-finger` (RFC 1288, pluggable `FingerDirectory`, control-char sanitized so a hostile .plan can't inject escapes, 32 KiB cap); per-persona opt-out + burrow wiring TBD
 - [ ] Legacy-surface class restrictions + per-listener toggles
@@ -154,12 +154,12 @@
 *Depends on: W3 (+W4/W5 for catalogs/swarm; W8 admin UI helpful)*
 
 - [ ] S2S QUIC channel; server key exchange; peering handshake + admin approval
-- [ ] Board flood-fill: per-peer/per-board subscriptions, ihave/pull, Bloom+store seen-set
-- [ ] Tombstone/redact propagation (server-sovereign application)
-- [ ] Ingest defense: dual-sig verify, per-peer rate limits, reputation, auto-defederation, allow/deny lists
+- [~] Board flood-fill: per-peer/per-board subscriptions, ihave/pull, Bloom+store seen-set — model landed: `rabbithole-federation` (`Subscription`/`IHave`/`PullRequest`/`PushEvents`/`FedEvent`, classic `BloomFilter` with optimal m,k; 25 tests). S2S transport + store wiring is the service slice
+- [~] Tombstone/redact propagation (server-sovereign application) — `rabbithole-federation::redaction` (signed `Redaction`, verify authenticates; apply left to receiver). Propagation wiring pending
+- [~] Ingest defense: dual-sig verify, per-peer rate limits, reputation, auto-defederation, allow/deny lists — `rabbithole-federation::policy` (per-peer token-bucket `RateLimiter`, allow/deny `PeerPolicy`) + descriptor verify done; reputation/auto-defederation pending
 - [ ] Cross-server identity attestation (`persona@server`, key continuity)
 - [ ] Cross-server file search: signed catalogs, pull fan-out, blake3 dedupe; swarm federated sources live
-- [ ] `.well-known/rabbithole/server` (signed descriptor)
+- [~] `.well-known/rabbithole/server` (signed descriptor) — `rabbithole-federation::PeerDescriptor` (ed25519-signed under `rhp-fed-descriptor-v1`, verify + tamper tests) done; HTTP surface pending
 - [ ] Looking Glass tracker: signed descriptors, heartbeats, categories, tracker-to-tracker gossip
 - [ ] Directory index (health/uptime, verifiable-not-authoritative); client server-browser UI
 - [ ] Deploy flagship public **Looking Glass** (project-run, domain TBD); pre-configure in clients (user-removable)
@@ -209,14 +209,14 @@
 - [ ] Tauri iOS/iPadOS + Android builds; mobile plugin glue: notifications, background audio + audio session, share sheet
 - [ ] Transport resilience on mobile (QUIC connection migration, WS fallback)
 - [ ] App Store (TestFlight) + Play (.aab) packaging, signing, privacy manifests, entitlements
-- [ ] `dist` release automation (CLI/TUI/server): archives, installers, Homebrew
-- [ ] Docker images (cargo-chef → slim) + docker-compose (server + tracker); systemd unit; install docs
+- [~] `dist` release automation (CLI/TUI/server): archives, installers, Homebrew — `.github/workflows/release.yml` (tag-triggered cross-platform binary archives + checksums + GitHub Release) and `scripts/release.sh` landed; installers/Homebrew tap pending
+- [x] Docker images (multi-stage → slim) + docker-compose; systemd unit; install docs — `Dockerfile` + `.dockerignore` + `docker-compose.yml` + hardened `contrib/burrow.service` + `docs/deployment.md` (accurate to real bins/ports/env vars)
 - [ ] Versioned protocol docs published (docs site)
 
 ## Wave 13 — Hardening & 1.0
 *Depends on: all*
 
-- [ ] E2EE DMs: X25519 + Double Ratchet (vodozemac), ChaCha20-Poly1305, sealed sender; opt-in per thread; key backup UX
+- [~] E2EE DMs: X25519 + Double Ratchet, ChaCha20-Poly1305, sealed sender — crypto core landed: `rabbithole-e2ee` (X25519, Signal Double Ratchet w/ bounded skipped-key store + transactional decrypt, X3DH-lite, sealed sender; RNG-generic, wasm-friendly; 23 tests). Per-thread opt-in wiring into the DM proto + key-backup UX pending
 - [ ] Moderation suite: report queues, quarantine-for-review, shared blocklists + blake3 hash-deny lists, moderation audit UI
 - [ ] Rate limiting everywhere (governor buckets per IP/account/endpoint-class); mCaptcha option; invite trees
 - [ ] Fuzzing coverage goals (all codecs); RUSTSEC audit gate in CI; security review checklist/pen-test pass
@@ -229,7 +229,7 @@
 *Depends on: W3, W9, W13*
 
 - [ ] Spike: `reticulum-rs` maturity vs Python RNS gateway sidecar → decision
-- [ ] RNS transport adapter: Burrow as a Reticulum destination; constrained RHP profile (control + text; no bulk over LoRa-class links)
+- [~] RNS interop foundation: identity (X25519+Ed25519), destination/name hashes, packet + announce codecs, ECDH+AEAD token — `rabbithole-reticulum` (spec-faithful hashes, never-panic decoders, documented cipher/field divergences; 40 tests). The live RNS transport adapter (Burrow as a Reticulum destination, constrained RHP profile) builds on this
 - [ ] LXMF bridge: DMs ↔ LXMF (delay-tolerant, NomadNet-compatible); boards ↔ LXMF propagation nodes (shared dupe subsystem)
 - [ ] Delay-tolerant Tunnels (S2S flood-fill) over RNS with bandwidth-aware batching
 - [ ] rabbit links w/ RNS destination hashes; Looking Glass entries may advertise RNS destinations

@@ -1,0 +1,21 @@
+[package]
+name = "rabbithole-reticulum"
+description = "Reticulum (RNS) interop foundation for RabbitHole — protocol data model and crypto identity (Wave 14): identity keypairs, destination naming/hashes, wire packet codec, and announces. No transport/interfaces yet."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ed25519-dalek.workspace = true
+x25519-dalek = { workspace = true, features = ["static_secrets"] }
+sha2.workspace = true
+hkdf.workspace = true
+chacha20poly1305.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
