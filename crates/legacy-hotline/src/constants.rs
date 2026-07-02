@@ -70,6 +70,100 @@ pub mod field {
 
     /// Server name (162), text.
     pub const SERVER_NAME: u16 = 162;
+
+    // ---- Files (200-220) -------------------------------------------------
+
+    /// Packed "file name with info" record (200) returned per directory entry
+    /// by GetFileNameList. Layout: `type(4) creator(4) size(4) rsvd(4)
+    /// name_script(2) name_len(2) name(name_len)`, all big-endian.
+    pub const FILE_NAME_WITH_INFO: u16 = 200;
+
+    /// A bare file/folder name (201), text.
+    pub const FILE_NAME: u16 = 201;
+
+    /// A structured file path (202): `count(2)` then per component
+    /// `rsvd(2) len(1) name(len)`. The first component is the area slug.
+    pub const FILE_PATH: u16 = 202;
+
+    /// File resume data (203), blob — used by resumed transfers (deferred).
+    pub const FILE_RESUME_DATA: u16 = 203;
+
+    /// File transfer options (204), integer.
+    pub const FILE_TRANSFER_OPTIONS: u16 = 204;
+
+    /// Human-readable file type string (205), text.
+    pub const FILE_TYPE_STRING: u16 = 205;
+
+    /// Human-readable file creator string (206), text.
+    pub const FILE_CREATOR_STRING: u16 = 206;
+
+    /// File size in bytes (207), integer.
+    pub const FILE_SIZE: u16 = 207;
+
+    /// File create date (208), 8-byte classic date.
+    pub const FILE_CREATE_DATE: u16 = 208;
+
+    /// File modify date (209), 8-byte classic date.
+    pub const FILE_MODIFY_DATE: u16 = 209;
+
+    /// File comment (210), text.
+    pub const FILE_COMMENT: u16 = 210;
+
+    /// Four-char file type code (213), blob.
+    pub const FILE_TYPE: u16 = 213;
+
+    /// Count of items in a folder (220), integer.
+    pub const FOLDER_ITEM_COUNT: u16 = 220;
+
+    // ---- News (321-337) --------------------------------------------------
+
+    /// Threaded-news article-list blob (321): the flattened list of a
+    /// category's articles, returned by GetNewsArtNameList.
+    pub const NEWS_ART_LIST_DATA: u16 = 321;
+
+    /// News category name (322), text.
+    pub const NEWS_CAT_NAME: u16 = 322;
+
+    /// News category/bundle list record (323): one per child of a news path,
+    /// returned by GetNewsCatNameList.
+    pub const NEWS_CAT_LIST_DATA_15: u16 = 323;
+
+    /// Structured news path (325): same wire shape as [`FILE_PATH`]; each
+    /// component names a category/bundle.
+    pub const NEWS_PATH: u16 = 325;
+
+    /// News article id (326), integer.
+    pub const NEWS_ART_ID: u16 = 326;
+
+    /// News article data flavor (327), text — e.g. `text/plain`.
+    pub const NEWS_ART_DATA_FLAV: u16 = 327;
+
+    /// News article title (328), text.
+    pub const NEWS_ART_TITLE: u16 = 328;
+
+    /// News article poster (329), text.
+    pub const NEWS_ART_POSTER: u16 = 329;
+
+    /// News article date (330), 8-byte classic date.
+    pub const NEWS_ART_DATE: u16 = 330;
+
+    /// Previous sibling article id (331), integer.
+    pub const NEWS_ART_PREV: u16 = 331;
+
+    /// Next sibling article id (332), integer.
+    pub const NEWS_ART_NEXT: u16 = 332;
+
+    /// News article body (333), blob.
+    pub const NEWS_ART_DATA: u16 = 333;
+
+    /// News article flags (334), integer.
+    pub const NEWS_ART_FLAGS: u16 = 334;
+
+    /// Parent article id (335), integer.
+    pub const NEWS_ART_PARENT: u16 = 335;
+
+    /// First-child article id (336), integer.
+    pub const NEWS_ART_FIRST_CHILD: u16 = 336;
 }
 
 /// Well-known transaction type numbers (the `type_` in a
@@ -81,8 +175,12 @@ pub mod transaction {
     /// Get flat-news messages (101).
     pub const GET_MESSAGES: u16 = 101;
 
-    /// Post a flat-news message (102).
+    /// Post a flat-news message (102). In this bridge, a client posting to the
+    /// flat message board sends this (some clients use [`OLD_POST_NEWS`]).
     pub const NEW_MESSAGE: u16 = 102;
+
+    /// Classic "post flat news" (103) — the older post path some clients use.
+    pub const OLD_POST_NEWS: u16 = 103;
 
     /// Server broadcast message to a client (104).
     pub const SERVER_MSG: u16 = 104;
@@ -138,6 +236,61 @@ pub mod transaction {
     /// Client accepted the agreement (121).
     pub const AGREED: u16 = 121;
 
+    // ---- Files (200-213) -------------------------------------------------
+
+    /// Browse a file directory (200).
+    pub const GET_FILE_NAME_LIST: u16 = 200;
+
+    /// Negotiate a file download (202); the bulk transfer runs on HTXF.
+    pub const DOWNLOAD_FILE: u16 = 202;
+
+    /// Negotiate a file upload (203) — deferred.
+    pub const UPLOAD_FILE: u16 = 203;
+
+    /// Delete a file/folder (204).
+    pub const DELETE_FILE: u16 = 204;
+
+    /// Create a new folder (205).
+    pub const NEW_FOLDER: u16 = 205;
+
+    /// Get a file's info (206).
+    pub const GET_FILE_INFO: u16 = 206;
+
+    /// Set a file's info (207).
+    pub const SET_FILE_INFO: u16 = 207;
+
+    /// Negotiate a folder download (210) — deferred.
+    pub const DOWNLOAD_FOLDER: u16 = 210;
+
+    /// Download info / progress (211) — deferred.
+    pub const DOWNLOAD_INFO: u16 = 211;
+
+    // ---- News: threaded (370-411) ----------------------------------------
+
+    /// List news categories/bundles at a path (370).
+    pub const GET_NEWS_CAT_NAME_LIST: u16 = 370;
+
+    /// List a category's article threads (371).
+    pub const GET_NEWS_ART_NAME_LIST: u16 = 371;
+
+    /// Delete a news category/bundle item (380).
+    pub const DEL_NEWS_ITEM: u16 = 380;
+
+    /// Create a news bundle/folder (381).
+    pub const NEW_NEWS_FOLDER: u16 = 381;
+
+    /// Create a news category (382).
+    pub const NEW_NEWS_CATEGORY: u16 = 382;
+
+    /// Get a single article's data (400).
+    pub const GET_NEWS_ART_DATA: u16 = 400;
+
+    /// Post a threaded news article (410).
+    pub const POST_NEWS_ART: u16 = 410;
+
+    /// Delete a threaded news article (411).
+    pub const DEL_NEWS_ART: u16 = 411;
+
     /// Get the online user name list (300).
     pub const GET_USER_NAME_LIST: u16 = 300;
 
@@ -170,6 +323,13 @@ mod tests {
         assert_eq!(field::USER_ICON_ID, 104);
         assert_eq!(field::LOGIN, 105);
         assert_eq!(field::PASSWORD, 106);
+        // News + file field ids (added with the W7.4 slice).
+        assert_eq!(field::FILE_NAME_WITH_INFO, 200);
+        assert_eq!(field::FILE_PATH, 202);
+        assert_eq!(field::NEWS_ART_LIST_DATA, 321);
+        assert_eq!(field::NEWS_CAT_LIST_DATA_15, 323);
+        assert_eq!(field::NEWS_PATH, 325);
+        assert_eq!(field::NEWS_ART_DATA, 333);
     }
 
     #[test]
@@ -178,5 +338,12 @@ mod tests {
         assert_eq!(transaction::LOGIN, 107);
         assert_eq!(transaction::GET_USER_NAME_LIST, 300);
         assert_eq!(transaction::KEEP_ALIVE, 500);
+        // News + file transaction types (added with the W7.4 slice).
+        assert_eq!(transaction::GET_FILE_NAME_LIST, 200);
+        assert_eq!(transaction::DOWNLOAD_FILE, 202);
+        assert_eq!(transaction::GET_NEWS_CAT_NAME_LIST, 370);
+        assert_eq!(transaction::GET_NEWS_ART_NAME_LIST, 371);
+        assert_eq!(transaction::GET_NEWS_ART_DATA, 400);
+        assert_eq!(transaction::POST_NEWS_ART, 410);
     }
 }
