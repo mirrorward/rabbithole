@@ -16,8 +16,10 @@
 //! nothing to order by rarity here.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use serde::{Deserialize, Serialize};
 
 use crate::peer::{fetch_range, PeerError, PEER_REQUEST_MAX};
 
@@ -41,6 +43,31 @@ pub struct FetchReport {
 pub const UNIT_SIZE: u64 = 1024 * 1024;
 const _: () = assert!(UNIT_SIZE <= PEER_REQUEST_MAX);
 
+/// The on-disk resume record (`<dest>.rhstate`, postcard): which units of
+/// which root have already been fetched and verified. The bytes live in the
+/// partial destination file itself; this is just the map of what's real.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RhState {
+    pub root: [u8; 32],
+    pub size: u64,
+    /// Offsets of completed units.
+    pub done: Vec<u64>,
+}
+
+/// The conventional state-file path for a destination.
+pub fn rhstate_path(dest: &Path) -> PathBuf {
+    let mut os = dest.as_os_str().to_owned();
+    os.push(".rhstate");
+    PathBuf::from(os)
+}
+
+fn load_rhstate(path: &Path, root: &[u8; 32], size: u64) -> Option<RhState> {
+    let bytes = std::fs::read(path).ok()?;
+    let state: RhState = postcard::from_bytes(&bytes).ok()?;
+    // A state for a different root or size describes some other download.
+    (state.root == *root && state.size == size).then_some(state)
+}
+
 /// Shared scheduler state: pending units and the in-flight set (offsets),
 /// for endgame duplication.
 struct WorkState {
@@ -49,10 +76,34 @@ struct WorkState {
     /// Units verified-and-written (offsets) — endgame duplicates check this
     /// so both copies don't double-count.
     done: HashSet<u64>,
+    /// When resumable: persist `done` here after every unit.
+    persist_to: Option<(PathBuf, [u8; 32], u64)>,
+}
+
+impl WorkState {
+    /// Write the resume record (atomically: tmp + rename). Called under the
+    /// scheduler lock right after a unit lands, so a kill at any instant
+    /// leaves a state file that matches bytes actually on disk.
+    fn persist(&self) {
+        let Some((path, root, size)) = &self.persist_to else {
+            return;
+        };
+        let state = RhState {
+            root: *root,
+            size: *size,
+            done: self.done.iter().copied().collect(),
+        };
+        let bytes = postcard::to_allocvec(&state).expect("state serializes");
+        let tmp = path.with_extension("rhstate.tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
 }
 
 /// Fetch `root` (`size` bytes) into `dest` from every reachable source
-/// concurrently. Fails only when no source can make progress.
+/// concurrently. Fails only when no source can make progress. Fresh fetch:
+/// truncates `dest` and keeps no resume state — see [`fetch_swarm_resumable`].
 pub async fn fetch_swarm(
     sources: &[SourcePeer],
     token: &[u8],
@@ -60,29 +111,105 @@ pub async fn fetch_swarm(
     size: u64,
     dest: &Path,
 ) -> Result<FetchReport, PeerError> {
+    fetch_swarm_inner(sources, token, root, size, dest, HashSet::new(), None).await
+}
+
+/// [`fetch_swarm`], but interruption-proof: completed units are recorded in
+/// `<dest>.rhstate` as they land, a matching state file on entry skips the
+/// units it lists, the reassembled file is hash-verified whole against
+/// `root` (so a stale or corrupted partial can't slip through), and the
+/// state file is removed on success.
+pub async fn fetch_swarm_resumable(
+    sources: &[SourcePeer],
+    token: &[u8],
+    root: [u8; 32],
+    size: u64,
+    dest: &Path,
+) -> Result<FetchReport, PeerError> {
+    let state_path = rhstate_path(dest);
+    let done: HashSet<u64> = load_rhstate(&state_path, &root, size)
+        .map(|s| s.done.into_iter().collect())
+        .unwrap_or_default();
+    let report = fetch_swarm_inner(
+        sources,
+        token,
+        root,
+        size,
+        dest,
+        done,
+        Some(state_path.clone()),
+    )
+    .await?;
+    // The resume trusted prior units from disk; verify the whole file.
+    let path = dest.to_path_buf();
+    let ok = tokio::task::spawn_blocking(move || -> Result<bool, std::io::Error> {
+        use std::io::Read;
+        let mut f = std::fs::File::open(&path)?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(*hasher.finalize().as_bytes() == root)
+    })
+    .await
+    .map_err(|e| PeerError::Verify(e.to_string()))??;
+    if !ok {
+        // A prior partial lied; the caller should remove dest and restart.
+        return Err(PeerError::Verify(
+            "assembled file does not hash to the root (stale partial?)".into(),
+        ));
+    }
+    let _ = std::fs::remove_file(&state_path);
+    Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_swarm_inner(
+    sources: &[SourcePeer],
+    token: &[u8],
+    root: [u8; 32],
+    size: u64,
+    dest: &Path,
+    done: HashSet<u64>,
+    state_path: Option<PathBuf>,
+) -> Result<FetchReport, PeerError> {
     if sources.is_empty() {
         return Err(PeerError::BadRequest);
     }
-    // Pre-size the destination so workers can write units at any offset.
-    let file = std::fs::File::create(dest)?;
+    // Pre-size the destination so workers can write units at any offset —
+    // without truncating an existing partial when resuming.
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(state_path.is_none())
+        .write(true)
+        .open(dest)?;
     file.set_len(size)?;
     drop(file);
     if size == 0 {
         return Ok(FetchReport::default());
     }
 
-    // Units back-to-front so `pop()` hands them out front-to-back.
+    // Units back-to-front so `pop()` hands them out front-to-back; already-
+    // done units (a resume) never enter the queue.
     let mut pending: Vec<(u64, u64)> = Vec::new();
     let mut offset = 0;
     while offset < size {
-        pending.push((offset, (size - offset).min(UNIT_SIZE)));
+        if !done.contains(&offset) {
+            pending.push((offset, (size - offset).min(UNIT_SIZE)));
+        }
         offset += UNIT_SIZE;
     }
     pending.reverse();
     let state = Arc::new(Mutex::new(WorkState {
         pending,
         in_flight: HashSet::new(),
-        done: HashSet::new(),
+        done,
+        persist_to: state_path.map(|p| (p, root, size)),
     }));
 
     let mut workers = Vec::new();
@@ -97,10 +224,8 @@ pub async fn fetch_swarm(
     }
 
     let mut per_source = Vec::new();
-    let mut served_total = 0u64;
     for w in workers {
         if let Ok((endpoint, units)) = w.await {
-            served_total += units;
             per_source.push((endpoint, units));
         }
     }
@@ -112,7 +237,6 @@ pub async fn fetch_swarm(
             state.pending.len() + state.in_flight.len()
         )));
     }
-    debug_assert!(served_total >= state.done.len() as u64);
     Ok(FetchReport {
         bytes: size,
         per_source,
@@ -168,6 +292,7 @@ async fn worker(
                     f.write_all(&bytes)?;
                     s.done.insert(off);
                     s.in_flight.remove(&off);
+                    s.persist();
                     Ok(true)
                 })();
                 match write {
@@ -305,6 +430,127 @@ mod tests {
             .map(|(_, n)| *n)
             .unwrap_or(0);
         assert_eq!(live_units, 3);
+    }
+
+    #[tokio::test]
+    async fn resume_skips_done_units_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = IdentityKey::from_seed(&[8; 32]);
+        let body = payload(4 * 1024 * 1024); // four units
+        let src = dir.path().join("seed.bin");
+        std::fs::write(&src, &body).unwrap();
+        let root = *blake3::hash(&body).as_bytes();
+        let peer = seeding_peer(&key, root, &src).await;
+        let token = CapToken::issue(&key, root, "tester", now() + 60)
+            .unwrap()
+            .to_bytes();
+
+        // Simulate an interrupted fetch: units 0 and 2 already on disk,
+        // recorded in the .rhstate file.
+        let dest = dir.path().join("out.bin");
+        let mut partial = vec![0u8; body.len()];
+        partial[0..UNIT_SIZE as usize].copy_from_slice(&body[0..UNIT_SIZE as usize]);
+        let u2 = 2 * UNIT_SIZE as usize;
+        partial[u2..u2 + UNIT_SIZE as usize].copy_from_slice(&body[u2..u2 + UNIT_SIZE as usize]);
+        std::fs::write(&dest, &partial).unwrap();
+        let state = RhState {
+            root,
+            size: body.len() as u64,
+            done: vec![0, 2 * UNIT_SIZE],
+        };
+        std::fs::write(rhstate_path(&dest), postcard::to_allocvec(&state).unwrap()).unwrap();
+
+        let report = fetch_swarm_resumable(
+            &[peer_source(&peer)],
+            &token,
+            root,
+            body.len() as u64,
+            &dest,
+        )
+        .await
+        .unwrap();
+        // Only the two missing units moved; the file is whole and verified,
+        // and the state file is gone.
+        let fetched: u64 = report.per_source.iter().map(|(_, n)| n).sum();
+        assert_eq!(fetched, 2, "resume fetched only the missing units");
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert!(!rhstate_path(&dest).exists(), "state removed on success");
+    }
+
+    #[tokio::test]
+    async fn corrupted_partial_fails_the_final_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = IdentityKey::from_seed(&[10; 32]);
+        let body = payload(2 * 1024 * 1024);
+        let src = dir.path().join("seed.bin");
+        std::fs::write(&src, &body).unwrap();
+        let root = *blake3::hash(&body).as_bytes();
+        let peer = seeding_peer(&key, root, &src).await;
+        let token = CapToken::issue(&key, root, "tester", now() + 60)
+            .unwrap()
+            .to_bytes();
+
+        // A lying partial: unit 0 marked done but its bytes are garbage.
+        let dest = dir.path().join("out.bin");
+        let mut partial = vec![0u8; body.len()];
+        partial[..UNIT_SIZE as usize].fill(0xAB);
+        std::fs::write(&dest, &partial).unwrap();
+        let state = RhState {
+            root,
+            size: body.len() as u64,
+            done: vec![0],
+        };
+        std::fs::write(rhstate_path(&dest), postcard::to_allocvec(&state).unwrap()).unwrap();
+
+        let err = fetch_swarm_resumable(
+            &[peer_source(&peer)],
+            &token,
+            root,
+            body.len() as u64,
+            &dest,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, PeerError::Verify(_)),
+            "whole-file check catches the stale unit: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mismatched_rhstate_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = IdentityKey::from_seed(&[11; 32]);
+        let body = payload(1024 * 1024 + 5);
+        let src = dir.path().join("seed.bin");
+        std::fs::write(&src, &body).unwrap();
+        let root = *blake3::hash(&body).as_bytes();
+        let peer = seeding_peer(&key, root, &src).await;
+        let token = CapToken::issue(&key, root, "tester", now() + 60)
+            .unwrap()
+            .to_bytes();
+
+        // A state file for some OTHER root must not mask units here.
+        let dest = dir.path().join("out.bin");
+        let state = RhState {
+            root: [0xEE; 32],
+            size: body.len() as u64,
+            done: vec![0],
+        };
+        std::fs::write(rhstate_path(&dest), postcard::to_allocvec(&state).unwrap()).unwrap();
+
+        let report = fetch_swarm_resumable(
+            &[peer_source(&peer)],
+            &token,
+            root,
+            body.len() as u64,
+            &dest,
+        )
+        .await
+        .unwrap();
+        let fetched: u64 = report.per_source.iter().map(|(_, n)| n).sum();
+        assert_eq!(fetched, 2, "foreign state ignored; full fetch ran");
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
     }
 
     #[tokio::test]

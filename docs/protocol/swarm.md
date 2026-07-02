@@ -109,6 +109,13 @@ idempotent, first-done wins), so one stalled peer can't hold the tail.
 Rarest-first ordering applies across files (from coordinator source
 counts) and arrives with manifest-set fetching.
 
+Fetches are interruption-proof: `fetch_swarm_resumable` records each
+completed unit in `<dest>.rhstate` (written atomically as units land),
+resumes by skipping recorded units, hash-verifies the assembled file
+whole against the root (a stale or lying partial fails closed), and
+removes the state file on success. A state file for a different
+root/size is ignored. `rabbit swarm fetch` resumes automatically.
+
 ## Transport decision (the spike)
 
 The peer wire stays on **quinn + custom** coordination rather than

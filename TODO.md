@@ -101,7 +101,7 @@
 - [x] Multi-source scheduler: per-source speed assignment via work-stealing (1 MiB units, faster peers naturally pull more), endgame duplication of in-flight stragglers, failed sources retire and their units migrate — `rabbithole-swarm::scheduler::fetch_swarm`; `rabbit swarm fetch` uses all reachable sources. Rarest-first is a cross-file ordering (coordinator source counts) and lands with manifest-set fetching
 - [ ] Server chunk cache policies (none/LRU/mirror)
 - [ ] NAT: hole punching + server relay fallback; optional UPnP/NAT-PMP; "relay-only" privacy mode
-- [ ] `.rhstate` persistence (bitfield + Bao outboard), lazy re-verify, partial seeding
+- [~] `.rhstate` persistence — resumable swarm fetches done (`fetch_swarm_resumable`: unit bitfield persisted atomically per unit, foreign/stale state ignored, whole-file hash check on completion catches lying partials, state removed on success; `rabbit swarm fetch` resumes). Bao-outboard persistence + partial *seeding* (serving what you have) still open
 - [ ] WebRTC gateway for browser peers (may land with W8)
 - [ ] Multi-peer simulation test harness (lossy links, corruption injection)
 

@@ -962,9 +962,14 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
                 }
                 let size = list.sources.iter().map(|s| s.size).max().unwrap_or(0);
                 let ticket = c.swarm_ticket(root).await?;
-                let report =
-                    rabbithole_swarm::fetch_swarm(&sources, &ticket.token, root, size, &out)
-                        .await?;
+                let report = rabbithole_swarm::scheduler::fetch_swarm_resumable(
+                    &sources,
+                    &ticket.token,
+                    root,
+                    size,
+                    &out,
+                )
+                .await?;
                 if json {
                     println!(
                         "{}",
