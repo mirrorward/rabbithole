@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 rabbithole-proto.workspace = true
+postcard.workspace = true
+ed25519-dalek = { version = "2", default-features = false }
 serde.workspace = true
 thiserror.workspace = true
 
@@ -19,3 +21,6 @@ tokio = { workspace = true, optional = true }
 [features]
 default = []
 native = ["dep:rabbithole-net", "dep:tokio"]
+
+[dev-dependencies]
+rabbithole-identity.workspace = true

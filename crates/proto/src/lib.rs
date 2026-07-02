@@ -34,6 +34,7 @@ pub mod persona;
 pub mod presence;
 pub mod session;
 pub mod version;
+pub mod welcome;
 
 pub use codec::{decode_frame, encode_frame, FrameCodec};
 pub use error::{ErrorCode, ProtoError};

@@ -7,4 +7,15 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "rabbit-tui"
+path = "src/main.rs"
+
 [dependencies]
+rabbithole-proto.workspace = true
+rabbithole-core = { workspace = true, features = ["native"] }
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true

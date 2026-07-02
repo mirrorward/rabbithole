@@ -438,6 +438,10 @@ async fn handle_request(
     if crate::handlers4::handle(conn, frame, shared, ctx).await? {
         return Ok(());
     }
+    // Wave 2.3: welcome screen, theme, keyword nav ----------------------------
+    if crate::handlers5::handle(conn, frame, shared, ctx).await? {
+        return Ok(());
+    }
 
     // Anything else: tolerated, answered, never fatal.
     conn.send(Frame::error_reply(frame, ErrorCode::Unsupported))

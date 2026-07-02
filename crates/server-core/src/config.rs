@@ -41,6 +41,16 @@ pub struct ServerConfig {
     /// Size caps for profile art blobs, in bytes.
     pub avatar_max_bytes: usize,
     pub banner_max_bytes: usize,
+    /// Welcome-screen featured block (title on first line, body after).
+    pub welcome_featured: String,
+    /// Welcome-screen one-line ticker.
+    pub welcome_ticker: String,
+    /// Theme accent color as hex "RRGGBB" (empty = none).
+    pub theme_accent: String,
+    /// Theme ANSI logo art (also the future telnet banner).
+    pub theme_logo_ansi: String,
+    /// Keyword teleport map: word → "room:<name>" | "user:<name>" | "url:<…>".
+    pub keywords: std::collections::HashMap<String, String>,
 }
 
 impl Default for ServerConfig {
@@ -59,6 +69,11 @@ impl Default for ServerConfig {
             persona_max: 5,
             avatar_max_bytes: 256 * 1024,
             banner_max_bytes: 1024 * 1024,
+            welcome_featured: String::new(),
+            welcome_ticker: String::new(),
+            theme_accent: String::new(),
+            theme_logo_ansi: String::new(),
+            keywords: std::collections::HashMap::new(),
         }
     }
 }
@@ -139,6 +154,10 @@ impl ServerConfig {
             "persona_max" => self.persona_max.to_string(),
             "avatar_max_bytes" => self.avatar_max_bytes.to_string(),
             "banner_max_bytes" => self.banner_max_bytes.to_string(),
+            "welcome_featured" => self.welcome_featured.clone(),
+            "welcome_ticker" => self.welcome_ticker.clone(),
+            "theme_accent" => self.theme_accent.clone(),
+            "theme_logo_ansi" => self.theme_logo_ansi.clone(),
             other => return Err(ConfigError::UnknownKey(other.to_string())),
         })
     }
@@ -175,6 +194,29 @@ impl ServerConfig {
                     key: key.into(),
                     detail: value.into(),
                 })?;
+                Ok(true)
+            }
+            "welcome_featured" => {
+                self.welcome_featured = value.to_string();
+                Ok(true)
+            }
+            "welcome_ticker" => {
+                self.welcome_ticker = value.to_string();
+                Ok(true)
+            }
+            "theme_accent" => {
+                let v = value.trim_start_matches('#');
+                if !v.is_empty() && (v.len() != 6 || hex::decode(v).is_err()) {
+                    return Err(ConfigError::BadValue {
+                        key: key.into(),
+                        detail: value.into(),
+                    });
+                }
+                self.theme_accent = v.to_string();
+                Ok(true)
+            }
+            "theme_logo_ansi" => {
+                self.theme_logo_ansi = value.to_string();
                 Ok(true)
             }
             "registration_mode" => {

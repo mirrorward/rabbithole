@@ -5,7 +5,7 @@
 > dependency edges shown in PLAN.md §15. ⛔ = do not start until PLAN.md is
 > reviewed and approved by the project owner.
 
-**Status: Wave 1 complete — Wave 2 (community layer) is next.**
+**Status: Wave 2 complete — Wave 3 (message bases & offline) is next.**
 
 ---
 
@@ -52,12 +52,12 @@
 - [x] Chat: multiple public rooms w/ categories + topics; ad-hoc rooms; private rooms w/ invite/join/leave; subjects; room kick/ban (mute + slow-mode deferred to W13 moderation hardening)
 - [x] DMs: threads, offline queueing, quoting, away auto-response, receipts (privacy-gated)
 - [x] DM attachments (server-config max size, content-addressed)
-- [ ] Notifications: protocol pushes + client-side sounds (optional, tasteful)
-- [ ] Welcome screen composer (widgets: MOTD, unread, who, featured, ticker)
-- [ ] Server theme bundle v1 (signed, content-addressed: logo, banner art, accent tokens, icon set) in welcome bundle
-- [ ] Keyword registry + `/go` fuzzy teleport
-- [ ] TUI client v1: login, chat, who, DMs (`screen` crate begun); light/dark palettes
-- [ ] Server TUI v1: connection monitor, config, accounts
+- [x] Notifications: protocol pushes + client-side sounds (optional, tasteful)
+- [x] Welcome screen composer (widgets: MOTD, unread, who, featured, ticker)
+- [x] Server theme bundle v1 (signed, content-addressed: logo, banner art, accent tokens, icon set) in welcome bundle
+- [x] Keyword registry + `/go` fuzzy teleport
+- [x] TUI client v1: login, chat, who, DMs (`screen` crate begun); light/dark palettes
+- [x] Server TUI v1: connection monitor, config, accounts
 - [x] Remote admin protocol family live (capability-gated + audited)
 
 ## Wave 3 — Message bases & offline

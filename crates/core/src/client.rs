@@ -443,6 +443,42 @@ impl Client {
             .members)
     }
 
+    // ---- Wave 2.3: welcome, theme, keyword --------------------------------
+
+    pub async fn welcome_screen(
+        &mut self,
+    ) -> Result<rabbithole_proto::welcome::WelcomeScreen, ClientError> {
+        self.request(&rabbithole_proto::welcome::WelcomeScreenRequest)
+            .await
+    }
+
+    /// Fetch and verify the server theme bundle. Returns None when the
+    /// server has no theme; errors only on transport/verification failure.
+    pub async fn theme(
+        &mut self,
+    ) -> Result<Option<rabbithole_proto::welcome::ThemeBundle>, ClientError> {
+        let reply: rabbithole_proto::welcome::ThemeReply = match self
+            .request(&rabbithole_proto::welcome::ThemeGet)
+            .await
+        {
+            Ok(r) => r,
+            Err(ClientError::Refused(rabbithole_proto::ErrorCode::NotFound)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        Ok(crate::theme::verify_theme_bundle(
+            &reply,
+            &self.server.server_key,
+        ))
+    }
+
+    pub async fn keyword_go(
+        &mut self,
+        word: &str,
+    ) -> Result<rabbithole_proto::welcome::KeywordTarget, ClientError> {
+        self.request(&rabbithole_proto::welcome::KeywordGo::new(word))
+            .await
+    }
+
     pub async fn totp_enroll(
         &mut self,
     ) -> Result<rabbithole_proto::persona::TotpEnrollInfo, ClientError> {

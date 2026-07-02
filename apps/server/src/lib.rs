@@ -7,6 +7,7 @@ pub mod ctl;
 pub mod handlers2;
 pub mod handlers3;
 pub mod handlers4;
+pub mod handlers5;
 pub mod identity_store;
 pub mod session;
 
@@ -42,6 +43,8 @@ pub struct Shared {
     pub auto_responded: std::sync::Mutex<std::collections::HashSet<(i64, i64)>>,
     pub blobs: std::sync::Arc<BlobStore>,
     pub server_key: [u8; 32],
+    /// Ed25519 signing seed for theme bundles and (later) federation.
+    pub server_signing_seed: [u8; 32],
     pub fingerprint_hex: String,
     next_session: AtomicU64,
 }
@@ -107,6 +110,7 @@ impl Burrow {
             auto_responded: std::sync::Mutex::new(std::collections::HashSet::new()),
             blobs,
             server_key: identity.signing.public().0,
+            server_signing_seed: identity.signing.seed(),
             fingerprint_hex: fingerprint.to_hex(),
             next_session: AtomicU64::new(1),
         });
