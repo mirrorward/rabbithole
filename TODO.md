@@ -5,7 +5,7 @@
 > dependency edges shown in PLAN.md §15. ⛔ = do not start until PLAN.md is
 > reviewed and approved by the project owner.
 
-**Status: Wave 4 complete. Wave 5 (swarm / "the warren") in progress — manifests + `rabbit://` links and the advertise/find-sources coordinator landed; peer wire with Bao verification next.**
+**Status: Waves 0–5 complete (swarm coordinator, Bao-verified peer wire, multi-source scheduler, resumable fetches, blob cache policy; NAT traversal + WebRTC deferred to their proper environments). Wave 6 (legacy surfaces) underway — the `art` (CP437/ANSI/SAUCE), `legacy-telnet` (negotiation + login shell), and `legacy-finger` (RFC 1288) crates have landed as standalone libraries; Wave 10 gained an RSS/Atom parsing crate. Next: wire these surfaces into `burrow`.**
 
 > W4.2: transfers are resumable + integrity-checked, folder-pipelined, and
 > move bytes over dedicated QUIC bulk streams (off the control channel) with
@@ -108,17 +108,18 @@
 ## Wave 6 — Telnet BBS + finger + art pipeline
 *Depends on: W2, W3 (W4 optional for file menus)*
 
-- [ ] `art` crate: CP437↔Unicode tables, ANSI/SGR + cursor parser, iCE colors, ANSImation, renderer to terminal/HTML-canvas/PNG-thumbs
-- [ ] SAUCE reader/writer (128-byte record + COMNT)
+- [x] `art` crate: CP437↔Unicode tables, ANSI/SGR + cursor parser, iCE colors, renderer to terminal/plain — `rabbithole-art` (`cp437`/`ansi`/`sauce`/`render`, std-only, `AnsiParser`→`Canvas` of `Cell`, fuzz-tolerant). ANSImation + HTML-canvas/PNG thumbs deferred to W8 (canvas) rendering
+- [x] SAUCE reader/writer (128-byte record + COMNT) — `rabbithole-art::sauce`, tolerant reads / strict writes, iCE-color tflag, roundtrip tests
 - [ ] `screen` crate: ratatui → socket backend (CP437/ANSI mode + UTF-8 mode)
-- [ ] Telnet codec: IAC state machine, ECHO/SGA/BINARY/NAWS(resize)/TTYPE, 0xFF doubling, loop-safe negotiation
-- [ ] BBS surface: login, welcome art, who, boards (read/post), chat, DMs, keyword nav
+- [x] Telnet codec: IAC state machine, ECHO/SGA/NAWS(resize)/TTYPE, 0xFF doubling, loop-safe negotiation — `rabbithole-legacy-telnet` (`proto`/`negotiate`/`stream`, sans-IO parser + RFC 1143-style state machine, line IO w/ password mode, CP437/UTF-8 seam); BINARY option TBD with the art integration
+- [~] BBS surface: telnet login shell + MAIN MENU stub (`legacy-telnet::shell`, pluggable `TelnetAuth`); full welcome art / boards / chat / DMs / keyword nav still to wire into burrow
 - [ ] File browse + HTTP-link handoff
 - [ ] Zmodem transfers over telnet: download, then upload; ZRPOS resume; tested against SyncTERM/NetRunner/qodem
 - [ ] Door games: DOOR32.SYS (+DOOR.SYS/DORINFO1.DEF) dropfiles; telnet/PTY bridge (no fd inheritance); door menu + per-door ACLs + time limits
 - [ ] Legacy security-level projection (RBAC → 0–255 SL + flags) for dropfiles
-- [ ] finger (79): empty = who list; user = profile+presence+.plan; /W; **forwarding refused**; output caps; per-persona opt-out
+- [x] finger (79): empty = who list; user = profile+presence+.plan; /W; **forwarding refused**; output caps — `rabbithole-legacy-finger` (RFC 1288, pluggable `FingerDirectory`, control-char sanitized so a hostile .plan can't inject escapes, 32 KiB cap); per-persona opt-out + burrow wiring TBD
 - [ ] Legacy-surface class restrictions + per-listener toggles
+- [ ] Wire the telnet/finger listeners + art rendering into `burrow` (crates exist; daemon integration is the next slice)
 
 ## Wave 7 — Hotline compatibility
 *Depends on: W2, W3, W4*
@@ -180,6 +181,9 @@
 - [ ] binkp mailer (FTS-1026, port 24554)
 - [ ] AreaFix (netmail commands: +/−/％LIST/％QUERY)
 - [ ] Nodelist + NODEDIFF parsing (CRC-16); echomail↔boards; netmail↔DM gateway; CP437 lossless round-trip
+
+**RSS/Atom (inbound web syndication)**
+- [x] Feed parsing: lenient hand-rolled XML pull tokenizer, RSS 2.0 + Atom 1.0 → `Feed`/`FeedItem`, manual RFC 2822 + RFC 3339 date parsing, HTML-to-text (tag strip + entity decode + char-boundary cap), blake3 dedup ids — `rabbithole-legacy-syndication` (blake3-only dep, 39 tests). Network fetch + board ingestion wiring is the next slice.
 
 **QWK/QWKE**
 - [ ] Packer: MESSAGES.DAT 128-byte blocks (0xE3 EOL, conf# @124–125), CONTROL.DAT, per-conf NDX with **MBF float** encode, DOOR.ID (QWKE advertised), bulletins; ZIP bundling
