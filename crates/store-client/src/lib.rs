@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 pub mod boards;
+pub mod transfers;
 
 use std::path::Path;
 
@@ -76,6 +77,33 @@ const MIGRATIONS: &[&str] = &[
          sent_event_id BLOB
      ) STRICT;
      CREATE INDEX board_outbox_pending ON board_outbox(sent, id);",
+    // 0003: persistent transfer queue (Wave 4.3). Survives restart; the
+    // partial file on disk holds the bytes, `bytes_done` is the resume
+    // offset, and the queue schedules by priority. Bandwidth caps / schedule
+    // windows are client-driver policy layered on top.
+    "CREATE TABLE transfer_queue (
+         id          INTEGER PRIMARY KEY AUTOINCREMENT,
+         -- 0 download, 1 upload.
+         direction   INTEGER NOT NULL,
+         endpoint    TEXT NOT NULL,             -- server host:port or ws URL
+         -- Download target:
+         node_id     INTEGER,
+         -- Upload target:
+         area        TEXT,
+         parent      TEXT,
+         name        TEXT,
+         -- Local file: destination (download) or source (upload).
+         local_path  TEXT NOT NULL,
+         size        INTEGER NOT NULL DEFAULT 0,
+         bytes_done  INTEGER NOT NULL DEFAULT 0,
+         priority    INTEGER NOT NULL DEFAULT 0, -- higher runs sooner
+         -- 0 queued, 1 active, 2 done, 3 failed, 4 paused.
+         state       INTEGER NOT NULL DEFAULT 0,
+         error       TEXT,
+         created_at  INTEGER NOT NULL,
+         updated_at  INTEGER NOT NULL
+     ) STRICT;
+     CREATE INDEX transfer_queue_sched ON transfer_queue(state, priority DESC, id);",
 ];
 
 /// Open (creating if needed) the local store and apply pending migrations.
