@@ -198,10 +198,10 @@
 
 - [x] Station/mount model (multiple stations, per-server toggle) — `rabbithole-audio` (PCM frames, mixer, `Station` fan-out, jitter buffer, VU meter; 21 tests) + `rabbithole-radio::StationRegistry` (create/remove/list, per-station enable toggle, listener accounting; 23 tests)
 - [x] Playlist engine: rotation (Sequential/seeded-Shuffle/RepeatOne), **vote queue** + requests, `StationController` tying playlist→audio Station with now-playing/metadata — `rabbithole-radio`. Library-from-file-areas source wiring is the server slice
-- [ ] DJ live source (Icecast SOURCE/PUT + Basic auth) — works with butt/ices
+- [x] DJ live source (Icecast SOURCE/PUT + Basic auth) — works with butt/ices — dedicated source-ingest listener (`radio_source_enabled`/`radio_source_addr` :8001, `radio_source_user`/`radio_source_password` config creds, off by default): `legacy-icecast::parse_source_request` auth → OK2/401/403, mount claim into the existing per-mount byte fan-out, DJ pre-empts the playlist program (`go_live`) and rotation resumes on disconnect (graceful shutdown); now-playing from `ice-*` headers. Library-from-file-areas playlist source (`radio_library_areas` area→mount map via FileService → `tracks_from_nodes` → `install_program` + 1s playlist driver). Mid-stream SHOUTcast metadata updates + bytes→PCM decode are documented follow-ups. 4 e2e + 3 unit tests
 - [ ] Encode pipelines: Opus/Ogg primary + MP3 legacy mount
 - [x] Delivery: ICY mounts w/ exact icy-metaint math — codec (`rabbithole-legacy-icecast`, 43 tests) + a live listener wired into burrow (`apps/server/src/radio.rs`, config-gated `radio_enabled`/`radio_addr`): SOURCE/PUT DJ auth via AuthService+`Caps::BROADCAST`, per-mount broadcast fan-out, listeners get metaint-spliced `StreamTitle`, lagging listeners dropped; e2e-tested. Native QUIC uni-stream + HTTP/Ogg transports are later refinements
-- [ ] Listener counts in presence; now-playing surfaced (presence line, TUI status, telnet, web)
+- [~] Listener counts in presence; now-playing surfaced (presence line, TUI status, telnet, web) — server side landed: `PresenceRegistry` gains `RadioStatus` (station/title/artist/dj/listeners/live) + `set_radio_now_playing`/`clear_radio_now_playing`, publishing `ServerEvent::RadioNowPlaying` on the bus. Surfacing in TUI/telnet/web clients is the UI slice
 - [ ] Client players: GUI/web, TUI handoff, per-user enable + volume/ducking settings
 
 ## Wave 12 — Mobile & distribution

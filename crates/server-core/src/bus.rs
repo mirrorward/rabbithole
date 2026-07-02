@@ -92,6 +92,21 @@ pub enum ServerEvent {
     },
     /// A file landed in a library (broadcast so listings/search stay live).
     FileAdded { area: String, id: i64 },
+    /// A radio station's now-playing changed — a DJ took over the mount, or the
+    /// playlist engine rotated to the next track. Surfaced in presence/status
+    /// lines the way away/idle status is.
+    RadioNowPlaying {
+        /// Station mount slug (e.g. "live").
+        station: String,
+        /// Current track title (or station name before the first track).
+        title: String,
+        /// Current track artist (may be empty).
+        artist: String,
+        /// The source name: a live DJ, or the automation label.
+        dj: String,
+        /// Listeners currently tuned in.
+        listeners: usize,
+    },
     /// The server is shutting down; surfaces should drain gracefully.
     Shutdown,
 }

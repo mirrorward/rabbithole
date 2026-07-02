@@ -40,22 +40,40 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use parking_lot::Mutex;
-use rabbithole_audio::NowPlaying;
+use rabbithole_audio::{NowPlaying, Station};
 use rabbithole_legacy_icecast::{
     build_listener_response, parse_listener_request, parse_source_request, source_forbidden,
     source_ok, source_unauthorized, IcyMetaInterleaver, StationMeta, DEFAULT_METAINT,
 };
-use rabbithole_radio::{StationConfig, StationRegistry};
-use rabbithole_server_core::Caps;
+use rabbithole_radio::{
+    BlobId, Playlist, RotationMode, StationConfig, StationController, StationRegistry, Track,
+    TrackId,
+};
+use rabbithole_server_core::files::KIND_FILE;
+use rabbithole_server_core::{Caps, RadioStatus, ServerEvent};
+use rabbithole_store_server::repo6::FileNodeRow;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::Shared;
+
+/// Broadcast-event capacity for a library station's audio fan-out. At 50
+/// frames/second this retains roughly 1.3 s for a slow listener.
+const STATION_CAPACITY: usize = 64;
+
+/// Nominal per-track duration for library tracks whose real length is unknown
+/// (no decode happens here). It only drives the rotation driver's finish
+/// detection; a long value keeps automation from spinning.
+const DEFAULT_TRACK_MS: u64 = 180_000;
+
+/// The DJ label shown for playlist automation (no live human sourcing).
+const AUTOMATION_DJ: &str = "auto";
 
 /// How many raw audio chunks a listener may fall behind before the oldest are
 /// overwritten (drop-behind). Chunks are read up to [`SOURCE_CHUNK`] bytes, so
@@ -116,8 +134,33 @@ pub struct Stations {
     pub registry: StationRegistry,
     /// Live source mounts, keyed by bare slug (no leading `/`).
     mounts: Mutex<HashMap<String, MountEntry>>,
+    /// Library-backed programs (playlist engine per station), keyed by slug.
+    programs: Mutex<HashMap<String, Program>>,
     /// Monotonic listener-id source for registry accounting.
     next_listener: AtomicU64,
+}
+
+/// A library-backed station: a playlist engine ([`StationController`]) plus its
+/// live-DJ takeover state. The playlist rotates on its own until a DJ goes
+/// live; while live, the DJ's now-playing overrides the rotation and rotation
+/// is paused (resuming when the DJ disconnects).
+struct Program {
+    controller: StationController,
+    /// `Some` while a DJ is live: their now-playing overrides the playlist's.
+    live: Option<NowPlaying>,
+    /// Bytes ingested from the current live DJ (observability + tests).
+    source_bytes: u64,
+}
+
+impl Program {
+    fn is_live(&self) -> bool {
+        self.live.is_some()
+    }
+
+    /// The now-playing to surface: the live DJ's when live, else the playlist's.
+    fn now_playing(&self) -> Option<NowPlaying> {
+        self.live.clone().or_else(|| self.controller.now_playing())
+    }
 }
 
 impl Default for Stations {
@@ -131,6 +174,7 @@ impl Stations {
         Self {
             registry: StationRegistry::new(),
             mounts: Mutex::new(HashMap::new()),
+            programs: Mutex::new(HashMap::new()),
             next_listener: AtomicU64::new(1),
         }
     }
@@ -142,6 +186,115 @@ impl Stations {
     /// Subscribe a listener to a mount, if a source is currently live there.
     fn subscribe(&self, slug: &str) -> Option<MountHandle> {
         self.mounts.lock().get(slug).map(MountEntry::subscribe)
+    }
+
+    /// Installs a library-backed program: a station whose default rotation is
+    /// `tracks`. Registers it in the directory and starts playout at the first
+    /// track (now-playing is populated immediately, deterministically).
+    pub fn install_program(
+        &self,
+        slug: &str,
+        display_name: &str,
+        description: &str,
+        tracks: Vec<Track>,
+    ) {
+        let station = Station::new(slug, STATION_CAPACITY);
+        let playlist = Playlist::new(tracks, RotationMode::Sequential);
+        let mut controller = StationController::new(station, playlist, description, AUTOMATION_DJ);
+        // Start playout at the opening track so now-playing is live at once.
+        controller.on_track_finished(0);
+        let _ = self.registry.create(StationConfig {
+            slug: slug.to_string(),
+            display_name: display_name.to_string(),
+            description: description.to_string(),
+            enabled: true,
+        });
+        let _ = self.registry.set_enabled(slug, true);
+        self.programs.lock().insert(
+            slug.to_string(),
+            Program {
+                controller,
+                live: None,
+                source_bytes: 0,
+            },
+        );
+    }
+
+    /// A DJ took over `slug`: pause rotation and adopt the DJ's now-playing.
+    /// Returns whether a library program existed (a pure-DJ mount with no
+    /// playlist still fans bytes out via the mount channel).
+    pub fn go_live(&self, slug: &str, now_playing: NowPlaying) -> bool {
+        let mut programs = self.programs.lock();
+        match programs.get_mut(slug) {
+            Some(p) => {
+                p.live = Some(now_playing);
+                p.source_bytes = 0;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Records bytes ingested from the live DJ on `slug` (best-effort; a
+    /// program-less mount simply has no counter to bump).
+    pub fn add_source_bytes(&self, slug: &str, n: u64) {
+        if let Some(p) = self.programs.lock().get_mut(slug) {
+            p.source_bytes = p.source_bytes.saturating_add(n);
+        }
+    }
+
+    /// The DJ disconnected from `slug`: resume playlist rotation.
+    pub fn end_live(&self, slug: &str) {
+        if let Some(p) = self.programs.lock().get_mut(slug) {
+            p.live = None;
+        }
+    }
+
+    /// Whether a DJ is currently sourcing `slug`.
+    pub fn is_live(&self, slug: &str) -> bool {
+        self.programs.lock().get(slug).is_some_and(Program::is_live)
+    }
+
+    /// Bytes ingested from the current live DJ on `slug`.
+    pub fn source_bytes(&self, slug: &str) -> u64 {
+        self.programs
+            .lock()
+            .get(slug)
+            .map(|p| p.source_bytes)
+            .unwrap_or(0)
+    }
+
+    /// The now-playing for `slug` (DJ's when live, else the playlist's).
+    pub fn now_playing(&self, slug: &str) -> Option<NowPlaying> {
+        self.programs
+            .lock()
+            .get(slug)
+            .and_then(Program::now_playing)
+    }
+
+    /// Advances every non-live program whose current track has finished at
+    /// `now_ms`, returning the slugs that rotated so the caller can republish
+    /// now-playing. Live (DJ-sourced) programs are skipped — the DJ owns the air.
+    pub fn advance_finished(&self, now_ms: u64) -> Vec<String> {
+        let mut advanced = Vec::new();
+        let mut programs = self.programs.lock();
+        for (slug, p) in programs.iter_mut() {
+            if p.is_live() {
+                continue;
+            }
+            if p.controller.is_finished(now_ms) {
+                p.controller.on_track_finished(now_ms);
+                advanced.push(slug.clone());
+            }
+        }
+        advanced
+    }
+
+    /// Slugs of all installed library programs, sorted (deterministic).
+    pub fn program_slugs(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.programs.lock().keys().cloned().collect();
+        v.sort();
+        v
     }
 }
 
@@ -432,5 +585,370 @@ fn initial_now_playing(
         title,
         artist: String::new(),
         dj: authed.persona.screen_name.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Library-from-file-areas playlist source
+// ---------------------------------------------------------------------------
+
+/// Whether a library node looks like a playable audio file, by MIME first and
+/// then by filename extension (many uploads carry a generic MIME).
+fn is_audio(name: &str, mime: &str) -> bool {
+    if mime.to_ascii_lowercase().starts_with("audio/") {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    const EXTS: [&str; 8] = [
+        ".mp3", ".ogg", ".oga", ".opus", ".flac", ".wav", ".aac", ".m4a",
+    ];
+    EXTS.iter().any(|ext| lower.ends_with(ext))
+}
+
+/// Maps one file node to a [`Track`], or `None` if it is not a playable audio
+/// file (wrong kind, no blob, or non-audio type). Pure and testable.
+fn track_from_node(node: &FileNodeRow) -> Option<Track> {
+    if node.kind != KIND_FILE {
+        return None;
+    }
+    let blob = node.blob_id?;
+    if !is_audio(&node.name, &node.mime) {
+        return None;
+    }
+    Some(Track::new(
+        TrackId(node.id as u64),
+        node.name.clone(),
+        node.comment.clone(), // artist/notes, when the uploader supplied any
+        DEFAULT_TRACK_MS,
+        BlobId(blob),
+    ))
+}
+
+/// Maps a file-area listing into a playlist track list, preserving order and
+/// dropping non-audio nodes. This is the file-listing → track-list seam.
+pub fn tracks_from_nodes(nodes: &[FileNodeRow]) -> Vec<Track> {
+    nodes.iter().filter_map(track_from_node).collect()
+}
+
+// ---------------------------------------------------------------------------
+// DJ live source ingest + now-playing plumbing
+// ---------------------------------------------------------------------------
+
+/// The now-playing a source implies at connect, from its `ice-*` metadata.
+fn now_playing_from_ice(meta: &StationMeta, dj: &str) -> NowPlaying {
+    let title = if meta.now_playing.trim().is_empty() {
+        meta.name.clone()
+    } else {
+        meta.now_playing.clone()
+    };
+    NowPlaying {
+        title,
+        artist: meta.genre.clone(),
+        dj: dj.to_string(),
+    }
+}
+
+/// Publishes a station's current now-playing (with the live listener count)
+/// into presence, so status lines pick it up like away/idle status.
+fn publish_now_playing(shared: &Arc<Shared>, slug: &str, live: bool) {
+    let Some(np) = shared.radio.now_playing(slug) else {
+        return;
+    };
+    let listeners = shared.radio.registry.listener_count(slug).unwrap_or(0);
+    shared.presence.set_radio_now_playing(RadioStatus {
+        station: slug.to_string(),
+        title: np.title,
+        artist: np.artist,
+        dj: np.dj,
+        listeners,
+        live,
+    });
+}
+
+/// Bind + serve the DJ **source ingest** surface (SOURCE/PUT). Distinct from
+/// [`spawn_radio`], which is the listener *delivery* surface. Returns the bound
+/// address and the accept-loop handle. Mirrors the other legacy spawn helpers.
+pub async fn spawn_radio_source(
+    shared: Arc<Shared>,
+    addr: SocketAddr,
+) -> Result<(SocketAddr, JoinHandle<()>)> {
+    let listener = TcpListener::bind(addr).await?;
+    let local = listener.local_addr()?;
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((sock, _peer)) = listener.accept().await else {
+                break;
+            };
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(e) = serve_ingest(sock, shared).await {
+                    tracing::debug!("radio source session error: {e}");
+                }
+            });
+        }
+    });
+    Ok((local, handle))
+}
+
+/// One DJ source connection: read the head, ingest, then shut the write half
+/// down gracefully (`.shutdown()` before drop) so the final response is not
+/// truncated by an RST on macOS/Windows.
+async fn serve_ingest(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
+    let (mut rd, mut wr) = sock.split();
+    let (head, body) = read_head(&mut rd).await?;
+    let result = if head.is_empty() {
+        Ok(()) // client hung up before sending anything
+    } else {
+        ingest_source(&head, body, &mut rd, &mut wr, &shared).await
+    };
+    let _ = wr.shutdown().await;
+    result
+}
+
+/// Authenticate a DJ source against the configured credentials, take over the
+/// matching station (pausing playlist rotation), and feed its body to the mount
+/// fan-out until it disconnects (then resume rotation).
+async fn ingest_source<R, W>(
+    head: &[u8],
+    body: Vec<u8>,
+    rd: &mut R,
+    wr: &mut W,
+    shared: &Arc<Shared>,
+) -> Result<()>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
+    let req = match parse_source_request(head) {
+        Ok(r) => r,
+        Err(_) => {
+            wr.write_all(source_forbidden().as_bytes()).await?;
+            return Ok(());
+        }
+    };
+    let slug = slug_of(&req.mount).to_string();
+    if slug.is_empty() {
+        wr.write_all(source_forbidden().as_bytes()).await?;
+        return Ok(());
+    }
+
+    // Authenticate against the admin-configured source credentials. An empty
+    // configured password refuses every source (fail safe); the username is
+    // matched only when the DJ supplied one (SHOUTcast v1 has none).
+    let (want_user, want_pass) = {
+        let cfg = shared.config.read();
+        (
+            cfg.radio_source_user.clone(),
+            cfg.radio_source_password.clone(),
+        )
+    };
+    let user_ok = req.user.is_empty() || req.user == want_user;
+    if want_pass.is_empty() || req.pass != want_pass || !user_ok {
+        wr.write_all(source_unauthorized().as_bytes()).await?;
+        return Ok(());
+    }
+
+    // Claim the mount byte fan-out (reject if a source already holds it), so
+    // listeners on the delivery surface hear this DJ. The lock is dropped
+    // before any `.await`.
+    let dj_name = if want_user.is_empty() {
+        AUTOMATION_DJ.to_string()
+    } else {
+        want_user.clone()
+    };
+    let np = now_playing_from_ice(&req.metadata, &dj_name);
+    let claim = {
+        let mut mounts = shared.radio.mounts.lock();
+        if mounts.contains_key(&slug) {
+            None
+        } else {
+            let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+            mounts.insert(
+                slug.clone(),
+                MountEntry {
+                    tx: tx.clone(),
+                    meta: req.metadata.clone(),
+                    content_type: req.content_type.clone(),
+                    now_playing: Arc::new(Mutex::new(Some(np.clone()))),
+                },
+            );
+            Some(tx)
+        }
+    };
+    let Some(tx) = claim else {
+        wr.write_all(source_forbidden().as_bytes()).await?;
+        return Ok(());
+    };
+
+    // Ensure the station exists in the directory (a pure-DJ mount has no
+    // library program), take it live, and surface the now-playing.
+    let _ = shared.radio.registry.create(StationConfig {
+        slug: slug.clone(),
+        display_name: req.metadata.name.clone(),
+        description: req.metadata.genre.clone(),
+        enabled: true,
+    });
+    let _ = shared.radio.registry.set_enabled(&slug, true);
+    let had_program = shared.radio.go_live(&slug, np);
+    publish_now_playing(shared, &slug, true);
+
+    wr.write_all(source_ok(req.method).as_bytes()).await?;
+    tracing::info!(mount = %slug, dj = %dj_name, "DJ live source connected");
+
+    // Fan the body out verbatim and count bytes until the DJ disconnects.
+    if !body.is_empty() {
+        shared.radio.add_source_bytes(&slug, body.len() as u64);
+        let _ = tx.send(Arc::from(body.into_boxed_slice()));
+    }
+    let mut chunk = vec![0u8; SOURCE_CHUNK];
+    loop {
+        let n = match rd.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        shared.radio.add_source_bytes(&slug, n as u64);
+        let _ = tx.send(Arc::from(&chunk[..n]));
+    }
+
+    // DJ gone: drop the mount and resume the playlist (or take the station off
+    // the air if it was a pure-DJ mount with no library rotation to fall back
+    // to).
+    shared.radio.mounts.lock().remove(&slug);
+    shared.radio.end_live(&slug);
+    if had_program && shared.radio.now_playing(&slug).is_some() {
+        publish_now_playing(shared, &slug, false);
+    } else {
+        shared.presence.clear_radio_now_playing(&slug);
+        let _ = shared.radio.registry.set_enabled(&slug, false);
+    }
+    tracing::info!(mount = %slug, "DJ live source ended");
+    Ok(())
+}
+
+/// Spawn the playlist rotation driver: on a 1 s cadence it advances any
+/// non-live program whose current track has finished and republishes the new
+/// now-playing. Stops on [`ServerEvent::Shutdown`].
+pub fn spawn_playlist_driver(shared: Arc<Shared>) -> JoinHandle<()> {
+    tokio::spawn(playlist_driver(shared))
+}
+
+async fn playlist_driver(shared: Arc<Shared>) {
+    let start = std::time::Instant::now();
+    let mut rx = shared.bus.subscribe();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                let now_ms = start.elapsed().as_millis() as u64;
+                for slug in shared.radio.advance_finished(now_ms) {
+                    publish_now_playing(&shared, &slug, false);
+                }
+            }
+            ev = rx.recv() => {
+                if matches!(
+                    ev,
+                    Ok(ServerEvent::Shutdown) | Err(broadcast::error::RecvError::Closed)
+                ) {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_node(id: i64, name: &str, mime: &str, blob: Option<[u8; 32]>) -> FileNodeRow {
+        FileNodeRow {
+            id,
+            area_id: 1,
+            area: "music".into(),
+            parent_id: None,
+            kind: KIND_FILE,
+            name: name.into(),
+            path: name.into(),
+            is_dropbox: false,
+            blob_id: blob,
+            size: 0,
+            mime: mime.into(),
+            icon: String::new(),
+            comment: "The Lagomorphs".into(),
+            uploader: "dj".into(),
+            uploader_id: Some(1),
+            downloads: 0,
+            target_id: None,
+            created_at: 0,
+            rating_avg: 0.0,
+            rating_count: 0,
+        }
+    }
+
+    #[test]
+    fn is_audio_by_mime_and_extension() {
+        assert!(is_audio("track", "audio/mpeg"));
+        assert!(is_audio("Song.MP3", "application/octet-stream"));
+        assert!(is_audio("clip.flac", ""));
+        assert!(!is_audio("readme.txt", "text/plain"));
+        assert!(!is_audio("cover.png", "image/png"));
+    }
+
+    #[test]
+    fn tracks_map_preserves_order_and_drops_non_audio() {
+        let nodes = vec![
+            file_node(10, "a.mp3", "audio/mpeg", Some([1u8; 32])),
+            file_node(11, "notes.txt", "text/plain", Some([2u8; 32])),
+            file_node(12, "b.ogg", "application/octet-stream", Some([3u8; 32])),
+            // audio by name but no blob → not playable, dropped.
+            file_node(13, "c.wav", "audio/wav", None),
+        ];
+        let tracks = tracks_from_nodes(&nodes);
+        let ids: Vec<u64> = tracks.iter().map(|t| t.id.0).collect();
+        assert_eq!(ids, vec![10, 12]);
+        assert_eq!(tracks[0].title, "a.mp3");
+        assert_eq!(tracks[0].artist, "The Lagomorphs");
+        assert_eq!(tracks[0].source, BlobId([1u8; 32]));
+    }
+
+    #[test]
+    fn program_goes_live_and_resumes() {
+        let stations = Stations::new();
+        stations.install_program(
+            "live",
+            "Live FM",
+            "test",
+            vec![Track::new(
+                TrackId(1),
+                "auto track",
+                "artist",
+                DEFAULT_TRACK_MS,
+                BlobId([1u8; 32]),
+            )],
+        );
+        // Playlist automation is now-playing to start.
+        assert!(!stations.is_live("live"));
+        assert_eq!(stations.now_playing("live").unwrap().title, "auto track");
+
+        // A DJ takes over: now-playing switches, rotation is paused.
+        stations.go_live(
+            "live",
+            NowPlaying {
+                title: "Live Set".into(),
+                artist: "DJ Hop".into(),
+                dj: "source".into(),
+            },
+        );
+        assert!(stations.is_live("live"));
+        assert_eq!(stations.now_playing("live").unwrap().title, "Live Set");
+        // A live program never advances, even long past the track duration.
+        assert!(stations.advance_finished(DEFAULT_TRACK_MS * 10).is_empty());
+        stations.add_source_bytes("live", 4096);
+        assert_eq!(stations.source_bytes("live"), 4096);
+
+        // DJ disconnects: rotation resumes, playlist now-playing returns.
+        stations.end_live("live");
+        assert!(!stations.is_live("live"));
+        assert_eq!(stations.now_playing("live").unwrap().title, "auto track");
     }
 }

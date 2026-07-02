@@ -34,9 +34,32 @@ impl PresenceEntry {
     }
 }
 
+/// A radio station's live status, as presence surfaces it.
+///
+/// This is server-wide (per station), not per session: it is the "now playing"
+/// line a who-list or status bar shows beside the roster, updated whenever a DJ
+/// takes over a mount or the playlist engine rotates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RadioStatus {
+    /// Station mount slug (e.g. "live").
+    pub station: String,
+    /// Current track title (or station name before the first track).
+    pub title: String,
+    /// Current track artist (may be empty).
+    pub artist: String,
+    /// The source name: a live DJ, or the automation label.
+    pub dj: String,
+    /// Listeners currently tuned in.
+    pub listeners: usize,
+    /// Whether a live DJ is sourcing the mount (vs. playlist automation).
+    pub live: bool,
+}
+
 #[derive(Default)]
 pub struct PresenceRegistry {
     inner: RwLock<HashMap<u64, PresenceEntry>>,
+    /// Radio now-playing, keyed by station slug. Server-wide, not per session.
+    radio: RwLock<HashMap<String, RadioStatus>>,
     bus: Option<EventBus>,
 }
 
@@ -44,6 +67,7 @@ impl PresenceRegistry {
     pub fn new(bus: EventBus) -> Self {
         Self {
             inner: RwLock::default(),
+            radio: RwLock::default(),
             bus: Some(bus),
         }
     }
@@ -132,6 +156,41 @@ impl PresenceRegistry {
 
     pub fn count(&self) -> usize {
         self.inner.read().len()
+    }
+
+    /// Records (or replaces) a station's now-playing status and publishes a
+    /// [`ServerEvent::RadioNowPlaying`] so every surface can update its status
+    /// line. Idempotent-friendly: repeated identical updates still publish
+    /// (listeners may have changed).
+    pub fn set_radio_now_playing(&self, status: RadioStatus) {
+        let event = ServerEvent::RadioNowPlaying {
+            station: status.station.clone(),
+            title: status.title.clone(),
+            artist: status.artist.clone(),
+            dj: status.dj.clone(),
+            listeners: status.listeners,
+        };
+        self.radio.write().insert(status.station.clone(), status);
+        if let Some(bus) = &self.bus {
+            bus.publish(event);
+        }
+    }
+
+    /// Drops a station's now-playing status (the mount went off the air).
+    pub fn clear_radio_now_playing(&self, station: &str) {
+        self.radio.write().remove(station);
+    }
+
+    /// Current now-playing for one station, if it is on the air.
+    pub fn radio_status(&self, station: &str) -> Option<RadioStatus> {
+        self.radio.read().get(station).cloned()
+    }
+
+    /// Snapshot of every station's now-playing, sorted by station slug.
+    pub fn radio_now_playing(&self) -> Vec<RadioStatus> {
+        let mut all: Vec<RadioStatus> = self.radio.read().values().cloned().collect();
+        all.sort_by(|a, b| a.station.cmp(&b.station));
+        all
     }
 }
 

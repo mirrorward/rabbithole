@@ -108,8 +108,11 @@ pub struct Burrow {
     pub finger_addr: Option<SocketAddr>,
     /// Bound NNTP address when `nntp_enabled` (else `None`).
     pub nntp_addr: Option<SocketAddr>,
-    /// Bound radio (ICY) address when `radio_enabled` (else `None`).
+    /// Bound radio (ICY) delivery address when `radio_enabled` (else `None`).
     pub radio_addr: Option<SocketAddr>,
+    /// Bound radio DJ source-ingest address when `radio_source_enabled`
+    /// (else `None`).
+    pub radio_source_addr: Option<SocketAddr>,
     /// Bound Hotline address when `hotline_enabled` (else `None`).
     pub hotline_addr: Option<SocketAddr>,
     /// Bound FTN binkp address when `ftn_enabled` (else `None`).
@@ -154,6 +157,10 @@ impl Burrow {
         let finger = config.finger_enabled.then_some(config.finger_addr);
         let nntp = config.nntp_enabled.then_some(config.nntp_addr);
         let radio = config.radio_enabled.then_some(config.radio_addr);
+        let radio_source = config
+            .radio_source_enabled
+            .then_some(config.radio_source_addr);
+        let radio_library_areas = config.radio_library_areas.clone();
         let hotline = config.hotline_enabled.then_some(config.hotline_addr);
         let ftn = config.ftn_enabled.then_some(config.ftn_addr);
         let federation = config.federation_enabled.then_some(config.federation_addr);
@@ -250,6 +257,19 @@ impl Burrow {
             radio_addr = Some(bound);
             tasks.push(handle);
         }
+        // Library playlist sources: pull each configured file area's audio into
+        // a station's rotation. Off by default (empty map).
+        install_radio_library(&shared, &radio_library_areas).await;
+        if !shared.radio.program_slugs().is_empty() {
+            tasks.push(radio::spawn_playlist_driver(shared.clone()));
+        }
+        let mut radio_source_addr = None;
+        if let Some(addr) = radio_source {
+            let (bound, handle) = radio::spawn_radio_source(shared.clone(), addr).await?;
+            tracing::info!(radio_source = %bound, "radio DJ source ingest listening");
+            radio_source_addr = Some(bound);
+            tasks.push(handle);
+        }
         let mut hotline_addr = None;
         if let Some(addr) = hotline {
             let (bound, handle) = hotline::spawn_hotline(shared.clone(), addr).await?;
@@ -282,6 +302,7 @@ impl Burrow {
             finger_addr,
             nntp_addr,
             radio_addr,
+            radio_source_addr,
             hotline_addr,
             ftn_addr,
             federation_addr,
@@ -373,6 +394,34 @@ async fn replay_recorder(shared: Arc<Shared>) {
             }
             Err(RecvError::Closed) => break,
         }
+    }
+}
+
+/// Build a library-backed radio program per configured `mount -> file-area`
+/// entry: recurse the area, map its audio files into a playlist, and install
+/// it. A missing/empty area logs and is skipped (the station just has no
+/// automation until a DJ goes live).
+async fn install_radio_library(
+    shared: &Arc<Shared>,
+    areas: &std::collections::HashMap<String, String>,
+) {
+    for (mount, area) in areas {
+        let nodes = match shared.files.manifest(area, None).await {
+            Ok(files) => files
+                .into_iter()
+                .map(|(node, _rel)| node)
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                tracing::warn!(mount = %mount, area = %area, "radio library area unavailable: {e}");
+                Vec::new()
+            }
+        };
+        let tracks = radio::tracks_from_nodes(&nodes);
+        let count = tracks.len();
+        shared
+            .radio
+            .install_program(mount, &format!("{mount} (library)"), area, tracks);
+        tracing::info!(mount = %mount, area = %area, tracks = count, "radio library program installed");
     }
 }
 

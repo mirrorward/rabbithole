@@ -34,6 +34,6 @@ pub use dedup::{DedupStore, SeenKey};
 pub use federation::{PeerRecord, PeerRegistry, PeerState};
 pub use files::{FileError, FileService};
 pub use permissions::{Caps, PermissionEvaluator, Role, Subject};
-pub use presence::{PresenceEntry, PresenceRegistry};
+pub use presence::{PresenceEntry, PresenceRegistry, RadioStatus};
 pub use pushlog::PushLog;
 pub use swarm::SwarmCatalog;

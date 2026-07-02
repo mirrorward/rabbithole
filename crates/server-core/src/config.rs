@@ -91,6 +91,25 @@ pub struct ServerConfig {
     pub radio_enabled: bool,
     /// Radio listener address (default 0.0.0.0:8000 — the Icecast convention).
     pub radio_addr: SocketAddr,
+    /// Accept inbound DJ source connections (SOURCE/PUT) on `radio_source_addr`.
+    /// This is the *ingest* surface (a DJ pushing a live stream), distinct from
+    /// the `radio_addr` *delivery* surface (players pulling). Off by default.
+    pub radio_source_enabled: bool,
+    /// DJ source ingest listener address (default 0.0.0.0:8001 — beside the
+    /// Icecast delivery port 8000).
+    pub radio_source_addr: SocketAddr,
+    /// Username a DJ source must present (HTTP Basic). Default "source", the
+    /// Icecast convention.
+    pub radio_source_user: String,
+    /// Password a DJ source must present (HTTP Basic). Empty refuses every
+    /// source connection (fail safe: no blank-password broadcasting, and
+    /// guests are always refused).
+    pub radio_source_password: String,
+    /// Library playlist sources: station mount slug -> file-area slug. Each
+    /// entry pulls that area's audio files into the station's rotation via the
+    /// playlist engine. Serialized as a TOML table and edited on disk (like
+    /// `ftn_areas`), not via `ctl config set`.
+    pub radio_library_areas: std::collections::HashMap<String, String>,
     /// Serve the Hotline-compatible surface on `hotline_addr`.
     pub hotline_enabled: bool,
     /// Hotline listener address (default 0.0.0.0:5500 — the classic Hotline port).
@@ -169,6 +188,11 @@ impl Default for ServerConfig {
             nntp_addr: "0.0.0.0:1119".parse().expect("valid"),
             radio_enabled: false,
             radio_addr: "0.0.0.0:8000".parse().expect("valid"),
+            radio_source_enabled: false,
+            radio_source_addr: "0.0.0.0:8001".parse().expect("valid"),
+            radio_source_user: "source".into(),
+            radio_source_password: String::new(),
+            radio_library_areas: std::collections::HashMap::new(),
             hotline_enabled: false,
             hotline_addr: "0.0.0.0:5500".parse().expect("valid"),
             ftn_enabled: false,
@@ -282,6 +306,10 @@ impl ServerConfig {
             "nntp_addr" => self.nntp_addr.to_string(),
             "radio_enabled" => self.radio_enabled.to_string(),
             "radio_addr" => self.radio_addr.to_string(),
+            "radio_source_enabled" => self.radio_source_enabled.to_string(),
+            "radio_source_addr" => self.radio_source_addr.to_string(),
+            "radio_source_user" => self.radio_source_user.clone(),
+            "radio_source_password" => self.radio_source_password.clone(),
             "hotline_enabled" => self.hotline_enabled.to_string(),
             "hotline_addr" => self.hotline_addr.to_string(),
             "ftn_enabled" => self.ftn_enabled.to_string(),
@@ -464,6 +492,22 @@ impl ServerConfig {
             }
             "radio_addr" => {
                 self.radio_addr = parse_addr(key, value)?;
+                Ok(false)
+            }
+            "radio_source_enabled" => {
+                self.radio_source_enabled = parse_bool(key, value)?;
+                Ok(false)
+            }
+            "radio_source_addr" => {
+                self.radio_source_addr = parse_addr(key, value)?;
+                Ok(false)
+            }
+            "radio_source_user" => {
+                self.radio_source_user = value.to_string();
+                Ok(false)
+            }
+            "radio_source_password" => {
+                self.radio_source_password = value.to_string();
                 Ok(false)
             }
             "hotline_enabled" => {
