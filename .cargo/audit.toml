@@ -1,0 +1,13 @@
+# cargo-audit configuration (used by the `audit` job in .github/workflows/ci.yml).
+# https://docs.rs/cargo-audit/latest/cargo_audit/config/index.html
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071: "Marvin Attack" timing sidechannel in the `rsa` crate.
+    # Pulled in transitively via sqlx-macros-core -> sqlx-mysql; we do not use
+    # the MySQL driver (SQLite only), so the vulnerable code is never linked
+    # into our binaries. No fixed version of `rsa` exists yet ("no fixed
+    # upgrade is available"); re-evaluate when rsa ships a fix or sqlx drops
+    # the dependency.
+    "RUSTSEC-2023-0071",
+]
