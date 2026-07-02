@@ -4,6 +4,7 @@
 
 pub mod admin_store;
 pub mod ctl;
+pub mod fed_catalog;
 pub mod federation;
 pub mod ftn;
 pub mod handlers10;
@@ -73,6 +74,8 @@ pub struct Shared {
     pub hotline: hotline::Hub,
     /// Known/approved/pending S2S federation peers + their state (Wave 9).
     pub peers: PeerRegistry,
+    /// Local signed file-catalog + verified peer catalogs (Wave 9.x).
+    pub catalogs: fed_catalog::CatalogState,
     next_session: AtomicU64,
 }
 
@@ -192,6 +195,9 @@ impl Burrow {
             radio: radio::Stations::new(),
             hotline: hotline::Hub::new(),
             peers: PeerRegistry::new(),
+            // Reload the last signed local catalog so the generation chain
+            // survives restarts (peers must never see a stale "fresh" gen 1).
+            catalogs: fed_catalog::CatalogState::load(&data_dir, &identity.signing.public().0),
             next_session: AtomicU64::new(1),
         });
 

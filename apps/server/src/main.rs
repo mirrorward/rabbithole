@@ -79,8 +79,12 @@ async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<
         ("account-create", [login, password, role]) => {
             json!({"cmd": "account-create", "login": login, "password": password, "role": role})
         }
+        ("fed-catalogs", _) => json!({"cmd": "fed-catalogs"}),
+        ("fed-search", terms) if !terms.is_empty() => {
+            json!({"cmd": "fed-search", "terms": terms.join(" ")})
+        }
         _ => anyhow::bail!(
-            "usage: burrow ctl <status|who|config-get KEY|config-set KEY VALUE|account-create LOGIN PASSWORD [ROLE]>"
+            "usage: burrow ctl <status|who|config-get KEY|config-set KEY VALUE|account-create LOGIN PASSWORD [ROLE]|fed-catalogs|fed-search TERMS…>"
         ),
     };
 

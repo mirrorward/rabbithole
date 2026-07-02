@@ -33,13 +33,26 @@
 //! traffic never mixes with client sessions. This reuses the existing QUIC
 //! transport rather than hand-rolling a socket.
 //!
-//! # Deliberately deferred
+//! # Catalog sync over the session
 //!
-//! Catalog sync and cross-server file search over S2S are **not** wired here.
-//! The [`rabbithole_federation`] crate already carries the catalog / search /
-//! dedupe / fan-out primitives; a later wave rides them over the peering
-//! session established here. This slice is handshake + approval + registry +
-//! connection lifecycle only.
+//! Once a session is live (both sides authenticated, dialer approved), signed
+//! file-catalogs ride the same [`Family::FEDERATION`] frames:
+//!
+//! - the dialer announces its local catalog id/generation
+//!   ([`MT_CATALOG_ANNOUNCE`]) and the listener answers with its own;
+//! - if the listener's announced generation is fresher than what the dialer
+//!   holds, the dialer requests a full fetch ([`MT_CATALOG_GET`]) and the
+//!   listener replies with its `SignedCatalog` bytes ([`MT_CATALOG`]);
+//! - the dialer verifies the catalog against the peer's **pinned key** (the
+//!   Ed25519 key the handshake proved) and generation staleness before
+//!   storing it (see [`crate::fed_catalog::ingest_peer_catalog`]).
+//!
+//! Sync is **dialer-pull**: the listener serves announces/fetches but pulls
+//! the dialer's catalog only when it dials back itself (the background dialer
+//! does this for configured peers). Building/serving the local catalog and
+//! the per-peer verified store live in [`crate::fed_catalog`]; `fed-search`
+//! in `ctl` runs the cross-server search over them. Client-facing RHP search
+//! over federated catalogs is a follow-up.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -70,11 +83,21 @@ const SOFTWARE: &str = concat!("rabbithole/", env!("CARGO_PKG_VERSION"));
 /// Largest handshake frame payload we will decode (belt-and-suspenders).
 const MAX_MSG: usize = 64 * 1024;
 
+/// Largest catalog frame payload we will decode (a full listing is bigger
+/// than any handshake message, but still bounded).
+const MAX_CATALOG: usize = 4 * 1024 * 1024;
+
 /// Federation frame message types (within [`Family::FEDERATION`]).
 const MT_HELLO: u16 = 1;
 const MT_HELLO_ACK: u16 = 2;
 const MT_PROOF: u16 = 3;
 const MT_WELCOME: u16 = 4;
+/// Catalog id/generation announcement (both directions, post-welcome).
+const MT_CATALOG_ANNOUNCE: u16 = 5;
+/// Full-catalog fetch request (dialer → listener, post-welcome).
+const MT_CATALOG_GET: u16 = 6;
+/// Full-catalog reply: `SignedCatalog` wire bytes.
+const MT_CATALOG: u16 = 7;
 
 /// How often the background dialer re-checks configured peers.
 const DIAL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -109,6 +132,25 @@ struct ProofMsg {
 #[derive(Debug, Serialize, Deserialize)]
 struct WelcomeMsg {
     connected: bool,
+}
+
+/// Both directions, post-welcome: "my current catalog is `catalog_id` at
+/// `generation`" — enough for the other side to detect staleness cheaply.
+#[derive(Debug, Serialize, Deserialize)]
+struct CatalogAnnounceMsg {
+    catalog_id: [u8; 32],
+    generation: u64,
+}
+
+/// Dialer → listener: request the full signed catalog.
+#[derive(Debug, Serialize, Deserialize)]
+struct CatalogGetMsg {}
+
+/// Listener → dialer: the full `SignedCatalog` in its wire form. The receiver
+/// verifies signature + staleness before trusting a byte of it.
+#[derive(Debug, Serialize, Deserialize)]
+struct CatalogMsg {
+    bytes: Vec<u8>,
 }
 
 /// The outcome of a dial attempt.
@@ -148,7 +190,11 @@ fn fed_frame<T: Serialize>(kind: FrameKind, message_type: u16, msg: &T) -> Frame
     }
 }
 
-fn decode_fed<T: DeserializeOwned>(frame: &Frame, message_type: u16) -> Result<T> {
+fn decode_fed_bounded<T: DeserializeOwned>(
+    frame: &Frame,
+    message_type: u16,
+    max: usize,
+) -> Result<T> {
     if frame.family != Family::FEDERATION {
         bail!("non-federation frame on S2S channel");
     }
@@ -158,18 +204,30 @@ fn decode_fed<T: DeserializeOwned>(frame: &Frame, message_type: u16) -> Result<T
             frame.message_type
         );
     }
-    if frame.payload.0.len() > MAX_MSG {
+    if frame.payload.0.len() > max {
         bail!("federation message too large");
     }
     postcard::from_bytes(&frame.payload.0).map_err(|e| anyhow!("federation decode: {e}"))
 }
 
-async fn recv_fed<T: DeserializeOwned>(conn: &mut dyn Connection, message_type: u16) -> Result<T> {
+fn decode_fed<T: DeserializeOwned>(frame: &Frame, message_type: u16) -> Result<T> {
+    decode_fed_bounded(frame, message_type, MAX_MSG)
+}
+
+async fn recv_fed_bounded<T: DeserializeOwned>(
+    conn: &mut dyn Connection,
+    message_type: u16,
+    max: usize,
+) -> Result<T> {
     let frame = conn
         .recv()
         .await?
         .ok_or_else(|| anyhow!("peer closed before message {message_type}"))?;
-    decode_fed(&frame, message_type)
+    decode_fed_bounded(&frame, message_type, max)
+}
+
+async fn recv_fed<T: DeserializeOwned>(conn: &mut dyn Connection, message_type: u16) -> Result<T> {
+    recv_fed_bounded(conn, message_type, MAX_MSG).await
 }
 
 fn random_nonce() -> [u8; 32] {
@@ -318,14 +376,74 @@ async fn serve_peer(mut conn: Box<dyn Connection>, shared: Arc<Shared>) -> Resul
         return Ok(());
     }
 
-    // Hold the session open until the peer drops it. Catalog/search traffic
-    // rides here in a later wave; for now inbound frames are ignored.
-    // Drain until the peer drops the session (inbound frames ignored in this
-    // slice; catalog/search traffic rides here in a later wave).
-    while let Ok(Some(_)) = conn.recv().await {}
+    // Serve catalog traffic until the peer drops the session. Unknown
+    // federation message types are ignored (forward compatibility).
+    while let Ok(Some(frame)) = conn.recv().await {
+        if frame.family != Family::FEDERATION {
+            continue;
+        }
+        let served = match frame.message_type {
+            MT_CATALOG_ANNOUNCE => serve_catalog_announce(conn.as_mut(), &shared, &frame).await,
+            MT_CATALOG_GET => serve_catalog_get(conn.as_mut(), &shared, &dialer_key).await,
+            _ => Ok(()),
+        };
+        if let Err(e) = served {
+            tracing::debug!(
+                peer = %PublicKey(dialer_key).fingerprint(),
+                "federation catalog exchange ended: {e}"
+            );
+            break;
+        }
+    }
     shared.peers.set_disconnected(&dialer_key);
     tracing::info!(peer = %PublicKey(dialer_key).fingerprint(), "federation peer disconnected");
     conn.close().await;
+    Ok(())
+}
+
+/// Answer a peer's catalog announcement with our own id/generation, so the
+/// dialer can decide whether a full fetch is worth it.
+async fn serve_catalog_announce(
+    conn: &mut dyn Connection,
+    shared: &Arc<Shared>,
+    frame: &Frame,
+) -> Result<()> {
+    // Decode (validates shape); the announcement itself is informational —
+    // pull is dialer-driven, so we don't fetch back on this connection.
+    let theirs: CatalogAnnounceMsg = decode_fed(frame, MT_CATALOG_ANNOUNCE)?;
+    tracing::debug!(generation = theirs.generation, "peer announced its catalog");
+    let mine = crate::fed_catalog::local_catalog(shared).await?;
+    conn.send(fed_frame(
+        FrameKind::Reply,
+        MT_CATALOG_ANNOUNCE,
+        &CatalogAnnounceMsg {
+            catalog_id: mine.catalog_id().map_err(|e| anyhow!("catalog id: {e}"))?,
+            generation: mine.catalog.generation,
+        },
+    ))
+    .await?;
+    Ok(())
+}
+
+/// Serve the full signed catalog — but only while the peer is still
+/// admin-approved (approval can be revoked mid-session).
+async fn serve_catalog_get(
+    conn: &mut dyn Connection,
+    shared: &Arc<Shared>,
+    dialer_key: &[u8; 32],
+) -> Result<()> {
+    if !shared.peers.is_approved(dialer_key) {
+        bail!("peer approval revoked; refusing catalog fetch");
+    }
+    let signed = crate::fed_catalog::local_catalog(shared).await?;
+    conn.send(fed_frame(
+        FrameKind::Reply,
+        MT_CATALOG,
+        &CatalogMsg {
+            bytes: signed.to_bytes(),
+        },
+    ))
+    .await?;
     Ok(())
 }
 
@@ -397,6 +515,16 @@ pub async fn dial_peer(shared: Arc<Shared>, target: DialTarget) -> Result<DialOu
             peer = %PublicKey(listener_key).fingerprint(),
             "federation dial established a session"
         );
+        // Catalog sync (dialer-pull) rides the live session before it goes to
+        // the background hold, so callers have a deterministic "sync
+        // attempted" point. Failure is non-fatal: the peering session is
+        // useful without a catalog, and the next dial retries.
+        if let Err(e) = sync_catalogs(conn.as_mut(), &shared, listener_key).await {
+            tracing::warn!(
+                peer = %PublicKey(listener_key).fingerprint(),
+                "federation catalog sync failed: {e}"
+            );
+        }
         // Hold the session open in the background until it drops.
         let hold = shared.clone();
         tokio::spawn(async move {
@@ -413,10 +541,50 @@ pub async fn dial_peer(shared: Arc<Shared>, target: DialTarget) -> Result<DialOu
     }
 }
 
+/// Announce our catalog, learn the peer's, and pull its full signed catalog
+/// when the announced generation is fresher than what we hold. The received
+/// catalog is verified against the peer's pinned (handshake-proven) key and
+/// generation staleness before being stored.
+async fn sync_catalogs(
+    conn: &mut dyn Connection,
+    shared: &Arc<Shared>,
+    peer_key: [u8; 32],
+) -> Result<()> {
+    let mine = crate::fed_catalog::local_catalog(shared).await?;
+    conn.send(fed_frame(
+        FrameKind::Request,
+        MT_CATALOG_ANNOUNCE,
+        &CatalogAnnounceMsg {
+            catalog_id: mine.catalog_id().map_err(|e| anyhow!("catalog id: {e}"))?,
+            generation: mine.catalog.generation,
+        },
+    ))
+    .await?;
+    let theirs: CatalogAnnounceMsg = recv_fed(conn, MT_CATALOG_ANNOUNCE).await?;
+    if !shared.catalogs.wants(&peer_key, theirs.generation) {
+        return Ok(()); // we already hold this generation (or newer)
+    }
+    conn.send(fed_frame(
+        FrameKind::Request,
+        MT_CATALOG_GET,
+        &CatalogGetMsg {},
+    ))
+    .await?;
+    let msg: CatalogMsg = recv_fed_bounded(conn, MT_CATALOG, MAX_CATALOG).await?;
+    let stored = crate::fed_catalog::ingest_peer_catalog(shared, peer_key, &msg.bytes)?;
+    tracing::info!(
+        peer = %PublicKey(peer_key).fingerprint(),
+        generation = stored.catalog.generation,
+        entries = stored.catalog.entries.len(),
+        "verified peer catalog stored"
+    );
+    Ok(())
+}
+
 /// Keep a dialer-side session alive until the peer drops it.
 async fn hold_dialer(mut conn: Box<dyn Connection>, peer_key: [u8; 32], shared: Arc<Shared>) {
-    // Drain until the peer drops the session (inbound frames ignored in this
-    // slice; catalog/search traffic rides here in a later wave).
+    // Drain until the peer drops the session (the dialer's catalog sync ran
+    // before the hold; inbound frames here are ignored).
     while let Ok(Some(_)) = conn.recv().await {}
     shared.peers.set_disconnected(&peer_key);
     conn.close().await;

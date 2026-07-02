@@ -145,6 +145,69 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
             audit("peer-revoke", key_hex.clone());
             Ok(json!({"key": key_hex, "was_known": existed}))
         }
+        // ---- Federated catalogs + cross-server search (Wave 9.x) -------
+        "fed-catalogs" => {
+            // The local catalog (rebuilt on demand) plus every stored,
+            // verified peer catalog.
+            let local = crate::fed_catalog::local_catalog(shared)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut rows = vec![json!({
+                "server": crate::fed_catalog::server_display_name(shared, &shared.server_key),
+                "key": hex::encode(shared.server_key),
+                "local": true,
+                "generation": local.catalog.generation,
+                "entries": local.catalog.entries.len(),
+            })];
+            for cat in shared.catalogs.peer_catalogs() {
+                let key = cat.catalog.server_key;
+                rows.push(json!({
+                    "server": crate::fed_catalog::server_display_name(shared, &key),
+                    "key": hex::encode(key),
+                    "local": false,
+                    "generation": cat.catalog.generation,
+                    "entries": cat.catalog.entries.len(),
+                }));
+            }
+            Ok(Value::Array(rows))
+        }
+        "fed-search" => {
+            // Whitespace-separated, case-insensitive substring terms (AND).
+            let terms = str_arg("terms")?;
+            let query = rabbithole_federation::SearchQuery::new(terms.split_whitespace());
+            let deduped = crate::fed_catalog::federated_search(shared, &query)
+                .await
+                .map_err(|e| e.to_string())?;
+            let rows: Vec<Value> = deduped
+                .iter()
+                .map(|d| {
+                    let sources: Vec<Value> = d
+                        .sources
+                        .iter()
+                        .map(|s| {
+                            json!({
+                                "server": crate::fed_catalog::server_display_name(
+                                    shared,
+                                    &s.server_key,
+                                ),
+                                "server_key": hex::encode(s.server_key),
+                                "local": s.server_key == shared.server_key,
+                                "generation": s.generation,
+                                "area": s.area,
+                                "path": s.path,
+                                "name": s.name,
+                            })
+                        })
+                        .collect();
+                    json!({
+                        "hash": hex::encode(d.hash),
+                        "size": d.size,
+                        "sources": sources,
+                    })
+                })
+                .collect();
+            Ok(Value::Array(rows))
+        }
         other => Err(format!("unknown cmd: {other}")),
     }
 }
