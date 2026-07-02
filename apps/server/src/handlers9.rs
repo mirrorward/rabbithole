@@ -305,8 +305,6 @@ pub async fn handle(
                 Some(t) if t.account_id != ctx.account_id || t.direction != pt::DIR_UPLOAD => {
                     Err(ErrorCode::Forbidden)
                 }
-                // Sequential MVP: a chunk must continue exactly where we are.
-                Some(t) if req.offset != t.have => Err(ErrorCode::BadRequest),
                 Some(t) => match &t.staging {
                     Some(p) => Ok(p.clone()),
                     None => Err(ErrorCode::Internal),
@@ -317,22 +315,30 @@ pub async fn handle(
             Ok(v) => v,
             Err(code) => fail!(code),
         };
-        use tokio::io::AsyncWriteExt;
+        // Position-addressed write: seek to the chunk's declared offset rather
+        // than blind-append. This makes chunk delivery idempotent and order-
+        // independent — a re-sent or reordered chunk lands in the right place
+        // instead of corrupting the stage. The finished file is verified whole
+        // against the declared blake3 root at UploadFinish, which is the real
+        // integrity gate (a lost chunk leaves a hole and fails that check).
+        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
         let mut f = match tokio::fs::OpenOptions::new()
-            .append(true)
+            .write(true)
             .open(&staging)
             .await
         {
             Ok(f) => f,
             Err(_) => fail!(ErrorCode::Internal),
         };
-        if f.write_all(&req.bytes).await.is_err() {
+        if f.seek(std::io::SeekFrom::Start(req.offset)).await.is_err()
+            || f.write_all(&req.bytes).await.is_err()
+        {
             fail!(ErrorCode::Internal);
         }
         {
             let mut map = shared.transfers.inner.lock();
             if let Some(t) = map.get_mut(&req.transfer_id) {
-                t.have += req.bytes.len() as u64;
+                t.have = t.have.max(req.offset + req.bytes.len() as u64);
             }
         }
         conn.send(Frame::ack(frame)).await?;
