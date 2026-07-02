@@ -110,7 +110,7 @@
 
 - [x] `art` crate: CP437↔Unicode tables, ANSI/SGR + cursor parser, iCE colors, renderer to terminal/plain — `rabbithole-art` (`cp437`/`ansi`/`sauce`/`render`, std-only, `AnsiParser`→`Canvas` of `Cell`, fuzz-tolerant). ANSImation + HTML-canvas/PNG thumbs deferred to W8 (canvas) rendering
 - [x] SAUCE reader/writer (128-byte record + COMNT) — `rabbithole-art::sauce`, tolerant reads / strict writes, iCE-color tflag, roundtrip tests
-- [ ] `screen` crate: ratatui → socket backend (CP437/ANSI mode + UTF-8 mode)
+- [x] `screen` crate: CP437/ANSI + UTF-8 text surface — `rabbithole-screen` (direct `Cell` buffer over `rabbithole-art`, `ScreenMode::{Utf8,Cp437Ansi}`, box/menu drawing with reverse-video selection, SGR-coalesced `flush`; no ratatui dep). Socket wiring into the telnet shell is the next slice
 - [x] Telnet codec: IAC state machine, ECHO/SGA/NAWS(resize)/TTYPE, 0xFF doubling, loop-safe negotiation — `rabbithole-legacy-telnet` (`proto`/`negotiate`/`stream`, sans-IO parser + RFC 1143-style state machine, line IO w/ password mode, CP437/UTF-8 seam); BINARY option TBD with the art integration
 - [~] BBS surface: telnet login shell + MAIN MENU stub (`legacy-telnet::shell`, pluggable `TelnetAuth`); full welcome art / boards / chat / DMs / keyword nav still to wire into burrow
 - [ ] File browse + HTTP-link handoff
@@ -124,7 +124,7 @@
 ## Wave 7 — Hotline compatibility
 *Depends on: W2, W3, W4*
 
-- [ ] TRTP/HOTL handshake; 20-byte transaction codec; TLV fields w/ 16/32-bit size-dependent ints
+- [x] TRTP/HOTL handshake; 20-byte transaction codec; TLV fields w/ 16/32-bit size-dependent ints — `rabbithole-legacy-hotline` (handshake/transaction/field/reassembly/constants, big-endian, minimal-width int helpers, fragment reassembler with 16 MiB ceiling, fuzz-tolerant; 29 tests). Networking + login flow are later slices
 - [ ] Login (255−b obfuscation) + opt-in legacy credential; agreement/banner; Agreed/SetClientUserInfo flows; pipelined-early-request tolerance
 - [ ] User list + icon-ID mapping; NotifyChange/DeleteUser pushes; UserFlags
 - [ ] Public chat, private chat rooms (112–120), IM (108) w/ quoting + auto-response
