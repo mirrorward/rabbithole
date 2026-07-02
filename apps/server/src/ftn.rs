@@ -54,6 +54,7 @@ use rabbithole_legacy_ftn::{
     bso_file_name, scan, BsoKind, Flavor, FtnAddress, Message as FtnMessage, PackedMessage,
     PacketHeader, Tosser,
 };
+use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::{Caps, Role, ServerEvent, Subject};
 use rabbithole_store_server::repo2::PersonasRepo;
 use rabbithole_store_server::repo3::DmsRepo;
@@ -90,9 +91,13 @@ pub async fn spawn_ftn(
 
     let handle = tokio::spawn(async move {
         loop {
-            let Ok((sock, _peer)) = listener.accept().await else {
+            let Ok((sock, peer)) = listener.accept().await else {
                 break;
             };
+            // Over the per-IP connection budget: drop it on the floor.
+            if !gateway.shared.rate_allow(Scope::Ip(peer.ip()), rl::CONN) {
+                continue;
+            }
             let gateway = gateway.clone();
             tokio::spawn(async move {
                 if let Err(e) = serve_inbound(gateway, sock).await {

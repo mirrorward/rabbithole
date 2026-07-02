@@ -37,7 +37,7 @@
 //! listener that falls behind skips ahead and never blocks the source.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,6 +56,7 @@ use rabbithole_radio::{
     TrackId,
 };
 use rabbithole_server_core::files::KIND_FILE;
+use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::{Caps, RadioStatus, ServerEvent};
 use rabbithole_store_server::repo6::FileNodeRow;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -372,12 +373,16 @@ pub async fn spawn_radio(
     let local = listener.local_addr()?;
     let handle = tokio::spawn(async move {
         loop {
-            let Ok((sock, _peer)) = listener.accept().await else {
+            let Ok((sock, peer)) = listener.accept().await else {
                 break;
             };
+            // Over the per-IP connection budget: drop it on the floor.
+            if !shared.rate_allow(Scope::Ip(peer.ip()), rl::CONN) {
+                continue;
+            }
             let shared = shared.clone();
             tokio::spawn(async move {
-                if let Err(e) = serve(sock, shared).await {
+                if let Err(e) = serve(sock, shared, Some(peer.ip())).await {
                     tracing::debug!("radio session error: {e}");
                 }
             });
@@ -424,7 +429,11 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Dispatch one connection: peek the method, then serve as a source or listener.
-async fn serve(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
+async fn serve(
+    mut sock: tokio::net::TcpStream,
+    shared: Arc<Shared>,
+    peer_ip: Option<IpAddr>,
+) -> Result<()> {
     let (mut rd, mut wr) = sock.split();
     let (head, body) = read_head(&mut rd).await?;
     if head.is_empty() {
@@ -441,7 +450,7 @@ async fn serve(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<(
     if is_get {
         serve_listener(&head, &mut wr, &shared).await
     } else {
-        serve_source(&head, body, &mut rd, &mut wr, &shared).await
+        serve_source(&head, body, &mut rd, &mut wr, &shared, peer_ip).await
     }
 }
 
@@ -452,6 +461,7 @@ async fn serve_source<R, W>(
     rd: &mut R,
     wr: &mut W,
     shared: &Arc<Shared>,
+    peer_ip: Option<IpAddr>,
 ) -> Result<()>
 where
     R: AsyncReadExt + Unpin,
@@ -470,10 +480,21 @@ where
         return Ok(());
     }
 
+    // Failed source logins drain the per-IP auth budget; an empty bucket
+    // refuses the attempt before it is tried.
+    if let Some(ip) = peer_ip {
+        if !shared.rate_probe(Scope::Ip(ip), rl::AUTH) {
+            wr.write_all(source_unauthorized().as_bytes()).await?;
+            return Ok(());
+        }
+    }
     // Authenticate the Basic credentials, then require the broadcast capability.
     let authed = match shared.auth.login_password(&req.user, &req.pass, None).await {
         Ok(u) => u,
         Err(_) => {
+            if let Some(ip) = peer_ip {
+                let _ = shared.rate_allow(Scope::Ip(ip), rl::AUTH);
+            }
             wr.write_all(source_unauthorized().as_bytes()).await?;
             return Ok(());
         }
@@ -780,12 +801,16 @@ pub async fn spawn_radio_source(
     let local = listener.local_addr()?;
     let handle = tokio::spawn(async move {
         loop {
-            let Ok((sock, _peer)) = listener.accept().await else {
+            let Ok((sock, peer)) = listener.accept().await else {
                 break;
             };
+            // Over the per-IP connection budget: drop it on the floor.
+            if !shared.rate_allow(Scope::Ip(peer.ip()), rl::CONN) {
+                continue;
+            }
             let shared = shared.clone();
             tokio::spawn(async move {
-                if let Err(e) = serve_ingest(sock, shared).await {
+                if let Err(e) = serve_ingest(sock, shared, Some(peer.ip())).await {
                     tracing::debug!("radio source session error: {e}");
                 }
             });
@@ -801,15 +826,19 @@ pub async fn spawn_radio_source(
 /// Besides SOURCE/PUT streams, this surface also answers the short-lived
 /// `GET /admin/metadata` / `GET /admin.cgi` **updinfo** request encoders use
 /// to announce track changes mid-stream.
-async fn serve_ingest(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
+async fn serve_ingest(
+    mut sock: tokio::net::TcpStream,
+    shared: Arc<Shared>,
+    peer_ip: Option<IpAddr>,
+) -> Result<()> {
     let (mut rd, mut wr) = sock.split();
     let (head, body) = read_head(&mut rd).await?;
     let result = if head.is_empty() {
         Ok(()) // client hung up before sending anything
     } else if let Ok(update) = parse_metadata_update(&head) {
-        handle_metadata_update(update, &mut wr, &shared).await
+        handle_metadata_update(update, &mut wr, &shared, peer_ip).await
     } else {
-        ingest_source(&head, body, &mut rd, &mut wr, &shared).await
+        ingest_source(&head, body, &mut rd, &mut wr, &shared, peer_ip).await
     };
     let _ = wr.shutdown().await;
     result
@@ -823,10 +852,20 @@ async fn handle_metadata_update<W>(
     update: MetadataUpdate,
     wr: &mut W,
     shared: &Arc<Shared>,
+    peer_ip: Option<IpAddr>,
 ) -> Result<()>
 where
     W: AsyncWriteExt + Unpin,
 {
+    // Failed updinfo credentials drain the per-IP auth budget; an empty
+    // bucket refuses before checking.
+    if let Some(ip) = peer_ip {
+        if !shared.rate_probe(Scope::Ip(ip), rl::AUTH) {
+            wr.write_all(metadata_update_unauthorized().as_bytes())
+                .await?;
+            return Ok(());
+        }
+    }
     // Same discipline as `ingest_source`: an empty configured password
     // refuses every update (fail safe); the username is matched only when the
     // encoder supplied one (SHOUTcast v1 sends only a password).
@@ -840,6 +879,9 @@ where
     let user_ok = update.user.as_deref().is_none_or(|u| u == want_user);
     let pass_ok = update.pass.as_deref() == Some(want_pass.as_str());
     if want_pass.is_empty() || !pass_ok || !user_ok {
+        if let Some(ip) = peer_ip {
+            let _ = shared.rate_allow(Scope::Ip(ip), rl::AUTH);
+        }
         wr.write_all(metadata_update_unauthorized().as_bytes())
             .await?;
         return Ok(());
@@ -891,6 +933,7 @@ async fn ingest_source<R, W>(
     rd: &mut R,
     wr: &mut W,
     shared: &Arc<Shared>,
+    peer_ip: Option<IpAddr>,
 ) -> Result<()>
 where
     R: AsyncReadExt + Unpin,
@@ -909,6 +952,14 @@ where
         return Ok(());
     }
 
+    // Failed source logins drain the per-IP auth budget; an empty bucket
+    // refuses the attempt before it is tried.
+    if let Some(ip) = peer_ip {
+        if !shared.rate_probe(Scope::Ip(ip), rl::AUTH) {
+            wr.write_all(source_unauthorized().as_bytes()).await?;
+            return Ok(());
+        }
+    }
     // Authenticate against the admin-configured source credentials. An empty
     // configured password refuses every source (fail safe); the username is
     // matched only when the DJ supplied one (SHOUTcast v1 has none).
@@ -921,6 +972,9 @@ where
     };
     let user_ok = req.user.is_empty() || req.user == want_user;
     if want_pass.is_empty() || req.pass != want_pass || !user_ok {
+        if let Some(ip) = peer_ip {
+            let _ = shared.rate_allow(Scope::Ip(ip), rl::AUTH);
+        }
         wr.write_all(source_unauthorized().as_bytes()).await?;
         return Ok(());
     }

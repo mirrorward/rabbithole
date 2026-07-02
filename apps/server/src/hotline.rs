@@ -100,6 +100,7 @@ use rabbithole_legacy_hotline::{read_int, Field, Handshake, HandshakeReply, Reas
 use rabbithole_legacy_hotline::{AccessMask, Privilege, Transaction, TransactionHeader};
 use rabbithole_server_core::chat::LOBBY;
 use rabbithole_server_core::files::{KIND_ALIAS, KIND_FILE, KIND_FOLDER};
+use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::{AuthError, Caps, PresenceEntry, Role, ServerEvent, Subject};
 use rabbithole_store_server::repo::{Account, AccountsRepo, AuditRepo};
 use rabbithole_store_server::repo4::{BoardRow, PostRow};
@@ -341,9 +342,15 @@ pub async fn spawn_hotline(
         let ctrl_shared = shared.clone();
         let ctrl = async move {
             loop {
-                let Ok((sock, _peer)) = listener.accept().await else {
+                let Ok((sock, peer)) = listener.accept().await else {
                     break;
                 };
+                // Over the per-IP connection budget: drop it on the floor.
+                // (The HTXF data port is exempt — its transfers were already
+                // admitted through the `transfer` class.)
+                if !ctrl_shared.rate_allow(Scope::Ip(peer.ip()), rl::CONN) {
+                    continue;
+                }
                 let shared = ctrl_shared.clone();
                 tokio::spawn(async move {
                     if let Err(e) = serve(sock, shared).await {
@@ -430,6 +437,8 @@ struct Active {
     /// automatic-response text (so clearing it goes back online without
     /// clobbering an away state set elsewhere).
     auto_away: bool,
+    /// Client address, keying the per-IP legacy-command rate bucket.
+    peer_ip: Option<IpAddr>,
 }
 
 /// The accept handler for one Hotline client.
@@ -473,6 +482,25 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
         .map(|v| v as u16)
         .unwrap_or(DEFAULT_ICON);
 
+    // Failed logins drain the per-IP auth budget; an empty bucket refuses
+    // the attempt before it is even tried (successes never spend from it).
+    if let Some(ip) = peer_ip {
+        if !shared.rate_probe(Scope::Ip(ip), rl::AUTH) {
+            wr.write_all(
+                &Transaction::reply(
+                    transaction::LOGIN,
+                    login_txn.header.id,
+                    1,
+                    vec![Field::text(field::ERROR_TEXT, "too many login attempts")],
+                )
+                .encode(),
+            )
+            .await?;
+            wr.shutdown().await.ok();
+            return Ok(());
+        }
+    }
+
     // Guest sign-in when both credentials are empty; otherwise a real login.
     let guests = shared.config.read().guest_enabled;
     let authed = if login.is_empty() && password.is_empty() {
@@ -484,6 +512,9 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
         Ok(u) => u,
         Err(e) => {
             tracing::debug!("hotline login failed: {e}");
+            if let Some(ip) = peer_ip {
+                let _ = shared.rate_allow(Scope::Ip(ip), rl::AUTH);
+            }
             wr.write_all(
                 &Transaction::reply(
                     transaction::LOGIN,
@@ -588,6 +619,7 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
         icon,
         agreed,
         auto_away: false,
+        peer_ip,
     };
 
     // 6. The active loop: client requests, bus deltas, and routed IMs.
@@ -692,6 +724,25 @@ async fn handle_txn(
     shared: &Arc<Shared>,
     active: &mut Active,
 ) -> Result<()> {
+    // Coarse per-IP legacy command budget: refuse the transaction, keep the
+    // session. Notifies (id 0, no reply expected) are dropped silently.
+    if let Some(ip) = active.peer_ip {
+        if !shared.rate_allow(Scope::Ip(ip), rl::LEGACY) {
+            if txn.header.id != 0 {
+                wr.write_all(
+                    &Transaction::reply(
+                        txn.header.type_,
+                        txn.header.id,
+                        1,
+                        vec![Field::text(field::ERROR_TEXT, "rate limited; slow down")],
+                    )
+                    .encode(),
+                )
+                .await?;
+            }
+            return Ok(());
+        }
+    }
     match txn.header.type_ {
         transaction::KEEP_ALIVE => {
             wr.write_all(&empty_reply(transaction::KEEP_ALIVE, txn.header.id))
@@ -1528,6 +1579,10 @@ async fn post_news_art(shared: &Arc<Shared>, active: &Active, txn: &Transaction)
     {
         return err_reply(ty, id, "not permitted");
     }
+    // Per-account posting budget (shared with the native + NNTP surfaces).
+    if !shared.rate_allow(Scope::Account(active.subject.account_id), rl::POST) {
+        return err_reply(ty, id, "rate limited; slow down");
+    }
     let path = field_bytes(txn, field::NEWS_PATH)
         .map(parse_path)
         .unwrap_or_default();
@@ -1661,6 +1716,10 @@ async fn post_msg(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> T
             .allows(&active.subject, "board", Caps::BOARD_POST)
     {
         return err_reply(ty, id, "not permitted");
+    }
+    // Per-account posting budget (shared with the native + NNTP surfaces).
+    if !shared.rate_allow(Scope::Account(active.subject.account_id), rl::POST) {
+        return err_reply(ty, id, "rate limited; slow down");
     }
     let Some(board) = flat_board(shared).await else {
         return err_reply(ty, id, "no message board");
@@ -1960,6 +2019,10 @@ async fn get_file_info(shared: &Arc<Shared>, active: &Active, txn: &Transaction)
 async fn download_file(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
     let ty = transaction::DOWNLOAD_FILE;
     let id = txn.header.id;
+    // Per-account transfer-open budget (shared with the native surface).
+    if !shared.rate_allow(Scope::Account(active.subject.account_id), rl::TRANSFER) {
+        return err_reply(ty, id, "rate limited; slow down");
+    }
     let Some((area, full)) = file_target(txn) else {
         return err_reply(ty, id, "no file path");
     };

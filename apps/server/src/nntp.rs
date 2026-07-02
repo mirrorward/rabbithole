@@ -39,6 +39,7 @@ use rabbithole_legacy_nntp::{
     datablock, overview::overview_fmt_block, ArticleRef, Command, MessageId, OverRef, Overview,
     Range, Response, Status,
 };
+use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::{AuthedUser, Caps, Role, ServerEvent, Subject};
 use rabbithole_store_server::repo4::PostRow;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -58,12 +59,16 @@ pub async fn spawn_nntp(
     let local = listener.local_addr()?;
     let handle = tokio::spawn(async move {
         loop {
-            let Ok((sock, _peer)) = listener.accept().await else {
+            let Ok((sock, peer)) = listener.accept().await else {
                 break;
             };
+            // Over the per-IP connection budget: drop it on the floor.
+            if !shared.rate_allow(Scope::Ip(peer.ip()), rl::CONN) {
+                continue;
+            }
             let shared = shared.clone();
             tokio::spawn(async move {
-                if let Err(e) = serve(sock, shared).await {
+                if let Err(e) = serve(sock, shared, Some(peer.ip())).await {
                     tracing::debug!("nntp session error: {e}");
                 }
             });
@@ -256,8 +261,13 @@ fn range_bounds(range: Range, count: u64) -> (u64, u64) {
     (low, high)
 }
 
-/// The accept-loop handler for one client.
-async fn serve(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
+/// The accept-loop handler for one client. `peer_ip` keys the per-IP
+/// auth/legacy rate buckets (`None` = unlimited, for in-memory harnesses).
+async fn serve(
+    mut sock: tokio::net::TcpStream,
+    shared: Arc<Shared>,
+    peer_ip: Option<std::net::IpAddr>,
+) -> Result<()> {
     let (read_half, mut write) = sock.split();
     let mut reader = BufReader::new(read_half);
     let origin = shared.origin_name();
@@ -280,6 +290,16 @@ async fn serve(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<(
         line.clear();
         if reader.read_line(&mut line).await? == 0 {
             break; // client hung up
+        }
+        // Coarse per-IP legacy command budget: refuse the command (400
+        // service unavailable), keep the session.
+        if let Some(ip) = peer_ip {
+            if !shared.rate_allow(Scope::Ip(ip), rl::LEGACY) {
+                write
+                    .write_all(Status::ServiceUnavailable.response().render().as_bytes())
+                    .await?;
+                continue;
+            }
         }
         let cmd = match Command::parse(&line) {
             Ok(c) => c,
@@ -342,6 +362,16 @@ async fn serve(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<(
             }
 
             Command::AuthInfoPass(pass) => {
+                // Failed attempts drain the per-IP auth budget; an empty
+                // bucket refuses the attempt outright and closes.
+                if let Some(ip) = peer_ip {
+                    if !shared.rate_probe(Scope::Ip(ip), rl::AUTH) {
+                        write
+                            .write_all(Status::AuthRejected.response().render().as_bytes())
+                            .await?;
+                        break;
+                    }
+                }
                 let status = match session.pending_user.take() {
                     None => Status::AuthSequenceError,
                     Some(user) => match shared.auth.login_password(&user, &pass, None).await {
@@ -355,6 +385,13 @@ async fn serve(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<(
                 write
                     .write_all(status.response().render().as_bytes())
                     .await?;
+                if status == Status::AuthRejected {
+                    if let Some(ip) = peer_ip {
+                        if !shared.rate_allow(Scope::Ip(ip), rl::AUTH) {
+                            break; // budget exhausted: close the connection
+                        }
+                    }
+                }
             }
 
             Command::List(keyword) => {
@@ -905,6 +942,17 @@ where
         return Ok(());
     }
     if !session.can_post() {
+        write
+            .write_all(Status::PostingNotPermitted.response().render().as_bytes())
+            .await?;
+        return Ok(());
+    }
+    // Per-account posting budget: refuse before asking for the article.
+    let account_id = session.subject().account_id;
+    if !session
+        .shared
+        .rate_allow(Scope::Account(account_id), rl::POST)
+    {
         write
             .write_all(Status::PostingNotPermitted.response().render().as_bytes())
             .await?;

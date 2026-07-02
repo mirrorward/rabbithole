@@ -7,6 +7,7 @@ use rabbithole_net::Connection;
 use rabbithole_proto::presence::PresenceState;
 use rabbithole_proto::{dm as pdm, presence as ppres};
 use rabbithole_proto::{ErrorCode, Frame};
+use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::{Caps, ServerEvent};
 use rabbithole_store_server::repo2::PersonasRepo;
 use rabbithole_store_server::repo3::{dm_receipts_enabled, BlocksRepo, BuddiesRepo, DmsRepo};
@@ -182,6 +183,10 @@ pub async fn handle(
     if let Some(Ok(req)) = frame.decode::<pdm::DmSend>() {
         if !ctx.allows(shared, "dm", Caps::DM_SEND) {
             fail!(ErrorCode::Forbidden);
+        }
+        // DMs share the per-account message budget with chat sends.
+        if !shared.rate_allow(Scope::Account(ctx.account_id), rl::MSG) {
+            fail!(ErrorCode::RateLimited);
         }
         let text = req.text.trim_end();
         if text.is_empty() && req.attachments.is_empty() {

@@ -7,6 +7,7 @@ use rabbithole_proto::board as pb;
 use rabbithole_proto::{ErrorCode, Frame};
 use rabbithole_server_core::boards::BoardError;
 use rabbithole_server_core::events::{EventBody, SignedEvent};
+use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::{Caps, ServerEvent};
 use rabbithole_store_server::repo4::PostRow;
 
@@ -132,6 +133,10 @@ pub async fn handle(
     if let Some(Ok(req)) = frame.decode::<pb::PostCreate>() {
         if ctx.is_guest || !ctx.allows(shared, "board", Caps::BOARD_POST) {
             fail!(ErrorCode::Forbidden);
+        }
+        // Per-account posting budget: refuse the post, keep the session.
+        if !shared.rate_allow(Scope::Account(ctx.account_id), rl::POST) {
+            fail!(ErrorCode::RateLimited);
         }
         let seed = author_seed(shared, ctx.account_id);
         let author = format!("{}@{}", ctx.screen_name, shared.origin_name());

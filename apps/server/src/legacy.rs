@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use rabbithole_legacy_finger::{FingerDirectory, FingerServer, Profile, WhoEntry};
+use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_store_server::repo2::PersonasRepo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -71,12 +72,16 @@ pub async fn spawn_telnet(
     let local = listener.local_addr()?;
     let handle = tokio::spawn(async move {
         loop {
-            let Ok((mut sock, _peer)) = listener.accept().await else {
+            let Ok((mut sock, peer)) = listener.accept().await else {
                 break;
             };
+            // Over the per-IP connection budget: drop it on the floor.
+            if !shared.rate_allow(Scope::Ip(peer.ip()), rl::CONN) {
+                continue;
+            }
             let shared = shared.clone();
             tokio::spawn(async move {
-                let _ = crate::telnet::run_shell(&mut sock, &shared).await;
+                let _ = crate::telnet::run_shell(&mut sock, &shared, Some(peer.ip())).await;
                 // Windows-safe close discipline (see `hotline::serve_htxf`):
                 // send FIN explicitly, then drain to the peer's FIN so
                 // buffered farewell bytes are delivered rather than

@@ -9,9 +9,11 @@
 //! commands (`doors` to list, `door <id>` to play — see [`crate::doors`]).
 
 use std::io;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use rabbithole_legacy_telnet::{Echo, Encoding, TelnetStream};
+use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::AuthedUser;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -23,7 +25,9 @@ const MAX_ATTEMPTS: u32 = 3;
 /// Run one telnet session over `io` to completion (quit, login lockout, or
 /// disconnect). Burrow calls this once per accepted socket; the caller keeps
 /// the socket and performs the graceful FIN + drain close afterwards.
-pub async fn run_shell<S>(io: S, shared: &Arc<Shared>) -> io::Result<()>
+/// `peer_ip` keys the per-IP auth/legacy rate buckets (`None` — e.g. a test
+/// harness driving an in-memory stream — is unlimited).
+pub async fn run_shell<S>(io: S, shared: &Arc<Shared>, peer_ip: Option<IpAddr>) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -36,21 +40,34 @@ where
     ))
     .await?;
 
-    let Some(authed) = login(&mut t, shared).await? else {
+    let Some(authed) = login(&mut t, shared, peer_ip).await? else {
         return Ok(()); // disconnected or out of attempts
     };
     greet(&mut t, &authed).await?;
-    menu_loop(&mut t, shared, &authed).await
+    menu_loop(&mut t, shared, &authed, peer_ip).await
 }
 
 /// Prompt for credentials until success, disconnect, or [`MAX_ATTEMPTS`].
 /// TOTP-gated accounts can't complete the minimal prompt yet (no
-/// second-factor step), so they fail here like a bad password.
-async fn login<S>(t: &mut TelnetStream<S>, shared: &Arc<Shared>) -> io::Result<Option<AuthedUser>>
+/// second-factor step), so they fail here like a bad password. Failed
+/// attempts also drain the per-IP `auth` rate bucket; an empty bucket ends
+/// the session before (or right after) an attempt.
+async fn login<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    peer_ip: Option<IpAddr>,
+) -> io::Result<Option<AuthedUser>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     for _ in 0..MAX_ATTEMPTS {
+        if let Some(ip) = peer_ip {
+            if !shared.rate_probe(Scope::Ip(ip), rl::AUTH) {
+                t.write_str("Too many failed logins. Try again later.\n")
+                    .await?;
+                return Ok(None);
+            }
+        }
         t.write_str("login: ").await?;
         let Some(user) = t.read_line(Echo::On).await? else {
             return Ok(None);
@@ -63,6 +80,13 @@ where
         if !user.is_empty() {
             if let Ok(authed) = shared.auth.login_password(&user, &pass, None).await {
                 return Ok(Some(authed));
+            }
+        }
+        if let Some(ip) = peer_ip {
+            if !shared.rate_allow(Scope::Ip(ip), rl::AUTH) {
+                t.write_str("Too many failed logins. Try again later.\n")
+                    .await?;
+                return Ok(None);
             }
         }
         t.write_str("Login incorrect.\n\n").await?;
@@ -97,6 +121,7 @@ async fn menu_loop<S>(
     t: &mut TelnetStream<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
+    peer_ip: Option<IpAddr>,
 ) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -111,6 +136,14 @@ where
         let Some(line) = t.read_line(Echo::On).await? else {
             return Ok(()); // peer went away
         };
+        // Coarse per-IP legacy command budget: refuse the command, keep the
+        // session.
+        if let Some(ip) = peer_ip {
+            if !shared.rate_allow(Scope::Ip(ip), rl::LEGACY) {
+                t.write_str("\nRate limited; slow down.\n").await?;
+                continue;
+            }
+        }
         // Lowercase only the verb — door ids are matched exactly.
         let mut words = line.split_whitespace();
         let verb = words.next().unwrap_or("").to_ascii_lowercase();

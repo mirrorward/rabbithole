@@ -22,6 +22,7 @@ pub mod files;
 pub mod permissions;
 pub mod presence;
 pub mod pushlog;
+pub mod ratelimit;
 pub mod swarm;
 
 pub use auth::{AuthError, AuthService, AuthedUser, RegistrationMode};
@@ -36,4 +37,5 @@ pub use files::{FileError, FileService};
 pub use permissions::{Caps, PermissionEvaluator, Role, Subject};
 pub use presence::{PresenceEntry, PresenceRegistry, RadioStatus};
 pub use pushlog::PushLog;
+pub use ratelimit::RateLimiter;
 pub use swarm::SwarmCatalog;

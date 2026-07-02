@@ -25,6 +25,7 @@ use rabbithole_proto::filelib as pf;
 use rabbithole_proto::transfer as pt;
 use rabbithole_proto::{ErrorCode, Frame};
 use rabbithole_server_core::files::KIND_FILE;
+use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::{Caps, ServerEvent};
 
 use crate::session::SessionCtx;
@@ -294,8 +295,15 @@ pub async fn handle(
     if let Some(Ok(req)) = frame.decode::<pt::TransferOpen>() {
         // Per-account concurrency cap (0 = unlimited). Enforced before the
         // ticket is minted so a flood is refused rather than admitted.
+        // Checked before the rate budget so a client politely polling for a
+        // free slot does not drain its transfer-open tokens.
         let cap = shared.config.read().max_concurrent_transfers;
         if cap > 0 && shared.transfers.count_for_account(ctx.account_id) >= cap as usize {
+            fail!(ErrorCode::RateLimited);
+        }
+        // Per-account transfer-open rate budget (Wave 13), consumed before
+        // any work is done for the request.
+        if !shared.rate_allow(Scope::Account(ctx.account_id), rl::TRANSFER) {
             fail!(ErrorCode::RateLimited);
         }
         match req.direction {

@@ -37,10 +37,11 @@ use rabbithole_net::quic::QuicListener;
 use rabbithole_net::tls::CertFingerprint;
 use rabbithole_net::ws::WsListener;
 use rabbithole_net::Listener;
+use rabbithole_server_core::ratelimit::{self, Decision, LimitKey, Policy, Scope};
 use rabbithole_server_core::{
     AuthService, BoardService, ChatService, ClassCache, DedupStore, EventBus, FileService,
-    LiveConfig, PeerRegistry, PermissionEvaluator, PresenceRegistry, PushLog, RegistrationMode,
-    ServerConfig, ServerEvent, SwarmCatalog,
+    LiveConfig, PeerRegistry, PermissionEvaluator, PresenceRegistry, PushLog, RateLimiter,
+    RegistrationMode, ServerConfig, ServerEvent, SwarmCatalog,
 };
 use rabbithole_store_server::SqlitePool;
 
@@ -82,6 +83,9 @@ pub struct Shared {
     pub peers: PeerRegistry,
     /// Local signed file-catalog + verified peer catalogs (Wave 9.x).
     pub catalogs: fed_catalog::CatalogState,
+    /// Shared token-bucket rate limiter, per IP / account / endpoint class
+    /// (Wave 13). Policies are resolved live from config on every check.
+    pub ratelimit: RateLimiter,
     next_session: AtomicU64,
 }
 
@@ -102,6 +106,51 @@ impl Shared {
     pub fn registration_mode(&self) -> RegistrationMode {
         RegistrationMode::parse(&self.config.read().registration_mode)
             .unwrap_or(RegistrationMode::Closed)
+    }
+
+    /// Consume one rate-limit token from `class` for `scope`; `true` =
+    /// allowed. Always allows when limiting is disabled globally
+    /// (`ratelimit_enabled=false`) or per class (rate knob 0). Refusals are
+    /// audit-logged **sparsely** — the limiter flags at most one refusal per
+    /// key per minute — so an abusive flood cannot flood the audit log too.
+    pub fn rate_allow(&self, scope: Scope, class: &'static str) -> bool {
+        !self.rate_decision(scope, class, true).is_limited()
+    }
+
+    /// Non-consuming probe: would a request on `class` be allowed right now?
+    /// Used to gate an expensive attempt (a login) whose *failures* are what
+    /// consume tokens — a success never spends from the budget.
+    pub fn rate_probe(&self, scope: Scope, class: &'static str) -> bool {
+        !self.rate_decision(scope, class, false).is_limited()
+    }
+
+    fn rate_decision(&self, scope: Scope, class: &'static str, consume: bool) -> Decision {
+        let cfg = self.config.read();
+        if !cfg.ratelimit_enabled {
+            return Decision::Allowed;
+        }
+        let Some(policy) = Policy::for_class(&cfg, class) else {
+            return Decision::Allowed; // rate knob 0: class disabled
+        };
+        drop(cfg);
+        let key = LimitKey { scope, class };
+        let now = ratelimit::now_ms();
+        let decision = if consume {
+            self.ratelimit.check_with(key, policy, now)
+        } else {
+            self.ratelimit.peek_with(key, policy, now)
+        };
+        if let Decision::Limited { audit: true, .. } = decision {
+            let pool = self.pool.clone();
+            let detail = format!("class={class} {scope}");
+            tokio::spawn(async move {
+                use rabbithole_store_server::repo::AuditRepo;
+                let _ = AuditRepo(&pool)
+                    .record("server", "rate-limited", &detail)
+                    .await;
+            });
+        }
+        decision
     }
 }
 
@@ -213,6 +262,7 @@ impl Burrow {
             // Reload the last signed local catalog so the generation chain
             // survives restarts (peers must never see a stale "fresh" gen 1).
             catalogs: fed_catalog::CatalogState::load(&data_dir, &identity.signing.public().0),
+            ratelimit: RateLimiter::new(),
             next_session: AtomicU64::new(1),
         });
 
@@ -475,6 +525,11 @@ async fn accept_loop(mut listener: Box<dyn Listener>, shared: Arc<Shared>) {
     loop {
         match listener.accept().await {
             Ok(conn) => {
+                // Over the per-IP connection budget: drop it on the floor.
+                let ip = conn.peer().remote_addr.ip();
+                if !shared.rate_allow(Scope::Ip(ip), ratelimit::class::CONN) {
+                    continue;
+                }
                 let session_id = shared.next_session_id();
                 let shared = shared.clone();
                 tokio::spawn(async move {

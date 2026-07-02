@@ -61,6 +61,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
+use rabbithole_server_core::ratelimit::{class as rl, Scope};
+
 use crate::nntp::{event_id_from_message_id, group_articles, message_id_for, ParsedArticle};
 use crate::Shared;
 
@@ -75,12 +77,16 @@ pub async fn spawn_nntp_feed(
     let local = listener.local_addr()?;
     let handle = tokio::spawn(async move {
         loop {
-            let Ok((sock, _peer)) = listener.accept().await else {
+            let Ok((sock, peer)) = listener.accept().await else {
                 break;
             };
+            // Over the per-IP connection budget: drop it on the floor.
+            if !shared.rate_allow(Scope::Ip(peer.ip()), rl::CONN) {
+                continue;
+            }
             let shared = shared.clone();
             tokio::spawn(async move {
-                if let Err(e) = serve(sock, shared).await {
+                if let Err(e) = serve(sock, shared, Some(peer.ip())).await {
                     tracing::debug!("nntp feed session error: {e}");
                 }
             });
@@ -271,8 +277,13 @@ async fn new_ids_since(shared: &Shared, pattern: &str, since_ms: i64) -> Result<
     Ok(ids)
 }
 
-/// The accept-loop handler for one peer connection.
-async fn serve(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
+/// The accept-loop handler for one peer connection. `peer_ip` keys the
+/// per-IP auth/legacy rate buckets (`None` = unlimited).
+async fn serve(
+    mut sock: tokio::net::TcpStream,
+    shared: Arc<Shared>,
+    peer_ip: Option<std::net::IpAddr>,
+) -> Result<()> {
     let (read_half, mut write) = sock.split();
     let mut reader = BufReader::new(read_half);
 
@@ -292,6 +303,16 @@ async fn serve(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<(
         line.clear();
         if reader.read_line(&mut line).await? == 0 {
             break; // peer hung up
+        }
+        // Coarse per-IP legacy command budget: refuse the command (400
+        // service unavailable), keep the session.
+        if let Some(ip) = peer_ip {
+            if !shared.rate_allow(Scope::Ip(ip), rl::LEGACY) {
+                write
+                    .write_all(Status::ServiceUnavailable.response().render().as_bytes())
+                    .await?;
+                continue;
+            }
         }
         let cmd = match Command::parse(&line) {
             Ok(c) => c,
@@ -347,6 +368,16 @@ async fn serve(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<(
             }
 
             Command::AuthInfoPass(pass) => {
+                // Failed attempts drain the per-IP auth budget; an empty
+                // bucket refuses the attempt outright and closes.
+                if let Some(ip) = peer_ip {
+                    if !shared.rate_probe(Scope::Ip(ip), rl::AUTH) {
+                        write
+                            .write_all(Status::AuthRejected.response().render().as_bytes())
+                            .await?;
+                        break;
+                    }
+                }
                 let status = match session.pending_user.take() {
                     None => Status::AuthSequenceError,
                     Some(user) => {
@@ -363,6 +394,13 @@ async fn serve(mut sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<(
                 write
                     .write_all(status.response().render().as_bytes())
                     .await?;
+                if status == Status::AuthRejected {
+                    if let Some(ip) = peer_ip {
+                        if !shared.rate_allow(Scope::Ip(ip), rl::AUTH) {
+                            break; // budget exhausted: close the connection
+                        }
+                    }
+                }
             }
 
             Command::ModeStream => {

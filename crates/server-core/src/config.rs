@@ -189,6 +189,42 @@ pub struct ServerConfig {
     /// Configured peer dial targets. Serialized as an array of tables in TOML;
     /// edited on disk (not via `ctl config set`), like `ftn_areas`.
     pub federation_peers: Vec<FederationPeer>,
+    /// Master switch for token-bucket rate limiting (Wave 13). On by default
+    /// with generous per-class budgets; see the `ratelimit_*` knobs below.
+    pub ratelimit_enabled: bool,
+    /// New connections allowed per client IP per minute across every accept
+    /// loop (native QUIC/WS + legacy listeners). **0 disables this class.**
+    pub ratelimit_conn_per_min: u32,
+    /// Connection burst (bucket size) per IP. 0 = refuse every connection.
+    pub ratelimit_conn_burst: u32,
+    /// Failed login attempts allowed per client IP per minute (native auth,
+    /// NNTP `AUTHINFO` on both reader and feed, Hotline login, telnet login,
+    /// radio source auth). Successful logins never consume from this budget.
+    /// **0 disables this class.**
+    pub ratelimit_auth_per_min: u32,
+    /// Failed-login burst (bucket size) per IP. 0 = refuse every attempt.
+    pub ratelimit_auth_burst: u32,
+    /// Chat lines + DM sends allowed per account per second (native surface).
+    /// **0 disables this class.**
+    pub ratelimit_msg_per_sec: u32,
+    /// Message burst (bucket size) per account. 0 = refuse every send.
+    pub ratelimit_msg_burst: u32,
+    /// Board posts allowed per account per minute (native `PostCreate`, NNTP
+    /// `POST`, Hotline news posting). **0 disables this class.**
+    pub ratelimit_post_per_min: u32,
+    /// Post burst (bucket size) per account. 0 = refuse every post.
+    pub ratelimit_post_burst: u32,
+    /// File-transfer opens allowed per account per minute. **0 disables this
+    /// class.**
+    pub ratelimit_transfer_per_min: u32,
+    /// Transfer-open burst (bucket size) per account. 0 = refuse every open.
+    pub ratelimit_transfer_burst: u32,
+    /// Legacy-surface commands allowed per client IP per second (telnet,
+    /// Hotline, NNTP reader + feed — one coarse bucket per IP). **0 disables
+    /// this class.**
+    pub ratelimit_legacy_per_sec: u32,
+    /// Legacy command burst (bucket size) per IP. 0 = refuse every command.
+    pub ratelimit_legacy_burst: u32,
     /// Welcome-screen featured block (title on first line, body after).
     pub welcome_featured: String,
     /// Welcome-screen one-line ticker.
@@ -261,6 +297,19 @@ impl Default for ServerConfig {
             federation_enabled: false,
             federation_addr: "0.0.0.0:4655".parse().expect("valid"),
             federation_peers: Vec::new(),
+            ratelimit_enabled: true,
+            ratelimit_conn_per_min: 30,
+            ratelimit_conn_burst: 10,
+            ratelimit_auth_per_min: 5,
+            ratelimit_auth_burst: 5,
+            ratelimit_msg_per_sec: 10,
+            ratelimit_msg_burst: 20,
+            ratelimit_post_per_min: 6,
+            ratelimit_post_burst: 6,
+            ratelimit_transfer_per_min: 10,
+            ratelimit_transfer_burst: 10,
+            ratelimit_legacy_per_sec: 20,
+            ratelimit_legacy_burst: 60,
             welcome_featured: String::new(),
             welcome_ticker: String::new(),
             theme_accent: String::new(),
@@ -384,6 +433,19 @@ impl ServerConfig {
             "syndication_poll_secs" => self.syndication_poll_secs.to_string(),
             "federation_enabled" => self.federation_enabled.to_string(),
             "federation_addr" => self.federation_addr.to_string(),
+            "ratelimit_enabled" => self.ratelimit_enabled.to_string(),
+            "ratelimit_conn_per_min" => self.ratelimit_conn_per_min.to_string(),
+            "ratelimit_conn_burst" => self.ratelimit_conn_burst.to_string(),
+            "ratelimit_auth_per_min" => self.ratelimit_auth_per_min.to_string(),
+            "ratelimit_auth_burst" => self.ratelimit_auth_burst.to_string(),
+            "ratelimit_msg_per_sec" => self.ratelimit_msg_per_sec.to_string(),
+            "ratelimit_msg_burst" => self.ratelimit_msg_burst.to_string(),
+            "ratelimit_post_per_min" => self.ratelimit_post_per_min.to_string(),
+            "ratelimit_post_burst" => self.ratelimit_post_burst.to_string(),
+            "ratelimit_transfer_per_min" => self.ratelimit_transfer_per_min.to_string(),
+            "ratelimit_transfer_burst" => self.ratelimit_transfer_burst.to_string(),
+            "ratelimit_legacy_per_sec" => self.ratelimit_legacy_per_sec.to_string(),
+            "ratelimit_legacy_burst" => self.ratelimit_legacy_burst.to_string(),
             "welcome_featured" => self.welcome_featured.clone(),
             "welcome_ticker" => self.welcome_ticker.clone(),
             "theme_accent" => self.theme_accent.clone(),
@@ -661,6 +723,60 @@ impl ServerConfig {
                 self.federation_addr = parse_addr(key, value)?;
                 Ok(false)
             }
+            // Rate limiting applies live: every check re-reads the config,
+            // so a `ctl config set` takes effect on the next request.
+            "ratelimit_enabled" => {
+                self.ratelimit_enabled = parse_bool(key, value)?;
+                Ok(true)
+            }
+            "ratelimit_conn_per_min" => {
+                self.ratelimit_conn_per_min = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "ratelimit_conn_burst" => {
+                self.ratelimit_conn_burst = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "ratelimit_auth_per_min" => {
+                self.ratelimit_auth_per_min = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "ratelimit_auth_burst" => {
+                self.ratelimit_auth_burst = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "ratelimit_msg_per_sec" => {
+                self.ratelimit_msg_per_sec = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "ratelimit_msg_burst" => {
+                self.ratelimit_msg_burst = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "ratelimit_post_per_min" => {
+                self.ratelimit_post_per_min = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "ratelimit_post_burst" => {
+                self.ratelimit_post_burst = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "ratelimit_transfer_per_min" => {
+                self.ratelimit_transfer_per_min = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "ratelimit_transfer_burst" => {
+                self.ratelimit_transfer_burst = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "ratelimit_legacy_per_sec" => {
+                self.ratelimit_legacy_per_sec = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "ratelimit_legacy_burst" => {
+                self.ratelimit_legacy_burst = parse_u32(key, value)?;
+                Ok(true)
+            }
             "quic_addr" => {
                 self.quic_addr = parse_addr(key, value)?;
                 Ok(false) // restart required
@@ -687,6 +803,13 @@ fn parse_bool(key: &str, v: &str) -> Result<bool, ConfigError> {
             detail: v.into(),
         }),
     }
+}
+
+fn parse_u32(key: &str, v: &str) -> Result<u32, ConfigError> {
+    v.parse().map_err(|_| ConfigError::BadValue {
+        key: key.into(),
+        detail: v.into(),
+    })
 }
 
 fn parse_addr(key: &str, v: &str) -> Result<SocketAddr, ConfigError> {
@@ -759,6 +882,24 @@ mod tests {
             c
         };
         assert_eq!(loaded.name, "The Warren");
+    }
+
+    #[test]
+    fn ratelimit_knobs_get_set_live() {
+        let live = LiveConfig::new(ServerConfig::default());
+        assert_eq!(live.get_key("ratelimit_enabled").unwrap(), "true");
+        assert_eq!(live.get_key("ratelimit_auth_per_min").unwrap(), "5");
+        // All ratelimit knobs apply live (checks re-read config).
+        assert!(live.set_key("ratelimit_enabled", "off").unwrap());
+        assert!(live.set_key("ratelimit_msg_per_sec", "3").unwrap());
+        assert!(live.set_key("ratelimit_msg_burst", "4").unwrap());
+        assert_eq!(live.get_key("ratelimit_enabled").unwrap(), "false");
+        assert_eq!(live.get_key("ratelimit_msg_per_sec").unwrap(), "3");
+        assert_eq!(live.get_key("ratelimit_msg_burst").unwrap(), "4");
+        assert!(matches!(
+            live.set_key("ratelimit_msg_per_sec", "lots"),
+            Err(ConfigError::BadValue { .. })
+        ));
     }
 
     #[test]

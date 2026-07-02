@@ -19,6 +19,7 @@ use rabbithole_proto::{chat as pchat, presence as ppres, session as psess};
 use rabbithole_proto::{directory as pdir, persona as ppers};
 use rabbithole_proto::{ErrorCode, Frame, FrameKind, ProtocolVersion, PROTOCOL_VERSION};
 use rabbithole_proto::{Hello, HelloAck};
+use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::{
     AuthError, AuthedUser, Caps, PresenceEntry, Role, ServerEvent, Subject,
 };
@@ -65,6 +66,7 @@ pub async fn run_session(
     shared: Arc<Shared>,
 ) -> anyhow::Result<()> {
     let peer = conn.peer().clone();
+    let peer_ip = peer.remote_addr.ip();
     tracing::info!(session_id, remote = %peer.remote_addr, transport = %peer.transport, "connection");
 
     // ---- AwaitHello / AwaitAuth ----------------------------------------
@@ -183,6 +185,14 @@ pub async fn run_session(
                 tracing::debug!(session_id, "auth failed: {e}");
                 conn.send(Frame::error_reply(&frame, code)).await?;
                 resumed = false;
+                // Failed attempts drain the per-IP auth budget; once it is
+                // empty the connection is closed (fresh connections then get
+                // one refused attempt each until the bucket refills).
+                if !shared.rate_allow(Scope::Ip(peer_ip), rl::AUTH) {
+                    tracing::debug!(session_id, "auth rate limited; closing");
+                    conn.close().await;
+                    return Ok(());
+                }
             }
             None => {
                 conn.send(Frame::error_reply(&frame, ErrorCode::Unauthenticated))
@@ -394,6 +404,12 @@ async fn handle_request(
         };
         if !ctx.agreed {
             conn.send(Frame::error_reply(frame, ErrorCode::Forbidden))
+                .await?;
+            return Ok(());
+        }
+        // Per-account send budget: refuse the line, keep the session.
+        if !shared.rate_allow(Scope::Account(ctx.account_id), rl::MSG) {
+            conn.send(Frame::error_reply(frame, ErrorCode::RateLimited))
                 .await?;
             return Ok(());
         }
