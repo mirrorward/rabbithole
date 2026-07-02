@@ -21,6 +21,7 @@ pub mod files;
 pub mod permissions;
 pub mod presence;
 pub mod pushlog;
+pub mod swarm;
 
 pub use auth::{AuthError, AuthService, AuthedUser, RegistrationMode};
 pub use boards::{BoardError, BoardService};
@@ -33,3 +34,4 @@ pub use files::{FileError, FileService};
 pub use permissions::{Caps, PermissionEvaluator, Role, Subject};
 pub use presence::{PresenceEntry, PresenceRegistry};
 pub use pushlog::PushLog;
+pub use swarm::SwarmCatalog;

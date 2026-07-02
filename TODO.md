@@ -5,7 +5,7 @@
 > dependency edges shown in PLAN.md §15. ⛔ = do not start until PLAN.md is
 > reviewed and approved by the project owner.
 
-**Status: Wave 4 complete. Wave 5 (swarm / "the warren") started — manifest format + `rabbit://` links landed; peer discovery/advertise/Bao-verified transfer next.**
+**Status: Wave 4 complete. Wave 5 (swarm / "the warren") in progress — manifests + `rabbit://` links and the advertise/find-sources coordinator landed; peer wire with Bao verification next.**
 
 > W4.2: transfers are resumable + integrity-checked, folder-pipelined, and
 > move bytes over dedicated QUIC bulk streams (off the control channel) with
@@ -94,8 +94,8 @@
 
 - [ ] Spike: iroh vs quinn+custom for hole punching/relay → decision
 - [x] Manifest format (per-file blake3 roots, 1 MiB chunks) + `rabbit://` links — `rabbithole-swarm` `Manifest`/`ManifestFile` (content-addressed id = blake3 over canonical postcard bytes; path-sorted for determinism) and `RabbitLink` (`rabbit://host[:port]/{files,manifest,blob}/…`, percent-encoded, root-pinned). CBOR interop deferred to a later slice.
-- [ ] `AdvertiseFiles` (list-without-upload): metadata catalog, permission scopes, TTL soft state + re-announce
-- [ ] Coordinator: FindSources (scope-gated), announce, rarity annotation
+- [x] `AdvertiseFiles` (list-without-upload): metadata catalog, permission scopes, TTL soft state + re-announce — SWARM family (6) types 1-5, `SwarmCatalog` (TTL'd soft state, per-account cap `swarm_adverts_max`, session-scoped cleanup), gated by `SWARM_ADVERTISE` on the `swarm` resource; `rabbit swarm share/find/unshare`
+- [~] Coordinator: FindSources (scope-gated, reports origin-server fallback + source count as list-level rarity) done; per-chunk rarity annotation arrives with the peer wire/scheduler
 - [ ] Server-signed capability tokens; peer-side verification
 - [ ] Peer wire over QUIC: Hello/Have/RequestRange/Cancel; Bao-verified responses
 - [ ] Multi-source scheduler: rarest-first, per-source speed assignment, endgame mode

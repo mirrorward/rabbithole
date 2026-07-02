@@ -1786,6 +1786,7 @@ dependencies = [
  "rabbithole-core",
  "rabbithole-proto",
  "rabbithole-store-client",
+ "rabbithole-swarm",
  "serde",
  "serde_json",
  "tokio",

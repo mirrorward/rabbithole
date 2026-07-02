@@ -317,6 +317,8 @@ pub async fn run_session(
     for path in shared.transfers.close_session(session_id) {
         let _ = tokio::fs::remove_file(path).await;
     }
+    // A disconnected peer can't serve swarm bytes: drop its advertisements.
+    shared.swarm.session_closed(session_id);
     shared.chat.session_closed(session_id);
     shared.presence.leave(session_id);
     conn.close().await;
@@ -482,6 +484,10 @@ async fn handle_request(
     }
     // Wave 4.2: bulk transfers ------------------------------------------------
     if crate::handlers9::handle(conn, frame, shared, ctx).await? {
+        return Ok(());
+    }
+    // Wave 5: the swarm coordinator ---------------------------------------------
+    if crate::handlers10::handle(conn, frame, shared, ctx).await? {
         return Ok(());
     }
 

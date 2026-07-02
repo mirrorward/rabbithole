@@ -783,6 +783,36 @@ impl Client {
 
     // ---- Wave 4.2: bulk transfers -----------------------------------------
 
+    // ---- Swarm (the Warren, Wave 5) ------------------------------------
+
+    /// Advertise files this client can serve (list-without-upload). Returns
+    /// the ack with the granted TTL — re-announce before it lapses.
+    pub async fn swarm_advertise(
+        &mut self,
+        entries: Vec<rabbithole_proto::swarm::AdvertEntry>,
+        ttl_secs: u32,
+    ) -> Result<rabbithole_proto::swarm::AdvertiseAck, ClientError> {
+        self.request(&rabbithole_proto::swarm::AdvertiseFiles::new(
+            entries, ttl_secs,
+        ))
+        .await
+    }
+
+    /// Withdraw advertisements (empty = all of this session's).
+    pub async fn swarm_withdraw(&mut self, roots: Vec<[u8; 32]>) -> Result<(), ClientError> {
+        self.request_ack(&rabbithole_proto::swarm::AdvertWithdraw::new(roots))
+            .await
+    }
+
+    /// Who has this root? (Peers advertising it + whether the server does.)
+    pub async fn swarm_find(
+        &mut self,
+        root: [u8; 32],
+    ) -> Result<rabbithole_proto::swarm::SourceList, ClientError> {
+        self.request(&rabbithole_proto::swarm::FindSources::new(root))
+            .await
+    }
+
     /// Cap transfer bandwidth to `bytes_per_sec` (`None`/0 = unlimited). The
     /// queue driver uses this to throttle background transfers; it applies to
     /// the ranged-chunk and dedicated-stream paths alike.
@@ -793,8 +823,9 @@ impl Client {
     /// Chunk size for ranged transfers (kept under the 1 MiB control cap).
     const TRANSFER_CHUNK: usize = 256 * 1024;
 
-    /// blake3-hash a local file incrementally, returning `(root, size)`.
-    fn hash_file(path: &std::path::Path) -> Result<([u8; 32], u64), ClientError> {
+    /// blake3-hash a local file incrementally, returning `(root, size)` —
+    /// the same root transfers verify against and swarm adverts carry.
+    pub fn hash_file(path: &std::path::Path) -> Result<([u8; 32], u64), ClientError> {
         use std::io::Read;
         let mut f = std::fs::File::open(path)?;
         let mut hasher = blake3::Hasher::new();

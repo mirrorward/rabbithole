@@ -18,7 +18,8 @@ that is a bug in one of them.
 | [`board.md`](board.md) | Wave 3 | Message bases: board tree, signed post events, threading, read pointers |
 | [`wish.md`](wish.md) | Wave 3 | The Wishing Well: request board with voting, claim, fulfillment |
 | [`file.md`](file.md) | Wave 4 | File libraries: areas, folder tree, metadata, drop boxes, aliases, search |
-| families/*.md | future waves | One doc per family as it lands (swarm, federation, radio) |
+| [`swarm.md`](swarm.md) | Wave 5 | The Warren: advertise (list-without-upload), find-sources, TTL soft state |
+| families/*.md | future waves | One doc per family as it lands (federation, radio) |
 
 ## Ground rules
 

@@ -4,6 +4,7 @@
 
 pub mod admin_store;
 pub mod ctl;
+pub mod handlers10;
 pub mod handlers2;
 pub mod handlers3;
 pub mod handlers4;
@@ -28,7 +29,7 @@ use rabbithole_net::Listener;
 use rabbithole_server_core::{
     AuthService, BoardService, ChatService, ClassCache, DedupStore, EventBus, FileService,
     LiveConfig, PermissionEvaluator, PresenceRegistry, PushLog, RegistrationMode, ServerConfig,
-    ServerEvent,
+    ServerEvent, SwarmCatalog,
 };
 use rabbithole_store_server::SqlitePool;
 
@@ -58,6 +59,8 @@ pub struct Shared {
     pub dedup: DedupStore,
     /// Live bulk-transfer tickets (Wave 4.2).
     pub transfers: handlers9::TransferRegistry,
+    /// TTL'd who-has-what soft state for the Warren (Wave 5).
+    pub swarm: SwarmCatalog,
     next_session: AtomicU64,
 }
 
@@ -138,6 +141,7 @@ impl Burrow {
             fingerprint_hex: fingerprint.to_hex(),
             dedup: DedupStore::with_defaults(),
             transfers: handlers9::TransferRegistry::new(),
+            swarm: SwarmCatalog::new(),
             next_session: AtomicU64::new(1),
         });
 

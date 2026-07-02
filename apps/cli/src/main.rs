@@ -116,6 +116,26 @@ enum Cmd {
         #[command(subcommand)]
         action: QueueAction,
     },
+    /// The Warren — advertise local files to the swarm and find sources.
+    Swarm {
+        #[command(subcommand)]
+        action: SwarmAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SwarmAction {
+    /// Advertise local files (list-without-upload; bytes stay put).
+    Share {
+        files: Vec<PathBuf>,
+        /// Advert TTL in seconds (0 = server default). Re-run to re-announce.
+        #[arg(long, default_value_t = 0)]
+        ttl: u32,
+    },
+    /// Who has this file? Takes a hex blake3 root or a rabbit:// link.
+    Find { target: String },
+    /// Withdraw adverts: hex roots, or nothing to withdraw everything.
+    Unshare { roots: Vec<String> },
 }
 
 #[derive(Subcommand)]
@@ -570,6 +590,7 @@ async fn main() -> Result<()> {
         Cmd::Wish { action } => cmd_wish(cli.json, action).await,
         Cmd::File { action } => cmd_file(cli.json, action).await,
         Cmd::Queue { action } => cmd_queue(cli.json, action).await,
+        Cmd::Swarm { action } => cmd_swarm(cli.json, action).await,
     }
 }
 
@@ -773,6 +794,120 @@ fn mime_guess_simple(name: &str) -> &'static str {
         "html" | "htm" => "text/html",
         _ => "application/octet-stream",
     }
+}
+
+/// Resolve a `find` target: a bare hex blake3 root, or a rabbit:// link
+/// whose target pins one (`blob`, `manifest`, or root-pinned `files`).
+fn parse_swarm_target(s: &str) -> Result<[u8; 32]> {
+    if let Ok(link) = rabbithole_swarm::RabbitLink::parse(s) {
+        use rabbithole_swarm::LinkTarget;
+        return match link.target {
+            LinkTarget::Blob(id) | LinkTarget::Manifest(id) => Ok(id),
+            LinkTarget::File { root: Some(r), .. } => Ok(r),
+            LinkTarget::File { root: None, .. } => {
+                bail!("that rabbit:// link has no ?root= pin — nothing to look up by hash")
+            }
+        };
+    }
+    let bytes = hex::decode(s).context("expected a hex blake3 root or a rabbit:// link")?;
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("root must be 32 bytes (64 hex chars)"))
+}
+
+/// The Warren: advertise local files, find sources, withdraw.
+async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
+    use rabbithole_proto::swarm::AdvertEntry;
+    let (mut c, _) = reconnect().await?;
+    let result: Result<()> = async {
+        match action {
+            SwarmAction::Share { files, ttl } => {
+                if files.is_empty() {
+                    bail!("nothing to share");
+                }
+                let mut entries = Vec::with_capacity(files.len());
+                let mut listed = Vec::new();
+                for f in &files {
+                    let (root, size) = Client::hash_file(f)
+                        .map_err(|e| anyhow::anyhow!("{}: {e}", f.display()))?;
+                    let name = f
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .context("bad file name")?
+                        .to_string();
+                    let mime = mime_guess_simple(&name).to_string();
+                    listed.push((hex::encode(root), name.clone(), size));
+                    entries.push(AdvertEntry::new(root, size, name, mime));
+                }
+                let ack = c.swarm_advertise(entries, ttl).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "accepted": ack.accepted, "ttl_secs": ack.ttl_secs,
+                            "total": ack.total,
+                            "shared": listed.iter().map(|(r, n, s)| serde_json::json!({
+                                "root": r, "name": n, "size": s,
+                            })).collect::<Vec<_>>(),
+                        })
+                    );
+                } else {
+                    for (root, name, size) in &listed {
+                        println!("{root}  {name} ({size} bytes)");
+                    }
+                    println!(
+                        "advertised {} file(s), ttl {}s ({} total live)",
+                        ack.accepted, ack.ttl_secs, ack.total
+                    );
+                }
+            }
+            SwarmAction::Find { target } => {
+                let root = parse_swarm_target(&target)?;
+                let list = c.swarm_find(root).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "root": hex::encode(list.root),
+                            "server_has": list.server_has,
+                            "server_size": list.server_size,
+                            "sources": list.sources.iter().map(|s| serde_json::json!({
+                                "screen_name": s.screen_name, "name": s.name,
+                                "size": s.size, "mime": s.mime,
+                            })).collect::<Vec<_>>(),
+                        })
+                    );
+                } else {
+                    if list.server_has {
+                        println!("server    has it ({} bytes)", list.server_size);
+                    }
+                    for s in &list.sources {
+                        println!("{:24}  {} ({} bytes)", s.screen_name, s.name, s.size);
+                    }
+                    if !list.server_has && list.sources.is_empty() {
+                        println!("(no known sources)");
+                    }
+                }
+            }
+            SwarmAction::Unshare { roots } => {
+                let roots = roots
+                    .iter()
+                    .map(|s| parse_swarm_target(s))
+                    .collect::<Result<Vec<_>>>()?;
+                let all = roots.is_empty();
+                c.swarm_withdraw(roots).await?;
+                if all {
+                    println!("withdrew all advertisements");
+                } else {
+                    println!("withdrew");
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    c.close().await;
+    result
 }
 
 fn queue_state_label(state: u8) -> &'static str {

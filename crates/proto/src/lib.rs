@@ -35,6 +35,7 @@ pub mod hello;
 pub mod persona;
 pub mod presence;
 pub mod session;
+pub mod swarm;
 pub mod transfer;
 pub mod version;
 pub mod welcome;
