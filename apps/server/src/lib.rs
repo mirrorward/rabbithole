@@ -14,6 +14,7 @@ pub mod handlers7;
 pub mod handlers8;
 pub mod handlers9;
 pub mod identity_store;
+pub mod legacy;
 pub mod session;
 
 use std::net::SocketAddr;
@@ -90,6 +91,10 @@ pub struct Burrow {
     pub shared: Arc<Shared>,
     pub quic_addr: SocketAddr,
     pub ws_addr: SocketAddr,
+    /// Bound telnet address when `telnet_enabled` (else `None`).
+    pub telnet_addr: Option<SocketAddr>,
+    /// Bound finger address when `finger_enabled` (else `None`).
+    pub finger_addr: Option<SocketAddr>,
     pub fingerprint: CertFingerprint,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -122,6 +127,11 @@ impl Burrow {
         let quic_addr = quic.local_addr()?;
         let ws_addr = ws.local_addr()?;
 
+        // Legacy listener toggles (captured before `config` moves into the
+        // live handle).
+        let telnet = config.telnet_enabled.then_some(config.telnet_addr);
+        let finger = config.finger_enabled.then_some(config.finger_addr);
+
         let shared = Arc::new(Shared {
             chat: ChatService::new(bus.clone(), config.chat_max_len),
             files: FileService::new(pool.clone()),
@@ -152,7 +162,7 @@ impl Burrow {
             "burrow is up"
         );
 
-        let tasks = vec![
+        let mut tasks = vec![
             tokio::spawn(accept_loop(Box::new(quic), shared.clone())),
             tokio::spawn(accept_loop(Box::new(ws), shared.clone())),
             tokio::spawn(replay_recorder(shared.clone())),
@@ -167,10 +177,28 @@ impl Burrow {
             }),
         ];
 
+        // Opt-in legacy surfaces (Wave 6).
+        let mut telnet_addr = None;
+        if let Some(addr) = telnet {
+            let (bound, handle) = legacy::spawn_telnet(shared.clone(), addr).await?;
+            tracing::info!(telnet = %bound, "telnet BBS listening");
+            telnet_addr = Some(bound);
+            tasks.push(handle);
+        }
+        let mut finger_addr = None;
+        if let Some(addr) = finger {
+            let (bound, handle) = legacy::spawn_finger(shared.clone(), addr).await?;
+            tracing::info!(finger = %bound, "finger listening");
+            finger_addr = Some(bound);
+            tasks.push(handle);
+        }
+
         Ok(Burrow {
             shared,
             quic_addr,
             ws_addr,
+            telnet_addr,
+            finger_addr,
             fingerprint,
             tasks,
         })

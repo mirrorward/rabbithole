@@ -55,6 +55,14 @@ pub struct ServerConfig {
     /// maintenance sweep evicts oldest-first over this. 0 = unlimited
     /// ("mirror": keep everything the server has ever held).
     pub swarm_cache_max_bytes: u64,
+    /// Serve the legacy telnet BBS surface on `telnet_addr`.
+    pub telnet_enabled: bool,
+    /// Telnet listener address (default 0.0.0.0:2323 — 23 needs privilege).
+    pub telnet_addr: SocketAddr,
+    /// Serve the finger surface (RFC 1288) on `finger_addr`.
+    pub finger_enabled: bool,
+    /// Finger listener address (default 0.0.0.0:7979 — 79 needs privilege).
+    pub finger_addr: SocketAddr,
     /// Welcome-screen featured block (title on first line, body after).
     pub welcome_featured: String,
     /// Welcome-screen one-line ticker.
@@ -89,6 +97,10 @@ impl Default for ServerConfig {
             swarm_advert_ttl_secs: 3600,
             swarm_adverts_max: 4096,
             swarm_cache_max_bytes: 0,
+            telnet_enabled: false,
+            telnet_addr: "0.0.0.0:2323".parse().expect("valid"),
+            finger_enabled: false,
+            finger_addr: "0.0.0.0:7979".parse().expect("valid"),
             welcome_featured: String::new(),
             welcome_ticker: String::new(),
             theme_accent: String::new(),
@@ -180,6 +192,10 @@ impl ServerConfig {
             "swarm_advert_ttl_secs" => self.swarm_advert_ttl_secs.to_string(),
             "swarm_adverts_max" => self.swarm_adverts_max.to_string(),
             "swarm_cache_max_bytes" => self.swarm_cache_max_bytes.to_string(),
+            "telnet_enabled" => self.telnet_enabled.to_string(),
+            "telnet_addr" => self.telnet_addr.to_string(),
+            "finger_enabled" => self.finger_enabled.to_string(),
+            "finger_addr" => self.finger_addr.to_string(),
             "welcome_featured" => self.welcome_featured.clone(),
             "welcome_ticker" => self.welcome_ticker.clone(),
             "theme_accent" => self.theme_accent.clone(),
@@ -319,6 +335,22 @@ impl ServerConfig {
                     detail: value.into(),
                 })?;
                 Ok(true)
+            }
+            "telnet_enabled" => {
+                self.telnet_enabled = parse_bool(key, value)?;
+                Ok(false) // listener binds at startup
+            }
+            "telnet_addr" => {
+                self.telnet_addr = parse_addr(key, value)?;
+                Ok(false)
+            }
+            "finger_enabled" => {
+                self.finger_enabled = parse_bool(key, value)?;
+                Ok(false)
+            }
+            "finger_addr" => {
+                self.finger_addr = parse_addr(key, value)?;
+                Ok(false)
             }
             "quic_addr" => {
                 self.quic_addr = parse_addr(key, value)?;

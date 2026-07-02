@@ -119,7 +119,7 @@
 - [ ] Legacy security-level projection (RBAC → 0–255 SL + flags) for dropfiles
 - [x] finger (79): empty = who list; user = profile+presence+.plan; /W; **forwarding refused**; output caps — `rabbithole-legacy-finger` (RFC 1288, pluggable `FingerDirectory`, control-char sanitized so a hostile .plan can't inject escapes, 32 KiB cap); per-persona opt-out + burrow wiring TBD
 - [ ] Legacy-surface class restrictions + per-listener toggles
-- [ ] Wire the telnet/finger listeners + art rendering into `burrow` (crates exist; daemon integration is the next slice)
+- [~] Wire the telnet/finger listeners into `burrow` — done: opt-in `telnet_enabled`/`finger_enabled` config, `burrow::legacy` adapters (`TelnetAuth`→`AuthService`, `FingerDirectory`→presence+`PersonasRepo`, invisible users hidden), listeners spawned at startup, e2e-tested. Art rendering in the telnet menus + full BBS navigation still to wire
 
 ## Wave 7 — Hotline compatibility
 *Depends on: W2, W3, W4*
