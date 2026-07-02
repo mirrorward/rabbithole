@@ -95,11 +95,7 @@ pub fn parse_source_request(raw: &[u8]) -> Result<SourceRequest, IcyError> {
             "ice-url" | "icy-url" => metadata.url = value,
             "ice-bitrate" | "icy-br" => metadata.bitrate = value.trim().parse().ok(),
             "ice-public" | "icy-pub" => metadata.is_public = parse_bool(&value),
-            "content-type" => {
-                if !value.is_empty() {
-                    content_type = value;
-                }
-            }
+            "content-type" if !value.is_empty() => content_type = value,
             _ => {}
         }
     }

@@ -112,6 +112,15 @@ mod tests {
         }
     }
 
+    /// Like [`entry`], but with `last_heartbeat` backdated by `age` — lets the
+    /// TTL tests be deterministic instead of sleeping on the wall clock
+    /// (which flakes on slow/loaded CI runners, notably macOS).
+    fn aged_entry(name: &str, ip: [u8; 4], port: u16, users: u16, age: Duration) -> ServerEntry {
+        let mut e = entry(name, ip, port, users);
+        e.last_heartbeat = Instant::now().checked_sub(age).expect("recent enough");
+        e
+    }
+
     #[test]
     fn add_and_snapshot() {
         let reg = Registry::new(DEFAULT_TTL);
@@ -146,23 +155,43 @@ mod tests {
 
     #[test]
     fn entries_expire_after_ttl() {
-        let reg = Registry::new(Duration::from_millis(20));
-        reg.register(entry("Ephemeral", [10, 0, 0, 1], 5500, 0));
-        assert_eq!(reg.len(), 1);
-        std::thread::sleep(Duration::from_millis(40));
+        let reg = Registry::new(Duration::from_millis(50));
+        // A heartbeat older than the TTL is pruned on the next query…
+        reg.register(aged_entry(
+            "Ephemeral",
+            [10, 0, 0, 1],
+            5500,
+            0,
+            Duration::from_millis(500),
+        ));
         assert!(reg.snapshot().is_empty());
         assert!(reg.is_empty());
+        // …while a fresh one survives.
+        reg.register(entry("Live", [10, 0, 0, 2], 5500, 0));
+        assert_eq!(reg.len(), 1);
     }
 
     #[test]
-    fn refresh_extends_lifetime() {
-        let reg = Registry::new(Duration::from_millis(60));
-        reg.register(entry("Alive", [10, 0, 0, 1], 5500, 0));
-        std::thread::sleep(Duration::from_millis(35));
-        // Heartbeat again before expiry: the clock restarts.
-        reg.register(entry("Alive", [10, 0, 0, 1], 5500, 1));
-        std::thread::sleep(Duration::from_millis(35));
-        // 70ms since first registration, 35ms since refresh: still live.
+    fn refresh_restarts_the_ttl_clock() {
+        let reg = Registry::new(Duration::from_millis(50));
+        // Aging but still within TTL.
+        reg.register(aged_entry(
+            "Alive",
+            [10, 0, 0, 1],
+            5500,
+            0,
+            Duration::from_millis(40),
+        ));
         assert_eq!(reg.len(), 1);
+        // A fresh heartbeat replaces the stored timestamp with "now" — the
+        // TTL clock restarts, so the entry is young again, not near expiry.
+        reg.register(entry("Alive", [10, 0, 0, 1], 5500, 1));
+        let snap = reg.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].users_online, 1);
+        assert!(
+            snap[0].last_heartbeat.elapsed() < Duration::from_millis(30),
+            "refresh restarted the heartbeat clock"
+        );
     }
 }
