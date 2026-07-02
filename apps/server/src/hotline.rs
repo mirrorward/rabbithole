@@ -305,6 +305,19 @@ async fn serve_htxf(sock: TcpStream, shared: Arc<Shared>) -> Result<()> {
     // explicit shutdown drains the send buffer first. (`flush` alone does not
     // wait for delivery on a TCP stream.)
     wr.shutdown().await?;
+    // shutdown() alone is still not enough on Windows: closesocket right after
+    // shutdown(SD_SEND) can abort delivery of in-flight data. The documented
+    // pattern is shutdown -> keep receiving until the peer's FIN (read == 0) ->
+    // close, so drain the read half (bounded) before dropping the socket.
+    let mut sink = [0u8; 1024];
+    let drain = async {
+        while let Ok(n) = rd.read(&mut sink).await {
+            if n == 0 {
+                break;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), drain).await;
     Ok(())
 }
 
