@@ -140,6 +140,9 @@ enum SwarmAction {
     },
     /// Who has this file? Takes a hex blake3 root or a rabbit:// link.
     Find { target: String },
+    /// Fetch a file from the swarm (Bao-verified, block by block): try an
+    /// advertising peer first, fall back to the origin server.
+    Fetch { target: String, out: PathBuf },
     /// Withdraw adverts: hex roots, or nothing to withdraw everything.
     Unshare { roots: Vec<String> },
 }
@@ -871,11 +874,27 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
                     );
                 }
                 if !no_wait {
-                    // Adverts are session-scoped soft state: hold the session
-                    // open (re-announcing before the TTL lapses) until the
-                    // user stops serving.
+                    // Serve for real: a peer-wire endpoint seeds the shared
+                    // files, its contact card routes fetchers here, and the
+                    // session stays open (re-announcing before the TTL
+                    // lapses) until the user stops serving.
+                    let seeds = std::sync::Arc::new(rabbithole_swarm::SeedStore::new());
+                    for (e, f) in entries.iter().zip(&files) {
+                        seeds.add(e.root, f)?;
+                    }
+                    let server = rabbithole_swarm::PeerServer::start(
+                        "0.0.0.0:0".parse().expect("valid addr"),
+                        c.server.server_key,
+                        seeds,
+                    )
+                    .await?;
+                    c.swarm_contact(server.addr.port(), server.fingerprint.0)
+                        .await?;
                     if !json {
-                        eprintln!("serving — Ctrl-C to stop");
+                        eprintln!(
+                            "seeding on port {} — Ctrl-C to stop",
+                            server.addr.port()
+                        );
                     }
                     // Re-announce at ~2/3 of the granted TTL.
                     let period =
@@ -916,6 +935,60 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
                     if !list.server_has && list.sources.is_empty() {
                         println!("(no known sources)");
                     }
+                }
+            }
+            SwarmAction::Fetch { target, out } => {
+                let root = parse_swarm_target(&target)?;
+                let list = c.swarm_find(root).await?;
+                let ticket = c.swarm_ticket(root).await?;
+                // Try advertising peers first (verified block-by-block);
+                // the origin's transfer engine is the fallback.
+                let mut fetched = None;
+                for s in &list.sources {
+                    let (Some(endpoint), Some(fp)) = (&s.endpoint, s.cert_fp) else {
+                        continue;
+                    };
+                    match rabbithole_swarm::fetch_file(
+                        endpoint,
+                        fp,
+                        &ticket.token,
+                        root,
+                        s.size,
+                        &out,
+                    )
+                    .await
+                    {
+                        Ok(n) => {
+                            fetched = Some((n, format!("peer {}", s.screen_name)));
+                            break;
+                        }
+                        Err(e) => {
+                            if !json {
+                                eprintln!("peer {} failed ({e}); trying next", s.screen_name);
+                            }
+                        }
+                    }
+                }
+                let (n, via) = match fetched {
+                    Some(v) => v,
+                    None if list.server_has => {
+                        // No serving peer: search the library for a node
+                        // with this blob and pull it over the W4.2 engine.
+                        bail!(
+                            "no reachable peer serves {} — download it from the \
+                             library instead (`rabbit file get`)",
+                            hex::encode(root)
+                        );
+                    }
+                    None => bail!("no known sources for {}", hex::encode(root)),
+                };
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"bytes": n, "via": via, "out": out.display().to_string()})
+                    );
+                } else {
+                    println!("fetched {n} bytes via {via} → {}", out.display());
                 }
             }
             SwarmAction::Unshare { roots } => {

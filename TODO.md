@@ -97,7 +97,7 @@
 - [x] `AdvertiseFiles` (list-without-upload): metadata catalog, permission scopes, TTL soft state + re-announce — SWARM family (6) types 1-5, `SwarmCatalog` (TTL'd soft state, per-account cap `swarm_adverts_max`, session-scoped cleanup), gated by `SWARM_ADVERTISE` on the `swarm` resource; `rabbit swarm share/find/unshare`
 - [~] Coordinator: FindSources (scope-gated, reports origin-server fallback + source count as list-level rarity) done; per-chunk rarity annotation arrives with the peer wire/scheduler
 - [x] Server-signed capability tokens; peer-side verification — `rabbithole-swarm::CapToken` (ed25519 over `rhp-swarm-cap-v1`-separated claim {root, fetcher, expiry}), issued via `SourceTicketRequest` (FILE_DOWNLOAD-gated, 10 min TTL), verified against the hello-time server key; `PeerContact` cards (observed-IP + declared port + pinned cert fp) join `SourceList` entries
-- [ ] Peer wire over QUIC: Hello/Have/RequestRange/Cancel; Bao-verified responses
+- [x] Peer wire over QUIC: request/response with Bao-verified streams — `rabbithole-swarm::peer` (PeerServer on the rabbithole-net QUIC stack, one bi-stream per `PeerRequest{token, root, offset, len≤4MiB}`, responses are Bao streams at 16 KiB chunk groups verified block-by-block against the root; SeedStore precomputes outboards and refuses root-mismatched files; `rabbit swarm share` seeds / `rabbit swarm fetch` does find→ticket→fetch). Have-bitfields/Cancel arrive with partial seeding (`.rhstate`)
 - [ ] Multi-source scheduler: rarest-first, per-source speed assignment, endgame mode
 - [ ] Server chunk cache policies (none/LRU/mirror)
 - [ ] NAT: hole punching + server relay fallback; optional UPnP/NAT-PMP; "relay-only" privacy mode

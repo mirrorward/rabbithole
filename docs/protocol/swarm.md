@@ -1,10 +1,10 @@
 # RHP Swarm Family (6)
 
-Status: **Wave 5 in progress** — the Warren's coordinator surface:
-advertise (list-without-upload), find-sources, TTL soft state. The peer
-wire (Have/RequestRange with Bao proofs), capability tokens, and the
-multi-source scheduler land in later slices; manifests and `rabbit://`
-links live in the `rabbithole-swarm` crate.
+Status: **Wave 5 in progress** — the coordinator surface (advertise,
+find-sources, TTL soft state), capability tokens, and the Bao-verified
+peer wire are live; the multi-source scheduler and NAT traversal land in
+later slices. Manifests, `rabbit://` links, `CapToken`, and the peer
+wire itself live in the `rabbithole-swarm` crate.
 
 | type | name | direction | payload |
 |---|---|---|---|
@@ -73,6 +73,30 @@ key they learned at hello (no round trip), check the root matches what
 is being requested, and refuse expired tokens. Tickets are short-lived
 (10 minutes) — fetchers re-request rather than hoard. Issuance is gated
 by `FILE_DOWNLOAD`, since a ticket authorizes moving file bytes.
+
+## The peer wire
+
+A sharing peer runs a QUIC endpoint (same `rabbithole-net` stack,
+self-signed cert pinned via the contact card's fingerprint). One
+bi-stream per request:
+
+1. Fetcher writes a framed `PeerRequest { token, root, offset, len }`
+   (postcard, `len` ≤ 4 MiB) and closes its side.
+2. Peer verifies the capability (signature against its own server's
+   key, root match, expiry), then replies with a framed
+   `PeerResponseHeader { status, size }` followed by the **Bao stream**
+   for the requested ranges, rounded to 16 KiB chunk groups.
+3. The fetcher decodes the stream against the root: every block is
+   verified before a byte is accepted. A lying peer (wrong size, stale
+   bytes, truncation) produces a verification error, never bad data.
+   Seeds are validated at both ends — `SeedStore::add` refuses a file
+   that doesn't hash to its declared root, and the peer's encoder
+   re-validates against the outboard at serve time.
+
+Whole files loop 4 MiB range requests (`fetch_file`). Bytes never
+transit the origin server. `rabbit swarm share` seeds exactly this way;
+`rabbit swarm fetch <root|link> <out>` does find → ticket → fetch with
+per-peer fallback.
 
 ## Transport decision (the spike)
 

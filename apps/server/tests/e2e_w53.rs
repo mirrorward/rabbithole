@@ -149,6 +149,82 @@ async fn guests_cannot_get_tickets_or_register_contacts() {
 }
 
 #[tokio::test]
+async fn full_peer_to_peer_fetch_via_the_coordinator() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    for n in ["alice", "bob"] {
+        burrow
+            .shared
+            .auth
+            .create_account(n, "pw-pw-pw", Role::User)
+            .await
+            .unwrap();
+    }
+
+    // Alice seeds a ~300 KiB file on a real peer-wire endpoint, registers
+    // her contact card, and advertises the root. Bytes never touch the
+    // server.
+    let body: Vec<u8> = (0..300 * 1024 + 55).map(|i| (i % 251) as u8).collect();
+    let src = work.path().join("seed.bin");
+    std::fs::write(&src, &body).unwrap();
+    let root = *blake3::hash(&body).as_bytes();
+
+    let mut alice = login(&burrow, "alice").await;
+    let seeds = std::sync::Arc::new(rabbithole_swarm::SeedStore::new());
+    seeds.add(root, &src).unwrap();
+    let peer = rabbithole_swarm::PeerServer::start(
+        "127.0.0.1:0".parse().unwrap(),
+        alice.server.server_key,
+        seeds,
+    )
+    .await
+    .unwrap();
+    alice
+        .swarm_advertise(
+            vec![AdvertEntry::new(
+                root,
+                body.len() as u64,
+                "seed.bin",
+                "application/octet-stream",
+            )],
+            0,
+        )
+        .await
+        .unwrap();
+    alice
+        .swarm_contact(peer.addr.port(), peer.fingerprint.0)
+        .await
+        .unwrap();
+
+    // Bob: find → ticket → fetch straight from alice's peer, verified
+    // block-by-block against the root.
+    let mut bob = login(&burrow, "bob").await;
+    let list = bob.swarm_find(root).await.unwrap();
+    let source = &list.sources[0];
+    let endpoint = source.endpoint.clone().expect("alice registered contact");
+    let ticket = bob.swarm_ticket(root).await.unwrap();
+
+    let dest = work.path().join("fetched.bin");
+    let n = rabbithole_swarm::fetch_file(
+        &endpoint,
+        source.cert_fp.unwrap(),
+        &ticket.token,
+        root,
+        source.size,
+        &dest,
+    )
+    .await
+    .unwrap();
+    assert_eq!(n, body.len() as u64);
+    assert_eq!(std::fs::read(&dest).unwrap(), body, "P2P bytes verified");
+
+    peer.stop();
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
 async fn contact_card_dies_with_the_session() {
     let work = tempfile::tempdir().unwrap();
     let burrow = Burrow::start(test_config(&work.path().join("srv")))
