@@ -34,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]
@@ -134,6 +134,8 @@ parking_lot = "0.12"
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.29"
 crossterm = "0.28"
+leptos = { version = "0.6", features = ["csr"] }
+leptos_router = { version = "0.6", features = ["csr"] }
 
 [profile.release]
 lto = "thin"

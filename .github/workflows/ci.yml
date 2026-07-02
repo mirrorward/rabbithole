@@ -45,7 +45,7 @@ jobs:
       - run: cargo test --workspace
 
   wasm:
-    name: wasm (proto + core)
+    name: wasm (proto + core + ui-web)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,3 +56,5 @@ jobs:
       # These crates are compiled into the browser client; they must stay
       # wasm-clean (no tokio/net/fs in their default features).
       - run: cargo check -p rabbithole-proto -p rabbithole-core --target wasm32-unknown-unknown
+      # The Leptos SPA must also build for the browser.
+      - run: cargo check -p rabbithole-ui-web --target wasm32-unknown-unknown

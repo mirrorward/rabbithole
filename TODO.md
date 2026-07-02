@@ -137,7 +137,7 @@
 ## Wave 8 — Web & desktop GUI
 *Depends on: W2–W4 (W5 for transfer UI); parallel with W6/W7*
 
-- [ ] `ui-web` Leptos SPA: auth, welcome, rooms, DMs, boards, member directory, profiles, keyword bar
+- [~] `ui-web` Leptos SPA foundation — `rabbithole-ui-web` (Leptos 0.6 CSR: `App`/router, Login, Lobby chat + WhoList, ThemeToggle, StatusBar; DOM-free `UiState`/`apply` reducer + `UiClient` seam with a `MockClient`; wasm-check in CI; 12 host tests). Real wasm WebSocket transport + boards/DMs/directory/profiles/keyword views are the next slices
 - [ ] Files UI: browse, upload/download (WS + fetch), transfer queue
 - [ ] Art rendering (canvas)
 - [ ] Design tokens; **light/dark mode** (OS-follow + manual override) across all rich clients

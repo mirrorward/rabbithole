@@ -8,3 +8,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+leptos.workspace = true
+leptos_router.workspace = true
+# rabbithole-core WITHOUT the "native" feature: this crate must stay
+# wasm-clean (no tokio / net / store-client pulled in).
+rabbithole-core.workspace = true
+rabbithole-proto.workspace = true
