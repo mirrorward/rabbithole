@@ -41,6 +41,8 @@ pub struct ServerConfig {
     /// Size caps for profile art blobs, in bytes.
     pub avatar_max_bytes: usize,
     pub banner_max_bytes: usize,
+    /// Per-account file-library upload quota in bytes (0 = unlimited).
+    pub upload_quota_bytes: u64,
     /// Welcome-screen featured block (title on first line, body after).
     pub welcome_featured: String,
     /// Welcome-screen one-line ticker.
@@ -69,6 +71,7 @@ impl Default for ServerConfig {
             persona_max: 5,
             avatar_max_bytes: 256 * 1024,
             banner_max_bytes: 1024 * 1024,
+            upload_quota_bytes: 0,
             welcome_featured: String::new(),
             welcome_ticker: String::new(),
             theme_accent: String::new(),
@@ -154,6 +157,7 @@ impl ServerConfig {
             "persona_max" => self.persona_max.to_string(),
             "avatar_max_bytes" => self.avatar_max_bytes.to_string(),
             "banner_max_bytes" => self.banner_max_bytes.to_string(),
+            "upload_quota_bytes" => self.upload_quota_bytes.to_string(),
             "welcome_featured" => self.welcome_featured.clone(),
             "welcome_ticker" => self.welcome_ticker.clone(),
             "theme_accent" => self.theme_accent.clone(),
@@ -245,6 +249,13 @@ impl ServerConfig {
             }
             "banner_max_bytes" => {
                 self.banner_max_bytes = value.parse().map_err(|_| ConfigError::BadValue {
+                    key: key.into(),
+                    detail: value.into(),
+                })?;
+                Ok(true)
+            }
+            "upload_quota_bytes" => {
+                self.upload_quota_bytes = value.parse().map_err(|_| ConfigError::BadValue {
                     key: key.into(),
                     detail: value.into(),
                 })?;

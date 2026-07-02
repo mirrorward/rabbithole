@@ -304,6 +304,19 @@ pub async fn handle(
                 if req.name.trim().is_empty() || req.name.contains('/') {
                     fail!(ErrorCode::BadRequest);
                 }
+                // Per-account storage quota (0 = unlimited).
+                let quota = shared.config.read().upload_quota_bytes;
+                if quota > 0 {
+                    let used = shared
+                        .files
+                        .uploaded_bytes(ctx.account_id)
+                        .await
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    if used.saturating_add(req.size) > quota {
+                        fail!(ErrorCode::TooLarge);
+                    }
+                }
                 let id = shared.transfers.next_id();
                 let token = mint_token(&shared.server_signing_seed, id);
                 let staging = staging_path(shared, id);

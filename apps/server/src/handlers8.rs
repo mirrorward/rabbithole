@@ -201,6 +201,20 @@ pub async fn handle(
         if req.bytes.len() > MAX_INLINE_UPLOAD {
             fail!(ErrorCode::TooLarge);
         }
+        // Per-account storage quota (0 = unlimited) — enforced here too so it
+        // can't be sidestepped via small inline uploads.
+        let quota = shared.config.read().upload_quota_bytes;
+        if quota > 0 {
+            let used = shared
+                .files
+                .uploaded_bytes(ctx.account_id)
+                .await
+                .unwrap_or(0)
+                .max(0) as u64;
+            if used.saturating_add(req.bytes.len() as u64) > quota {
+                fail!(ErrorCode::TooLarge);
+            }
+        }
         let blobs = shared.blobs.clone();
         let bytes = req.bytes.clone();
         let size = bytes.len() as i64;

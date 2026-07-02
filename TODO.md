@@ -85,8 +85,8 @@
 - [x] Background file indexer → instant search (projection-backed substring search; FTS5 later)
 - [x] Transfer engine: ticketed resumable transfer with dedicated QUIC bulk streams (WS ranged-chunk fallback), whole-file blake3 verify; per-chunk Bao verify shares the W5 swarm crate
 - [x] Folder transfers (pipelined, no per-item lockstep) — one FolderManifest round trip, then independent per-file transfers (`rabbit file getdir`)
-- [ ] Quotas + per-class rate policy
-- [ ] Persistent client transfer queue: priorities, bandwidth caps, schedules, auto-resume across restarts
+- [~] Quotas + per-class rate policy — per-account upload storage quota enforced at ticket + inline upload (`upload_quota_bytes`); per-class bandwidth/concurrency throttling still to do
+- [~] Persistent client transfer queue: priorities + auto-resume across restarts done (store-client `transfer_queue`); the queue driver (bandwidth caps, schedule windows) + CLI `queue` commands still to do
 - [x] CLI file browse + transfer UX (`rabbit file areas/ls/put/get/search/rate/…`); TUI + big-file transfers with W4.2
 
 ## Wave 5 — Swarm ("the warren")

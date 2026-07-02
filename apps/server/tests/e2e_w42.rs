@@ -231,6 +231,54 @@ async fn folder_download_pipelines_a_subtree() {
 }
 
 #[tokio::test]
+async fn upload_quota_is_enforced() {
+    let work = tempfile::tempdir().unwrap();
+    let cfg = ServerConfig {
+        upload_quota_bytes: 400 * 1024, // room for one 300 KiB file, not two
+        ..test_config(&work.path().join("srv"))
+    };
+    let burrow = Burrow::start(cfg).await.unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("alice", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    // Alice needs an area to upload into; make her area via an admin.
+    burrow
+        .shared
+        .auth
+        .create_account("admin", "pw-pw-pw", Role::Admin)
+        .await
+        .unwrap();
+    login(&burrow, "admin")
+        .await
+        .area_create("pub", "Public", "")
+        .await
+        .unwrap();
+
+    let mut alice = login(&burrow, "alice").await;
+    let a = work.path().join("a.bin");
+    std::fs::write(&a, payload(300 * 1024)).unwrap();
+    // First upload fits under the quota.
+    alice
+        .transfer_upload("pub", None, "a.bin", &a, "application/octet-stream", "")
+        .await
+        .unwrap();
+    // Second upload would exceed it — refused at ticket issue.
+    let b = work.path().join("b.bin");
+    std::fs::write(&b, payload(300 * 1024)).unwrap();
+    assert!(matches!(
+        alice
+            .transfer_upload("pub", None, "b.bin", &b, "application/octet-stream", "")
+            .await,
+        Err(ClientError::Refused(ErrorCode::TooLarge))
+    ));
+
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
 async fn upload_requires_permission_and_verifies_hash() {
     let work = tempfile::tempdir().unwrap();
     let burrow = Burrow::start(test_config(&work.path().join("srv")))

@@ -343,6 +343,11 @@ impl FileService {
             .ok_or(FileError::NoSuchNode)
     }
 
+    /// Total bytes an account has uploaded (for storage-quota checks).
+    pub async fn uploaded_bytes(&self, account_id: i64) -> Result<i64, FileError> {
+        Ok(self.repo().uploaded_bytes(account_id).await?)
+    }
+
     pub async fn search(
         &self,
         area_slug: Option<&str>,

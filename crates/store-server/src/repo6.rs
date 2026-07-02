@@ -324,6 +324,19 @@ impl FilesRepo<'_> {
         Ok(())
     }
 
+    /// Total bytes an account has uploaded across all libraries (files only)
+    /// — the figure a storage quota is checked against.
+    pub async fn uploaded_bytes(&self, account_id: i64) -> Result<i64, StoreError> {
+        Ok(sqlx::query(
+            "SELECT COALESCE(SUM(size), 0) AS total FROM file_nodes
+             WHERE kind = 1 AND uploader_id = ?",
+        )
+        .bind(account_id)
+        .fetch_one(self.0)
+        .await?
+        .get("total"))
+    }
+
     /// Search files (kind = 1) by name/comment/uploader substring, optionally
     /// scoped to one area, newest first.
     pub async fn search(
