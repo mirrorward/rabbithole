@@ -9,6 +9,7 @@ pub mod handlers3;
 pub mod handlers4;
 pub mod handlers5;
 pub mod handlers6;
+pub mod handlers7;
 pub mod identity_store;
 pub mod session;
 
@@ -23,8 +24,8 @@ use rabbithole_net::tls::CertFingerprint;
 use rabbithole_net::ws::WsListener;
 use rabbithole_net::Listener;
 use rabbithole_server_core::{
-    AuthService, BoardService, ChatService, ClassCache, EventBus, LiveConfig, PermissionEvaluator,
-    PresenceRegistry, PushLog, RegistrationMode, ServerConfig, ServerEvent,
+    AuthService, BoardService, ChatService, ClassCache, DedupStore, EventBus, LiveConfig,
+    PermissionEvaluator, PresenceRegistry, PushLog, RegistrationMode, ServerConfig, ServerEvent,
 };
 use rabbithole_store_server::SqlitePool;
 
@@ -48,6 +49,9 @@ pub struct Shared {
     /// Ed25519 signing seed for theme bundles and (later) federation.
     pub server_signing_seed: [u8; 32],
     pub fingerprint_hex: String,
+    /// The shared dupe/seen gate — prevents reprocessing and rebroadcast
+    /// loops once federation (W9) and syndication (W10) come online.
+    pub dedup: DedupStore,
     next_session: AtomicU64,
 }
 
@@ -125,6 +129,7 @@ impl Burrow {
             server_key: identity.signing.public().0,
             server_signing_seed: identity.signing.seed(),
             fingerprint_hex: fingerprint.to_hex(),
+            dedup: DedupStore::with_defaults(),
             next_session: AtomicU64::new(1),
         });
 

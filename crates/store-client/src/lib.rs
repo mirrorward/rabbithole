@@ -10,6 +10,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod boards;
+
 use std::path::Path;
 
 pub use rusqlite::Connection;
@@ -28,6 +30,52 @@ const MIGRATIONS: &[&str] = &[
          value TEXT NOT NULL
      ) STRICT;
      INSERT INTO client_meta (key, value) VALUES ('schema_epoch', 'wave-0');",
+    // 0002: offline board cache + reply outbox (Wave 3.2). Posts are keyed
+    // by their 32-byte content id so a delta download can merge idempotently;
+    // the outbox holds replies composed offline until they can be sent.
+    "CREATE TABLE cached_boards (
+         slug        TEXT PRIMARY KEY NOT NULL,
+         title       TEXT NOT NULL,
+         description TEXT NOT NULL DEFAULT '',
+         kind        INTEGER NOT NULL,
+         parent_slug TEXT,
+         unread      INTEGER NOT NULL DEFAULT 0,
+         synced_at   INTEGER NOT NULL DEFAULT 0
+     ) STRICT;
+
+     CREATE TABLE cached_posts (
+         id           BLOB PRIMARY KEY NOT NULL,
+         board        TEXT NOT NULL,
+         root         BLOB,
+         parent       BLOB,
+         author       TEXT NOT NULL,
+         subject      TEXT NOT NULL,
+         body         TEXT NOT NULL,
+         mime         TEXT NOT NULL,
+         created_at   INTEGER NOT NULL,
+         edited       INTEGER NOT NULL DEFAULT 0,
+         tombstoned   INTEGER NOT NULL DEFAULT 0
+     ) STRICT;
+     CREATE INDEX cached_posts_board ON cached_posts(board, created_at);
+     CREATE INDEX cached_posts_root  ON cached_posts(root, created_at);
+
+     CREATE TABLE board_read_marks (
+         board    TEXT PRIMARY KEY NOT NULL,
+         up_to_ms INTEGER NOT NULL
+     ) STRICT;
+
+     CREATE TABLE board_outbox (
+         id            INTEGER PRIMARY KEY AUTOINCREMENT,
+         board         TEXT NOT NULL,
+         parent        BLOB,
+         subject       TEXT NOT NULL,
+         body          TEXT NOT NULL,
+         mime          TEXT NOT NULL DEFAULT 'text/plain',
+         created_at    INTEGER NOT NULL,
+         sent          INTEGER NOT NULL DEFAULT 0,
+         sent_event_id BLOB
+     ) STRICT;
+     CREATE INDEX board_outbox_pending ON board_outbox(sent, id);",
 ];
 
 /// Open (creating if needed) the local store and apply pending migrations.

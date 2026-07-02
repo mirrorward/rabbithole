@@ -84,6 +84,12 @@ pub enum ServerEvent {
         id: [u8; 32],
         root: Option<[u8; 32]>,
     },
+    /// A wish changed status; pushed to the requester's account. Carries the
+    /// full view so push projection stays synchronous (no DB round-trip).
+    WishUpdated {
+        to_account: i64,
+        wish: rabbithole_proto::wish::WishView,
+    },
     /// The server is shutting down; surfaces should drain gracefully.
     Shutdown,
 }

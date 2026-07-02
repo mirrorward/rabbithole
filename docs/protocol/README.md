@@ -12,7 +12,12 @@ that is a bug in one of them.
 | [`session.md`](session.md) | Wave 1 | Hello, auth (password/guest/resume), keepalive, welcome/agreement, push replay |
 | [`presence.md`](presence.md) | Wave 1 | Who-list, join/leave pushes |
 | [`chat.md`](chat.md) | Wave 1 | Lobby chat, history, chat pushes |
-| families/*.md | future waves | One doc per family as it lands (dm, board, file, swarm, admin, federation, radio, wishing-well) |
+| [`admin.md`](admin.md) | Wave 2 | Remote admin family (capability-gated, audited) |
+| [`dm.md`](dm.md) | Wave 2 | Direct messages: threads, receipts, attachments, offline queue |
+| [`welcome.md`](welcome.md) | Wave 2 | Welcome screen composer, signed theme bundle, keyword `/go` |
+| [`board.md`](board.md) | Wave 3 | Message bases: board tree, signed post events, threading, read pointers |
+| [`wish.md`](wish.md) | Wave 3 | The Wishing Well: request board with voting, claim, fulfillment |
+| families/*.md | future waves | One doc per family as it lands (file, swarm, federation, radio) |
 
 ## Ground rules
 

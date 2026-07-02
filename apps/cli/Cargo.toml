@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 rabbithole-proto.workspace = true
 rabbithole-core = { workspace = true, features = ["native"] }
+rabbithole-store-client.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

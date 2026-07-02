@@ -5,7 +5,7 @@
 > dependency edges shown in PLAN.md §15. ⛔ = do not start until PLAN.md is
 > reviewed and approved by the project owner.
 
-**Status: Wave 2 complete — Wave 3 (message bases & offline) is next.**
+**Status: Wave 3 complete — Wave 4 (file libraries & transfers) is next.**
 
 ---
 
@@ -68,10 +68,10 @@
 - [x] Threading (parent/root), markdown/plain/ANSI bodies, edit-as-event, tombstones
 - [x] Retention/auto-archive policy (KDX-style)
 - [x] Per-user read pointers; unread counts surfaced (welcome, keyword bar)
-- [ ] Client offline store: board subscribe, batch delta download, offline read/reply, outbox sync on reconnect
-- [ ] Request system ("wishing well"): CRUD, voting, claim → fulfilled linkage, notifications
-- [ ] Shared dupe/seen subsystem (time-windowed, multi-ID-form) + tests
-- [x] CLI/TUI board reading + posting
+- [x] Client offline store: board cache, batch delta download (content-id merge), offline read/reply, outbox sync on reconnect
+- [x] Request system ("wishing well"): CRUD, voting, claim → fulfilled linkage, requester notifications
+- [x] Shared dupe/seen subsystem (time-windowed, multi-ID-form) + tests
+- [x] CLI/TUI board reading + posting; `rabbit sync`/`read`/`reply`/`wish`
 
 ## Wave 4 — File libraries & transfers
 *Depends on: W3*

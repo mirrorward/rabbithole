@@ -560,6 +560,57 @@ impl Client {
             .await
     }
 
+    // ---- Wave 3.2: the Wishing Well ---------------------------------------
+
+    pub async fn wishes(
+        &mut self,
+        status: Option<u8>,
+        limit: u32,
+    ) -> Result<Vec<rabbithole_proto::wish::WishView>, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::wish::WishList>(
+                &rabbithole_proto::wish::WishListRequest::new(status, limit),
+            )
+            .await?
+            .wishes)
+    }
+
+    pub async fn wish_create(
+        &mut self,
+        kind: u8,
+        title: &str,
+        details: &str,
+    ) -> Result<rabbithole_proto::wish::WishView, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::wish::WishReply>(
+                &rabbithole_proto::wish::WishCreate::new(kind, title, details),
+            )
+            .await?
+            .wish)
+    }
+
+    pub async fn wish_vote(
+        &mut self,
+        id: i64,
+    ) -> Result<rabbithole_proto::wish::WishView, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::wish::WishReply>(
+                &rabbithole_proto::wish::WishVote::new(id),
+            )
+            .await?
+            .wish)
+    }
+
+    pub async fn wish_set_status(
+        &mut self,
+        req: &rabbithole_proto::wish::WishSetStatus,
+    ) -> Result<rabbithole_proto::wish::WishView, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::wish::WishReply>(req)
+            .await?
+            .wish)
+    }
+
     pub async fn totp_enroll(
         &mut self,
     ) -> Result<rabbithole_proto::persona::TotpEnrollInfo, ClientError> {

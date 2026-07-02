@@ -1783,6 +1783,7 @@ dependencies = [
  "hex",
  "rabbithole-core",
  "rabbithole-proto",
+ "rabbithole-store-client",
  "serde",
  "serde_json",
  "tokio",
@@ -1931,6 +1932,7 @@ dependencies = [
 name = "rabbithole-store-client"
 version = "0.1.0"
 dependencies = [
+ "rabbithole-proto",
  "rusqlite",
  "tempfile",
  "thiserror 2.0.18",
