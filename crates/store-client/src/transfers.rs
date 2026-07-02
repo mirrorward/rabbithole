@@ -37,6 +37,10 @@ pub struct TransferItem {
     pub priority: i64,
     pub state: u8,
     pub error: Option<String>,
+    /// Upload MIME type (empty for downloads).
+    pub mime: String,
+    /// Upload comment (empty for downloads).
+    pub comment: String,
 }
 
 /// A new transfer to enqueue.
@@ -51,6 +55,8 @@ pub struct NewTransfer {
     pub local_path: String,
     pub size: i64,
     pub priority: i64,
+    pub mime: String,
+    pub comment: String,
 }
 
 fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<TransferItem> {
@@ -68,11 +74,13 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<TransferItem> {
         priority: r.get("priority")?,
         state: r.get::<_, i64>("state")? as u8,
         error: r.get("error")?,
+        mime: r.get("mime")?,
+        comment: r.get("comment")?,
     })
 }
 
 const COLS: &str = "id, direction, endpoint, node_id, area, parent, name, local_path, \
-                    size, bytes_done, priority, state, error";
+                    size, bytes_done, priority, state, error, mime, comment";
 
 /// The transfer queue, scoped to a client store connection.
 pub struct TransferQueue<'a>(pub &'a Connection);
@@ -83,8 +91,9 @@ impl TransferQueue<'_> {
         self.0.execute(
             "INSERT INTO transfer_queue
                  (direction, endpoint, node_id, area, parent, name, local_path,
-                  size, bytes_done, priority, state, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, 0, ?10, ?10)",
+                  size, bytes_done, priority, state, mime, comment,
+                  created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, 0, ?11, ?12, ?10, ?10)",
             params![
                 t.direction as i64,
                 t.endpoint,
@@ -96,6 +105,8 @@ impl TransferQueue<'_> {
                 t.size,
                 t.priority,
                 now,
+                t.mime,
+                t.comment,
             ],
         )?;
         Ok(self.0.last_insert_rowid())
@@ -261,5 +272,28 @@ mod tests {
         let item = q.get(id).unwrap().unwrap();
         assert_eq!(item.state, FAILED);
         assert_eq!(item.error.as_deref(), Some("connection refused"));
+    }
+
+    #[test]
+    fn upload_metadata_roundtrips() {
+        let conn = open_in_memory().unwrap();
+        let q = TransferQueue(&conn);
+        let t = NewTransfer {
+            direction: DIR_UPLOAD,
+            endpoint: "h".into(),
+            area: Some("warez".into()),
+            name: Some("x.bin".into()),
+            local_path: "/x.bin".into(),
+            size: 10,
+            mime: "application/octet-stream".into(),
+            comment: "a note".into(),
+            ..Default::default()
+        };
+        let id = q.enqueue(&t, 1).unwrap();
+        let got = q.get(id).unwrap().unwrap();
+        assert_eq!(got.direction, DIR_UPLOAD);
+        assert_eq!(got.area.as_deref(), Some("warez"));
+        assert_eq!(got.mime, "application/octet-stream");
+        assert_eq!(got.comment, "a note");
     }
 }

@@ -20,6 +20,8 @@
 pub mod api;
 #[cfg(feature = "native")]
 pub mod client;
+#[cfg(feature = "native")]
+pub mod queue;
 pub mod theme;
 
 pub use api::{Command, Event};

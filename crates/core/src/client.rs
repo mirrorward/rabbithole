@@ -45,6 +45,20 @@ pub struct Client {
     /// Highest push sequence seen (the resume replay cursor).
     pub replay_cursor: u64,
     pub server: HelloAck,
+    /// Client-side transfer bandwidth cap in bytes/sec (`None` = unlimited).
+    rate_limit: Option<u64>,
+}
+
+/// Bandwidth cap: sleep to hold the average transfer rate at or under `rate`
+/// bytes/sec. `None`/0 disables it. A per-chunk sleep is a lower bound on the
+/// achieved rate, which is the safe direction for a cap.
+async fn throttle(rate: Option<u64>, bytes: usize) {
+    if let Some(rate) = rate {
+        if rate > 0 && bytes > 0 {
+            let secs = bytes as f64 / rate as f64;
+            tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
+        }
+    }
 }
 
 impl Client {
@@ -77,6 +91,7 @@ impl Client {
             next_id: 1,
             pushes: VecDeque::new(),
             replay_cursor: 0,
+            rate_limit: None,
             server: HelloAck::new(
                 rabbithole_proto::PROTOCOL_VERSION,
                 CapabilitySet::default(),
@@ -768,6 +783,13 @@ impl Client {
 
     // ---- Wave 4.2: bulk transfers -----------------------------------------
 
+    /// Cap transfer bandwidth to `bytes_per_sec` (`None`/0 = unlimited). The
+    /// queue driver uses this to throttle background transfers; it applies to
+    /// the ranged-chunk and dedicated-stream paths alike.
+    pub fn set_rate_limit(&mut self, bytes_per_sec: Option<u64>) {
+        self.rate_limit = bytes_per_sec.filter(|&r| r > 0);
+    }
+
     /// Chunk size for ranged transfers (kept under the 1 MiB control cap).
     const TRANSFER_CHUNK: usize = 256 * 1024;
 
@@ -803,6 +825,7 @@ impl Client {
         let ticket: rabbithole_proto::transfer::TransferTicket = self
             .request(&rabbithole_proto::transfer::TransferOpen::download(node_id))
             .await?;
+        let rate = self.rate_limit;
         // Resume from the existing partial (clamped to the real size).
         let mut have = std::fs::metadata(dest)
             .map(|m| m.len())
@@ -836,6 +859,7 @@ impl Client {
                 }
                 file.write_all(&buf[..n])?;
                 have += n as u64;
+                throttle(rate, n).await;
             }
         } else {
             // WebSocket / no-multiplex: ranged chunks on the control stream.
@@ -851,8 +875,10 @@ impl Client {
                 if chunk.bytes.is_empty() {
                     break;
                 }
+                let n = chunk.bytes.len();
                 file.write_all(&chunk.bytes)?;
-                have += chunk.bytes.len() as u64;
+                have += n as u64;
+                throttle(rate, n).await;
                 if chunk.last {
                     break;
                 }
@@ -883,6 +909,7 @@ impl Client {
         let open = rabbithole_proto::transfer::TransferOpen::upload(area, parent, name, size, root)
             .with_meta(mime, comment);
         let ticket: rabbithole_proto::transfer::TransferTicket = self.request(&open).await?;
+        let rate = self.rate_limit;
 
         let mut have = ticket.server_have.min(size);
         let mut file = std::fs::File::open(src)?;
@@ -916,6 +943,7 @@ impl Client {
                 }
                 send.write_all(&buf[..filled]).await?;
                 have += filled as u64;
+                throttle(rate, filled).await;
             }
             send.shutdown().await?; // FIN → server reads to EOF
             let mut ack = [0u8; 1];
@@ -945,6 +973,7 @@ impl Client {
                 ))
                 .await?;
                 have += filled as u64;
+                throttle(rate, filled).await;
             }
         }
         let reply: rabbithole_proto::filelib::NodeReply = self

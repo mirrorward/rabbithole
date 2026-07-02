@@ -16,12 +16,18 @@ thiserror.workspace = true
 
 # native (non-wasm) session driver
 rabbithole-net = { workspace = true, optional = true }
+rabbithole-store-client = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
 
 [features]
 default = []
-native = ["dep:rabbithole-net", "dep:tokio", "dep:blake3"]
+native = [
+    "dep:rabbithole-net",
+    "dep:rabbithole-store-client",
+    "dep:tokio",
+    "dep:blake3",
+]
 
 [dev-dependencies]
 rabbithole-identity.workspace = true

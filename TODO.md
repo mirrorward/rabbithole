@@ -5,7 +5,7 @@
 > dependency edges shown in PLAN.md §15. ⛔ = do not start until PLAN.md is
 > reviewed and approved by the project owner.
 
-**Status: Wave 4.2 (transfer engine) complete — Wave 4.3 (quotas/rate policy, persistent client queue) is next.**
+**Status: Wave 4 complete (file libraries, transfer engine, quotas/rate policy, persistent client queue) — Wave 5 (swarm / "the warren") is next.**
 
 > W4.2: transfers are resumable + integrity-checked, folder-pipelined, and
 > move bytes over dedicated QUIC bulk streams (off the control channel) with
@@ -85,8 +85,8 @@
 - [x] Background file indexer → instant search (projection-backed substring search; FTS5 later)
 - [x] Transfer engine: ticketed resumable transfer with dedicated QUIC bulk streams (WS ranged-chunk fallback), whole-file blake3 verify; per-chunk Bao verify shares the W5 swarm crate
 - [x] Folder transfers (pipelined, no per-item lockstep) — one FolderManifest round trip, then independent per-file transfers (`rabbit file getdir`)
-- [~] Quotas + per-class rate policy — per-account upload storage quota enforced at ticket + inline upload (`upload_quota_bytes`); per-class bandwidth/concurrency throttling still to do
-- [~] Persistent client transfer queue: priorities + auto-resume across restarts done (store-client `transfer_queue`); the queue driver (bandwidth caps, schedule windows) + CLI `queue` commands still to do
+- [x] Quotas + rate policy — per-account upload storage quota (`upload_quota_bytes`) at ticket + inline upload; per-account transfer **concurrency cap** (`max_concurrent_transfers`, refused with `RateLimited`) with session-scoped ticket cleanup; per-transfer **bandwidth cap** (`transfer_rate_bytes_per_sec`) on both download paths (per-class overrides deferred)
+- [x] Persistent client transfer queue: priorities + auto-resume across restarts (store-client `transfer_queue`); queue driver (`rabbithole_core::queue::drain`, bandwidth cap via `Client::set_rate_limit`) + CLI `rabbit queue get/put/list/run/pause/resume/prio/rm/clear`
 - [x] CLI file browse + transfer UX (`rabbit file areas/ls/put/get/search/rate/…`); TUI + big-file transfers with W4.2
 
 ## Wave 5 — Swarm ("the warren")

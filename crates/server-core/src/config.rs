@@ -43,6 +43,10 @@ pub struct ServerConfig {
     pub banner_max_bytes: usize,
     /// Per-account file-library upload quota in bytes (0 = unlimited).
     pub upload_quota_bytes: u64,
+    /// Max simultaneous in-flight transfers per account (0 = unlimited).
+    pub max_concurrent_transfers: u32,
+    /// Per-transfer download bandwidth cap in bytes/sec (0 = unlimited).
+    pub transfer_rate_bytes_per_sec: u64,
     /// Welcome-screen featured block (title on first line, body after).
     pub welcome_featured: String,
     /// Welcome-screen one-line ticker.
@@ -72,6 +76,8 @@ impl Default for ServerConfig {
             avatar_max_bytes: 256 * 1024,
             banner_max_bytes: 1024 * 1024,
             upload_quota_bytes: 0,
+            max_concurrent_transfers: 0,
+            transfer_rate_bytes_per_sec: 0,
             welcome_featured: String::new(),
             welcome_ticker: String::new(),
             theme_accent: String::new(),
@@ -158,6 +164,8 @@ impl ServerConfig {
             "avatar_max_bytes" => self.avatar_max_bytes.to_string(),
             "banner_max_bytes" => self.banner_max_bytes.to_string(),
             "upload_quota_bytes" => self.upload_quota_bytes.to_string(),
+            "max_concurrent_transfers" => self.max_concurrent_transfers.to_string(),
+            "transfer_rate_bytes_per_sec" => self.transfer_rate_bytes_per_sec.to_string(),
             "welcome_featured" => self.welcome_featured.clone(),
             "welcome_ticker" => self.welcome_ticker.clone(),
             "theme_accent" => self.theme_accent.clone(),
@@ -259,6 +267,22 @@ impl ServerConfig {
                     key: key.into(),
                     detail: value.into(),
                 })?;
+                Ok(true)
+            }
+            "max_concurrent_transfers" => {
+                self.max_concurrent_transfers =
+                    value.parse().map_err(|_| ConfigError::BadValue {
+                        key: key.into(),
+                        detail: value.into(),
+                    })?;
+                Ok(true)
+            }
+            "transfer_rate_bytes_per_sec" => {
+                self.transfer_rate_bytes_per_sec =
+                    value.parse().map_err(|_| ConfigError::BadValue {
+                        key: key.into(),
+                        detail: value.into(),
+                    })?;
                 Ok(true)
             }
             "quic_addr" => {

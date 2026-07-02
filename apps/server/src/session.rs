@@ -312,6 +312,11 @@ pub async fn run_session(
     if let Some(task) = bulk_task {
         task.abort();
     }
+    // Retire any transfer tickets this session left open (abandoned downloads
+    // or half-finished uploads) and delete their staging files.
+    for path in shared.transfers.close_session(session_id) {
+        let _ = tokio::fs::remove_file(path).await;
+    }
     shared.chat.session_closed(session_id);
     shared.presence.leave(session_id);
     conn.close().await;

@@ -110,6 +110,12 @@ enum Cmd {
         #[command(subcommand)]
         action: FileAction,
     },
+    /// Background transfer queue — enqueue, list, and run resumable
+    /// downloads/uploads (survives restart, priority-ordered).
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -164,6 +170,47 @@ enum FileAction {
         #[arg(long)]
         area: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum QueueAction {
+    /// Queue a download of a file node by id.
+    Get {
+        id: i64,
+        local: PathBuf,
+        /// Higher runs sooner.
+        #[arg(long, default_value_t = 0)]
+        priority: i64,
+    },
+    /// Queue an upload of a local file.
+    Put {
+        area: String,
+        local: PathBuf,
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(long)]
+        comment: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        priority: i64,
+    },
+    /// List queued transfers.
+    List,
+    /// Run the queue until it drains (highest priority first).
+    Run {
+        /// Cap bandwidth in bytes/sec (0 = unlimited).
+        #[arg(long, default_value_t = 0)]
+        rate: u64,
+    },
+    /// Pause a transfer (skipped by `run`).
+    Pause { id: i64 },
+    /// Re-queue a paused or failed transfer.
+    Resume { id: i64 },
+    /// Change a transfer's priority.
+    Prio { id: i64, priority: i64 },
+    /// Remove a transfer from the queue.
+    Rm { id: i64 },
+    /// Drop completed transfers from the queue.
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -522,6 +569,7 @@ async fn main() -> Result<()> {
         } => cmd_reply(cli.json, board, parent, text.join(" ")).await,
         Cmd::Wish { action } => cmd_wish(cli.json, action).await,
         Cmd::File { action } => cmd_file(cli.json, action).await,
+        Cmd::Queue { action } => cmd_queue(cli.json, action).await,
     }
 }
 
@@ -725,6 +773,179 @@ fn mime_guess_simple(name: &str) -> &'static str {
         "html" | "htm" => "text/html",
         _ => "application/octet-stream",
     }
+}
+
+fn queue_state_label(state: u8) -> &'static str {
+    use rabbithole_store_client::transfers as tq;
+    match state {
+        tq::QUEUED => "queued",
+        tq::ACTIVE => "active",
+        tq::DONE => "done",
+        tq::FAILED => "failed",
+        tq::PAUSED => "paused",
+        _ => "?",
+    }
+}
+
+/// Manage the persistent transfer queue. Enqueue/list/prioritize operations
+/// touch only the local store (no connection); `run` dials the cached session
+/// and drains the queue, resuming each transfer from disk / the server's
+/// staged prefix.
+async fn cmd_queue(json: bool, action: QueueAction) -> Result<()> {
+    use rabbithole_store_client::transfers::{self as tq, NewTransfer, TransferQueue};
+    let cache = open_cache()?;
+    let q = TransferQueue(&cache);
+    match action {
+        QueueAction::Get {
+            id,
+            local,
+            priority,
+        } => {
+            let endpoint = load_session()?.endpoint;
+            let qid = q.enqueue(
+                &NewTransfer {
+                    direction: tq::DIR_DOWNLOAD,
+                    endpoint,
+                    node_id: Some(id),
+                    local_path: local.to_string_lossy().into_owned(),
+                    priority,
+                    ..Default::default()
+                },
+                now_secs(),
+            )?;
+            println!("queued download #{qid}: node {id} → {}", local.display());
+        }
+        QueueAction::Put {
+            area,
+            local,
+            parent,
+            comment,
+            priority,
+        } => {
+            let name = local
+                .file_name()
+                .and_then(|s| s.to_str())
+                .context("bad local file name")?
+                .to_string();
+            let size = std::fs::metadata(&local)
+                .with_context(|| format!("cannot stat {}", local.display()))?
+                .len() as i64;
+            let mime = mime_guess_simple(&name).to_string();
+            let endpoint = load_session()?.endpoint;
+            let qid = q.enqueue(
+                &NewTransfer {
+                    direction: tq::DIR_UPLOAD,
+                    endpoint,
+                    area: Some(area),
+                    parent,
+                    name: Some(name.clone()),
+                    local_path: local.to_string_lossy().into_owned(),
+                    size,
+                    priority,
+                    mime,
+                    comment: comment.unwrap_or_default(),
+                    ..Default::default()
+                },
+                now_secs(),
+            )?;
+            println!("queued upload #{qid}: {name} ({size} bytes)");
+        }
+        QueueAction::List => {
+            let items = q.all()?;
+            if json {
+                let rows: Vec<_> = items
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "id": t.id,
+                            "dir": if t.direction == tq::DIR_UPLOAD { "put" } else { "get" },
+                            "state": queue_state_label(t.state),
+                            "priority": t.priority,
+                            "bytes_done": t.bytes_done,
+                            "size": t.size,
+                            "local": t.local_path,
+                            "error": t.error,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::Value::Array(rows));
+            } else if items.is_empty() {
+                println!("(queue empty)");
+            } else {
+                for t in items {
+                    let dir = if t.direction == tq::DIR_UPLOAD {
+                        "put"
+                    } else {
+                        "get"
+                    };
+                    let target = if t.direction == tq::DIR_UPLOAD {
+                        format!(
+                            "{}/{}",
+                            t.area.as_deref().unwrap_or(""),
+                            t.name.as_deref().unwrap_or("")
+                        )
+                    } else {
+                        format!("node {}", t.node_id.unwrap_or(0))
+                    };
+                    println!(
+                        "#{:<4} {:3} {:6} p{:<3} {:>9}/{:<9} {:24} {}",
+                        t.id,
+                        dir,
+                        queue_state_label(t.state),
+                        t.priority,
+                        t.bytes_done,
+                        t.size,
+                        target,
+                        t.local_path,
+                    );
+                    if let Some(e) = &t.error {
+                        println!("        error: {e}");
+                    }
+                }
+            }
+        }
+        QueueAction::Run { rate } => {
+            let (mut c, _) = reconnect().await?;
+            c.set_rate_limit((rate > 0).then_some(rate));
+            let report = rabbithole_core::queue::drain(&mut c, &cache, now_secs).await?;
+            c.close().await;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"completed": report.completed, "failed": report.failed})
+                );
+            } else {
+                println!(
+                    "done: {} completed, {} failed",
+                    report.completed, report.failed
+                );
+            }
+        }
+        QueueAction::Pause { id } => {
+            q.set_state(id, tq::PAUSED, now_secs())?;
+            println!("paused #{id}");
+        }
+        QueueAction::Resume { id } => {
+            q.set_state(id, tq::QUEUED, now_secs())?;
+            println!("re-queued #{id}");
+        }
+        QueueAction::Prio { id, priority } => {
+            q.set_priority(id, priority, now_secs())?;
+            println!("#{id} priority = {priority}");
+        }
+        QueueAction::Rm { id } => {
+            if q.remove(id)? {
+                println!("removed #{id}");
+            } else {
+                bail!("no queued transfer #{id}");
+            }
+        }
+        QueueAction::Clear => {
+            let n = q.clear_done()?;
+            println!("cleared {n} completed transfer(s)");
+        }
+    }
+    Ok(())
 }
 
 /// Pull the board tree and full threads into the local cache, and flush any

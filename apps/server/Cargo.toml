@@ -38,4 +38,5 @@ rustls-pki-types.workspace = true
 [dev-dependencies]
 data-encoding.workspace = true
 rabbithole-core = { workspace = true, features = ["native"] }
+rabbithole-store-client.workspace = true
 tempfile.workspace = true

@@ -36,6 +36,8 @@ const CHUNK_MAX: usize = 256 * 1024;
 /// A live transfer authorization + progress.
 pub struct Ticket {
     pub account_id: i64,
+    /// The session that opened this ticket (for teardown cleanup).
+    pub session_id: u64,
     pub direction: u8,
     pub root: [u8; 32],
     pub size: u64,
@@ -72,6 +74,43 @@ impl TransferRegistry {
 
     fn next_id(&self) -> u64 {
         self.next.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Number of live tickets owned by an account — its in-flight transfer
+    /// count, used to enforce the per-account concurrency cap.
+    pub fn count_for_account(&self, account_id: i64) -> usize {
+        self.inner
+            .lock()
+            .values()
+            .filter(|t| t.account_id == account_id)
+            .count()
+    }
+
+    /// Drop a finished download ticket. Downloads have no explicit finish
+    /// message, so the server retires the ticket when it serves the last
+    /// chunk (or when the dedicated stream drains); session teardown is the
+    /// backstop for abandoned ones.
+    pub fn remove_download(&self, id: u64) {
+        self.inner.lock().remove(&id);
+    }
+
+    /// Remove every ticket a session opened and return the upload staging
+    /// files that need deleting. Called on session teardown so abandoned
+    /// transfers leak neither a registry slot (which would count against the
+    /// concurrency cap) nor a partial `.part` file.
+    pub fn close_session(&self, session_id: u64) -> Vec<PathBuf> {
+        let mut staging = Vec::new();
+        self.inner.lock().retain(|_, t| {
+            if t.session_id == session_id {
+                if let Some(p) = t.staging.take() {
+                    staging.push(p);
+                }
+                false
+            } else {
+                true
+            }
+        });
+        staging
     }
 }
 
@@ -124,6 +163,7 @@ pub async fn serve_bulk_stream(
     match direction {
         pt::DIR_DOWNLOAD => {
             let Some(blob_id) = blob_id else { return };
+            let rate = shared.config.read().transfer_rate_bytes_per_sec;
             let mut offset = pre.offset;
             while offset < size {
                 let want = ((size - offset).min(CHUNK_MAX as u64)) as usize;
@@ -135,17 +175,22 @@ pub async fn serve_bulk_stream(
                 .await
                 {
                     Ok(Ok(c)) => c,
-                    _ => return,
+                    _ => break,
                 };
                 if chunk.is_empty() {
                     break;
                 }
+                let n = chunk.len();
                 if send.write_all(&chunk).await.is_err() {
-                    return;
+                    break;
                 }
-                offset += chunk.len() as u64;
+                offset += n as u64;
+                throttle_after(rate, n).await;
             }
             let _ = send.shutdown().await;
+            // Download over (or the peer went away): retire the ticket so it
+            // stops counting against the account's concurrency cap.
+            shared.transfers.remove_download(pre.transfer_id);
         }
         pt::DIR_UPLOAD => {
             let Some(staging) = staging else { return };
@@ -185,6 +230,17 @@ pub async fn serve_bulk_stream(
             let _ = send.shutdown().await;
         }
         _ => {}
+    }
+}
+
+/// Bandwidth cap: sleep long enough after emitting `bytes` to hold the
+/// average send rate at or under `rate` bytes/sec. `rate == 0` disables it.
+/// A per-chunk sleep slightly under-utilizes the link (it ignores wire time),
+/// which is the safe direction for a cap.
+async fn throttle_after(rate: u64, bytes: usize) {
+    if rate > 0 && bytes > 0 {
+        let secs = bytes as f64 / rate as f64;
+        tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
     }
 }
 
@@ -236,6 +292,12 @@ pub async fn handle(
 
     // ---- Open a transfer -------------------------------------------------
     if let Some(Ok(req)) = frame.decode::<pt::TransferOpen>() {
+        // Per-account concurrency cap (0 = unlimited). Enforced before the
+        // ticket is minted so a flood is refused rather than admitted.
+        let cap = shared.config.read().max_concurrent_transfers;
+        if cap > 0 && shared.transfers.count_for_account(ctx.account_id) >= cap as usize {
+            fail!(ErrorCode::RateLimited);
+        }
         match req.direction {
             pt::DIR_DOWNLOAD => {
                 let Some(node_id) = req.node_id else {
@@ -273,6 +335,7 @@ pub async fn handle(
                     id,
                     Ticket {
                         account_id: ctx.account_id,
+                        session_id: ctx.session_id,
                         direction: pt::DIR_DOWNLOAD,
                         root: blob_id,
                         size,
@@ -329,6 +392,7 @@ pub async fn handle(
                     id,
                     Ticket {
                         account_id: ctx.account_id,
+                        session_id: ctx.session_id,
                         direction: pt::DIR_UPLOAD,
                         root: req.root,
                         size: req.size,
@@ -407,13 +471,20 @@ pub async fn handle(
             Ok(b) => b,
             Err(_) => fail!(ErrorCode::NotFound),
         };
-        let last = req.offset + bytes.len() as u64 >= size;
+        let n = bytes.len();
+        let last = req.offset + n as u64 >= size;
         reply!(&pt::FileChunk::new(
             req.transfer_id,
             req.offset,
             last,
             bytes
         ));
+        let rate = shared.config.read().transfer_rate_bytes_per_sec;
+        throttle_after(rate, n).await;
+        if last {
+            // Whole file served: retire the (single-use) download ticket.
+            shared.transfers.remove_download(req.transfer_id);
+        }
         return Ok(true);
     }
 

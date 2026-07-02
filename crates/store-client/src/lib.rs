@@ -104,6 +104,11 @@ const MIGRATIONS: &[&str] = &[
          updated_at  INTEGER NOT NULL
      ) STRICT;
      CREATE INDEX transfer_queue_sched ON transfer_queue(state, priority DESC, id);",
+    // 0004: queued uploads remember their request metadata (mime type and
+    // comment) so the driver replays the exact upload after a restart rather
+    // than re-deriving it.
+    "ALTER TABLE transfer_queue ADD COLUMN mime TEXT NOT NULL DEFAULT '';
+     ALTER TABLE transfer_queue ADD COLUMN comment TEXT NOT NULL DEFAULT '';",
 ];
 
 /// Open (creating if needed) the local store and apply pending migrations.

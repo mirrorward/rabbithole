@@ -1,9 +1,10 @@
 # RHP File Family (5)
 
-Status: **Wave 4.1** — file libraries: areas, a folder/file/alias tree,
-metadata (icons, comments, uploader, dates, download counters, ratings),
-hide-vs-deny ACLs, drop boxes, and indexed search. Bytes are content-
-addressed in the blob store.
+Status: **Wave 4 complete** — file libraries (W4.1: areas, a
+folder/file/alias tree, metadata, hide-vs-deny ACLs, drop boxes, indexed
+search), the resumable transfer engine (W4.2), and quotas / rate policy /
+the persistent client queue (W4.3). Bytes are content-addressed in the blob
+store.
 
 Small-blob transfer (avatars, banners, theme assets) shares this family at
 **types 100+** (see [`blob`](../../crates/proto/src/blob.rs)); the file
@@ -85,6 +86,34 @@ continue and a corrupt one is rejected.
 authenticated origin server. Per-chunk Bao merkle verification — needed when
 bytes come from *untrusted* peers — lands with the swarm in Wave 5, over the
 same byte ranges (`bao-tree`).
+
+## Rate policy & the client queue (Wave 4.3)
+
+Three server-side limits, all off by default (`0` = unlimited), settable via
+`ctl config set`:
+
+| config key | scope | effect |
+|---|---|---|
+| `upload_quota_bytes` | per account | total stored upload bytes; checked at upload `TransferOpen` and inline `FileUpload` → `TooLarge` |
+| `max_concurrent_transfers` | per account | live tickets (up + down); a further `TransferOpen` is refused with `RateLimited` |
+| `transfer_rate_bytes_per_sec` | per transfer | download bandwidth cap, applied to both the ranged-chunk and dedicated-stream paths |
+
+A download has no explicit "finish" message, so its ticket is retired when
+the last chunk is served (chunk path) or the dedicated stream drains (bulk
+path); **session teardown** is the backstop, removing any ticket a session
+left open and deleting its staging file — so an abandoned transfer never
+permanently holds a concurrency slot. Per-class overrides of these limits are
+a later refinement; today they are server-wide defaults.
+
+**The client queue** (`rabbithole-store-client` `transfer_queue`, driven by
+`rabbithole_core::queue::drain`) makes transfers durable and unattended:
+enqueue downloads/uploads, and a driver runs them highest-priority-first,
+marking each `ACTIVE`→`DONE`/`FAILED` and resuming from disk (download) or the
+server's staged prefix (upload) across restarts. Bandwidth is capped
+client-side via `Client::set_rate_limit`. The `rabbit queue`
+(`get`/`put`/`list`/`run`/`pause`/`resume`/`prio`/`rm`/`clear`) subcommands
+are the CLI surface; enqueue/list/prioritize work offline, `run` dials the
+cached session and drains.
 
 ## Ratings & the index
 
