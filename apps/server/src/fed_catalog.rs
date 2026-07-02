@@ -53,8 +53,9 @@ use crate::Shared;
 
 /// The "anyone" subject used to decide what is publicly listable: a bare
 /// guest with no class mask and no per-account grants. Only what this subject
-/// may `SEE | FILE_LIST` is advertised to peers.
-fn public_subject() -> Subject {
+/// may `SEE | FILE_LIST` is advertised to peers — and, by the same rule,
+/// served to anonymous HTTP download requests (see [`crate::http`]).
+pub(crate) fn public_subject() -> Subject {
     Subject {
         account_id: 0,
         role: Role::Guest,

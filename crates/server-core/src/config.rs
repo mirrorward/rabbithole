@@ -101,6 +101,16 @@ pub struct ServerConfig {
     /// telnet. This key only *mints links*: the web slice serves them.
     /// Applies live (read per command).
     pub files_http_base: String,
+    /// Serve the embedded HTTP surface on `http_addr`: the web SPA shell
+    /// (when `http_web_root` is set) plus the `/files/<area>/<path>` download
+    /// handoff that telnet's `get` command mints links for. Off by default.
+    pub http_enabled: bool,
+    /// HTTP listener address (default 0.0.0.0:8080).
+    pub http_addr: SocketAddr,
+    /// Directory of static SPA assets to serve at `/` (e.g. a `trunk build`
+    /// output dir). Empty (the default) disables static serving — only the
+    /// `/files/...` handoff answers. Relative paths resolve under `data_dir`.
+    pub http_web_root: PathBuf,
     /// Serve the legacy NNTP reader/poster surface (RFC 3977) on `nntp_addr`.
     pub nntp_enabled: bool,
     /// NNTP listener address (default 0.0.0.0:1119 — 119 needs privilege).
@@ -293,6 +303,9 @@ impl Default for ServerConfig {
             finger_addr: "0.0.0.0:7979".parse().expect("valid"),
             finger_min_role: "guest".into(),
             files_http_base: String::new(),
+            http_enabled: false,
+            http_addr: "0.0.0.0:8080".parse().expect("valid"),
+            http_web_root: PathBuf::new(),
             nntp_enabled: false,
             nntp_addr: "0.0.0.0:1119".parse().expect("valid"),
             nntp_min_role: "guest".into(),
@@ -440,6 +453,9 @@ impl ServerConfig {
             "finger_addr" => self.finger_addr.to_string(),
             "finger_min_role" => self.finger_min_role.clone(),
             "files_http_base" => self.files_http_base.clone(),
+            "http_enabled" => self.http_enabled.to_string(),
+            "http_addr" => self.http_addr.to_string(),
+            "http_web_root" => self.http_web_root.display().to_string(),
             "nntp_enabled" => self.nntp_enabled.to_string(),
             "nntp_addr" => self.nntp_addr.to_string(),
             "nntp_min_role" => self.nntp_min_role.clone(),
@@ -651,6 +667,18 @@ impl ServerConfig {
             "files_http_base" => {
                 self.files_http_base = value.trim().to_string();
                 Ok(true) // read per `get` command
+            }
+            "http_enabled" => {
+                self.http_enabled = parse_bool(key, value)?;
+                Ok(false) // listener binds at startup
+            }
+            "http_addr" => {
+                self.http_addr = parse_addr(key, value)?;
+                Ok(false)
+            }
+            "http_web_root" => {
+                self.http_web_root = PathBuf::from(value);
+                Ok(false)
             }
             "nntp_enabled" => {
                 self.nntp_enabled = parse_bool(key, value)?;

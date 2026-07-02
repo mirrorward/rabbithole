@@ -19,6 +19,7 @@ pub mod handlers7;
 pub mod handlers8;
 pub mod handlers9;
 pub mod hotline;
+pub mod http;
 pub mod identity_store;
 pub mod legacy;
 pub mod nntp;
@@ -168,6 +169,8 @@ pub struct Burrow {
     pub telnet_addr: Option<SocketAddr>,
     /// Bound finger address when `finger_enabled` (else `None`).
     pub finger_addr: Option<SocketAddr>,
+    /// Bound embedded-HTTP address when `http_enabled` (else `None`).
+    pub http_addr: Option<SocketAddr>,
     /// Bound NNTP address when `nntp_enabled` (else `None`).
     pub nntp_addr: Option<SocketAddr>,
     /// Bound NNTP peer-feed (transit) address when `nntp_feed_enabled`
@@ -220,6 +223,11 @@ impl Burrow {
         // live handle).
         let telnet = config.telnet_enabled.then_some(config.telnet_addr);
         let finger = config.finger_enabled.then_some(config.finger_addr);
+        let http = config.http_enabled.then_some(config.http_addr);
+        // Empty web root = no static serving (the /files handoff still works);
+        // a relative one resolves under data_dir like the other dir knobs.
+        let http_web_root = (!config.http_web_root.as_os_str().is_empty())
+            .then(|| resolve_dir(&data_dir, &config.http_web_root));
         let nntp = config.nntp_enabled.then_some(config.nntp_addr);
         let nntp_feed = config.nntp_feed_enabled.then_some(config.nntp_feed_addr);
         let radio = config.radio_enabled.then_some(config.radio_addr);
@@ -327,6 +335,13 @@ impl Burrow {
             finger_addr = Some(bound);
             tasks.push(handle);
         }
+        let mut http_addr = None;
+        if let Some(addr) = http {
+            let (bound, handle) = http::spawn_http(shared.clone(), addr, http_web_root).await?;
+            tracing::info!(http = %bound, "embedded HTTP (web shell + /files handoff) listening");
+            http_addr = Some(bound);
+            tasks.push(handle);
+        }
         let mut nntp_addr = None;
         if let Some(addr) = nntp {
             let (bound, handle) = nntp::spawn_nntp(shared.clone(), addr).await?;
@@ -399,6 +414,7 @@ impl Burrow {
             ws_addr,
             telnet_addr,
             finger_addr,
+            http_addr,
             nntp_addr,
             nntp_feed_addr,
             radio_addr,
