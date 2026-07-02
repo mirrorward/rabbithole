@@ -1,3 +1,16 @@
-//! The Warren — swarm file distribution: manifests, chunk scheduling, Bao-verified multi-source transfer. Lands in Wave 5.
+//! The Warren — swarm file distribution (Wave 5).
 //!
-//! Placeholder crate — see PLAN.md for the wave in which this is implemented.
+//! Files move as content-addressed sets: a [`Manifest`] catalogs each file's
+//! path, size, and blake3 root (the Bao verification anchor), and a
+//! [`RabbitLink`] (`rabbit://…`) is the shareable, verifiable reference into
+//! it. This first slice is the data layer — manifests and links — with no
+//! network yet; peer discovery, advertise/announce, and multi-source
+//! Bao-verified transfer build on top in the following slices.
+
+#![forbid(unsafe_code)]
+
+pub mod link;
+pub mod manifest;
+
+pub use link::{LinkError, LinkTarget, RabbitLink};
+pub use manifest::{Manifest, ManifestError, ManifestFile, CHUNK_SIZE};

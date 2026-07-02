@@ -1958,6 +1958,13 @@ dependencies = [
 [[package]]
 name = "rabbithole-swarm"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "hex",
+ "postcard",
+ "serde",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "rabbithole-ui-web"

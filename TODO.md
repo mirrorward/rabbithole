@@ -5,7 +5,7 @@
 > dependency edges shown in PLAN.md §15. ⛔ = do not start until PLAN.md is
 > reviewed and approved by the project owner.
 
-**Status: Wave 4 complete (file libraries, transfer engine, quotas/rate policy, persistent client queue) — Wave 5 (swarm / "the warren") is next.**
+**Status: Wave 4 complete. Wave 5 (swarm / "the warren") started — manifest format + `rabbit://` links landed; peer discovery/advertise/Bao-verified transfer next.**
 
 > W4.2: transfers are resumable + integrity-checked, folder-pipelined, and
 > move bytes over dedicated QUIC bulk streams (off the control channel) with
@@ -93,7 +93,7 @@
 *Depends on: W4*
 
 - [ ] Spike: iroh vs quinn+custom for hole punching/relay → decision
-- [ ] Manifest format (canonical CBOR, per-file blake3 roots, 1 MiB chunks) + `rabbit://` links
+- [x] Manifest format (per-file blake3 roots, 1 MiB chunks) + `rabbit://` links — `rabbithole-swarm` `Manifest`/`ManifestFile` (content-addressed id = blake3 over canonical postcard bytes; path-sorted for determinism) and `RabbitLink` (`rabbit://host[:port]/{files,manifest,blob}/…`, percent-encoded, root-pinned). CBOR interop deferred to a later slice.
 - [ ] `AdvertiseFiles` (list-without-upload): metadata catalog, permission scopes, TTL soft state + re-announce
 - [ ] Coordinator: FindSources (scope-gated), announce, rarity annotation
 - [ ] Server-signed capability tokens; peer-side verification
