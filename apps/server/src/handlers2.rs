@@ -144,6 +144,9 @@ pub async fn handle(
         let row = repo.by_id(req.id).await?.expect("still there");
         if row.id == ctx.persona_id {
             shared.presence.rename(ctx.session_id, &row.screen_name);
+            shared
+                .swarm
+                .rename_session(ctx.session_id, &row.screen_name);
         }
         reply!(&ppers::PersonaReply::new(persona_info(&row)));
         return Ok(true);
@@ -176,6 +179,9 @@ pub async fn handle(
         ctx.persona_id = row.id;
         ctx.screen_name = row.screen_name.clone();
         shared.presence.rename(ctx.session_id, &row.screen_name);
+        shared
+            .swarm
+            .rename_session(ctx.session_id, &row.screen_name);
         reply!(&ppers::PersonaReply::new(persona_info(&row)));
         return Ok(true);
     }

@@ -16,7 +16,7 @@ use rabbithole_net::Connection;
 use rabbithole_proto::swarm as ps;
 use rabbithole_proto::{ErrorCode, Frame};
 use rabbithole_server_core::swarm::NewAdvert;
-use rabbithole_server_core::Caps;
+use rabbithole_server_core::{Caps, Role};
 
 use crate::session::SessionCtx;
 use crate::Shared;
@@ -24,6 +24,19 @@ use crate::Shared;
 /// The permission resource for the whole swarm surface (operators can ACL
 /// `swarm` like any other path).
 const RESOURCE: &str = "swarm";
+
+/// Most entries one `AdvertiseFiles` may carry — bounds the work done under
+/// the catalog's write lock per request (re-announce in batches).
+const ADVERT_BATCH_MAX: usize = 256;
+/// Metadata length caps, so the count cap is also a memory bound and a
+/// `SourceList` reply can never outgrow the 1 MiB control-frame limit.
+const ADVERT_NAME_MAX: usize = 255;
+const ADVERT_MIME_MAX: usize = 127;
+/// Most sources one `SourceList` returns (more than any fetcher dials).
+const SOURCES_MAX: usize = 200;
+/// Granted TTL when the client asks for the default (`ttl_secs == 0`) and
+/// the server has no configured maximum to fall back on.
+const ADVERT_TTL_FALLBACK: u32 = 3600;
 
 pub async fn handle(
     conn: &mut Box<dyn Connection>,
@@ -51,15 +64,28 @@ pub async fn handle(
         if req.entries.is_empty() {
             fail!(ErrorCode::BadRequest);
         }
+        if req.entries.len() > ADVERT_BATCH_MAX {
+            fail!(ErrorCode::TooLarge);
+        }
+        if req
+            .entries
+            .iter()
+            .any(|e| e.name.len() > ADVERT_NAME_MAX || e.mime.len() > ADVERT_MIME_MAX)
+        {
+            fail!(ErrorCode::TooLarge);
+        }
         let (max_ttl, max_adverts) = {
             let cfg = shared.config.read();
             (cfg.swarm_advert_ttl_secs, cfg.swarm_adverts_max)
         };
-        // 0 = "server default", i.e. the maximum; otherwise clamp into range.
-        let ttl_secs = if req.ttl_secs == 0 {
-            max_ttl
-        } else {
-            req.ttl_secs.clamp(1, max_ttl)
+        // `ttl_secs == 0` asks for the server default; a configured max of 0
+        // means "no maximum" (grant what was asked). Plain min/max arithmetic
+        // — `clamp` would panic on a 0 max.
+        let ttl_secs = match (req.ttl_secs, max_ttl) {
+            (0, 0) => ADVERT_TTL_FALLBACK,
+            (0, max) => max,
+            (req_ttl, 0) => req_ttl,
+            (req_ttl, max) => req_ttl.min(max),
         };
         let entries: Vec<NewAdvert> = req
             .entries
@@ -99,10 +125,24 @@ pub async fn handle(
         if !ctx.allows(shared, RESOURCE, Caps::FILE_LIST) {
             fail!(ErrorCode::Forbidden);
         }
+        // Cheshire mode is a real visibility boundary here as everywhere:
+        // an advert is session-scoped, so naming its holder also confirms
+        // they're online right now. Sub-moderators don't see invisible
+        // sources (mirroring the who-list); a source whose presence entry is
+        // already gone (teardown race) is dropped too.
+        let viewer_is_mod = ctx.role >= Role::Moderator;
         let sources: Vec<ps::SourceInfo> = shared
             .swarm
             .find(&req.root)
             .into_iter()
+            .filter(|a| {
+                viewer_is_mod
+                    || shared
+                        .presence
+                        .get(a.session_id)
+                        .is_some_and(|e| !e.is_invisible())
+            })
+            .take(SOURCES_MAX)
             .map(|a| ps::SourceInfo::new(a.screen_name, a.size, a.name, a.mime))
             .collect();
         // Does the origin itself hold the blob? (Fetcher's fallback source.)

@@ -227,6 +227,157 @@ async fn guests_cannot_advertise_but_can_find() {
 }
 
 #[tokio::test]
+async fn advertise_request_bounds_are_enforced() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("alice", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    let mut alice = login(&burrow, "alice").await;
+
+    // 257 entries exceeds the per-request batch cap.
+    let big_batch: Vec<AdvertEntry> = (0..257)
+        .map(|i| {
+            let mut root = [0u8; 32];
+            root[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            AdvertEntry::new(root, 1, format!("f{i}"), "")
+        })
+        .collect();
+    assert!(matches!(
+        alice.swarm_advertise(big_batch, 0).await,
+        Err(ClientError::Refused(ErrorCode::TooLarge))
+    ));
+
+    // An overlong name is refused (metadata caps keep the catalog and
+    // SourceList replies bounded).
+    let long_name = "x".repeat(300);
+    assert!(matches!(
+        alice
+            .swarm_advertise(vec![AdvertEntry::new([1; 32], 1, long_name, "")], 0)
+            .await,
+        Err(ClientError::Refused(ErrorCode::TooLarge))
+    ));
+
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn zero_ttl_config_grants_requested_ttl_without_panicking() {
+    let work = tempfile::tempdir().unwrap();
+    let cfg = ServerConfig {
+        swarm_advert_ttl_secs: 0, // "no maximum"
+        ..test_config(&work.path().join("srv"))
+    };
+    let burrow = Burrow::start(cfg).await.unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("alice", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    let mut alice = login(&burrow, "alice").await;
+
+    // Requested TTL is granted as-is (this used to panic the session task).
+    let ack = alice
+        .swarm_advertise(vec![entry(1, "a", 1)], 60)
+        .await
+        .unwrap();
+    assert_eq!(ack.ttl_secs, 60);
+    // ttl 0 + no configured max → the 3600 s fallback, never a 0 s advert.
+    let ack = alice
+        .swarm_advertise(vec![entry(2, "b", 2)], 0)
+        .await
+        .unwrap();
+    assert_eq!(ack.ttl_secs, 3600);
+    assert_eq!(alice.swarm_find([2; 32]).await.unwrap().sources.len(), 1);
+
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn invisible_sources_hidden_from_regulars_visible_to_mods() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    for (n, r) in [
+        ("alice", Role::User),
+        ("bob", Role::User),
+        ("mod", Role::Moderator),
+    ] {
+        burrow
+            .shared
+            .auth
+            .create_account(n, "pw-pw-pw", r)
+            .await
+            .unwrap();
+    }
+
+    // Alice goes invisible (Cheshire mode, state 3), then advertises.
+    let mut alice = login(&burrow, "alice").await;
+    alice
+        .presence_set(rabbithole_proto::presence::PresenceState::Invisible, None)
+        .await
+        .unwrap();
+    alice
+        .swarm_advertise(vec![entry(7, "hidden.bin", 7)], 0)
+        .await
+        .unwrap();
+
+    // A regular member sees no source; naming one would confirm alice is on.
+    let mut bob = login(&burrow, "bob").await;
+    assert!(
+        bob.swarm_find([7; 32]).await.unwrap().sources.is_empty(),
+        "invisible source hidden from sub-moderators"
+    );
+
+    // Moderators see through Cheshire mode, as with the who-list.
+    let mut m = login(&burrow, "mod").await;
+    let list = m.swarm_find([7; 32]).await.unwrap();
+    assert_eq!(list.sources.len(), 1);
+    assert_eq!(list.sources[0].screen_name, "alice");
+
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn persona_switch_updates_catalog_names() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("alice", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    let mut alice = login(&burrow, "alice").await;
+    alice
+        .swarm_advertise(vec![entry(3, "c.bin", 3)], 0)
+        .await
+        .unwrap();
+
+    // Switch to a fresh persona; the catalog must follow.
+    let p = alice.persona_create("Cheshire").await.unwrap();
+    alice.persona_switch(p.persona.id).await.unwrap();
+
+    let list = alice.swarm_find([3; 32]).await.unwrap();
+    assert_eq!(list.sources.len(), 1);
+    assert_eq!(
+        list.sources[0].screen_name, "Cheshire",
+        "catalog reflects the live persona"
+    );
+
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
 async fn find_reports_when_the_origin_server_has_the_file() {
     let work = tempfile::tempdir().unwrap();
     let burrow = Burrow::start(test_config(&work.path().join("srv")))

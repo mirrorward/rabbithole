@@ -160,6 +160,18 @@ impl SwarmCatalog {
         self.withdraw(session_id, &[]);
     }
 
+    /// Persona switch/rename: keep the catalog's names in step with
+    /// presence so `FindSources` never reports an identity the session no
+    /// longer presents.
+    pub fn rename_session(&self, session_id: u64, screen_name: &str) {
+        let mut map = self.inner.write();
+        for adverts in map.values_mut() {
+            for a in adverts.iter_mut().filter(|a| a.session_id == session_id) {
+                a.screen_name = screen_name.to_string();
+            }
+        }
+    }
+
     /// Live sources for a root (expired entries are pruned on the way).
     pub fn find(&self, root: &[u8; 32]) -> Vec<Advert> {
         self.find_at(root, Instant::now())
@@ -301,6 +313,24 @@ mod tests {
         let left = cat.find(&[1; 32]);
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].screen_name, "bob");
+    }
+
+    #[test]
+    fn rename_session_updates_catalog_names() {
+        let cat = SwarmCatalog::new();
+        cat.advertise(&[adv(1, "a"), adv(2, "b")], 10, 100, "alice", TTL, 0);
+        cat.advertise(&[adv(1, "a")], 11, 200, "bob", TTL, 0);
+
+        cat.rename_session(100, "cheshire");
+        for root in [[1; 32], [2; 32]] {
+            for a in cat.find(&root) {
+                if a.session_id == 100 {
+                    assert_eq!(a.screen_name, "cheshire");
+                } else {
+                    assert_eq!(a.screen_name, "bob", "other sessions untouched");
+                }
+            }
+        }
     }
 
     #[test]

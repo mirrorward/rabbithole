@@ -125,12 +125,18 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum SwarmAction {
-    /// Advertise local files (list-without-upload; bytes stay put).
+    /// Advertise local files and stay connected to serve them (adverts are
+    /// session-scoped: they vanish when this command exits). Ctrl-C to stop.
     Share {
         files: Vec<PathBuf>,
-        /// Advert TTL in seconds (0 = server default). Re-run to re-announce.
+        /// Advert TTL in seconds (0 = server default); re-announced
+        /// automatically while the command runs.
         #[arg(long, default_value_t = 0)]
         ttl: u32,
+        /// Advertise and exit immediately (the advert dies with the
+        /// session — only useful for scripting against a held session).
+        #[arg(long)]
+        no_wait: bool,
     },
     /// Who has this file? Takes a hex blake3 root or a rabbit:// link.
     Find { target: String },
@@ -821,7 +827,11 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
     let (mut c, _) = reconnect().await?;
     let result: Result<()> = async {
         match action {
-            SwarmAction::Share { files, ttl } => {
+            SwarmAction::Share {
+                files,
+                ttl,
+                no_wait,
+            } => {
                 if files.is_empty() {
                     bail!("nothing to share");
                 }
@@ -839,7 +849,7 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
                     listed.push((hex::encode(root), name.clone(), size));
                     entries.push(AdvertEntry::new(root, size, name, mime));
                 }
-                let ack = c.swarm_advertise(entries, ttl).await?;
+                let ack = c.swarm_advertise(entries.clone(), ttl).await?;
                 if json {
                     println!(
                         "{}",
@@ -859,6 +869,25 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
                         "advertised {} file(s), ttl {}s ({} total live)",
                         ack.accepted, ack.ttl_secs, ack.total
                     );
+                }
+                if !no_wait {
+                    // Adverts are session-scoped soft state: hold the session
+                    // open (re-announcing before the TTL lapses) until the
+                    // user stops serving.
+                    if !json {
+                        eprintln!("serving — Ctrl-C to stop");
+                    }
+                    // Re-announce at ~2/3 of the granted TTL.
+                    let period =
+                        std::time::Duration::from_secs(((ack.ttl_secs as u64) * 2 / 3).max(1));
+                    loop {
+                        tokio::select! {
+                            _ = tokio::time::sleep(period) => {
+                                c.swarm_advertise(entries.clone(), ttl).await?;
+                            }
+                            _ = tokio::signal::ctrl_c() => break,
+                        }
+                    }
                 }
             }
             SwarmAction::Find { target } => {
