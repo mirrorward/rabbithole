@@ -553,6 +553,31 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
         return Ok(());
     }
 
+    // Surface minimum (`hotline_min_role`, live): guests and accounts below
+    // it are refused with a login error naming the requirement.
+    let min_role =
+        Role::parse_min_role(&shared.config.read().hotline_min_role).unwrap_or(Role::Guest);
+    if authed.subject.role < min_role {
+        wr.write_all(
+            &Transaction::reply(
+                transaction::LOGIN,
+                login_txn.header.id,
+                1,
+                vec![Field::text(
+                    field::ERROR_TEXT,
+                    &format!(
+                        "this server requires {} access or better",
+                        min_role.min_role_name()
+                    ),
+                )],
+            )
+            .encode(),
+        )
+        .await?;
+        wr.shutdown().await.ok();
+        return Ok(());
+    }
+
     let screen_name = want_name.unwrap_or_else(|| authed.persona.screen_name.clone());
     let session_id = shared.next_session_id();
     let user_id = session_id as u32;

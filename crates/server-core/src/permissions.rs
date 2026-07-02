@@ -154,6 +154,113 @@ impl Role {
             Role::Superuser => "superuser",
         }
     }
+
+    /// Parse a config-facing role name (the `*_min_role` keys). Accepts
+    /// `guest`, `user` (or its class alias `member`), `moderator`, and
+    /// `admin` — case-insensitively. `superuser` is deliberately not a valid
+    /// listener minimum: a surface only the superuser can enter is a surface
+    /// switched off, and the `*_enabled` toggles already express that.
+    pub fn parse_min_role(s: &str) -> Option<Role> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "guest" => Some(Role::Guest),
+            "user" | "member" => Some(Role::User),
+            "moderator" => Some(Role::Moderator),
+            "admin" => Some(Role::Admin),
+            _ => None,
+        }
+    }
+
+    /// The canonical config-facing name for this role (the inverse of
+    /// [`Role::parse_min_role`]), used in refusal messages.
+    pub fn min_role_name(self) -> &'static str {
+        match self {
+            Role::Guest => "guest",
+            Role::User => "user",
+            Role::Moderator => "moderator",
+            Role::Admin => "admin",
+            Role::Superuser => "superuser",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy security-level projection (Wave 6 polish)
+// ---------------------------------------------------------------------------
+
+/// The participation capabilities that nudge a subject's projected security
+/// level *within* its role band (see [`security_level`]). Order is fixed so
+/// the projection is deterministic; each entry is worth ±2 levels.
+const SL_NUDGE_CAPS: [Caps; 12] = [
+    Caps::DM_SEND,
+    Caps::BOARD_POST,
+    Caps::FILE_DOWNLOAD,
+    Caps::FILE_UPLOAD,
+    Caps::CHAT_CREATE_ROOM,
+    Caps::SWARM_ADVERTISE,
+    Caps::DOOR_RUN,
+    Caps::DROPBOX_VIEW,
+    Caps::CHAT_MODERATE,
+    Caps::BOARD_MODERATE,
+    Caps::USER_KICK,
+    Caps::FILE_MANAGE,
+];
+
+/// Project a permission [`Subject`] onto the classic 0–255 BBS security
+/// level (SL) that legacy drop files (DOOR.SYS, DOOR32.SYS, DORINFO1.DEF)
+/// carry. Doors use the SL for their own gating, so the projection must be
+/// deterministic and must never rank a higher role below a lower one.
+///
+/// ## The table
+///
+/// | Role      | base SL | band (clamp) |
+/// |-----------|---------|--------------|
+/// | Guest     |  10     |  1 – 25      |
+/// | User      |  30     | 26 – 70      |
+/// | Moderator |  80     | 71 – 95      |
+/// | Admin     | 100     | 96 – 250     |
+/// | Superuser | 255     | 255 (fixed)  |
+///
+/// ## Within-role adjustments
+///
+/// Class base masks and per-account grant/revoke masks (via
+/// [`Subject::base_caps`]) shift the SL inside the role's band: each
+/// capability in the participation list ([`SL_NUDGE_CAPS`]) adds **+2** when
+/// the subject holds it beyond its role default, and **−2** when a
+/// role-default capability has been revoked. Per-resource ACLs never
+/// influence the SL — the drop file describes the *caller*, not a resource.
+///
+/// ## Monotonicity
+///
+/// The bands are disjoint and ordered (guest ≤ 25 < 26 ≤ user ≤ 70 < 71 ≤
+/// moderator ≤ 95 < 96 ≤ admin ≤ 250 < 255), and adjustments are clamped
+/// into the band, so a maximally-granted lower role always projects strictly
+/// below a maximally-revoked higher role. Superusers are always 255,
+/// regardless of masks (mirroring their bypass in the evaluator).
+pub fn security_level(subject: &Subject) -> u8 {
+    if subject.role == Role::Superuser {
+        return 255;
+    }
+    let (base, floor, ceil): (i32, i32, i32) = match subject.role {
+        Role::Guest => (10, 1, 25),
+        Role::User => (30, 26, 70),
+        Role::Moderator => (80, 71, 95),
+        Role::Admin => (100, 96, 250),
+        Role::Superuser => unreachable!("handled above"),
+    };
+    let defaults = subject.role.default_caps().0;
+    let held = subject.base_caps();
+    let mut level = base;
+    for cap in SL_NUDGE_CAPS {
+        let by_default = defaults & cap.0 == cap.0;
+        let in_hand = held & cap.0 == cap.0;
+        match (by_default, in_hand) {
+            (false, true) => level += 2, // granted beyond the role
+            (true, false) => level -= 2, // revoked from the role
+            _ => {}
+        }
+    }
+    // The clamp bounds are small positive constants, so the cast is exact.
+    level.clamp(floor, ceil) as u8
 }
 
 /// Who an ACL rule applies to.
@@ -472,6 +579,105 @@ mod tests {
         );
         let s = subject(Role::Superuser);
         assert!(eval.allows(&s, "anything/at/all", Caps::CONFIG_ADMIN));
+    }
+
+    #[test]
+    fn security_level_table_for_plain_roles() {
+        // A subject with no class/account mask tweaks sits on the role base.
+        assert_eq!(security_level(&subject(Role::Guest)), 10);
+        assert_eq!(security_level(&subject(Role::User)), 30);
+        assert_eq!(security_level(&subject(Role::Moderator)), 80);
+        assert_eq!(security_level(&subject(Role::Admin)), 100);
+        assert_eq!(security_level(&subject(Role::Superuser)), 255);
+    }
+
+    #[test]
+    fn security_level_grants_nudge_up_revokes_nudge_down() {
+        // A guest granted DM_SEND (not a guest default) gains +2.
+        let mut g = subject(Role::Guest);
+        g.grant_mask = Caps::DM_SEND.0;
+        assert_eq!(security_level(&g), 12);
+        // Two extra participation caps: +4.
+        g.grant_mask |= Caps::DOOR_RUN.0;
+        assert_eq!(security_level(&g), 14);
+
+        // A member with DOOR_RUN revoked loses 2.
+        let mut u = subject(Role::User);
+        u.revoke_mask = Caps::DOOR_RUN.0;
+        assert_eq!(security_level(&u), 28);
+
+        // Class masks count the same way as grants.
+        let mut c = subject(Role::Guest);
+        c.class_mask = Caps::BOARD_POST.0;
+        assert_eq!(security_level(&c), 12);
+    }
+
+    #[test]
+    fn security_level_clamps_to_the_role_band() {
+        // A guest granted everything still tops out below the user floor.
+        let mut g = subject(Role::Guest);
+        g.grant_mask = u64::MAX;
+        assert_eq!(security_level(&g), 25);
+        // A user with everything revoked still bottoms out above it.
+        let mut u = subject(Role::User);
+        u.revoke_mask = u64::MAX;
+        assert_eq!(security_level(&u), 26);
+        assert!(security_level(&g) < security_level(&u));
+    }
+
+    #[test]
+    fn security_level_is_monotonic_across_roles() {
+        let roles = [
+            Role::Guest,
+            Role::User,
+            Role::Moderator,
+            Role::Admin,
+            Role::Superuser,
+        ];
+        // For any mask shape, a higher role never projects a lower SL — even
+        // comparing a fully-granted lower role to a fully-revoked higher one.
+        let shapes: [(u64, u64, u64); 5] = [
+            (0, 0, 0),
+            (u64::MAX, 0, 0),
+            (0, u64::MAX, 0),
+            (0, 0, u64::MAX),
+            (Caps::DOOR_RUN.0, Caps::DM_SEND.0, Caps::FILE_UPLOAD.0),
+        ];
+        for (lo_shape, hi_shape) in shapes
+            .iter()
+            .flat_map(|a| shapes.iter().map(move |b| (a, b)))
+        {
+            for pair in roles.windows(2) {
+                let mut lo = subject(pair[0]);
+                (lo.class_mask, lo.grant_mask, lo.revoke_mask) = *lo_shape;
+                let mut hi = subject(pair[1]);
+                (hi.class_mask, hi.grant_mask, hi.revoke_mask) = *hi_shape;
+                assert!(
+                    security_level(&lo) < security_level(&hi),
+                    "{:?}{lo_shape:?} vs {:?}{hi_shape:?}",
+                    pair[0],
+                    pair[1],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn security_level_superuser_ignores_masks() {
+        let mut s = subject(Role::Superuser);
+        s.revoke_mask = u64::MAX;
+        assert_eq!(security_level(&s), 255);
+    }
+
+    #[test]
+    fn min_role_names_round_trip() {
+        for role in [Role::Guest, Role::User, Role::Moderator, Role::Admin] {
+            assert_eq!(Role::parse_min_role(role.min_role_name()), Some(role));
+        }
+        assert_eq!(Role::parse_min_role("member"), Some(Role::User));
+        assert_eq!(Role::parse_min_role(" Admin "), Some(Role::Admin));
+        assert_eq!(Role::parse_min_role("superuser"), None);
+        assert_eq!(Role::parse_min_role("wizard"), None);
     }
 
     #[test]

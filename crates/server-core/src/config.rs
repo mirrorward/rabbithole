@@ -80,14 +80,36 @@ pub struct ServerConfig {
     pub telnet_enabled: bool,
     /// Telnet listener address (default 0.0.0.0:2323 — 23 needs privilege).
     pub telnet_addr: SocketAddr,
+    /// Minimum role for the telnet surface: "guest" (default — everyone the
+    /// auth service accepts), "user", "moderator", or "admin". An
+    /// authenticated caller below the minimum is refused at login. Applies
+    /// live (checked per login); an unparseable value in a hand-edited file
+    /// reads as "guest" (`ctl config set` validates and can't store one).
+    pub telnet_min_role: String,
     /// Serve the finger surface (RFC 1288) on `finger_addr`.
     pub finger_enabled: bool,
     /// Finger listener address (default 0.0.0.0:7979 — 79 needs privilege).
     pub finger_addr: SocketAddr,
+    /// Minimum role for the finger surface. Finger is anonymous (RFC 1288
+    /// has no authentication), so any value above "guest" refuses every
+    /// query with a polite notice. Applies live (checked per connection).
+    pub finger_min_role: String,
+    /// Base URL for the HTTP(S) file-transfer handoff links the telnet
+    /// `files` browser prints (e.g. "https://bbs.example.org:8080"); links
+    /// take the form `<base>/files/<area>/<path>`. Empty (the default) turns
+    /// the handoff off — `get` explains transfers aren't available on
+    /// telnet. This key only *mints links*: the web slice serves them.
+    /// Applies live (read per command).
+    pub files_http_base: String,
     /// Serve the legacy NNTP reader/poster surface (RFC 3977) on `nntp_addr`.
     pub nntp_enabled: bool,
     /// NNTP listener address (default 0.0.0.0:1119 — 119 needs privilege).
     pub nntp_addr: SocketAddr,
+    /// Minimum role for the NNTP *reader* surface (the peer feed has its own
+    /// credential list). Anonymous reading counts as "guest": above that,
+    /// unauthenticated commands get 480 (auth required) and an `AUTHINFO` by
+    /// an account below the minimum is rejected with 481. Applies live.
+    pub nntp_min_role: String,
     /// Serve the NNTP peer-feed (transit) surface — `IHAVE` plus RFC 4644
     /// streaming `CHECK`/`TAKETHIS` — on `nntp_feed_addr`. Distinct from the
     /// reader surface (`nntp_enabled`): this one talks to *peers*, not
@@ -146,6 +168,11 @@ pub struct ServerConfig {
     pub hotline_enabled: bool,
     /// Hotline listener address (default 0.0.0.0:5500 — the classic Hotline port).
     pub hotline_addr: SocketAddr,
+    /// Minimum role for the Hotline surface. Hotline guest sign-ins (empty
+    /// credentials) count as "guest" and are refused when the minimum is
+    /// higher; authenticated accounts below it get a login error. Applies
+    /// live (checked per login).
+    pub hotline_min_role: String,
     /// Serve the FidoNet (FTN) binkp mailer gateway on `ftn_addr`.
     pub ftn_enabled: bool,
     /// binkp listener address (default 0.0.0.0:24554 — the IANA binkp port).
@@ -261,10 +288,14 @@ impl Default for ServerConfig {
             swarm_cache_max_bytes: 0,
             telnet_enabled: false,
             telnet_addr: "0.0.0.0:2323".parse().expect("valid"),
+            telnet_min_role: "guest".into(),
             finger_enabled: false,
             finger_addr: "0.0.0.0:7979".parse().expect("valid"),
+            finger_min_role: "guest".into(),
+            files_http_base: String::new(),
             nntp_enabled: false,
             nntp_addr: "0.0.0.0:1119".parse().expect("valid"),
+            nntp_min_role: "guest".into(),
             nntp_feed_enabled: false,
             nntp_feed_addr: "0.0.0.0:1120".parse().expect("valid"),
             nntp_feed_peers: std::collections::HashMap::new(),
@@ -282,6 +313,7 @@ impl Default for ServerConfig {
             doors: Vec::new(),
             hotline_enabled: false,
             hotline_addr: "0.0.0.0:5500".parse().expect("valid"),
+            hotline_min_role: "guest".into(),
             ftn_enabled: false,
             ftn_addr: "0.0.0.0:24554".parse().expect("valid"),
             ftn_node: String::new(),
@@ -403,10 +435,14 @@ impl ServerConfig {
             "swarm_cache_max_bytes" => self.swarm_cache_max_bytes.to_string(),
             "telnet_enabled" => self.telnet_enabled.to_string(),
             "telnet_addr" => self.telnet_addr.to_string(),
+            "telnet_min_role" => self.telnet_min_role.clone(),
             "finger_enabled" => self.finger_enabled.to_string(),
             "finger_addr" => self.finger_addr.to_string(),
+            "finger_min_role" => self.finger_min_role.clone(),
+            "files_http_base" => self.files_http_base.clone(),
             "nntp_enabled" => self.nntp_enabled.to_string(),
             "nntp_addr" => self.nntp_addr.to_string(),
+            "nntp_min_role" => self.nntp_min_role.clone(),
             "nntp_feed_enabled" => self.nntp_feed_enabled.to_string(),
             "nntp_feed_addr" => self.nntp_feed_addr.to_string(),
             "radio_enabled" => self.radio_enabled.to_string(),
@@ -421,6 +457,7 @@ impl ServerConfig {
             "doors_session_max_secs" => self.doors_session_max_secs.to_string(),
             "hotline_enabled" => self.hotline_enabled.to_string(),
             "hotline_addr" => self.hotline_addr.to_string(),
+            "hotline_min_role" => self.hotline_min_role.clone(),
             "ftn_enabled" => self.ftn_enabled.to_string(),
             "ftn_addr" => self.ftn_addr.to_string(),
             "ftn_node" => self.ftn_node.clone(),
@@ -594,6 +631,11 @@ impl ServerConfig {
                 self.telnet_addr = parse_addr(key, value)?;
                 Ok(false)
             }
+            // Surface minimums apply live: each login/query re-reads config.
+            "telnet_min_role" => {
+                self.telnet_min_role = parse_min_role(key, value)?;
+                Ok(true)
+            }
             "finger_enabled" => {
                 self.finger_enabled = parse_bool(key, value)?;
                 Ok(false)
@@ -602,6 +644,14 @@ impl ServerConfig {
                 self.finger_addr = parse_addr(key, value)?;
                 Ok(false)
             }
+            "finger_min_role" => {
+                self.finger_min_role = parse_min_role(key, value)?;
+                Ok(true)
+            }
+            "files_http_base" => {
+                self.files_http_base = value.trim().to_string();
+                Ok(true) // read per `get` command
+            }
             "nntp_enabled" => {
                 self.nntp_enabled = parse_bool(key, value)?;
                 Ok(false)
@@ -609,6 +659,10 @@ impl ServerConfig {
             "nntp_addr" => {
                 self.nntp_addr = parse_addr(key, value)?;
                 Ok(false)
+            }
+            "nntp_min_role" => {
+                self.nntp_min_role = parse_min_role(key, value)?;
+                Ok(true)
             }
             "nntp_feed_enabled" => {
                 self.nntp_feed_enabled = parse_bool(key, value)?;
@@ -671,6 +725,10 @@ impl ServerConfig {
             "hotline_addr" => {
                 self.hotline_addr = parse_addr(key, value)?;
                 Ok(false)
+            }
+            "hotline_min_role" => {
+                self.hotline_min_role = parse_min_role(key, value)?;
+                Ok(true)
             }
             "ftn_enabled" => {
                 self.ftn_enabled = parse_bool(key, value)?;
@@ -805,6 +863,19 @@ fn parse_bool(key: &str, v: &str) -> Result<bool, ConfigError> {
     }
 }
 
+/// Validate a `*_min_role` value, returning its canonical (lowercased)
+/// spelling. Enforcement points parse the stored string on every check via
+/// [`crate::permissions::Role::parse_min_role`].
+fn parse_min_role(key: &str, v: &str) -> Result<String, ConfigError> {
+    match crate::permissions::Role::parse_min_role(v) {
+        Some(role) => Ok(role.min_role_name().to_string()),
+        None => Err(ConfigError::BadValue {
+            key: key.into(),
+            detail: v.into(),
+        }),
+    }
+}
+
 fn parse_u32(key: &str, v: &str) -> Result<u32, ConfigError> {
     v.parse().map_err(|_| ConfigError::BadValue {
         key: key.into(),
@@ -900,6 +971,61 @@ mod tests {
             live.set_key("ratelimit_msg_per_sec", "lots"),
             Err(ConfigError::BadValue { .. })
         ));
+    }
+
+    #[test]
+    fn min_role_keys_default_validate_and_apply_live() {
+        let live = LiveConfig::new(ServerConfig::default());
+        // Defaults: today's behavior — everyone in, no handoff base.
+        for key in [
+            "telnet_min_role",
+            "nntp_min_role",
+            "hotline_min_role",
+            "finger_min_role",
+        ] {
+            assert_eq!(live.get_key(key).unwrap(), "guest", "{key}");
+            // Valid values apply live and are canonicalized.
+            assert!(live.set_key(key, "User").unwrap(), "{key} applies live");
+            assert_eq!(live.get_key(key).unwrap(), "user");
+            assert!(live.set_key(key, "member").unwrap());
+            assert_eq!(live.get_key(key).unwrap(), "user", "member aliases user");
+            assert!(live.set_key(key, "moderator").unwrap());
+            assert!(live.set_key(key, "admin").unwrap());
+            // superuser and garbage are rejected; the stored value survives.
+            for bad in ["superuser", "wizard", ""] {
+                assert!(
+                    matches!(live.set_key(key, bad), Err(ConfigError::BadValue { .. })),
+                    "{key}={bad:?} must be refused"
+                );
+            }
+            assert_eq!(live.get_key(key).unwrap(), "admin");
+        }
+    }
+
+    #[test]
+    fn files_http_base_gets_sets_live_and_roundtrips() {
+        let live = LiveConfig::new(ServerConfig::default());
+        assert_eq!(live.get_key("files_http_base").unwrap(), "");
+        assert!(live
+            .set_key("files_http_base", "https://bbs.example.org:8080")
+            .unwrap());
+        assert_eq!(
+            live.get_key("files_http_base").unwrap(),
+            "https://bbs.example.org:8080"
+        );
+
+        // TOML round trip carries the new keys.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("burrow.toml");
+        let mut cfg = ServerConfig::default();
+        cfg.set_key("telnet_min_role", "user").unwrap();
+        cfg.files_http_base = "http://h:1".into();
+        cfg.save(&path).unwrap();
+        let loaded: ServerConfig =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.telnet_min_role, "user");
+        assert_eq!(loaded.files_http_base, "http://h:1");
+        assert_eq!(loaded.finger_min_role, "guest");
     }
 
     #[test]

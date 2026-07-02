@@ -34,7 +34,7 @@ pub use config::{LiveConfig, ServerConfig};
 pub use dedup::{DedupStore, SeenKey};
 pub use federation::{PeerRecord, PeerRegistry, PeerState};
 pub use files::{FileError, FileService};
-pub use permissions::{Caps, PermissionEvaluator, Role, Subject};
+pub use permissions::{security_level, Caps, PermissionEvaluator, Role, Subject};
 pub use presence::{PresenceEntry, PresenceRegistry, RadioStatus};
 pub use pushlog::PushLog;
 pub use ratelimit::RateLimiter;

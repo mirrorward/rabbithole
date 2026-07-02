@@ -10,13 +10,17 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
-use rabbithole_legacy_finger::{FingerDirectory, FingerServer, Profile, WhoEntry};
+use rabbithole_legacy_finger::{
+    handle_query, to_wire, FingerDirectory, Profile, WhoEntry, MAX_QUERY_BYTES,
+};
 use rabbithole_server_core::ratelimit::{class as rl, Scope};
+use rabbithole_server_core::Role;
 use rabbithole_store_server::repo2::PersonasRepo;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 use crate::Shared;
@@ -102,16 +106,86 @@ pub async fn spawn_telnet(
     Ok((local, handle))
 }
 
-/// Bind + serve the finger surface. Returns the bound address and task handle.
+/// Bind + serve the finger surface. Returns the bound address and task
+/// handle.
+///
+/// The accept loop is burrow's own (rather than `FingerServer::serve`) so
+/// each connection can consult the live config: finger has no login (RFC
+/// 1288 is anonymous), so any `finger_min_role` above "guest" refuses every
+/// query with a polite notice — checked per connection, applied live.
 pub async fn spawn_finger(
     shared: Arc<Shared>,
     addr: SocketAddr,
 ) -> Result<(SocketAddr, JoinHandle<()>)> {
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
-    let dir: Arc<dyn FingerDirectory> = Arc::new(FingerDirAdapter { shared });
+    let dir: Arc<dyn FingerDirectory> = Arc::new(FingerDirAdapter {
+        shared: shared.clone(),
+    });
     let handle = tokio::spawn(async move {
-        let _ = FingerServer::new(dir).serve(listener).await;
+        loop {
+            let Ok((stream, peer)) = listener.accept().await else {
+                break;
+            };
+            // Over the per-IP connection budget: drop it on the floor.
+            if !shared.rate_allow(Scope::Ip(peer.ip()), rl::CONN) {
+                continue;
+            }
+            let dir = dir.clone();
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let restricted = Role::parse_min_role(&shared.config.read().finger_min_role)
+                    .unwrap_or(Role::Guest)
+                    > Role::Guest;
+                if let Err(err) = serve_finger_conn(stream, dir.as_ref(), restricted).await {
+                    tracing::debug!(%peer, %err, "finger connection error");
+                }
+            });
+        }
     });
     Ok((local, handle))
+}
+
+/// One finger connection: read one capped query line, answer it (or refuse
+/// the whole surface when restricted), close gracefully. Mirrors the
+/// legacy-finger crate's own connection discipline (query cap, deadline,
+/// [`to_wire`] sanitization).
+async fn serve_finger_conn(
+    mut stream: TcpStream,
+    directory: &dyn FingerDirectory,
+    restricted: bool,
+) -> std::io::Result<()> {
+    if restricted {
+        // Anonymous protocol + a minimum above guest = the surface is
+        // members-only, and finger has no way to prove membership.
+        stream
+            .write_all(to_wire("This finger service is restricted. Ask your sysop.\n").as_bytes())
+            .await?;
+        return stream.shutdown().await;
+    }
+    let query = tokio::time::timeout(Duration::from_secs(30), read_query_line(&mut stream)).await;
+    let text = match query {
+        Ok(Ok(Some(line))) => handle_query(directory, &line).await,
+        Ok(Ok(None)) => "finger: query too long.\n".to_string(),
+        Ok(Err(err)) => return Err(err),
+        // Deadline passed without a full query line: just hang up.
+        Err(_elapsed) => return Ok(()),
+    };
+    stream.write_all(to_wire(&text).as_bytes()).await?;
+    stream.shutdown().await
+}
+
+/// Read one query line, capped at [`MAX_QUERY_BYTES`] (plus line ending);
+/// `Ok(None)` when the client exceeded the cap without a newline.
+async fn read_query_line(stream: &mut TcpStream) -> std::io::Result<Option<String>> {
+    let mut limited = BufReader::new(stream.take((MAX_QUERY_BYTES + 2) as u64));
+    let mut buf = Vec::with_capacity(128);
+    limited.read_until(b'\n', &mut buf).await?;
+    if !buf.ends_with(b"\n") && buf.len() > MAX_QUERY_BYTES {
+        return Ok(None);
+    }
+    while buf.last() == Some(&b'\n') || buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
 }

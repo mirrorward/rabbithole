@@ -108,14 +108,30 @@ impl NntpSession {
         }
     }
 
+    /// The reader surface's configured minimum role (`nntp_min_role`), read
+    /// live. Unparseable values (hand-edited files) read as guest.
+    fn min_role(&self) -> Role {
+        Role::parse_min_role(&self.shared.config.read().nntp_min_role).unwrap_or(Role::Guest)
+    }
+
+    /// Whether the session's subject clears the surface minimum. Anonymous
+    /// reading counts as guest, so a minimum above guest sends 480 (via
+    /// [`deny_read`]) until an account of sufficient role authenticates.
+    fn meets_min_role(&self) -> bool {
+        self.subject().role >= self.min_role()
+    }
+
     fn can_read(&self) -> bool {
-        self.shared
-            .perms
-            .allows(&self.subject(), "board", Caps::BOARD_READ)
+        self.meets_min_role()
+            && self
+                .shared
+                .perms
+                .allows(&self.subject(), "board", Caps::BOARD_READ)
     }
 
     fn can_post(&self) -> bool {
         self.authed.is_some()
+            && self.meets_min_role()
             && self
                 .shared
                 .perms
@@ -375,6 +391,9 @@ async fn serve(
                 let status = match session.pending_user.take() {
                     None => Status::AuthSequenceError,
                     Some(user) => match shared.auth.login_password(&user, &pass, None).await {
+                        // An account below the surface minimum is refused
+                        // with 481 — right password, wrong standing.
+                        Ok(u) if u.subject.role < session.min_role() => Status::AuthRejected,
                         Ok(u) => {
                             session.authed = Some(u);
                             Status::AuthAccepted

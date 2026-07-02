@@ -59,7 +59,7 @@ use rabbithole_legacy_doors::{
 };
 use rabbithole_legacy_telnet::proto::escape_iac;
 use rabbithole_legacy_telnet::{Input, TelnetStream};
-use rabbithole_server_core::{AuthedUser, Caps, Role, ServerConfig};
+use rabbithole_server_core::{security_level, AuthedUser, Caps, ServerConfig};
 use rabbithole_store_server::repo::AuditRepo;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, ChildStdout, Command};
@@ -450,8 +450,10 @@ fn expand_tokens(arg: &str, drop_dir: &Path, dropfile: &Path, node: u16) -> Stri
 }
 
 /// Project the caller onto a [`DoorContext`] for the drop file: terminal
-/// size from NAWS, persona name as alias/real name, role-derived security
-/// level, and the session's effective time budget.
+/// size from NAWS, persona name as alias/real name, the RBAC-projected
+/// security level (see [`rabbithole_server_core::security_level`] for the
+/// documented role→SL table and within-role class/grant/revoke nudges), and
+/// the session's effective time budget.
 fn door_context<S>(
     shared: &Arc<Shared>,
     t: &TelnetStream<S>,
@@ -475,7 +477,7 @@ where
             real_name: authed.persona.screen_name.clone(),
             alias: authed.persona.screen_name.clone(),
             location: String::new(),
-            security_level: security_level(authed.subject.role),
+            security_level: u16::from(security_level(&authed.subject)),
             time_left_mins: limit
                 .map(|d| u32::try_from((d.as_secs() / 60).max(1)).unwrap_or(u32::MAX))
                 .unwrap_or(60),
@@ -483,17 +485,6 @@ where
             is_ansi: true,
         },
         session_start: SystemTime::now(),
-    }
-}
-
-/// The classic 0–255 BBS security level a role projects to.
-fn security_level(role: Role) -> u16 {
-    match role {
-        Role::Guest => 10,
-        Role::User => 30,
-        Role::Moderator => 60,
-        Role::Admin => 90,
-        Role::Superuser => 100,
     }
 }
 
