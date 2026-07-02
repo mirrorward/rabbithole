@@ -5,6 +5,7 @@
 pub mod admin_store;
 pub mod ctl;
 pub mod handlers2;
+pub mod handlers3;
 pub mod identity_store;
 pub mod session;
 
@@ -35,6 +36,9 @@ pub struct Shared {
     pub chat: ChatService,
     pub pushlog: PushLog,
     pub classes: ClassCache,
+    /// (sender_account, recipient_account) pairs already auto-responded
+    /// this away period (cleared when the recipient comes back online).
+    pub auto_responded: std::sync::Mutex<std::collections::HashSet<(i64, i64)>>,
     pub blobs: std::sync::Arc<BlobStore>,
     pub server_key: [u8; 32],
     pub fingerprint_hex: String,
@@ -99,6 +103,7 @@ impl Burrow {
             perms: PermissionEvaluator::new(),
             pushlog: PushLog::new(),
             classes,
+            auto_responded: std::sync::Mutex::new(std::collections::HashSet::new()),
             blobs,
             server_key: identity.signing.public().0,
             fingerprint_hex: fingerprint.to_hex(),
@@ -156,10 +161,10 @@ async fn replay_recorder(shared: Arc<Shared>) {
         use tokio::sync::broadcast::error::RecvError;
         match rx.recv().await {
             Ok(ServerEvent::Shutdown) => break,
+            // DMs/read-receipts are durably queued in the DM store; the
+            // replay ring must not double-deliver them.
+            Ok(ServerEvent::Dm { .. }) | Ok(ServerEvent::DmRead { .. }) => continue,
             Ok(event) => {
-                let Some(push) = session::push_for_event(&event, &shared) else {
-                    continue;
-                };
                 let online: std::collections::HashSet<i64> = shared
                     .presence
                     .snapshot()
@@ -168,7 +173,15 @@ async fn replay_recorder(shared: Arc<Shared>) {
                     .collect();
                 for account_id in shared.pushlog.known_accounts() {
                     if account_id > 0 && !online.contains(&account_id) {
-                        let _ = shared.pushlog.stamp(account_id, push.clone());
+                        let Some(push) = session::push_for_event(
+                            &event,
+                            &shared,
+                            rabbithole_server_core::Role::User,
+                            account_id,
+                        ) else {
+                            continue;
+                        };
+                        let _ = shared.pushlog.stamp(account_id, push);
                     }
                 }
             }

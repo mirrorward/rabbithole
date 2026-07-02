@@ -320,6 +320,75 @@ impl Client {
         Ok(r.bytes)
     }
 
+    // ---- Wave 2.2: presence, buddies, DMs ---------------------------------
+
+    pub async fn presence_set(
+        &mut self,
+        state: rabbithole_proto::presence::PresenceState,
+        status: Option<String>,
+    ) -> Result<(), ClientError> {
+        self.request_ack(&ppres::PresenceSet::new(state, status))
+            .await
+    }
+
+    pub async fn buddy_list(&mut self) -> Result<ppres::BuddyList, ClientError> {
+        self.request(&ppres::BuddyListRequest).await
+    }
+
+    pub async fn buddy_add(&mut self, screen_name: &str, group: &str) -> Result<(), ClientError> {
+        self.request_ack(&ppres::BuddyAdd::new(screen_name, group))
+            .await
+    }
+
+    pub async fn buddy_remove(&mut self, screen_name: &str) -> Result<(), ClientError> {
+        self.request_ack(&ppres::BuddyRemove::new(screen_name))
+            .await
+    }
+
+    pub async fn block_add(&mut self, screen_name: &str) -> Result<(), ClientError> {
+        self.request_ack(&ppres::BlockAdd::new(screen_name)).await
+    }
+
+    pub async fn block_remove(&mut self, screen_name: &str) -> Result<(), ClientError> {
+        self.request_ack(&ppres::BlockRemove::new(screen_name))
+            .await
+    }
+
+    pub async fn dm_send(
+        &mut self,
+        msg: &rabbithole_proto::dm::DmSend,
+    ) -> Result<rabbithole_proto::dm::DmSent, ClientError> {
+        self.request(msg).await
+    }
+
+    pub async fn dm_history(
+        &mut self,
+        with: &str,
+        before_id: i64,
+        limit: u32,
+    ) -> Result<Vec<rabbithole_proto::dm::DmMessage>, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::dm::DmHistory>(
+                &rabbithole_proto::dm::DmHistoryRequest::new(with, before_id, limit),
+            )
+            .await?
+            .messages)
+    }
+
+    pub async fn dm_threads(
+        &mut self,
+    ) -> Result<Vec<rabbithole_proto::dm::DmThreadSummary>, ClientError> {
+        Ok(self
+            .request::<_, rabbithole_proto::dm::DmThreads>(&rabbithole_proto::dm::DmThreadsRequest)
+            .await?
+            .threads)
+    }
+
+    pub async fn dm_mark_read(&mut self, with: &str, up_to_id: i64) -> Result<(), ClientError> {
+        self.request_ack(&rabbithole_proto::dm::DmMarkRead::new(with, up_to_id))
+            .await
+    }
+
     pub async fn totp_enroll(
         &mut self,
     ) -> Result<rabbithole_proto::persona::TotpEnrollInfo, ClientError> {

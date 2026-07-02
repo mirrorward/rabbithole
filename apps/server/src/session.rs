@@ -217,6 +217,8 @@ pub async fn run_session(
         role: ctx.role,
         transport: peer.transport.to_string(),
         connected_at: Instant::now(),
+        state: 0,
+        status: None,
     });
     // Subscribe BEFORE welcome/replay so no event falls in a gap.
     let mut bus_rx = shared.bus.subscribe();
@@ -233,6 +235,19 @@ pub async fn run_session(
     let welcome = Frame::push(&psess::Welcome::new(motd, agreement))?;
     conn.send(shared.pushlog.stamp(ctx.account_id, welcome))
         .await?;
+
+    // Offline mail call: deliver unread DMs (capped; the rest via DmThreads).
+    if !ctx.is_guest {
+        use rabbithole_store_server::repo3::DmsRepo;
+        let unread = DmsRepo(&shared.pool).unread_for(ctx.account_id).await?;
+        for row in unread.iter().take(100) {
+            let push = Frame::push(&rabbithole_proto::dm::DmReceived::new(
+                crate::handlers3::dm_row_to_message(row),
+            ))?;
+            conn.send(shared.pushlog.stamp(ctx.account_id, push))
+                .await?;
+        }
+    }
 
     let result: anyhow::Result<()> = async {
         loop {
@@ -256,7 +271,7 @@ pub async fn run_session(
                             break;
                         }
                         Ok(ev) => {
-                            if let Some(push) = push_for_event(&ev, &shared) {
+                            if let Some(push) = push_for_event(&ev, &shared, ctx.role, ctx.account_id) {
                                 conn.send(shared.pushlog.stamp(ctx.account_id, push)).await?;
                             }
                             if matches!(ev, ServerEvent::Shutdown) {
@@ -316,11 +331,15 @@ async fn handle_request(
                 .await?;
             return Ok(());
         }
+        let viewer_is_mod = ctx.role >= Role::Moderator;
         let users = shared
             .presence
             .snapshot()
             .into_iter()
+            .filter(|e| !e.is_invisible() || viewer_is_mod || e.session_id == ctx.session_id)
             .map(|e| {
+                let state = ppres::PresenceState::from_ordinal(e.state);
+                let status = e.status.clone();
                 ppres::UserSummary::new(
                     e.session_id,
                     e.screen_name,
@@ -328,6 +347,7 @@ async fn handle_request(
                     e.transport,
                     e.connected_at.elapsed().as_secs(),
                 )
+                .with_state(state, status)
             })
             .collect();
         conn.send(Frame::reply_to(frame, &ppres::WhoList::new(users))?)
@@ -397,6 +417,10 @@ async fn handle_request(
     if crate::handlers2::handle(conn, frame, shared, ctx).await? {
         return Ok(());
     }
+    // Wave 2.2 families (presence states, buddies, DMs) ----------------------
+    if crate::handlers3::handle(conn, frame, shared, ctx).await? {
+        return Ok(());
+    }
 
     // Anything else: tolerated, answered, never fatal.
     conn.send(Frame::error_reply(frame, ErrorCode::Unsupported))
@@ -404,8 +428,16 @@ async fn handle_request(
     Ok(())
 }
 
-/// Project a bus event into a push frame (None = nothing to send).
-pub(crate) fn push_for_event(event: &ServerEvent, shared: &Shared) -> Option<Frame> {
+/// Project a bus event into a push frame for a specific viewer
+/// (None = nothing to send). Viewer-aware because Cheshire mode hides
+/// arrivals/changes from sub-moderators, and DMs are targeted.
+pub(crate) fn push_for_event(
+    event: &ServerEvent,
+    shared: &Shared,
+    viewer_role: Role,
+    viewer_account: i64,
+) -> Option<Frame> {
+    let viewer_is_mod = viewer_role >= Role::Moderator;
     match event {
         ServerEvent::Chat { room, from, text } => Frame::push(&pchat::ChatMessage::new(
             room.clone(),
@@ -416,6 +448,9 @@ pub(crate) fn push_for_event(event: &ServerEvent, shared: &Shared) -> Option<Fra
         .ok(),
         ServerEvent::SessionOpened { session_id, .. } => {
             let entry = shared.presence.get(*session_id)?;
+            if entry.is_invisible() && !viewer_is_mod {
+                return None;
+            }
             Frame::push(&ppres::UserJoined::new(ppres::UserSummary::new(
                 entry.session_id,
                 entry.screen_name,
@@ -428,11 +463,87 @@ pub(crate) fn push_for_event(event: &ServerEvent, shared: &Shared) -> Option<Fra
         ServerEvent::SessionClosed {
             session_id,
             screen_name,
-        } => Frame::push(&ppres::UserLeft::new(*session_id, screen_name.clone())).ok(),
+            was_invisible,
+        } => {
+            if *was_invisible && !viewer_is_mod {
+                return None;
+            }
+            Frame::push(&ppres::UserLeft::new(*session_id, screen_name.clone())).ok()
+        }
         ServerEvent::SessionChanged {
             session_id,
             screen_name,
         } => Frame::push(&pdir::UserChanged::new(*session_id, screen_name.clone())).ok(),
+        ServerEvent::PresenceChanged {
+            session_id,
+            screen_name,
+            state,
+            status,
+            was_invisible,
+        } => {
+            let now_invisible = *state == 3;
+            if viewer_is_mod {
+                let s = ppres::PresenceState::from_ordinal(*state);
+                return Frame::push(
+                    &pdir::UserChanged::new(*session_id, screen_name.clone())
+                        .with_state(s, status.clone()),
+                )
+                .ok();
+            }
+            match (*was_invisible, now_invisible) {
+                // Vanishing: sub-moderators see them leave.
+                (false, true) => {
+                    Frame::push(&ppres::UserLeft::new(*session_id, screen_name.clone())).ok()
+                }
+                // Reappearing: they "arrive".
+                (true, false) => {
+                    let entry = shared.presence.get(*session_id)?;
+                    Frame::push(&ppres::UserJoined::new(
+                        ppres::UserSummary::new(
+                            entry.session_id,
+                            entry.screen_name,
+                            entry.role as u8,
+                            entry.transport,
+                            entry.connected_at.elapsed().as_secs(),
+                        )
+                        .with_state(ppres::PresenceState::from_ordinal(*state), status.clone()),
+                    ))
+                    .ok()
+                }
+                (true, true) => None,
+                (false, false) => {
+                    let s = ppres::PresenceState::from_ordinal(*state);
+                    Frame::push(
+                        &pdir::UserChanged::new(*session_id, screen_name.clone())
+                            .with_state(s, status.clone()),
+                    )
+                    .ok()
+                }
+            }
+        }
+        ServerEvent::Dm {
+            to_account,
+            message,
+        } => {
+            if *to_account != viewer_account {
+                return None;
+            }
+            Frame::push(&rabbithole_proto::dm::DmReceived::new(message.clone())).ok()
+        }
+        ServerEvent::DmRead {
+            to_account,
+            by,
+            up_to_id,
+        } => {
+            if *to_account != viewer_account {
+                return None;
+            }
+            Frame::push(&rabbithole_proto::dm::DmReadReceipt::new(
+                by.clone(),
+                *up_to_id,
+            ))
+            .ok()
+        }
         ServerEvent::Notice { text, from } => {
             Frame::push(&psess::ServerNotice::new(text.clone(), from.clone())).ok()
         }

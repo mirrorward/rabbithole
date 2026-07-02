@@ -23,10 +23,12 @@ pub enum ServerEvent {
         session_id: u64,
         screen_name: String,
     },
-    /// A session ended.
+    /// A session ended. `was_invisible` lets push projection skip the
+    /// synthetic leave for viewers who never saw the user arrive.
     SessionClosed {
         session_id: u64,
         screen_name: String,
+        was_invisible: bool,
     },
     /// A chat line was said in a room.
     Chat {
@@ -38,6 +40,27 @@ pub enum ServerEvent {
     SessionChanged {
         session_id: u64,
         screen_name: String,
+    },
+    /// A session's presence state changed (away/idle/Cheshire…).
+    PresenceChanged {
+        session_id: u64,
+        screen_name: String,
+        /// 0 online, 1 away, 2 idle, 3 invisible.
+        state: u8,
+        status: Option<String>,
+        was_invisible: bool,
+    },
+    /// A direct message for `to_account` (live delivery; offline delivery
+    /// rides the durable DM store, so the replay recorder skips these).
+    Dm {
+        to_account: i64,
+        message: rabbithole_proto::dm::DmMessage,
+    },
+    /// Read receipt for `to_account`'s sent messages.
+    DmRead {
+        to_account: i64,
+        by: String,
+        up_to_id: i64,
     },
     /// An operator notice for every session.
     Notice { text: String, from: String },

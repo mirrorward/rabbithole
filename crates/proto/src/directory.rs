@@ -93,12 +93,15 @@ impl Message for DirectoryResults {
     const MESSAGE_TYPE: u16 = 13;
 }
 
-/// Push: a user changed persona/profile visible state (name, avatar…).
+/// Push: a user's visible identity or presence changed (persona switch,
+/// away/idle state, status message).
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserChanged {
     pub session_id: u64,
     pub screen_name: String,
+    pub state: crate::presence::PresenceState,
+    pub status: Option<String>,
 }
 
 impl UserChanged {
@@ -106,7 +109,19 @@ impl UserChanged {
         Self {
             session_id,
             screen_name: screen_name.into(),
+            state: crate::presence::PresenceState::Online,
+            status: None,
         }
+    }
+
+    pub fn with_state(
+        mut self,
+        state: crate::presence::PresenceState,
+        status: Option<String>,
+    ) -> Self {
+        self.state = state;
+        self.status = status;
+        self
     }
 }
 

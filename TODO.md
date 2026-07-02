@@ -48,10 +48,10 @@
 - [x] Personas: multiple per account (cap configurable), switcher
 - [x] Profiles (location/interests/quote/free text/.plan), avatars + **banner images** (blob-backed, size-capped)
 - [x] Member directory + search; "locate online" (privacy-gated)
-- [ ] Buddy lists: server-stored, groups, permit/deny; presence states (online/away+msg/idle/invisible) + pub/sub pushes
+- [x] Buddy lists: server-stored, groups, permit/deny; presence states (online/away+msg/idle/invisible) + pub/sub pushes
 - [ ] Chat: multiple public rooms w/ categories + topics; ad-hoc rooms; private rooms w/ invite/decline/join/leave; subjects; room moderation (kick/mute/ban/slow-mode)
-- [ ] DMs: threads, offline queueing, quoting, away auto-response, receipts (privacy-gated)
-- [ ] DM attachments (server-config max size, content-addressed)
+- [x] DMs: threads, offline queueing, quoting, away auto-response, receipts (privacy-gated)
+- [x] DM attachments (server-config max size, content-addressed)
 - [ ] Notifications: protocol pushes + client-side sounds (optional, tasteful)
 - [ ] Welcome screen composer (widgets: MOTD, unread, who, featured, ticker)
 - [ ] Server theme bundle v1 (signed, content-addressed: logo, banner art, accent tokens, icon set) in welcome bundle

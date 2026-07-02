@@ -23,6 +23,15 @@ pub struct PresenceEntry {
     /// "quic", "websocket", later "telnet", "hotline", …
     pub transport: String,
     pub connected_at: Instant,
+    /// 0 online, 1 away, 2 idle, 3 invisible (Cheshire mode).
+    pub state: u8,
+    pub status: Option<String>,
+}
+
+impl PresenceEntry {
+    pub fn is_invisible(&self) -> bool {
+        self.state == 3
+    }
 }
 
 #[derive(Default)]
@@ -57,10 +66,32 @@ impl PresenceRegistry {
                 bus.publish(ServerEvent::SessionClosed {
                     session_id,
                     screen_name: e.screen_name.clone(),
+                    was_invisible: e.is_invisible(),
                 });
             }
         }
         entry
+    }
+
+    /// Change a session's presence state; publishes the transition.
+    pub fn set_state(&self, session_id: u64, state: u8, status: Option<String>) {
+        let mut inner = self.inner.write();
+        if let Some(entry) = inner.get_mut(&session_id) {
+            let was_invisible = entry.is_invisible();
+            entry.state = state;
+            entry.status = status.clone();
+            let event = ServerEvent::PresenceChanged {
+                session_id,
+                screen_name: entry.screen_name.clone(),
+                state,
+                status,
+                was_invisible,
+            };
+            drop(inner);
+            if let Some(bus) = &self.bus {
+                bus.publish(event);
+            }
+        }
     }
 
     pub fn get(&self, session_id: u64) -> Option<PresenceEntry> {
@@ -116,6 +147,8 @@ mod tests {
             role: Role::User,
             transport: "quic".into(),
             connected_at: Instant::now(),
+            state: 0,
+            status: None,
         }
     }
 

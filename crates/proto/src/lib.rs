@@ -26,6 +26,7 @@ pub mod blob;
 pub mod chat;
 pub mod codec;
 pub mod directory;
+pub mod dm;
 pub mod error;
 pub mod frame;
 pub mod hello;

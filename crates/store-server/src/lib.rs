@@ -9,6 +9,7 @@
 
 pub mod repo;
 pub mod repo2;
+pub mod repo3;
 
 use std::path::Path;
 
