@@ -16,6 +16,14 @@
 //! - [`redaction`]: server-sovereign tombstone/redact propagation.
 //! - [`policy`]: ingest-defense primitives — a per-peer token-bucket rate
 //!   limiter and an allow/deny [`policy::PeerPolicy`].
+//! - [`catalog`]: signed, incremental server file-catalogs — a server's
+//!   advertised file listing, canonicalized and Ed25519-signed.
+//! - [`search`]: cross-server file search — a query model and a pure matcher
+//!   over one catalog, tagged with provenance.
+//! - [`dedupe`]: blake3 dedupe that collapses the same file offered by many
+//!   servers into one result carrying all its sources.
+//! - [`fanout`]: pull fan-out planning — turning a deduped match's sources
+//!   into an ordered [`fanout::FetchPlan`] for the transfer layer.
 //!
 //! Everything here is deliberately dependency-light and wasm-friendly (no
 //! tokio, no filesystem, no sockets) so a browser client could verify a
@@ -31,13 +39,21 @@
 #![forbid(unsafe_code)]
 
 pub mod bloom;
+pub mod catalog;
+pub mod dedupe;
+pub mod fanout;
 pub mod floodfill;
 pub mod handshake;
 pub mod policy;
 pub mod redaction;
+pub mod search;
 
 pub use bloom::BloomFilter;
+pub use catalog::{Catalog, CatalogEntry, CatalogError, SignedCatalog, CATALOG_CONTEXT};
+pub use dedupe::{dedupe_by_hash, DedupedMatch, ServerRef};
+pub use fanout::{plan_fetch, plan_fetch_batch, FetchPlan, FetchPolicy, FetchStrategy};
 pub use floodfill::{FedEvent, IHave, PullRequest, PushEvents, Subscription};
 pub use handshake::{DescriptorBody, PeerDescriptor, PeerHello, PeerHelloAck};
 pub use policy::{PeerPolicy, PolicyMode, RateLimiter};
 pub use redaction::Redaction;
+pub use search::{search_catalog, Match, SearchQuery, SearchResult};
