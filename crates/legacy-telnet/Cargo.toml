@@ -1,6 +1,6 @@
 [package]
 name = "rabbithole-legacy-telnet"
-description = "Telnet codec: IAC negotiation, NAWS, TTYPE, BINARY"
+description = "Telnet BBS surface: IAC negotiation (ECHO/SGA/NAWS/TTYPE), line IO, login shell"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,3 +8,5 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+tokio.workspace = true
+async-trait.workspace = true
