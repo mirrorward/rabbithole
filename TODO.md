@@ -177,10 +177,10 @@
 **FidoNet**
 - [x] PKT codec: type-2+ w/ type-2 fallback (capability word), packed messages, golden-file round-trip tests — `rabbithole-legacy-ftn` (bounds-checked LE reader, 5D addresses, CP437; 31 tests incl. 2000-iter fuzz)
 - [x] Kludges: INTL/FMPT/TOPT/MSGID/REPLY/PID/TID; AREA:; Origin; SEEN-BY + PATH maintenance — `rabbithole-legacy-ftn::kludge` (canonical re-serialization, raw-CP437 text). Tosser/scanner/binkp/AreaFix/nodelist below are the service layer
-- [ ] Tosser + scanner services; ARCmail bundles (day-coded names + collision handling); BSO outbound
+- [x] Tosser + scanner services; ARCmail bundles (day-coded names + collision handling); BSO outbound — `rabbithole-legacy-ftn`: `tosser` (`Tosser::toss` classifies echomail vs netmail, cross-packet MSGID dedupe → `TossedBatch`, resolves 5D addrs from INTL/FMPT/TOPT, expands 2D SEEN-BY/PATH); `scanner` (group outbound into packets + pure BSO naming: lowercase-hex `NNNNnnnn`, `.?ut`/`.?lo` flavor matrix, cross-zone `outbound.NNN`, point paths); `arcmail` (`<hexdiff>.<weekday><seq>` with 0-9/a-z collision handling). Pure/sans-IO; the TCP mailer (binkp) service is the wiring slice
 - [~] binkp mailer (FTS-1026, port 24554) — codec + FSM landed: `rabbithole-legacy-binkp` (2-byte block framing, M_NUL..M_SKIP, CRAM-MD5 auth verified against RFC 2202 vectors, sans-IO originating+answering session state machine; 42 tests). TCP mailer service is the wiring slice
-- [ ] AreaFix (netmail commands: +/−/％LIST/％QUERY)
-- [ ] Nodelist + NODEDIFF parsing (CRC-16); echomail↔boards; netmail↔DM gateway; CP437 lossless round-trip
+- [x] AreaFix (netmail commands: +/−/％LIST/％QUERY) — `rabbithole-legacy-ftn::areafix`: `parse` (password / `+`/`-` / bare-toggle / `%LIST`/`%QUERY`/`%HELP`, skips kludge/SEEN-BY/tearline) + `process` against `AreaFixConfig` producing the reply body
+- [~] Nodelist + NODEDIFF parsing (CRC-16); echomail↔boards; netmail↔DM gateway; CP437 lossless round-trip — `rabbithole-legacy-ftn::nodelist`: line + whole-file parse, positional address resolution, `apply_nodediff` (A/C/D, header-aware), `crc16` (CRC-16/ARC, pinned to the `0xBB3D` check vector) + `verify_nodelist`. CP437 round-trip already lands via `::cp437`. echomail↔boards + netmail↔DM gateways are the server-wiring slice
 
 **RSS/Atom (inbound web syndication)**
 - [x] Feed parsing: lenient hand-rolled XML pull tokenizer, RSS 2.0 + Atom 1.0 → `Feed`/`FeedItem`, manual RFC 2822 + RFC 3339 date parsing, HTML-to-text (tag strip + entity decode + char-boundary cap), blake3 dedup ids — `rabbithole-legacy-syndication` (blake3-only dep, 39 tests). Network fetch + board ingestion wiring is the next slice.

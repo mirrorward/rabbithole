@@ -1,11 +1,23 @@
-//! FidoNet (FTN) packet codec — Wave 10.3 (pure codec slice).
+//! FidoNet (FTN) packet codec + mail-processing services.
 //!
-//! This crate is the **byte-level** half of RabbitHole's FidoNet interop: it
-//! encodes and decodes `.PKT` files and the messages inside them, and it parses
-//! the control-line ("kludge") grammar carried in message bodies. It contains
-//! **no networking** (no binkp), **no tosser/scanner services**, and **no board
-//! wiring** — those land in later slices. Everything here is a pure,
-//! deterministic transform that later waves build on.
+//! This crate is the **host-testable, sans-IO** half of RabbitHole's FidoNet
+//! interop. It encodes and decodes `.PKT` files and the messages inside them
+//! ([`packet`], [`message`], [`kludge`]), and layers the mail-processing
+//! services on top as pure transforms over in-memory structures:
+//!
+//! - [`tosser`] — split an inbound packet into echomail vs netmail, dedupe by
+//!   MSGID, expand SEEN-BY / PATH loop control.
+//! - [`scanner`] — group outbound messages by destination into packets and
+//!   compute Binkley-Style Outbound (BSO) file names.
+//! - [`arcmail`] — day-coded compressed-mail bundle names with collision
+//!   handling.
+//! - [`areafix`] — parse and process netmail-driven echo subscription commands.
+//! - [`nodelist`] — parse St. Louis-format nodelists, apply a NODEDIFF, and
+//!   verify the CRC-16 header checksum.
+//!
+//! It still contains **no networking** (binkp lands in `legacy-binkp`) and **no
+//! board wiring**: nothing here touches a socket, a clock, or the filesystem —
+//! every function is a deterministic transform that later waves build on.
 //!
 //! # Wire overview
 //!
@@ -64,16 +76,31 @@
 #![forbid(unsafe_code)]
 
 pub mod address;
+pub mod arcmail;
+pub mod areafix;
 pub mod cp437;
 pub mod error;
 pub mod kludge;
 pub mod message;
+pub mod nodelist;
 pub mod packet;
+pub mod scanner;
+pub mod tosser;
 
 mod reader;
 
 pub use address::FtnAddress;
-pub use error::{AddressErrorKind, FtnError};
+pub use arcmail::{bundle_basename, bundle_name, next_bundle_name, Weekday};
+pub use error::{AddressErrorKind, FtnError, NodediffErrorKind, NodelistErrorKind};
 pub use kludge::Message;
 pub use message::{decode_messages, encode_messages, PackedMessage};
+pub use nodelist::{
+    apply_nodediff, crc16, parse as parse_nodelist, resolve_addresses, verify_nodelist,
+    NodeKeyword, NodelistEntry,
+};
 pub use packet::{DosDateTime, Packet, PacketHeader, Type2Plus, HEADER_LEN};
+pub use scanner::{
+    bso_basename, bso_file_name, bso_packet_name, bso_relative_path, group_by_area, scan, BsoKind,
+    Flavor, ScannedBundle,
+};
+pub use tosser::{EchoMail, NetMail, TossedBatch, Tosser};
