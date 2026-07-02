@@ -24,6 +24,10 @@
 //!   servers into one result carrying all its sources.
 //! - [`fanout`]: pull fan-out planning — turning a deduped match's sources
 //!   into an ordered [`fanout::FetchPlan`] for the transfer layer.
+//! - [`attestation`]: cross-server identity — `persona@server` addressing,
+//!   home-server-signed [`attestation::PersonaAttestation`]s, and
+//!   key-continuity chains where every rotation is cross-signed by the
+//!   previous persona key so a server can't silently swap a user's key.
 //!
 //! Everything here is deliberately dependency-light and wasm-friendly (no
 //! tokio, no filesystem, no sockets) so a browser client could verify a
@@ -38,6 +42,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod attestation;
 pub mod bloom;
 pub mod catalog;
 pub mod dedupe;
@@ -48,6 +53,12 @@ pub mod policy;
 pub mod redaction;
 pub mod search;
 
+pub use attestation::{
+    is_valid_persona_name, is_valid_server_name, sign_challenge, verify_visitor, AddressError,
+    AttestationBody, AttestationError, ContinuityChain, ContinuityError, FedAddress, KeyRotation,
+    PersonaAttestation, ATTESTATION_CONTEXT, CHALLENGE_CONTEXT, MAX_PERSONA_LEN, MAX_SERVER_LEN,
+    MIN_CHALLENGE_LEN, ROTATION_CONTEXT,
+};
 pub use bloom::BloomFilter;
 pub use catalog::{Catalog, CatalogEntry, CatalogError, SignedCatalog, CATALOG_CONTEXT};
 pub use dedupe::{dedupe_by_hash, DedupedMatch, ServerRef};
