@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use rabbithole_server_core::ServerConfig;
 
@@ -64,6 +64,7 @@ async fn run(config: ServerConfig) -> Result<()> {
 
 #[cfg(unix)]
 async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<()> {
+    use anyhow::Context;
     use serde_json::{json, Value};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
