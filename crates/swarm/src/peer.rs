@@ -43,6 +43,9 @@ pub const PEER_BLOCK: BlockSize = BlockSize::from_chunk_log(4);
 pub const PEER_BLOCK_BYTES: u64 = 16 * 1024;
 /// Most bytes one [`PeerRequest`] may ask for (whole files loop ranges).
 pub const PEER_REQUEST_MAX: u64 = 4 * 1024 * 1024;
+/// How long to wait for a peer connection before giving up on it. Dead
+/// sources fail fast so the multi-source scheduler can route around them.
+pub const PEER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Response status codes.
 pub const STATUS_OK: u8 = 0;
@@ -323,7 +326,13 @@ pub async fn fetch_range(
         "peer".to_string(),
         ServerAuth::Pinned(CertFingerprint(cert_fp)),
     );
-    let conn = transport.connect(endpoint).await?;
+    // A dead or unreachable peer must fail fast, not hang on the QUIC idle
+    // timeout — the scheduler retires the source and moves on. (This is what
+    // keeps a swarm with dead entries responsive.)
+    let conn = match tokio::time::timeout(PEER_CONNECT_TIMEOUT, transport.connect(endpoint)).await {
+        Ok(r) => r?,
+        Err(_) => return Err(PeerError::Refused(STATUS_BAD_REQUEST)),
+    };
     let bulk = conn.bulk().ok_or(PeerError::BadRequest)?;
     let (mut send, mut recv) = bulk.open().await?;
 

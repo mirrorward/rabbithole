@@ -220,6 +220,49 @@ impl BlobStore {
         Ok(())
     }
 
+    /// Cache policy: bound the disk used by **unreferenced** blobs to
+    /// `max_bytes`, evicting oldest-first (by modified time) until the total
+    /// fits. Referenced blobs — library content the database layer holds —
+    /// are never evicted, so this only trims the swarm/transient cache. A
+    /// `max_bytes` of 0 evicts every unreferenced blob ("none" policy);
+    /// a "mirror" policy simply never calls this. Returns the evicted ids.
+    pub fn evict_unreferenced_over(&self, max_bytes: u64) -> Result<Vec<BlobId>, BlobError> {
+        // Gather (id, size, mtime) for unreferenced blobs.
+        let mut cache: Vec<(BlobId, u64, std::time::SystemTime)> = Vec::new();
+        let mut total: u64 = 0;
+        for path in walk(&self.root)? {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(id) = BlobId::from_hex(name) else {
+                continue; // skip .refs / .tmp sidecars
+            };
+            if self.read_refs(&id)? != 0 {
+                continue; // referenced: never a cache eviction candidate
+            }
+            let meta = fs::metadata(&path)?;
+            let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            total += meta.len();
+            cache.push((id, meta.len(), mtime));
+        }
+        if total <= max_bytes {
+            return Ok(Vec::new());
+        }
+        // Oldest first.
+        cache.sort_by_key(|(_, _, mtime)| *mtime);
+        let mut removed = Vec::new();
+        for (id, size, _) in cache {
+            if total <= max_bytes {
+                break;
+            }
+            fs::remove_file(self.blob_path(&id))?;
+            let _ = fs::remove_file(self.refs_path(&id));
+            total = total.saturating_sub(size);
+            removed.push(id);
+        }
+        Ok(removed)
+    }
+
     /// Remove every blob with a zero reference count. Returns the ids
     /// removed. Blobs with no refs file are treated as zero (unreferenced).
     pub fn gc(&self) -> Result<Vec<BlobId>, BlobError> {
@@ -335,6 +378,51 @@ mod tests {
         // Reads past EOF clamp to what's there.
         assert_eq!(store.read_range(&id, 8, 100).unwrap(), b"89");
         assert_eq!(store.read_range(&id, 10, 5).unwrap(), b"");
+    }
+
+    #[test]
+    fn evicts_oldest_unreferenced_over_cap_but_spares_referenced() {
+        let (_dir, store) = store();
+        // Three ~unreferenced cache blobs, distinct mtimes (oldest first).
+        let a = store.put(&vec![b'a'; 1000]).unwrap();
+        let b = store.put(&vec![b'b'; 1000]).unwrap();
+        let c = store.put(&vec![b'c'; 1000]).unwrap();
+        let older = std::time::SystemTime::now() - std::time::Duration::from_secs(300);
+        let mid = std::time::SystemTime::now() - std::time::Duration::from_secs(200);
+        filetime_set(&store.blob_path(&a), older);
+        filetime_set(&store.blob_path(&b), mid);
+        // c keeps ~now. Pin `a` with a reference: it must survive despite
+        // being oldest.
+        store.add_ref(&a).unwrap();
+
+        // Cap of 1500 bytes: only ~1000 of unreferenced cache may remain, so
+        // one of {b,c} is evicted — the older (b).
+        let removed = store.evict_unreferenced_over(1500).unwrap();
+        assert_eq!(removed, vec![b], "oldest unreferenced blob evicted");
+        assert!(store.contains(&a), "referenced blob spared");
+        assert!(!store.contains(&b));
+        assert!(store.contains(&c));
+    }
+
+    #[test]
+    fn evict_zero_cap_clears_all_unreferenced() {
+        let (_dir, store) = store();
+        let a = store.put(b"cache one").unwrap();
+        let b = store.put(b"cache two").unwrap();
+        let pinned = store.put(b"library file").unwrap();
+        store.add_ref(&pinned).unwrap();
+
+        let removed = store.evict_unreferenced_over(0).unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(!store.contains(&a));
+        assert!(!store.contains(&b));
+        assert!(store.contains(&pinned), "referenced content never evicted");
+    }
+
+    /// Set a file's modified time (test helper; no external crate).
+    fn filetime_set(path: &Path, t: std::time::SystemTime) {
+        let f = fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(t).unwrap();
     }
 
     #[test]

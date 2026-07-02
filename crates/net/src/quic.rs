@@ -53,15 +53,25 @@ impl Listener for QuicListener {
                     continue;
                 }
             };
-            let conn = connecting
-                .await
-                .map_err(|e| NetError::Quic(e.to_string()))?;
+            // A failed handshake (e.g. a client pinning the wrong
+            // fingerprint) dooms only this connection — skip it rather than
+            // tearing down the whole accept loop for every other peer.
+            let conn = match connecting.await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!("quic handshake failed: {e}");
+                    continue;
+                }
+            };
             // The client opens the control stream; accept it here so the
             // returned Connection is immediately usable.
-            let (send, recv) = conn
-                .accept_bi()
-                .await
-                .map_err(|e| NetError::Quic(e.to_string()))?;
+            let (send, recv) = match conn.accept_bi().await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    tracing::debug!("quic control stream not opened: {e}");
+                    continue;
+                }
+            };
             let peer = PeerInfo {
                 remote_addr: conn.remote_address(),
                 transport: TransportKind::Quic,

@@ -51,6 +51,10 @@ pub struct ServerConfig {
     pub swarm_advert_ttl_secs: u32,
     /// Max live swarm advertisements per account (0 = unlimited).
     pub swarm_adverts_max: u32,
+    /// Cap on disk used by unreferenced (cache/swarm) blobs, in bytes; the
+    /// maintenance sweep evicts oldest-first over this. 0 = unlimited
+    /// ("mirror": keep everything the server has ever held).
+    pub swarm_cache_max_bytes: u64,
     /// Welcome-screen featured block (title on first line, body after).
     pub welcome_featured: String,
     /// Welcome-screen one-line ticker.
@@ -84,6 +88,7 @@ impl Default for ServerConfig {
             transfer_rate_bytes_per_sec: 0,
             swarm_advert_ttl_secs: 3600,
             swarm_adverts_max: 4096,
+            swarm_cache_max_bytes: 0,
             welcome_featured: String::new(),
             welcome_ticker: String::new(),
             theme_accent: String::new(),
@@ -174,6 +179,7 @@ impl ServerConfig {
             "transfer_rate_bytes_per_sec" => self.transfer_rate_bytes_per_sec.to_string(),
             "swarm_advert_ttl_secs" => self.swarm_advert_ttl_secs.to_string(),
             "swarm_adverts_max" => self.swarm_adverts_max.to_string(),
+            "swarm_cache_max_bytes" => self.swarm_cache_max_bytes.to_string(),
             "welcome_featured" => self.welcome_featured.clone(),
             "welcome_ticker" => self.welcome_ticker.clone(),
             "theme_accent" => self.theme_accent.clone(),
@@ -302,6 +308,13 @@ impl ServerConfig {
             }
             "swarm_adverts_max" => {
                 self.swarm_adverts_max = value.parse().map_err(|_| ConfigError::BadValue {
+                    key: key.into(),
+                    detail: value.into(),
+                })?;
+                Ok(true)
+            }
+            "swarm_cache_max_bytes" => {
+                self.swarm_cache_max_bytes = value.parse().map_err(|_| ConfigError::BadValue {
                     key: key.into(),
                     detail: value.into(),
                 })?;

@@ -156,6 +156,7 @@ impl Burrow {
             tokio::spawn(accept_loop(Box::new(quic), shared.clone())),
             tokio::spawn(accept_loop(Box::new(ws), shared.clone())),
             tokio::spawn(replay_recorder(shared.clone())),
+            tokio::spawn(maintenance(shared.clone())),
             tokio::spawn({
                 let shared = shared.clone();
                 async move {
@@ -182,6 +183,38 @@ impl Burrow {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         for t in &self.tasks {
             t.abort();
+        }
+    }
+}
+
+/// Periodic housekeeping: enforce the blob cache policy
+/// (`swarm_cache_max_bytes`) by evicting oldest unreferenced blobs over the
+/// cap. Referenced library content is never touched; `0` means unlimited
+/// ("mirror"), so the sweep is a no-op. Stops on shutdown.
+async fn maintenance(shared: Arc<Shared>) {
+    let mut rx = shared.bus.subscribe();
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                let cap = shared.config.read().swarm_cache_max_bytes;
+                if cap == 0 {
+                    continue; // mirror: keep everything
+                }
+                let blobs = shared.blobs.clone();
+                match tokio::task::spawn_blocking(move || blobs.evict_unreferenced_over(cap)).await {
+                    Ok(Ok(removed)) if !removed.is_empty() => {
+                        tracing::info!(evicted = removed.len(), "blob cache trimmed to cap");
+                    }
+                    Ok(Err(e)) => tracing::warn!("blob cache eviction failed: {e}"),
+                    _ => {}
+                }
+            }
+            ev = rx.recv() => {
+                if matches!(ev, Ok(ServerEvent::Shutdown) | Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                    break;
+                }
+            }
         }
     }
 }
