@@ -13,6 +13,7 @@ use rabbithole_core::theme::{Mode, ThemePack};
 use crate::app::AppState;
 use crate::client::LOBBY;
 use crate::files::{human_size, node_kind_label, TransferStatus, KIND_FOLDER};
+use crate::syndication_admin::FeedsStatus;
 use crate::theme_css::{mode_label, pack_label};
 use crate::theme_editor::{contrast_warnings, EditorAction, EditorState};
 
@@ -975,6 +976,7 @@ pub fn Admin() -> impl IntoView {
             app.load_classes();
             app.load_accounts();
             app.load_config();
+            app.load_syndication();
         }
     });
     let status = move || admin.with(|a| a.status.clone());
@@ -1004,10 +1006,166 @@ pub fn Admin() -> impl IntoView {
             </div>
             <div class="rh-body">
                 <section class="rh-panel">
+                    <SyndicationPanel/>
+                </section>
+            </div>
+            <div class="rh-body">
+                <section class="rh-panel">
                     <ThemeEditorPanel/>
                 </section>
             </div>
         </Show>
+    }
+}
+
+/// Syndication & Gateways: the per-network gateway matrix (enabled state,
+/// listener port, live/restart badge, toggle), the poll-interval editor with
+/// inline validation, and the read-only feeds table + monitor. All state and
+/// logic live in the host-tested [`crate::syndication_admin`]; the panel
+/// rides the **existing** ADMIN config get/set vocabulary — no new wire
+/// messages. Feeds are honest about being TOML-only server-side, and live
+/// per-feed stats are a clearly-labeled seam for a future server slice.
+/// Admin-gated by rendering inside [`Admin`]'s capability guard.
+#[component]
+fn SyndicationPanel() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let syn = app.syndication;
+
+    let status = move || syn.with(|s| s.status.clone());
+    let has_status = move || syn.with(|s| !s.status.is_empty());
+    let matrix = move || syn.with(|s| s.gateway_matrix());
+    let poll_error = move || syn.with(|s| s.poll_error.clone().unwrap_or_default());
+    let has_poll_error = move || syn.with(|s| s.poll_error.is_some());
+    let can_save_poll = move || syn.with(|s| s.poll_save_command().is_some());
+    let feeds_unavailable = move || syn.with(|s| s.feeds == FeedsStatus::Unavailable);
+    let feeds_loaded = move || syn.with(|s| matches!(s.feeds, FeedsStatus::Listed(_)));
+    let feed_rows = move || syn.with(|s| s.feed_rows());
+    let feed_state = move || syn.with(|s| s.feed_state_line());
+
+    view! {
+        <h2 class="rh-panel-title">"Syndication & gateways"</h2>
+        <Show when=has_status fallback=|| ()>
+            <p class="rh-hint">{status}</p>
+        </Show>
+
+        <h2 class="rh-panel-title">"Gateway matrix"</h2>
+        <ul class="rh-tree">
+            <For
+                each=matrix
+                key=|r| format!("{}:{:?}:{:?}:{}", r.toggle_key, r.enabled, r.port, r.applies_live)
+                children=move |r| {
+                    let dot = match r.enabled {
+                        Some(true) => "rh-dot on",
+                        Some(false) => "rh-dot off",
+                        None => "rh-dot pending",
+                    };
+                    let port = r
+                        .port
+                        .map(|p| format!("port {p}"))
+                        .unwrap_or_else(|| "\u{2014}".to_string());
+                    let (badge, badge_text) = if r.applies_live {
+                        ("rh-badge done", "live")
+                    } else {
+                        ("rh-badge", "restart")
+                    };
+                    let toggle_key = r.toggle_key;
+                    let can_toggle = r.enabled.is_some();
+                    let label = match r.enabled {
+                        Some(true) => "Disable",
+                        _ => "Enable",
+                    };
+                    view! {
+                        <li class="rh-tree-item rh-account-row">
+                            <span class=dot></span>
+                            <span class="rh-member-name">{r.family}</span>
+                            <span class="rh-file-meta">{port}</span>
+                            <span class=badge>{badge_text}</span>
+                            <button
+                                class="rh-btn small"
+                                disabled=!can_toggle
+                                on:click=move |_| app.syn_toggle(toggle_key)
+                            >
+                                {label}
+                            </button>
+                        </li>
+                    }
+                }
+            />
+        </ul>
+        <p class="rh-hint">
+            "\"restart\" keys save to burrow.toml but take effect only after a \
+             server restart (listeners bind at boot); \"live\" keys apply \
+             immediately."
+        </p>
+
+        <h2 class="rh-panel-title">"Feed polling"</h2>
+        <div class="rh-toolbar">
+            <span class="rh-config-key">"syndication_poll_secs"</span>
+            <input
+                class="rh-input"
+                prop:value=move || syn.with(|s| s.poll_draft.clone())
+                on:input=move |ev| app.syn_set_poll_draft(&event_target_value(&ev))
+            />
+            <button
+                class="rh-btn small"
+                disabled=move || !can_save_poll()
+                on:click=move |_| app.syn_save_poll()
+            >
+                "Save"
+            </button>
+        </div>
+        <Show when=has_poll_error fallback=|| ()>
+            <p class="rh-warn">{poll_error}</p>
+        </Show>
+        <p class="rh-hint">
+            "Base seconds between feed polls (1\u{2013}604800). The server \
+             clamps the effective schedule between 300 s (politeness floor) \
+             and 86400 s (backoff ceiling). Restart required \u{2014} the \
+             poll task starts at boot."
+        </p>
+
+        <h2 class="rh-panel-title">"Feeds (URL \u{2192} board)"</h2>
+        <Show when=feeds_unavailable fallback=|| ()>
+            <p class="rh-hint">
+                "This server does not expose syndication_feeds over the admin \
+                 wire \u{2014} the map is TOML-only. Edit the \
+                 [syndication_feeds] table in burrow.toml (feed URL = board \
+                 slug) and restart."
+            </p>
+        </Show>
+        <Show when=feeds_loaded fallback=|| ()>
+            <Show
+                when=move || !feed_rows().is_empty()
+                fallback=|| view! { <p class="rh-empty">"(no feeds configured)"</p> }
+            >
+                <ul class="rh-tree">
+                    <For
+                        each=feed_rows
+                        key=|f| f.url.clone()
+                        children=move |f| view! {
+                            <li class="rh-tree-item rh-account-row">
+                                <span class="rh-member-name">{f.url}</span>
+                                <span class="rh-member-handle">"\u{2192} "{f.board}</span>
+                                <span class="rh-file-meta">{feed_state}</span>
+                            </li>
+                        }
+                    />
+                </ul>
+            </Show>
+            <p class="rh-hint">
+                "Read-only here: the mapping itself is TOML-only \u{2014} edit \
+                 the [syndication_feeds] table in burrow.toml and restart to \
+                 change it."
+            </p>
+        </Show>
+
+        <h2 class="rh-panel-title">"Feed monitor"</h2>
+        <p class="rh-hint">
+            "Configured state only. Live per-feed stats (last poll, \
+             conditional-GET 304s, dedupe hits) land with a future server \
+             slice \u{2014} no feed-stats wire message exists yet, and this \
+             panel does not invent one."
+        </p>
     }
 }
 

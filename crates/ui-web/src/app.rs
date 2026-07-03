@@ -20,6 +20,7 @@ use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
 use crate::radio::{clamp_volume, RadioPrefs, RadioState};
 use crate::state::UiState;
+use crate::syndication_admin::SynAdminState;
 use crate::theme_css::{next_mode, next_pack, resolve_root_style, ThemeChoice, STYLESHEET};
 use crate::wire::{AdminCommand, AdminEvent, FileCommand, FileEvent, NoticeRoute};
 
@@ -32,6 +33,9 @@ pub struct AppState {
     pub files: RwSignal<FilesState>,
     /// The web-admin model, folded from admin events.
     pub admin: RwSignal<AdminState>,
+    /// The Syndication & Gateways panel model, folded from paired config
+    /// get/set replies ([`crate::syndication_admin`]).
+    pub syndication: RwSignal<SynAdminState>,
     /// Whether the signed-in session holds an admin capability. Gates the admin
     /// nav entry and routes.
     pub is_admin: RwSignal<bool>,
@@ -64,6 +68,7 @@ impl AppState {
             state: create_rw_signal(UiState::default()),
             files: create_rw_signal(FilesState::default()),
             admin: create_rw_signal(AdminState::default()),
+            syndication: create_rw_signal(SynAdminState::default()),
             is_admin: create_rw_signal(false),
             theme: create_rw_signal(initial_theme_choice()),
             custom_pack: create_rw_signal(None),
@@ -356,6 +361,61 @@ impl AppState {
     /// Disconnect a session by id.
     pub fn kick(&self, session_id: u64) {
         self.dispatch_admin(AdminCommand::Kick { session_id });
+    }
+
+    /// Drive one `GetConfig` for the Syndication & Gateways panel and fold
+    /// its replies — paired with the requested `key` so the reducer knows
+    /// which read failed (the wire's `Failed` carries no key).
+    fn dispatch_syn_get(&self, key: &str) {
+        let syndication = self.syndication;
+        self.client.update_value(|client| {
+            let events = client.dispatch_admin(AdminCommand::GetConfig {
+                key: key.to_string(),
+            });
+            syndication.update(|s| s.apply_get_reply(key, &events));
+        });
+    }
+
+    /// Drive one `SetConfig` for the panel, fold the paired reply, then
+    /// re-read the key so the panel shows the authoritative stored value.
+    fn dispatch_syn_set(&self, key: &str, command: AdminCommand) {
+        let syndication = self.syndication;
+        self.client.update_value(|client| {
+            let events = client.dispatch_admin(command);
+            syndication.update(|s| s.apply_set_reply(key, &events));
+        });
+        self.dispatch_syn_get(key);
+    }
+
+    /// Load every key the Syndication & Gateways panel shows (gateway
+    /// toggles, listener addresses, the syndication knobs, and the
+    /// TOML-only `syndication_feeds` attempt).
+    pub fn load_syndication(&self) {
+        for key in crate::syndication_admin::LOAD_KEYS {
+            self.dispatch_syn_get(key);
+        }
+    }
+
+    /// Flip a gateway/syndication boolean key, if it is loaded and parsable.
+    pub fn syn_toggle(&self, key: &str) {
+        let Some(command) = self.syndication.with_untracked(|s| s.toggle_command(key)) else {
+            return;
+        };
+        self.dispatch_syn_set(key, command);
+    }
+
+    /// Update the poll-interval draft (inline validation happens in the
+    /// reducer).
+    pub fn syn_set_poll_draft(&self, draft: &str) {
+        self.syndication.update(|s| s.set_poll_draft(draft));
+    }
+
+    /// Save the poll-interval draft, if valid and changed.
+    pub fn syn_save_poll(&self) {
+        let Some(command) = self.syndication.with_untracked(|s| s.poll_save_command()) else {
+            return;
+        };
+        self.dispatch_syn_set(crate::syndication_admin::KEY_POLL_SECS, command);
     }
 
     /// Fold one routed notice: `[radio]` bridge updates feed the radio

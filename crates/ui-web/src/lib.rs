@@ -58,6 +58,11 @@
 //! - [`theme_editor`] is the DOM-free admin theme-editor model: a working
 //!   [`PackTokens`](packs::PackTokens) with a validated action reducer, JSON
 //!   import/export, and a WCAG contrast checker that warns (never blocks).
+//! - [`syndication_admin`] is the DOM-free Syndication & Gateways panel model
+//!   ([`SynAdminState`](syndication_admin::SynAdminState)): gateway-matrix
+//!   derivation, the poll-interval editor with validation, and a total
+//!   `syndication_feeds` parser — all riding the existing ADMIN config
+//!   vocabulary in [`wire`].
 //! - [`app`] and [`components`] are the Leptos view layer.
 //!
 //! ## wasm hygiene
@@ -78,6 +83,7 @@ pub mod packs;
 pub mod pwa;
 pub mod radio;
 pub mod state;
+pub mod syndication_admin;
 pub mod theme_css;
 pub mod theme_editor;
 pub mod wire;
@@ -102,6 +108,10 @@ pub use radio::{
     StationStatus,
 };
 pub use state::{Board, ChatLine, DmMessage, DmThread, Member, Post, Thread, UiState};
+pub use syndication_admin::{
+    expected_applies_live, parse_feeds_value, validate_poll_secs, FeedRow, FeedsStatus, GatewayRow,
+    SynAdminState,
+};
 pub use theme_editor::{contrast_warnings, ContrastWarning, EditorAction, EditorState};
 pub use wire::{
     admin_command_to_frame, command_to_frame, file_command_to_frame, frame_to_admin_events,

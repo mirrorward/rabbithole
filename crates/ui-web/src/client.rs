@@ -449,14 +449,36 @@ impl MockClient {
     }
 
     fn seeded_config() -> Vec<(String, String)> {
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
         vec![
-            ("server.name".to_string(), "Rabbit Lobby".to_string()),
-            (
-                "server.motd".to_string(),
-                "Welcome to the warren.".to_string(),
+            pair("server.name", "Rabbit Lobby"),
+            pair("server.motd", "Welcome to the warren."),
+            pair("registration.mode", "invite"),
+            pair("chat.slowmode_secs", "0"),
+            // Gateway + syndication knobs for the Syndication & Gateways
+            // panel, mirroring the server's key names and serializations.
+            pair("nntp_enabled", "true"),
+            pair("nntp_addr", "0.0.0.0:1119"),
+            pair("nntp_tls_enabled", "false"),
+            pair("nntp_tls_addr", "0.0.0.0:563"),
+            pair("nntp_feed_enabled", "false"),
+            pair("nntp_feed_addr", "0.0.0.0:1120"),
+            pair("nntp_feed_tls_enabled", "false"),
+            pair("nntp_feed_tls_addr", "0.0.0.0:1563"),
+            pair("ftn_enabled", "false"),
+            pair("ftn_addr", "0.0.0.0:24554"),
+            pair("qwk_enabled", "true"),
+            pair("syndication_enabled", "true"),
+            pair("syndication_poll_secs", "1800"),
+            // The real server does NOT expose `syndication_feeds` via config
+            // get (it is TOML-only and answers NotFound); the mock serves the
+            // TOML table body so the dev panel can demonstrate the read-only
+            // feeds table. The panel treats it as read-only either way.
+            pair(
+                "syndication_feeds",
+                "\"https://blog.example.org/feed.xml\" = \"general\"\n\
+                 \"https://warren.example/atom.xml\" = \"tech\"\n",
             ),
-            ("registration.mode".to_string(), "invite".to_string()),
-            ("chat.slowmode_secs".to_string(), "0".to_string()),
         ]
     }
 
@@ -535,8 +557,12 @@ impl MockClient {
                 } else {
                     self.admin_config.push((key.clone(), value));
                 }
-                // Listener addresses need a restart; everything else is live.
-                let live = !key.starts_with("listen.");
+                // Mirror the server's documented semantics for the gateway
+                // and syndication keys the admin panel drives; for keys
+                // outside that vocabulary keep the original mock rule
+                // (listener addresses need a restart; the rest is live).
+                let live = crate::syndication_admin::expected_applies_live(&key)
+                    .unwrap_or_else(|| !key.starts_with("listen."));
                 admin_events(&ConfigApplied::new(live))
             }
         }
@@ -1075,6 +1101,81 @@ mod tests {
         assert!(matches!(
             got.as_slice(),
             [AdminEvent::ConfigLoaded { value, .. }] if value == "New Warren"
+        ));
+    }
+
+    #[test]
+    fn admin_syndication_panel_keys_are_seeded() {
+        use crate::syndication_admin::{FeedsStatus, SynAdminState, LOAD_KEYS};
+
+        // Drive the exact load the panel performs and fold the paired
+        // replies; every key answers from the seeded mock config.
+        let mut c = MockClient::new();
+        let mut s = SynAdminState::default();
+        for key in LOAD_KEYS {
+            let events = c.dispatch_admin(AdminCommand::GetConfig {
+                key: (*key).to_string(),
+            });
+            s.apply_get_reply(key, &events);
+        }
+        assert_eq!(s.enabled(), Some(true));
+        assert_eq!(s.poll_secs(), Some(1800));
+        // The seeded TOML table body parses into read-only feed rows whose
+        // destinations are real seeded boards.
+        let rows = s.feed_rows();
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(&s.feeds, FeedsStatus::Listed(_)));
+        let boards = c.boards();
+        for row in &rows {
+            assert!(boards.iter().any(|b| b.slug == row.board), "{row:?}");
+        }
+        // The matrix is fully populated from the seeded pairs.
+        let matrix = s.gateway_matrix();
+        assert_eq!(matrix.len(), 7);
+        assert!(matrix.iter().all(|r| r.enabled.is_some()));
+    }
+
+    #[test]
+    fn admin_set_config_mirrors_gateway_restart_semantics() {
+        let mut c = MockClient::new();
+        // Syndication's poll task starts at boot: restart required.
+        let ev = c.dispatch_admin(AdminCommand::SetConfig {
+            key: "syndication_enabled".into(),
+            value: "false".into(),
+        });
+        assert!(matches!(
+            ev.as_slice(),
+            [AdminEvent::ConfigApplied {
+                applied_live: false
+            }]
+        ));
+        // QWK re-reads config per command: applies live.
+        let ev = c.dispatch_admin(AdminCommand::SetConfig {
+            key: "qwk_enabled".into(),
+            value: "false".into(),
+        });
+        assert!(matches!(
+            ev.as_slice(),
+            [AdminEvent::ConfigApplied { applied_live: true }]
+        ));
+        // NNTP listeners bind at startup: restart required.
+        let ev = c.dispatch_admin(AdminCommand::SetConfig {
+            key: "nntp_enabled".into(),
+            value: "false".into(),
+        });
+        assert!(matches!(
+            ev.as_slice(),
+            [AdminEvent::ConfigApplied {
+                applied_live: false
+            }]
+        ));
+        // The toggled value reads back.
+        let got = c.dispatch_admin(AdminCommand::GetConfig {
+            key: "nntp_enabled".into(),
+        });
+        assert!(matches!(
+            got.as_slice(),
+            [AdminEvent::ConfigLoaded { value, .. }] if value == "false"
         ));
     }
 
