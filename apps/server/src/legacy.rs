@@ -158,10 +158,30 @@ async fn serve_finger_conn(
     if restricted {
         // Anonymous protocol + a minimum above guest = the surface is
         // members-only, and finger has no way to prove membership.
+        //
+        // Read (and discard) the query line BEFORE refusing: closing a socket
+        // with the client's query still unread in our receive buffer turns
+        // the close into an RST on macOS/Windows, and the client sees
+        // ConnectionReset instead of the refusal text. Bounded so a silent
+        // client can't hold the connection open.
+        let _ = tokio::time::timeout(Duration::from_secs(10), read_query_line(&mut stream)).await;
         stream
             .write_all(to_wire("This finger service is restricted. Ask your sysop.\n").as_bytes())
             .await?;
-        return stream.shutdown().await;
+        stream.shutdown().await?;
+        // Drain until the peer's FIN so the refusal is delivered before the
+        // socket drops (the serve_htxf close discipline).
+        let mut sink = [0u8; 256];
+        let drain = async {
+            loop {
+                match stream.read(&mut sink).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(10), drain).await;
+        return Ok(());
     }
     let query = tokio::time::timeout(Duration::from_secs(30), read_query_line(&mut stream)).await;
     let text = match query {
