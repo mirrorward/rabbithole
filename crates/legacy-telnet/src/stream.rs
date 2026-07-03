@@ -5,6 +5,14 @@
 //! (replies, TTYPE `SEND` follow-up, NAWS/TTYPE capture), a line-mode reader
 //! with CR/LF and backspace handling plus server-side echo, and an
 //! encoding-aware writer that translates `\n` → `\r\n` and doubles IAC.
+//!
+//! For file transfers (ZMODEM) and door bridges the stream also exposes a
+//! **binary mode**: [`TelnetStream::read_binary`] / [`TelnetStream::write_binary`]
+//! move raw payload bytes through the telnet layer 8-bit-cleanly — IAC
+//! doubled outbound and undoubled inbound, negotiation still absorbed, and
+//! *no* newline translation or character-encoding applied. Line mode and
+//! binary mode share the stream safely: switching back to
+//! [`TelnetStream::read_line`] after a transfer just resumes line editing.
 
 use std::collections::VecDeque;
 use std::io;
@@ -274,6 +282,36 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TelnetStream<S> {
         self.io.flush().await
     }
 
+    /// Write payload bytes 8-bit-safely: every `0xFF` is doubled to `IAC
+    /// IAC` and nothing else is touched — no newline translation, no
+    /// character encoding. Flushes. The outbound half of binary mode; a
+    /// file-transfer driver (ZMODEM) sends its wire frames through this so
+    /// the session encoding never corrupts them.
+    pub async fn write_binary(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let escaped = escape_iac(bytes);
+        self.io.write_all(&escaped).await?;
+        self.io.flush().await
+    }
+
+    /// Next chunk of raw payload bytes, with `IAC IAC` already undoubled to
+    /// `0xFF`. Negotiation traffic is still absorbed internally (replies
+    /// written, NAWS/TTYPE captured silently). `None` means EOF. The
+    /// inbound half of binary mode: unlike [`TelnetStream::read_line`] there
+    /// is no line editing, no echo, and no encoding — bytes arrive exactly
+    /// as the peer's telnet layer sent them.
+    ///
+    /// **Cancel-safe**: no partial state lives in the future; dropping it
+    /// loses nothing.
+    pub async fn read_binary(&mut self) -> io::Result<Option<Vec<u8>>> {
+        loop {
+            match self.next_input().await? {
+                None => return Ok(None),
+                Some(Input::Data(data)) if !data.is_empty() => return Ok(Some(data)),
+                Some(_) => {} // window/ttype updates, or an empty chunk
+            }
+        }
+    }
+
     /// Are we echoing? True once we hold ECHO, or while our WILL ECHO offer
     /// is outstanding (classic BBS behavior; stops if the peer refuses).
     fn echo_active(&self) -> bool {
@@ -493,6 +531,92 @@ mod tests {
         assert_eq!(
             drain(&mut client).await,
             [b'c', b'a', b'f', 0x82, b'\r', b'\n']
+        );
+    }
+
+    #[tokio::test]
+    async fn write_binary_doubles_iac_and_nothing_else() {
+        let (mut client, server) = duplex(4096);
+        let mut t = TelnetStream::new(server);
+        // CP437 mode must not matter: binary mode bypasses encoding and
+        // newline translation entirely.
+        t.set_encoding(Encoding::Cp437);
+        t.write_binary(&[0x00, b'\n', 0xFF, 0x18, 0xFF, 0xFF, 0x7F])
+            .await
+            .unwrap();
+        assert_eq!(
+            drain(&mut client).await,
+            vec![0x00, b'\n', 0xFF, 0xFF, 0x18, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]
+        );
+    }
+
+    #[tokio::test]
+    async fn read_binary_undoubles_iac_and_absorbs_negotiation() {
+        let (mut client, server) = duplex(4096);
+        let mut t = TelnetStream::new(server);
+        t.start().await.unwrap();
+        drain(&mut client).await;
+
+        // Payload with a doubled IAC, negotiation spliced into the middle,
+        // and a NAWS report — the payload comes out contiguous per chunk,
+        // the negotiation is answered/captured invisibly.
+        client
+            .write_all(&[
+                1,
+                2,
+                IAC,
+                IAC,
+                3,
+                IAC,
+                WILL,
+                opt::NAWS,
+                IAC,
+                SB,
+                opt::NAWS,
+                0,
+                132,
+                0,
+                43,
+                IAC,
+                SE,
+                4,
+                5,
+            ])
+            .await
+            .unwrap();
+        assert_eq!(t.read_binary().await.unwrap(), Some(vec![1, 2, 0xFF, 3]));
+        assert_eq!(t.read_binary().await.unwrap(), Some(vec![4, 5]));
+        assert_eq!(t.window(), Some((132, 43)));
+
+        // EOF surfaces as None.
+        drop(client);
+        assert_eq!(t.read_binary().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn binary_mode_and_line_mode_share_the_stream() {
+        let (mut client, server) = duplex(4096);
+        let mut t = TelnetStream::new(server);
+
+        // A command line and the first transfer bytes arrive together; the
+        // line reader stops at the terminator and binary mode picks up the
+        // pushed-back remainder — then line mode resumes cleanly after.
+        client
+            .write_all(&[b'z', b'g', b'e', b't', b'\r', b'\n', 0xAA, IAC, IAC, 0xBB])
+            .await
+            .unwrap();
+        assert_eq!(
+            t.read_line(Echo::Hidden).await.unwrap().as_deref(),
+            Some("zget")
+        );
+        assert_eq!(
+            t.read_binary().await.unwrap(),
+            Some(vec![b'\n', 0xAA, 0xFF, 0xBB])
+        );
+        client.write_all(b"ls\r\n").await.unwrap();
+        assert_eq!(
+            t.read_line(Echo::Hidden).await.unwrap().as_deref(),
+            Some("ls")
         );
     }
 

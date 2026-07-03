@@ -27,12 +27,24 @@
 //! `Streaming` the *caller* pumps `ZDATA` subpackets (it owns the file
 //! bytes) and reports [`SendEvent::DataExhausted`] to trigger `ZEOF`.
 //!
+//! ## Resume (crash recovery)
+//!
+//! Both sides support offset resume through `ZRPOS`:
+//!
+//! - The [`Sender`] honors *any* `ZRPOS` position — the initial answer to
+//!   `ZFILE` (start mid-file), a mid-stream rewind, and a post-`ZEOF`
+//!   correction — by re-anchoring and streaming again from there.
+//! - The [`Receiver`] answers `ZFILE` with `ZRPOS(0)` by default; a driver
+//!   holding a partial file calls [`Receiver::set_resume_offset`] before
+//!   feeding the file-info subpacket and the receiver asks for the tail
+//!   instead (`ZRPOS(offset)`), then expects data from that offset.
+//!
 //! ## Deliberately deferred (future slices)
 //!
 //! - Full error recovery: `ZNAK`/garbled-header retries, retry limits and
 //!   timeouts, `ZRPOS` storm damping, `Attn` sequences from `ZSINIT`.
-//! - `ZSKIP`/`ZCRC` file-exists and crash-recovery negotiation, `ZFREECNT`,
-//!   `ZCHALLENGE`, `ZCOMMAND`.
+//! - `ZSKIP`/`ZCRC` file-exists negotiation, `ZFREECNT`, `ZCHALLENGE`,
+//!   `ZCOMMAND`.
 //! - Multi-file batches on the send side (the receiver already loops back
 //!   to `AwaitingFile` after each `ZEOF`).
 //! - Escape-policy negotiation (`ESCCTL`/`ESC8`) and `ZCRCQ`-window pacing.
@@ -139,7 +151,9 @@ pub enum RecvAction {
         /// The wire format to use.
         format: HeaderFormat,
     },
-    /// Open (create/truncate) the described file for writing.
+    /// Open the described file for writing: create/truncate normally, or
+    /// open the existing partial for appending when the driver seeded a
+    /// resume offset (see [`Receiver::set_resume_offset`]).
     OpenFile(FileInfo),
     /// Append these bytes at the given file offset.
     WriteData {
@@ -161,6 +175,9 @@ pub enum RecvAction {
 #[derive(Debug)]
 pub struct Receiver {
     state: RecvState,
+    /// Where the *next* accepted file starts: 0 normally, a staged partial's
+    /// length when the driver armed a resume (consumed per file).
+    resume_offset: u32,
 }
 
 impl Default for Receiver {
@@ -174,12 +191,23 @@ impl Receiver {
     pub fn new() -> Self {
         Receiver {
             state: RecvState::AwaitingInit,
+            resume_offset: 0,
         }
     }
 
     /// The current state, for logging/inspection.
     pub fn state(&self) -> RecvState {
         self.state
+    }
+
+    /// Arm crash-recovery resume for the *next* file: the answer to its
+    /// `ZFILE` info becomes `ZRPOS(offset)` instead of `ZRPOS(0)`, and data
+    /// is expected from `offset`. Call this after peeking at the offered
+    /// [`FileInfo`] (the driver decodes the subpacket anyway) and *before*
+    /// feeding it as a [`RecvEvent::Data`]. The offset is consumed by that
+    /// file; subsequent files in a batch start at 0 again.
+    pub fn set_resume_offset(&mut self, offset: u32) {
+        self.resume_offset = offset;
     }
 
     /// The `ZRINIT` this receiver advertises: full-duplex, overlapped I/O,
@@ -227,11 +255,12 @@ impl Receiver {
             }
             (RecvState::AwaitingFileInfo, RecvEvent::Data { payload, .. }) => {
                 let info = FileInfo::decode(&payload)?;
-                self.state = RecvState::AwaitingData { offset: 0 };
+                let start = std::mem::take(&mut self.resume_offset);
+                self.state = RecvState::AwaitingData { offset: start };
                 Ok(vec![
                     RecvAction::OpenFile(info),
                     RecvAction::SendHeader {
-                        header: Header::with_pos(FrameType::Zrpos, 0),
+                        header: Header::with_pos(FrameType::Zrpos, start),
                         format: HeaderFormat::Hex,
                     },
                 ])
@@ -499,6 +528,22 @@ impl Sender {
                     format: HeaderFormat::Hex,
                 }])
             }
+            // The receiver rejected our ZEOF position (it missed data, or a
+            // mid-stream ZRPOS crossed our ZEOF on the wire): rewind and
+            // stream again — a sender must honor ZRPOS at any time.
+            (SendState::AwaitingEofAck, SendEvent::Header(h))
+                if h.frame_type == FrameType::Zrpos =>
+            {
+                let from = h.pos();
+                self.state = SendState::Streaming { offset: from };
+                Ok(vec![
+                    SendAction::SendHeader {
+                        header: Header::with_pos(FrameType::Zdata, from),
+                        format: self.binary_format(),
+                    },
+                    SendAction::StreamData { from },
+                ])
+            }
             (SendState::AwaitingEofAck, SendEvent::Header(h))
                 if h.frame_type == FrameType::Zrinit =>
             {
@@ -680,6 +725,66 @@ mod tests {
     }
 
     #[test]
+    fn receiver_resumes_at_staged_offset() {
+        let mut rx = Receiver::new();
+        rx.advance(RecvEvent::Header(Header::new(FrameType::Zrqinit)))
+            .unwrap();
+        rx.advance(RecvEvent::Header(Header::new(FrameType::Zfile)))
+            .unwrap();
+
+        // The driver peeked at the info, found 100 staged bytes, and armed
+        // the resume before feeding the subpacket.
+        rx.set_resume_offset(100);
+        let info = FileInfo {
+            length: Some(150),
+            ..FileInfo::new("resume.bin")
+        };
+        let actions = rx
+            .advance(RecvEvent::Data {
+                payload: info.encode().unwrap(),
+                end: FrameEnd::Zcrcw,
+            })
+            .unwrap();
+        assert_eq!(actions[0], RecvAction::OpenFile(info));
+        let rpos = header_action(&actions, 1);
+        assert_eq!(rpos.frame_type, FrameType::Zrpos);
+        assert_eq!(rpos.pos(), 100);
+        assert_eq!(rx.state(), RecvState::AwaitingData { offset: 100 });
+
+        // Data now flows from the staged offset; the tail completes the file.
+        rx.advance(RecvEvent::Header(Header::with_pos(FrameType::Zdata, 100)))
+            .unwrap();
+        let actions = rx
+            .advance(RecvEvent::Data {
+                payload: vec![7; 50],
+                end: FrameEnd::Zcrce,
+            })
+            .unwrap();
+        assert_eq!(
+            actions[0],
+            RecvAction::WriteData {
+                offset: 100,
+                data: vec![7; 50]
+            }
+        );
+        let actions = rx
+            .advance(RecvEvent::Header(Header::with_pos(FrameType::Zeof, 150)))
+            .unwrap();
+        assert_eq!(actions[0], RecvAction::CloseFile);
+
+        // The offset was consumed: the next file in the batch starts at 0.
+        rx.advance(RecvEvent::Header(Header::new(FrameType::Zfile)))
+            .unwrap();
+        let actions = rx
+            .advance(RecvEvent::Data {
+                payload: FileInfo::new("next").encode().unwrap(),
+                end: FrameEnd::Zcrcw,
+            })
+            .unwrap();
+        assert_eq!(header_action(&actions, 1).pos(), 0);
+    }
+
+    #[test]
     fn receiver_rejects_out_of_order_events() {
         let mut rx = Receiver::new();
         let err = rx
@@ -815,6 +920,49 @@ mod tests {
             .unwrap();
         assert!(matches!(actions[1], SendAction::StreamData { from: 256 }));
         assert_eq!(tx.state(), SendState::Streaming { offset: 256 });
+    }
+
+    #[test]
+    fn sender_rewinds_on_zrpos_after_eof() {
+        let mut tx = Sender::new(FileInfo::new("f"));
+        tx.start().unwrap();
+        tx.advance(SendEvent::Header(Header::with_flags(
+            FrameType::Zrinit,
+            0,
+            0,
+            0,
+            CANFC32,
+        )))
+        .unwrap();
+        tx.advance(SendEvent::Header(Header::with_pos(FrameType::Zrpos, 0)))
+            .unwrap();
+        tx.advance(SendEvent::DataExhausted { offset: 512 })
+            .unwrap();
+        assert_eq!(tx.state(), SendState::AwaitingEofAck);
+
+        // The receiver only got 384 bytes: it answers ZEOF with ZRPOS(384).
+        let actions = tx
+            .advance(SendEvent::Header(Header::with_pos(FrameType::Zrpos, 384)))
+            .unwrap();
+        match &actions[0] {
+            SendAction::SendHeader { header, .. } => {
+                assert_eq!(header.frame_type, FrameType::Zdata);
+                assert_eq!(header.pos(), 384);
+            }
+            other => panic!("expected ZDATA, got {other:?}"),
+        }
+        assert!(matches!(actions[1], SendAction::StreamData { from: 384 }));
+        assert_eq!(tx.state(), SendState::Streaming { offset: 384 });
+
+        // Second attempt lands; the session finishes normally.
+        tx.advance(SendEvent::DataExhausted { offset: 512 })
+            .unwrap();
+        tx.advance(SendEvent::Header(Header::new(FrameType::Zrinit)))
+            .unwrap();
+        let actions = tx
+            .advance(SendEvent::Header(Header::new(FrameType::Zfin)))
+            .unwrap();
+        assert_eq!(actions[1], SendAction::Finished);
     }
 
     #[test]

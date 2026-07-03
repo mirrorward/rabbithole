@@ -41,21 +41,28 @@
 //! `url:` targets), then direct board/area/door matches, then the Wave 2.3
 //! room/user resolver.
 //!
-//! ## The file browser and the HTTP handoff
+//! ## The file browser: HTTP handoff and ZMODEM
 //!
 //! `files` opens a small sub-shell over the shared
 //! [`FileService`](rabbithole_server_core::FileService): `ls` walks areas →
 //! folders → files as a paged plain-ASCII table, `cd` moves around, and
-//! `get <name>` **does not stream bytes** — telnet is a terrible transfer
-//! channel — it prints an HTTP(S) handoff link
-//! `<files_http_base>/files/<area>/<path>` for the caller to fetch out of
-//! band. This module only mints the link; serving it belongs to the web
-//! slice. With `files_http_base` unset, `get` explains transfers aren't
-//! available on telnet. RBAC mirrors the Hotline surface exactly: `files`
-//! root needs [`Caps::FILE_LIST`], folder listings check `FILE_LIST` on the
+//! `get <name>` **does not stream bytes** — it prints an HTTP(S) handoff
+//! link `<files_http_base>/files/<area>/<path>` for the caller to fetch out
+//! of band. With `files_http_base` unset, `get` explains transfers aren't
+//! available that way. For real retro terminals the transfer *can* stay
+//! in-band: `zget <name>` sends the file over ZMODEM and `zput` receives an
+//! upload into the current (writable) folder — see [`crate::zmodem`] for
+//! the protocol driving, resume, and the 8-bit-clean telnet seam. RBAC
+//! mirrors the Hotline surface exactly: `files` root needs
+//! [`Caps::FILE_LIST`], folder listings check `FILE_LIST` on the
 //! `files/<area>/<path>` resource and hide entries the caller can't
 //! [`Caps::SEE`], drop-box contents stay hidden without
-//! [`Caps::DROPBOX_VIEW`], and `get` needs [`Caps::FILE_DOWNLOAD`].
+//! [`Caps::DROPBOX_VIEW`], `get`/`zget` need [`Caps::FILE_DOWNLOAD`] (plus
+//! the drop-box download rule and the moderation gates — quarantined or
+//! hash-denied content reads as absent, exactly like the HTTP serve path),
+//! and `zput` needs [`Caps::FILE_UPLOAD`] on the destination (uploading
+//! *into* a drop box is the classic use). `zget`/`zput` starts spend from
+//! the shared per-account `transfer` budget, like every transfer-open.
 
 use std::io;
 use std::net::IpAddr;
@@ -629,7 +636,8 @@ where
     }
     t.write_str(
         "\n--- File Library ---\n\
-         Commands: ls, cd <name>, cd .., get <name>, q (back to menu)\n",
+         Commands: ls, cd <name>, cd .., get <name>, zget <name>, zput, \
+         q (back to menu)\n",
     )
     .await?;
     list_level(t, shared, authed, &cur).await?;
@@ -655,6 +663,8 @@ where
                     "\nls           list this level (paged)\n\
                      cd <name>    enter an area or folder (cd .. goes up)\n\
                      get <name>   print an HTTP link for a file\n\
+                     zget <name>  send a file over ZMODEM (start your receive)\n\
+                     zput         receive a ZMODEM upload into this folder\n\
                      /go <word>   keyword teleport\n\
                      q            back to the main menu\n",
                 )
@@ -663,6 +673,8 @@ where
             "ls" | "list" | "dir" => list_level(t, shared, authed, &cur).await?,
             "cd" => change_dir(t, shared, authed, &mut cur, arg).await?,
             "get" => hand_off(t, shared, authed, &cur, arg).await?,
+            "zget" | "sz" => zget_cmd(t, shared, authed, &cur, arg).await?,
+            "zput" | "rz" => zput_cmd(t, shared, authed, &cur).await?,
             "/go" => {
                 if let Some(target) = go_command(t, shared, arg).await? {
                     return Ok(Some(target));
@@ -824,9 +836,98 @@ where
     }
 }
 
-/// `get`: authorize like a Hotline download (FILE_DOWNLOAD + the drop-box
-/// rule), then print the HTTP handoff link — or explain that transfers
-/// aren't available on telnet when `files_http_base` is unset.
+/// Resolve and authorize `arg` (relative to the cursor) for download, the
+/// checks every byte-serving path applies: hidden without [`Caps::SEE`],
+/// one alias hop, files only, [`Caps::FILE_DOWNLOAD`], the drop-box rule
+/// Hotline's DownloadFile enforces, and the moderation gates the HTTP serve
+/// path runs (quarantined-for-review and hash-denied blobs read as absent —
+/// checks the link-minting `get` previously left entirely to the HTTP hop).
+/// Writes the refusal itself; `None` means refused.
+async fn authorize_download<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    area: &str,
+    folder: &str,
+    arg: &str,
+) -> io::Result<Option<FileNodeRow>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let full = if folder.is_empty() {
+        arg.to_string()
+    } else {
+        format!("{folder}/{arg}")
+    };
+    // Resolve (following one alias hop), hiding what the caller can't SEE.
+    let node = match shared.files.node_by_path(area, &full).await {
+        Ok(Some(n))
+            if shared
+                .perms
+                .allows(&authed.subject, &file_resource(area, &n.path), Caps::SEE) =>
+        {
+            n
+        }
+        _ => {
+            t.write_str(&format!("\nNo such file: {arg}\n")).await?;
+            return Ok(None);
+        }
+    };
+    let target = match shared.files.resolve(node.id).await {
+        Ok(n) => n,
+        Err(_) => {
+            t.write_str(&format!("\nNo such file: {arg}\n")).await?;
+            return Ok(None);
+        }
+    };
+    if target.kind != rabbithole_server_core::files::KIND_FILE {
+        t.write_str(&format!("\n{arg} is a folder — `cd` into it instead.\n"))
+            .await?;
+        return Ok(None);
+    }
+    let resource = file_resource(&target.area, &target.path);
+    if !shared
+        .perms
+        .allows(&authed.subject, &resource, Caps::FILE_DOWNLOAD)
+    {
+        t.write_str("\nYou do not have permission to download that file.\n")
+            .await?;
+        return Ok(None);
+    }
+    // Drop-boxed content is not downloadable without view/manage rights
+    // (the same rule Hotline's DownloadFile applies).
+    let in_dropbox = shared.files.in_dropbox(&target).await.unwrap_or(false);
+    if in_dropbox
+        && !shared
+            .perms
+            .allows(&authed.subject, &resource, Caps::DROPBOX_VIEW)
+        && !shared.perms.allows(
+            &authed.subject,
+            &file_resource(&target.area, ""),
+            Caps::FILE_MANAGE,
+        )
+    {
+        t.write_str("\nYou do not have permission to download that file.\n")
+            .await?;
+        return Ok(None);
+    }
+    // Moderation: quarantined and hash-denied content reads as absent, the
+    // same non-teasing 404 the HTTP serve path gives.
+    if shared.moderation.file_quarantined(target.blob_id.as_ref())
+        || target
+            .blob_id
+            .as_ref()
+            .is_some_and(|b| shared.moderation.is_denied(b))
+    {
+        t.write_str(&format!("\nNo such file: {arg}\n")).await?;
+        return Ok(None);
+    }
+    Ok(Some(target))
+}
+
+/// `get`: authorize like a Hotline download (see [`authorize_download`]),
+/// then print the HTTP handoff link — or explain that link handoffs aren't
+/// available when `files_http_base` is unset (zget still works).
 async fn hand_off<S>(
     t: &mut TelnetStream<S>,
     shared: &Arc<Shared>,
@@ -846,64 +947,16 @@ where
             .await;
     };
     let folder = cur.folder();
-    let full = if folder.is_empty() {
-        arg.to_string()
-    } else {
-        format!("{folder}/{arg}")
+    let Some(target) = authorize_download(t, shared, authed, area, &folder, arg).await? else {
+        return Ok(());
     };
-    // Resolve (following one alias hop), hiding what the caller can't SEE.
-    let node = match shared.files.node_by_path(area, &full).await {
-        Ok(Some(n))
-            if shared
-                .perms
-                .allows(&authed.subject, &file_resource(area, &n.path), Caps::SEE) =>
-        {
-            n
-        }
-        _ => return t.write_str(&format!("\nNo such file: {arg}\n")).await,
-    };
-    let target = match shared.files.resolve(node.id).await {
-        Ok(n) => n,
-        Err(_) => return t.write_str(&format!("\nNo such file: {arg}\n")).await,
-    };
-    if target.kind != rabbithole_server_core::files::KIND_FILE {
-        return t
-            .write_str(&format!("\n{arg} is a folder — `cd` into it instead.\n"))
-            .await;
-    }
-    let resource = file_resource(&target.area, &target.path);
-    if !shared
-        .perms
-        .allows(&authed.subject, &resource, Caps::FILE_DOWNLOAD)
-    {
-        return t
-            .write_str("\nYou do not have permission to download that file.\n")
-            .await;
-    }
-    // Drop-boxed content is not downloadable without view/manage rights
-    // (the same rule Hotline's DownloadFile applies).
-    let in_dropbox = shared.files.in_dropbox(&target).await.unwrap_or(false);
-    if in_dropbox
-        && !shared
-            .perms
-            .allows(&authed.subject, &resource, Caps::DROPBOX_VIEW)
-        && !shared.perms.allows(
-            &authed.subject,
-            &file_resource(&target.area, ""),
-            Caps::FILE_MANAGE,
-        )
-    {
-        return t
-            .write_str("\nYou do not have permission to download that file.\n")
-            .await;
-    }
     let base = shared.config.read().files_http_base;
     let base = base.trim().trim_end_matches('/');
     if base.is_empty() {
         return t
             .write_str(
-                "\nFile transfers are not available on telnet; ask your sysop \
-                 about the web interface.\n",
+                "\nHTTP handoff links are not configured here; try \
+                 `zget <name>` for an in-band ZMODEM transfer.\n",
             )
             .await;
     }
@@ -914,6 +967,78 @@ where
         url_encode_path(&target.path)
     ))
     .await
+}
+
+/// `zget`: the same download authorization as `get`, then stream the bytes
+/// in-band over ZMODEM (see [`crate::zmodem::send_file`]). Starts spend
+/// from the shared per-account `transfer` budget, like every transfer-open.
+async fn zget_cmd<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    cur: &FileCursor,
+    arg: &str,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if arg.is_empty() {
+        return t.write_str("\nUsage: zget <name>\n").await;
+    }
+    let Some(area) = &cur.area else {
+        return t
+            .write_str("\nEnter an area first (cd <area>), then `zget <name>`.\n")
+            .await;
+    };
+    if !shared.rate_allow(Scope::Account(authed.account.id), rl::TRANSFER) {
+        return t.write_str("\nRate limited; slow down.\n").await;
+    }
+    let folder = cur.folder();
+    let Some(target) = authorize_download(t, shared, authed, area, &folder, arg).await? else {
+        return Ok(());
+    };
+    crate::zmodem::send_file(t, shared, authed, &target).await
+}
+
+/// `zput`: receive a ZMODEM upload into the current folder (see
+/// [`crate::zmodem::receive_files`]). Gated like a Hotline upload-open:
+/// no guests, [`Caps::FILE_UPLOAD`] on the destination resource (drop
+/// boxes very much included — uploading *into* one is the classic use),
+/// and the shared per-account `transfer` budget.
+async fn zput_cmd<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    cur: &FileCursor,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(area) = &cur.area else {
+        return t
+            .write_str("\nEnter an area first (cd <area>), then `zput`.\n")
+            .await;
+    };
+    if authed.subject.role == Role::Guest {
+        return t
+            .write_str("\nUploads need a member account. Ask your sysop.\n")
+            .await;
+    }
+    let folder = cur.folder();
+    let resource = file_resource(area, &folder);
+    if !shared
+        .perms
+        .allows(&authed.subject, &resource, Caps::FILE_UPLOAD)
+    {
+        return t
+            .write_str("\nYou do not have permission to upload here.\n")
+            .await;
+    }
+    if !shared.rate_allow(Scope::Account(authed.account.id), rl::TRANSFER) {
+        return t.write_str("\nRate limited; slow down.\n").await;
+    }
+    let folder_opt = (!folder.is_empty()).then_some(folder.as_str());
+    crate::zmodem::receive_files(t, shared, authed, area, folder_opt).await
 }
 
 /// Write `rows` in pages of [`FILES_PAGE_ROWS`], pausing with a More prompt

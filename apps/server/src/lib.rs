@@ -31,6 +31,7 @@ pub mod radio;
 pub mod session;
 pub mod syndication;
 pub mod telnet;
+pub mod zmodem;
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -94,6 +95,10 @@ pub struct Shared {
     /// The moderation suite: report queue, quarantine set, hash-deny list
     /// (Wave 13). Quarantine/deny lookups are cheap in-memory mirrors.
     pub moderation: ModerationService,
+    /// Interrupted telnet ZMODEM uploads parked for resume (Wave 6.x),
+    /// keyed per (account, area, folder, name) — the HTXF partial-upload
+    /// discipline.
+    pub zpartials: zmodem::Partials,
     next_session: AtomicU64,
 }
 
@@ -301,6 +306,7 @@ impl Burrow {
             catalogs: fed_catalog::CatalogState::load(&data_dir, &identity.signing.public().0),
             ratelimit: RateLimiter::new(),
             moderation,
+            zpartials: zmodem::Partials::new(),
             next_session: AtomicU64::new(1),
         });
 

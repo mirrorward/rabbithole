@@ -331,7 +331,7 @@ async fn files_browser_lists_pages_and_hands_off_http_links() {
 }
 
 #[tokio::test]
-async fn files_get_without_base_explains_no_telnet_transfers() {
+async fn files_get_without_base_points_at_zmodem() {
     let work = tempfile::tempdir().unwrap();
     let cfg = test_config(&work.path().join("srv")); // files_http_base = ""
     let burrow = Burrow::start(cfg).await.unwrap();
@@ -350,8 +350,12 @@ async fn files_get_without_base_explains_no_telnet_transfers() {
     c.expect(b"files /> ").await;
     c.send("cd pub").await;
     c.expect(b"files /pub> ").await;
+    // With no HTTP base configured, `get` can't mint a link — it points at
+    // the in-band ZMODEM path instead (Wave 6.x).
     c.send("get readme.txt").await;
-    c.expect(b"not available on telnet").await;
+    c.expect(b"HTTP handoff links are not configured here")
+        .await;
+    c.expect(b"zget <name>").await;
     assert!(
         !c.transcript().contains("http://"),
         "no link without a base"

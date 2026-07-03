@@ -33,6 +33,7 @@ rabbithole-legacy-nntp.workspace = true
 rabbithole-legacy-hotline.workspace = true
 rabbithole-legacy-ftn.workspace = true
 rabbithole-legacy-qwk.workspace = true
+rabbithole-legacy-zmodem.workspace = true
 rabbithole-legacy-binkp.workspace = true
 rabbithole-legacy-syndication.workspace = true
 rabbithole-art.workspace = true
