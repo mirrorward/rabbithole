@@ -74,6 +74,7 @@ use rabbithole_proto::admin::{
     ClassListRequest, ClassSet, ConfigApplied, ConfigGet, ConfigSet, ConfigValue, InviteCode,
     InviteCreate, Kick,
 };
+use rabbithole_proto::board::{BoardList, BoardListRequest};
 use rabbithole_proto::chat::{ChatMessage, ChatSend};
 use rabbithole_proto::filelib::{
     AreaList, AreaListRequest, FileAdded, FileAreaView, FileContent, FileDownloadRequest,
@@ -155,6 +156,32 @@ pub enum PresenceDelta {
     Joined(String),
     /// A user left the room (their screen name).
     Left(String),
+}
+
+/// Build a [`BoardListRequest`] frame (family 4).
+pub fn board_list_request(id: RequestId) -> Result<Frame, ProtoError> {
+    Frame::request(id, &BoardListRequest)
+}
+
+/// Decode a [`BoardList`] reply frame to the [`Board`](crate::state::Board)
+/// rows the tree renders. `None` for any other frame or an error reply. Like
+/// the who-list, this rides its own transport sink (the core [`Event`] enum
+/// has no board variant).
+pub fn frame_to_boards(frame: &Frame) -> Option<Vec<crate::state::Board>> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let list = frame.decode::<BoardList>()?.ok()?;
+    Some(
+        list.boards
+            .into_iter()
+            .map(|b| crate::state::Board {
+                slug: b.slug,
+                name: b.title,
+                description: b.description,
+            })
+            .collect(),
+    )
 }
 
 /// Decode a presence push to a [`PresenceDelta`]. `None` for any other frame.
@@ -880,6 +907,24 @@ mod tests {
         // Unrelated frames yield None.
         let chat = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
         assert_eq!(frame_to_presence(&chat), None);
+    }
+
+    #[test]
+    fn frame_to_boards_maps_the_list() {
+        use rabbithole_proto::board::{BoardInfo, BoardList};
+        let mut info = BoardInfo::new("general", "General", 2);
+        info.description = "Chit-chat".into();
+        let list = BoardList::new(vec![info]);
+        let req = board_list_request(RequestId(1)).unwrap();
+        let reply = Frame::reply_to(&req, &list).unwrap();
+        let boards = frame_to_boards(&reply).unwrap();
+        assert_eq!(boards.len(), 1);
+        assert_eq!(boards[0].slug, "general");
+        assert_eq!(boards[0].name, "General");
+        assert_eq!(boards[0].description, "Chit-chat");
+        // A non-board frame yields None.
+        let chat = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
+        assert_eq!(frame_to_boards(&chat), None);
     }
 
     #[test]

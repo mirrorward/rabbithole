@@ -248,6 +248,9 @@ impl AppState {
                     crate::wire::PresenceDelta::Left(name) => s.who.retain(|h| h != &name),
                 })
             }));
+            ws.on_boards(std::rc::Rc::new(move |boards| {
+                state.update(|s| s.set_boards(boards))
+            }));
             ws.on_notice(std::rc::Rc::new(move |route| match route {
                 crate::wire::NoticeRoute::Radio(u) => radio.update(|r| r.apply_update(u)),
                 crate::wire::NoticeRoute::Chat { from, text } => {
@@ -307,6 +310,12 @@ impl AppState {
 
     /// Load the board tree snapshot into state.
     pub fn load_boards(&self) {
+        #[cfg(target_arch = "wasm32")]
+        if self.live.get_untracked() {
+            // Live: request over the socket; the reply folds through the sink.
+            self.ws.update_value(|c| c.request_boards());
+            return;
+        }
         let boards = self.client.with_value(|c| c.boards());
         self.state.update(|s| s.set_boards(boards));
     }

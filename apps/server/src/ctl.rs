@@ -130,6 +130,23 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
             audit("account-create", format!("{login} role={role:?}"));
             Ok(json!({"id": account.id, "login": account.login}))
         }
+        "board-create" => {
+            let slug = str_arg("slug")?;
+            let title = str_arg("title")?;
+            let description = req
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            // kind 2 = a board that holds posts (0 category, 1 bundle).
+            let board = shared
+                .boards
+                .create_board(&slug, &title, &description, 2, None, 0)
+                .await
+                .map_err(|e| e.to_string())?;
+            audit("board-create", slug.clone());
+            Ok(json!({"slug": board.slug, "title": board.title}))
+        }
         "invite-tree" => {
             let login = str_arg("login")?;
             // Cap the walk; a downline this deep is already an anomaly worth a

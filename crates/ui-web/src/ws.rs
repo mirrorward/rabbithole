@@ -75,6 +75,9 @@ pub type WhoSink = Rc<dyn Fn(Vec<String>)>;
 /// A sink the transport pushes live roster deltas into (join/leave), keeping
 /// the presence list fresh between full [`WhoSink`] snapshots.
 pub type PresenceSink = Rc<dyn Fn(PresenceDelta)>;
+/// A sink the transport pushes the board list into (from a decoded
+/// [`BoardList`](rabbithole_proto::board::BoardList) reply).
+pub type BoardSink = Rc<dyn Fn(Vec<crate::state::Board>)>;
 
 /// A browser WebSocket [`EventClient`] speaking RHP.
 ///
@@ -95,6 +98,7 @@ struct Inner {
     notice_sink: Option<NoticeSink>,
     who_sink: Option<WhoSink>,
     presence_sink: Option<PresenceSink>,
+    board_sink: Option<BoardSink>,
     next_id: u64,
     /// While `true`, the keepalive loop keeps pinging; cleared on close.
     alive: bool,
@@ -150,6 +154,12 @@ impl Inner {
         }
     }
 
+    fn emit_boards(&self, boards: Vec<crate::state::Board>) {
+        if let Some(sink) = &self.board_sink {
+            sink(boards);
+        }
+    }
+
     fn next_request_id(&mut self) -> RequestId {
         self.next_id += 1;
         RequestId(self.next_id)
@@ -170,6 +180,7 @@ impl WsClient {
                 notice_sink: None,
                 who_sink: None,
                 presence_sink: None,
+                board_sink: None,
                 next_id: 0,
                 alive: false,
                 want_connected: false,
@@ -218,6 +229,21 @@ impl WsClient {
         let mut b = self.inner.borrow_mut();
         let id = b.next_request_id();
         if let Ok(bytes) = wire::who_request(id).and_then(|f| encode_frame(&f)) {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
+    /// Register the board-list sink. The most recent registration wins.
+    pub fn on_boards(&mut self, sink: BoardSink) {
+        self.inner.borrow_mut().board_sink = Some(sink);
+    }
+
+    /// Ask the server for the board list; the reply arrives through the
+    /// [`on_boards`](Self::on_boards) sink.
+    pub fn request_boards(&self) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) = wire::board_list_request(id).and_then(|f| encode_frame(&f)) {
             Self::write(&mut b, &bytes);
         }
     }
@@ -329,6 +355,9 @@ impl WsClient {
                         }
                         if let Some(delta) = wire::frame_to_presence(&frame) {
                             b.emit_presence(delta);
+                        }
+                        if let Some(boards) = wire::frame_to_boards(&frame) {
+                            b.emit_boards(boards);
                         }
                     }
                     Err(err) => b.emit(Event::CommandFailed {
