@@ -8,11 +8,13 @@
 use leptos::*;
 use leptos_router::{use_navigate, use_params_map, A};
 use rabbithole_core::api::Command;
+use rabbithole_core::theme::{Mode, ThemePack};
 
 use crate::app::AppState;
 use crate::client::LOBBY;
 use crate::files::{human_size, node_kind_label, TransferStatus, KIND_FOLDER};
 use crate::theme_css::{mode_label, pack_label};
+use crate::theme_editor::{contrast_warnings, EditorAction, EditorState};
 
 /// Appearance picker: a pack button cycling Clean → Retro → High Contrast and
 /// a mode button cycling System → Light → Dark. Together they cover the full
@@ -829,7 +831,240 @@ pub fn Admin() -> impl IntoView {
                     <AdminClassesPanel/>
                 </section>
             </div>
+            <div class="rh-body">
+                <section class="rh-panel">
+                    <ThemeEditorPanel/>
+                </section>
+            </div>
         </Show>
+    }
+}
+
+/// Theme editor: edit a pack's tokens with live scoped preview, WCAG
+/// contrast warnings, import/export as shareable JSON token files, and an
+/// apply-to-my-session action through the custom-pack override slot. All
+/// state and validation live in the host-tested [`crate::theme_editor`]; this
+/// component only folds [`EditorAction`]s into an `RwSignal<EditorState>`.
+/// Admin-gated by virtue of rendering inside [`Admin`]'s capability guard.
+#[component]
+fn ThemeEditorPanel() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let editor = create_rw_signal(EditorState::new(ThemePack::Clean));
+    let edit_mode = create_rw_signal(Mode::Light);
+    let import_text = create_rw_signal(String::new());
+    let dispatch = move |action: EditorAction| editor.update(|e| e.apply(action));
+
+    // Base-pack selector.
+    let base_buttons = [ThemePack::Clean, ThemePack::Retro, ThemePack::HighContrast].map(|pack| {
+        let class = move || {
+            if editor.with(|e| e.base == pack) {
+                "rh-btn small"
+            } else {
+                "rh-btn small ghost"
+            }
+        };
+        view! {
+            <button class=class on:click=move |_| dispatch(EditorAction::SelectBase(pack))>
+                {pack_label(pack)}
+            </button>
+        }
+    });
+
+    // Light/dark tabs select which colour map is edited and previewed.
+    let mode_tabs = [(Mode::Light, "Light"), (Mode::Dark, "Dark")].map(|(mode, label)| {
+        let class = move || {
+            if edit_mode.get() == mode {
+                "rh-btn small"
+            } else {
+                "rh-btn small ghost"
+            }
+        };
+        view! {
+            <button class=class on:click=move |_| edit_mode.set(mode)>{label}</button>
+        }
+    });
+
+    // Rows re-key on (mode, var, value) so committed edits re-render.
+    let colour_rows = move || {
+        let mode = edit_mode.get();
+        editor.with(|e| {
+            let map = match mode {
+                Mode::Light => &e.working.light,
+                Mode::Dark => &e.working.dark,
+            };
+            map.iter()
+                .map(|(var, value)| (mode, var.clone(), value.clone()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let shared_rows = move || {
+        editor.with(|e| {
+            e.working
+                .shared
+                .iter()
+                .map(|(var, value)| (var.clone(), value.clone()))
+                .collect::<Vec<_>>()
+        })
+    };
+
+    let error = move || editor.with(|e| e.error.clone());
+    let has_error = move || editor.with(|e| e.error.is_some());
+    let warnings = move || {
+        editor.with(|e| {
+            contrast_warnings(&e.working)
+                .into_iter()
+                .map(|w| w.message())
+                .collect::<Vec<_>>()
+        })
+    };
+    let dirty = move || editor.with(|e| e.dirty);
+    let preview_style = move || editor.with(|e| e.working.style_for(edit_mode.get()));
+
+    let apply_session = move |_| app.apply_custom_pack(editor.with(|e| e.working.clone()));
+    let revert_session = move |_| app.clear_custom_pack();
+    let reset = move |_| dispatch(EditorAction::Reset(editor.with(|e| e.base)));
+    let do_import = move |_| dispatch(EditorAction::LoadJson(import_text.get()));
+
+    view! {
+        <div class="rh-editor">
+            <h2 class="rh-panel-title">
+                "Theme editor "
+                <Show when=dirty fallback=|| ()>
+                    <span class="rh-badge active">"edited"</span>
+                </Show>
+            </h2>
+            <div class="rh-toolbar">
+                <span class="rh-var-name">"base pack"</span>
+                {base_buttons.to_vec()}
+                <button class="rh-btn small ghost" on:click=reset>"Reset"</button>
+            </div>
+            <div class="rh-toolbar">
+                <span class="rh-var-name">"mode"</span>
+                {mode_tabs.to_vec()}
+            </div>
+            <Show when=has_error fallback=|| ()>
+                <p class="rh-warn">{error}</p>
+            </Show>
+            <h2 class="rh-panel-title">"Colours"</h2>
+            <ul class="rh-tree">
+                <For
+                    each=colour_rows
+                    key=|(mode, var, value)| format!("{mode:?}:{var}:{value}")
+                    children=move |(mode, var, value)| {
+                        let swatch = format!("background:{value}");
+                        let name = var.clone();
+                        let on_commit = move |ev| {
+                            dispatch(EditorAction::SetColor {
+                                mode,
+                                var: var.clone(),
+                                value: event_target_value(&ev),
+                            });
+                        };
+                        view! {
+                            <li class="rh-editor-row">
+                                <span class="rh-swatch" style=swatch></span>
+                                <span class="rh-var-name">{name}</span>
+                                <input class="rh-input" prop:value=value.clone() on:change=on_commit/>
+                            </li>
+                        }
+                    }
+                />
+            </ul>
+            <h2 class="rh-panel-title">"Spacing, radii & type"</h2>
+            <ul class="rh-tree">
+                <For
+                    each=shared_rows
+                    key=|(var, value)| format!("{var}:{value}")
+                    children=move |(var, value)| {
+                        let name = var.clone();
+                        let on_commit = move |ev| {
+                            dispatch(EditorAction::SetShared {
+                                var: var.clone(),
+                                value: event_target_value(&ev),
+                            });
+                        };
+                        view! {
+                            <li class="rh-editor-row">
+                                <span class="rh-var-name">{name}</span>
+                                <input class="rh-input" prop:value=value.clone() on:change=on_commit/>
+                            </li>
+                        }
+                    }
+                />
+            </ul>
+            <Show when=move || !warnings().is_empty() fallback=|| ()>
+                <h2 class="rh-panel-title">"Contrast warnings"</h2>
+                <ul class="rh-tree">
+                    <For
+                        each=warnings
+                        key=|msg| msg.clone()
+                        children=|msg| view! { <li class="rh-warn">{msg}</li> }
+                    />
+                </ul>
+            </Show>
+            <h2 class="rh-panel-title">"Preview"</h2>
+            <ThemeEditorPreview style=Signal::derive(preview_style)/>
+            <div class="rh-toolbar">
+                <button class="rh-btn small" on:click=apply_session>"Apply to my session"</button>
+                <button class="rh-btn small ghost" on:click=revert_session>"Revert session"</button>
+                <button
+                    class="rh-btn small ghost"
+                    disabled=true
+                    title="server theme bundles land with the W8 bundle-application slice"
+                >
+                    "Publish to server"
+                </button>
+            </div>
+            <h2 class="rh-panel-title">"Export (token file)"</h2>
+            <textarea
+                class="rh-textarea"
+                readonly=true
+                prop:value=move || editor.with(|e| e.export_json())
+            ></textarea>
+            <h2 class="rh-panel-title">"Import (paste a token file)"</h2>
+            <textarea
+                class="rh-textarea"
+                placeholder="Paste token-file JSON here\u{2026}"
+                prop:value=import_text
+                on:input=move |ev| import_text.set(event_target_value(&ev))
+            ></textarea>
+            <div class="rh-toolbar">
+                <button class="rh-btn small" on:click=do_import>"Import"</button>
+            </div>
+        </div>
+    }
+}
+
+/// The scoped live-preview pane: a small mock of nav/status/chat inside a
+/// container whose `style` attribute carries the working tokens, so only this
+/// subtree re-themes (the app root keeps its own variables).
+#[component]
+fn ThemeEditorPreview(style: Signal<String>) -> impl IntoView {
+    view! {
+        <div class="rh-preview" style=move || style.get()>
+            <header class="rh-header">
+                <span class="rh-dot on"></span>
+                <span class="rh-title">"RabbitHole"</span>
+                <span class="rh-status">"Connected"</span>
+                <span class="rh-spacer"></span>
+                <nav class="rh-nav">
+                    <a href="#" class="active">"Lobby"</a>
+                    <a href="#">"Boards"</a>
+                </nav>
+            </header>
+            <div class="rh-preview-body">
+                <div class="rh-line">
+                    <span class="rh-from">"rabbit"</span>
+                    "Welcome to the warren."
+                </div>
+                <div class="rh-line">
+                    <span class="rh-from">"carrot"</span>
+                    "This theme is looking sharp."
+                </div>
+                <p class="rh-warn">"A sample error line."</p>
+                <button class="rh-btn small">"Send"</button>
+            </div>
+        </div>
     }
 }
 

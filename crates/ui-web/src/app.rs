@@ -17,8 +17,9 @@ use crate::components::{
     Admin, ArtGallery, BoardView, Boards, Directory, Dms, Files, Lobby, Login,
 };
 use crate::files::{join_path, FilesState};
+use crate::packs::PackTokens;
 use crate::state::UiState;
-use crate::theme_css::{next_mode, next_pack, root_style, ThemeChoice, STYLESHEET};
+use crate::theme_css::{next_mode, next_pack, resolve_root_style, ThemeChoice, STYLESHEET};
 use crate::wire::{AdminCommand, AdminEvent, FileCommand, FileEvent};
 
 /// Reactive, `Copy` handle bundle shared through context.
@@ -37,6 +38,11 @@ pub struct AppState {
     /// plus mode policy (System/Light/Dark). The effective [`Mode`] is
     /// derived from this plus the OS hint via [`AppState::mode`].
     pub theme: RwSignal<ThemeChoice>,
+    /// The theme editor's **custom pack override slot**: when set, these
+    /// tokens replace the built-in pack for this session (mode resolution
+    /// still applies). Session-local and unpersisted — Apply is a preview,
+    /// not a save.
+    pub custom_pack: RwSignal<Option<PackTokens>>,
     /// The command seam. `MockClient` today; a real transport later.
     pub client: StoredValue<MockClient>,
 }
@@ -50,6 +56,7 @@ impl AppState {
             admin: create_rw_signal(AdminState::default()),
             is_admin: create_rw_signal(false),
             theme: create_rw_signal(initial_theme_choice()),
+            custom_pack: create_rw_signal(None),
             client: store_value(MockClient::new()),
         }
     }
@@ -72,6 +79,18 @@ impl AppState {
     pub fn cycle_pack(&self) {
         self.theme.update(|c| c.pack = next_pack(c.pack));
         self.persist_theme();
+    }
+
+    /// Apply the theme editor's working tokens to this session: they fill
+    /// the custom override slot and win over the built-in pack until
+    /// [`AppState::clear_custom_pack`].
+    pub fn apply_custom_pack(&self, tokens: PackTokens) {
+        self.custom_pack.set(Some(tokens));
+    }
+
+    /// Clear the custom override slot, returning to the chosen built-in pack.
+    pub fn clear_custom_pack(&self) {
+        self.custom_pack.set(None);
     }
 
     /// Persist the current theme choice (browser only; no-op on the host).
@@ -365,7 +384,11 @@ pub fn App() -> impl IntoView {
     let app = AppState::new();
     provide_context(app);
 
-    let style = move || root_style(app.theme.get().pack, app.mode());
+    let style = move || {
+        let (pack, mode) = (app.theme.get().pack, app.mode());
+        app.custom_pack
+            .with(|custom| resolve_root_style(custom.as_ref(), pack, mode))
+    };
 
     view! {
         <style>{STYLESHEET}</style>

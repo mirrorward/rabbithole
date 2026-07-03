@@ -31,6 +31,17 @@ pub fn root_style(pack: ThemePack, mode: Mode) -> String {
     PackTokens::builtin(pack).style_for(mode)
 }
 
+/// Resolve the app-root style with the theme editor's **custom pack override
+/// slot**: when a custom [`PackTokens`] has been applied to the session it
+/// wins wholesale; otherwise the built-in `pack` renders. Pure and
+/// host-tested — the reactive layer in [`crate::app`] only feeds it signals.
+pub fn resolve_root_style(custom: Option<&PackTokens>, pack: ThemePack, mode: Mode) -> String {
+    match custom {
+        Some(tokens) => tokens.style_for(mode),
+        None => root_style(pack, mode),
+    }
+}
+
 /// How the user wants light vs dark chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModeChoice {
@@ -345,6 +356,23 @@ color:var(--rh-muted);font-size:var(--rh-font-sm)}\
 gap:var(--rh-space-2);flex-wrap:wrap}\
 .rh-config-key{font-weight:600;min-width:12rem}\
 .rh-account-role{font-size:var(--rh-font-xs);color:var(--rh-muted)}\
+.rh-editor{display:flex;flex-direction:column;gap:var(--rh-space-3)}\
+.rh-editor-row{display:flex;gap:var(--rh-space-2);align-items:center}\
+.rh-var-name{font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);\
+color:var(--rh-muted);min-width:8.5rem}\
+.rh-swatch{width:1.1rem;height:1.1rem;flex:none;display:inline-block;\
+border:1px solid var(--rh-muted);border-radius:var(--rh-radius)}\
+.rh-warn{color:var(--rh-error);font-size:var(--rh-font-sm);margin:.2rem 0}\
+.rh-textarea{font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);\
+width:100%;min-height:8rem;background:var(--rh-bg);color:var(--rh-text);\
+border:1px solid var(--rh-muted);border-radius:var(--rh-radius);\
+padding:var(--rh-space-2)}\
+.rh-preview{font-family:var(--rh-font-sans);font-size:var(--rh-font-sm);\
+color:var(--rh-text);background-color:var(--rh-bg);\
+background-image:var(--rh-bg-image);border:1px solid var(--rh-muted);\
+border-radius:var(--rh-radius-lg);overflow:hidden;margin:var(--rh-space-2) 0}\
+.rh-preview-body{padding:var(--rh-space-3);display:flex;\
+flex-direction:column;gap:var(--rh-space-2);align-items:flex-start}\
 ";
 
 #[cfg(test)]
@@ -479,6 +507,31 @@ mod tests {
                 "{pack:?}"
             );
         }
+    }
+
+    #[test]
+    fn custom_override_slot_wins_over_the_builtin_pack() {
+        // No override: the built-in pack renders.
+        assert_eq!(
+            resolve_root_style(None, ThemePack::Retro, Mode::Dark),
+            root_style(ThemePack::Retro, Mode::Dark)
+        );
+        // An applied custom pack overrides wholesale, per mode.
+        let mut custom = PackTokens::builtin(ThemePack::Clean);
+        custom.dark.insert("--rh-accent".into(), "#ff00ff".into());
+        for mode in MODES {
+            let style = resolve_root_style(Some(&custom), ThemePack::Retro, mode);
+            assert_eq!(style, custom.style_for(mode), "{mode:?}");
+        }
+        assert!(
+            resolve_root_style(Some(&custom), ThemePack::Retro, Mode::Dark)
+                .contains("--rh-accent:#ff00ff;")
+        );
+        // Light mode is untouched by the dark-only edit.
+        assert_eq!(
+            resolve_root_style(Some(&custom), ThemePack::Retro, Mode::Light),
+            root_style(ThemePack::Clean, Mode::Light)
+        );
     }
 
     #[test]

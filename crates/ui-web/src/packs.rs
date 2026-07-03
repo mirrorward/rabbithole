@@ -301,26 +301,11 @@ mod tests {
 
     #[test]
     fn high_contrast_is_aaa_leaning() {
-        // WCAG relative luminance (gamma-corrected, unlike the quick
-        // approximation in `rabbithole_core::theme::Rgb::luminance`).
-        fn lum(c: Rgb) -> f64 {
-            let lin = |v: u8| {
-                let s = v as f64 / 255.0;
-                if s <= 0.04045 {
-                    s / 12.92
-                } else {
-                    ((s + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * lin(c.0) + 0.7152 * lin(c.1) + 0.0722 * lin(c.2)
-        }
+        // WCAG gamma-corrected contrast (unlike the quick approximation in
+        // `rabbithole_core::theme::Rgb::luminance`), shared with the theme
+        // editor's live checker.
         fn contrast(a: Rgb, b: Rgb) -> f64 {
-            let (x, y) = (lum(a) + 0.05, lum(b) + 0.05);
-            if x > y {
-                x / y
-            } else {
-                y / x
-            }
+            crate::theme_editor::contrast_ratio((a.0, a.1, a.2), (b.0, b.1, b.2))
         }
         for mode in [Mode::Light, Mode::Dark] {
             let p = Palette::builtin(ThemePack::HighContrast, mode);

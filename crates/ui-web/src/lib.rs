@@ -40,7 +40,11 @@
 //!   the future server-theme-bundle seam.
 //! - [`theme_css`] holds the app stylesheet, the pack+mode
 //!   [`ThemeChoice`](theme_css::ThemeChoice) model, and resolves light/dark
-//!   from `(choice, os_pref)`.
+//!   from `(choice, os_pref)` — plus the custom-pack override slot the theme
+//!   editor applies through.
+//! - [`theme_editor`] is the DOM-free admin theme-editor model: a working
+//!   [`PackTokens`](packs::PackTokens) with a validated action reducer, JSON
+//!   import/export, and a WCAG contrast checker that warns (never blocks).
 //! - [`app`] and [`components`] are the Leptos view layer.
 //!
 //! ## wasm hygiene
@@ -60,6 +64,7 @@ pub mod files;
 pub mod packs;
 pub mod state;
 pub mod theme_css;
+pub mod theme_editor;
 pub mod wire;
 
 /// Browser WebSocket transport (`wasm32-unknown-unknown` only).
@@ -73,6 +78,7 @@ pub use conn::{backoff_delay, ConnState};
 pub use files::{FilesState, Transfer, TransferDir, TransferStatus};
 pub use packs::PackTokens;
 pub use state::{Board, ChatLine, DmMessage, DmThread, Member, Post, Thread, UiState};
+pub use theme_editor::{contrast_warnings, ContrastWarning, EditorAction, EditorState};
 pub use wire::{
     admin_command_to_frame, command_to_frame, file_command_to_frame, frame_to_admin_events,
     frame_to_events, frame_to_file_events, hello_request, normalize_ws_url, ping_request,
