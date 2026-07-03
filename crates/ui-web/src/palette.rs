@@ -55,6 +55,12 @@ pub const SECTIONS: &[Section] = &[
         aliases: &["music", "stream", "tunes", "listen"],
     },
     Section {
+        label: "Servers",
+        route: "/servers",
+        hint: "directory",
+        aliases: &["directory", "looking glass", "browse", "hubs", "explore"],
+    },
+    Section {
         label: "Art",
         route: "/art",
         hint: "gallery",

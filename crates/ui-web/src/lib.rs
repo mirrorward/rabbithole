@@ -34,11 +34,13 @@
 //!   ([`AdminState`](admin::AdminState)); the ADMIN-family mapping lives in
 //!   [`wire`].
 //! - [`radio`] holds the DOM-free radio model: the now-playing reducer
-//!   ([`RadioState`](radio::RadioState)), the total `[radio]` notice-bridge
-//!   parser ([`parse_radio_notice`](radio::parse_radio_notice)), player
-//!   preferences with validation + persistence resolve logic, and the pure
-//!   stream-URL join. The `ServerNotice` routing split lives in [`wire`]
+//!   ([`RadioState`](radio::RadioState)), player preferences with validation +
+//!   persistence resolve logic, and the pure stream-URL join. Inbound RADIO
+//!   frames are decoded in [`wire`]
 //!   ([`frame_to_notice_route`](wire::frame_to_notice_route)).
+//! - [`servers`] is the DOM-free Looking Glass server-browser model: the
+//!   [`DirectoryServer`](servers::DirectoryServer) row plus the total
+//!   [`browse`](servers::browse) filter/rank.
 //! - [`player`] (wasm only) wraps the `<audio>` element the radio streams
 //!   through; every decision it acts on is made in [`radio`].
 //! - [`art`] turns parsed CP437/ANSI art (via `rabbithole-art`) into pure,
@@ -89,6 +91,7 @@ pub mod palette;
 pub mod pwa;
 pub mod radio;
 pub mod server_theme;
+pub mod servers;
 pub mod state;
 pub mod syndication_admin;
 pub mod theme_css;

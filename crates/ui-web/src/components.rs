@@ -109,6 +109,7 @@ pub fn Nav() -> impl IntoView {
             <A href="/directory">"Directory"</A>
             <A href="/files">"Files"</A>
             <A href="/radio">"Radio"</A>
+            <A href="/servers">"Servers"</A>
             <A href="/art">"Art"</A>
             <Show when=move || is_admin.get() fallback=|| ()>
                 <A href="/admin">"Admin"</A>
@@ -320,7 +321,13 @@ pub fn CommandPalette() -> impl IntoView {
 pub fn Login() -> impl IntoView {
     let app = expect_context::<AppState>();
     let navigate = use_navigate();
-    let endpoint = create_rw_signal("ws://localhost:9000".to_string());
+    // Prefill the endpoint if the server browser picked one, then clear it.
+    let endpoint = create_rw_signal(
+        app.pending_endpoint
+            .get_untracked()
+            .unwrap_or_else(|| "ws://localhost:9000".to_string()),
+    );
+    app.pending_endpoint.set(None);
     let handle = create_rw_signal(String::new());
 
     let connect = move |ev: leptos::ev::SubmitEvent| {
@@ -766,6 +773,75 @@ pub fn Directory() -> impl IntoView {
                         })
                     })}
                 </Show>
+            </section>
+        </main>
+    }
+}
+
+/// The Looking Glass **server browser**: search + a ranked list of public
+/// servers, each with a Connect action that hands its endpoint to the login
+/// screen (which prefills on its next mount). Directory data is the host-tested
+/// [`crate::servers`] model, seeded in dev until a tracker transport lands.
+#[component]
+pub fn ServerBrowser() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let servers = app.servers;
+    let navigate = use_navigate();
+    let query = create_rw_signal(String::new());
+    let rows = move || crate::servers::browse(&servers.get(), &query.get());
+
+    view! {
+        <StatusBar/>
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
+            <section class="rh-panel rh-servers" aria-label="Server directory">
+                <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">"Looking Glass"</h1>
+                <input
+                    class="rh-input"
+                    type="search"
+                    aria-label="Search servers"
+                    placeholder="Search servers\u{2026}"
+                    prop:value=move || query.get()
+                    on:input=move |ev| query.set(event_target_value(&ev))
+                />
+                <ul class="rh-server-list">
+                    <For
+                        each=rows
+                        key=|s| s.endpoint.clone()
+                        children=move |s| {
+                            let navigate = navigate.clone();
+                            let endpoint = s.endpoint.clone();
+                            let dot = if s.reachable { "rh-dot on" } else { "rh-dot off" };
+                            let presence = if s.reachable { "Online:" } else { "Offline:" };
+                            let uptime = crate::servers::uptime_label(s.uptime_pct);
+                            view! {
+                                <li class="rh-server-card">
+                                    <div class="rh-server-head">
+                                        <span class=dot aria-hidden="true"></span>
+                                        <span class="rh-visually-hidden">{presence}</span>
+                                        <span class="rh-server-name">{s.name.clone()}</span>
+                                        <span class="rh-server-users">
+                                            {s.users_online}" online"
+                                        </span>
+                                    </div>
+                                    <p class="rh-server-desc">{s.description.clone()}</p>
+                                    <div class="rh-server-foot">
+                                        <span class="rh-server-uptime">{uptime}</span>
+                                        <code class="rh-server-endpoint">{s.endpoint.clone()}</code>
+                                        <button
+                                            class="rh-btn"
+                                            on:click=move |_| {
+                                                app.pending_endpoint.set(Some(endpoint.clone()));
+                                                navigate("/", Default::default());
+                                            }
+                                        >
+                                            "Connect"
+                                        </button>
+                                    </div>
+                                </li>
+                            }
+                        }
+                    />
+                </ul>
             </section>
         </main>
     }

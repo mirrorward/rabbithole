@@ -16,7 +16,7 @@ use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
     Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby, Login,
-    Radio,
+    Radio, ServerBrowser,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -45,6 +45,11 @@ pub struct AppState {
     /// Whether the ⌘K command palette overlay is open. Shared so both the
     /// header affordance and the global key binding drive the one overlay.
     pub palette_open: RwSignal<bool>,
+    /// The Looking Glass server-browser directory ([`crate::servers`]).
+    pub servers: RwSignal<Vec<crate::servers::DirectoryServer>>,
+    /// An endpoint chosen in the server browser, handed to the login screen to
+    /// prefill on its next mount (then cleared).
+    pub pending_endpoint: RwSignal<Option<String>>,
     /// The user's appearance choice: theme pack (Clean/Retro/HighContrast)
     /// plus mode policy (System/Light/Dark). The effective [`Mode`] is
     /// derived from this plus the OS hint via [`AppState::mode`].
@@ -84,6 +89,8 @@ impl AppState {
             syndication: create_rw_signal(SynAdminState::default()),
             is_admin: create_rw_signal(false),
             palette_open: create_rw_signal(false),
+            servers: create_rw_signal(crate::servers::sample_directory()),
+            pending_endpoint: create_rw_signal(None),
             theme: create_rw_signal(initial_theme_choice()),
             custom_pack: create_rw_signal(None),
             server_theme: create_rw_signal(None),
@@ -643,6 +650,7 @@ pub fn App() -> impl IntoView {
                     <Route path="/directory" view=Directory/>
                     <Route path="/files" view=Files/>
                     <Route path="/radio" view=Radio/>
+                    <Route path="/servers" view=ServerBrowser/>
                     <Route path="/art" view=ArtGallery/>
                     <Route path="/admin" view=Admin/>
                 </Routes>
