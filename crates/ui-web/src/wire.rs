@@ -26,11 +26,11 @@
 //! - **session / auth (family 0):** the [`Hello`] handshake ([`hello_request`]),
 //!   [`AuthPassword`] sign-in, keepalive [`Ping`], and the [`HelloAck`] reply
 //!   (→ [`Event::Connected`]). Error replies map to [`Event::CommandFailed`].
-//! - **presence / who (family 1):** the [`Who`] request ([`who_request`]) and
-//!   the [`WhoList`] reply are framed and decoded. The core [`Event`] enum has
-//!   no who-list variant yet, so a decoded [`WhoList`] folds to no events —
-//!   the roster is wired at the frame layer and surfaces once the api grows a
-//!   presence event.
+//! - **presence / who (family 1):** the [`Who`] request ([`who_request`]), the
+//!   [`WhoList`] reply ([`frame_to_who`] → roster snapshot), and the
+//!   `UserJoined`/`UserLeft` pushes ([`frame_to_presence`] → [`PresenceDelta`]).
+//!   The core [`Event`] enum has no roster variant, so — like the FILE/notice
+//!   families — the transport surfaces these through dedicated sinks.
 //! - **chat (family 2):** [`ChatSend`] outbound and the [`ChatMessage`] push
 //!   inbound (→ [`Event::ChatMessage`]).
 //! - **radio (family 9) + notices (family 0):** [`frame_to_notice_route`]
@@ -80,7 +80,7 @@ use rabbithole_proto::filelib::{
     FileNodeView, FileUpload, FolderListRequest, NodeGet, NodeList, NodeReply,
 };
 use rabbithole_proto::hello::{CapabilitySet, Hello, HelloAck};
-use rabbithole_proto::presence::{Who, WhoList};
+use rabbithole_proto::presence::{UserJoined, UserLeft, Who, WhoList};
 use rabbithole_proto::radio::{RadioNowPlaying, RadioOff};
 use rabbithole_proto::session::{AuthPassword, Ping, ServerNotice};
 use rabbithole_proto::transfer::{
@@ -144,6 +144,31 @@ pub fn frame_to_who(frame: &Frame) -> Option<Vec<String>> {
     }
     let list = frame.decode::<WhoList>()?.ok()?;
     Some(list.users.into_iter().map(|u| u.screen_name).collect())
+}
+
+/// A live roster change decoded from a `UserJoined` / `UserLeft` push, so the
+/// presence sidebar stays fresh between full [`frame_to_who`] snapshots.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresenceDelta {
+    /// A user joined the room (their screen name).
+    Joined(String),
+    /// A user left the room (their screen name).
+    Left(String),
+}
+
+/// Decode a presence push to a [`PresenceDelta`]. `None` for any other frame.
+pub fn frame_to_presence(frame: &Frame) -> Option<PresenceDelta> {
+    if frame.error.is_some() {
+        return None;
+    }
+    if let Some(Ok(j)) = frame.decode::<UserJoined>() {
+        return Some(PresenceDelta::Joined(j.user.screen_name));
+    }
+    if let Some(Ok(l)) = frame.decode::<UserLeft>() {
+        return Some(PresenceDelta::Left(l.screen_name));
+    }
+    None
 }
 
 /// Map an outbound [`Command`] to the RHP request [`Frame`] that carries it.
@@ -830,6 +855,31 @@ mod tests {
         // A non-WhoList frame (a chat push) yields None.
         let push = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
         assert_eq!(frame_to_who(&push), None);
+    }
+
+    #[test]
+    fn frame_to_presence_reads_join_and_leave() {
+        use rabbithole_proto::presence::{UserJoined, UserLeft};
+        let joined = Frame::push(&UserJoined::new(UserSummary::new(
+            3,
+            "carol",
+            1,
+            "websocket",
+            0,
+        )))
+        .unwrap();
+        assert_eq!(
+            frame_to_presence(&joined),
+            Some(PresenceDelta::Joined("carol".into()))
+        );
+        let left = Frame::push(&UserLeft::new(3, "carol")).unwrap();
+        assert_eq!(
+            frame_to_presence(&left),
+            Some(PresenceDelta::Left("carol".into()))
+        );
+        // Unrelated frames yield None.
+        let chat = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
+        assert_eq!(frame_to_presence(&chat), None);
     }
 
     #[test]

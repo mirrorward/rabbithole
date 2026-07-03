@@ -51,7 +51,9 @@ use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::{decode_frame, encode_frame, RequestId};
 
 use crate::conn::{backoff_delay, ConnState};
-use crate::wire::{self, EventClient, EventSink, FileCommand, FileEvent, NoticeRoute};
+use crate::wire::{
+    self, EventClient, EventSink, FileCommand, FileEvent, NoticeRoute, PresenceDelta,
+};
 
 /// Keepalive interval, milliseconds.
 const KEEPALIVE_MS: u32 = 30_000;
@@ -70,6 +72,9 @@ pub type NoticeSink = Rc<dyn Fn(NoticeRoute)>;
 /// [`WhoList`](rabbithole_proto::presence::WhoList) reply). The core [`Event`]
 /// enum has no roster variant, so this rides its own sink like FILE/notices.
 pub type WhoSink = Rc<dyn Fn(Vec<String>)>;
+/// A sink the transport pushes live roster deltas into (join/leave), keeping
+/// the presence list fresh between full [`WhoSink`] snapshots.
+pub type PresenceSink = Rc<dyn Fn(PresenceDelta)>;
 
 /// A browser WebSocket [`EventClient`] speaking RHP.
 ///
@@ -89,6 +94,7 @@ struct Inner {
     file_sink: Option<FileSink>,
     notice_sink: Option<NoticeSink>,
     who_sink: Option<WhoSink>,
+    presence_sink: Option<PresenceSink>,
     next_id: u64,
     /// While `true`, the keepalive loop keeps pinging; cleared on close.
     alive: bool,
@@ -138,6 +144,12 @@ impl Inner {
         }
     }
 
+    fn emit_presence(&self, delta: PresenceDelta) {
+        if let Some(sink) = &self.presence_sink {
+            sink(delta);
+        }
+    }
+
     fn next_request_id(&mut self) -> RequestId {
         self.next_id += 1;
         RequestId(self.next_id)
@@ -157,6 +169,7 @@ impl WsClient {
                 file_sink: None,
                 notice_sink: None,
                 who_sink: None,
+                presence_sink: None,
                 next_id: 0,
                 alive: false,
                 want_connected: false,
@@ -191,6 +204,12 @@ impl WsClient {
     /// reply). The most recent registration wins.
     pub fn on_who(&mut self, sink: WhoSink) {
         self.inner.borrow_mut().who_sink = Some(sink);
+    }
+
+    /// Register the presence-delta sink (live join/leave). The most recent
+    /// registration wins.
+    pub fn on_presence(&mut self, sink: PresenceSink) {
+        self.inner.borrow_mut().presence_sink = Some(sink);
     }
 
     /// Ask the server for the current room roster; the reply arrives through
@@ -307,6 +326,9 @@ impl WsClient {
                         }
                         if let Some(roster) = wire::frame_to_who(&frame) {
                             b.emit_who(roster);
+                        }
+                        if let Some(delta) = wire::frame_to_presence(&frame) {
+                            b.emit_presence(delta);
                         }
                     }
                     Err(err) => b.emit(Event::CommandFailed {

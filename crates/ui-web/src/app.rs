@@ -238,6 +238,16 @@ impl AppState {
             ws.on_who(std::rc::Rc::new(move |roster| {
                 state.update(|s| s.who = roster)
             }));
+            ws.on_presence(std::rc::Rc::new(move |delta| {
+                state.update(|s| match delta {
+                    crate::wire::PresenceDelta::Joined(name) => {
+                        if !s.who.contains(&name) {
+                            s.who.push(name);
+                        }
+                    }
+                    crate::wire::PresenceDelta::Left(name) => s.who.retain(|h| h != &name),
+                })
+            }));
             ws.on_notice(std::rc::Rc::new(move |route| match route {
                 crate::wire::NoticeRoute::Radio(u) => radio.update(|r| r.apply_update(u)),
                 crate::wire::NoticeRoute::Chat { from, text } => {
