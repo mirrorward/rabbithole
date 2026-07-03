@@ -296,6 +296,15 @@ pub async fn handle(
         if req.bytes.len() > max {
             fail!(ErrorCode::TooLarge);
         }
+        // Refuse deny-listed content (the moderation hash-deny list). A blob's
+        // id is its blake3, so this hash is exactly the id `put` would return —
+        // check before storing.
+        if shared
+            .moderation
+            .is_denied(blake3::hash(&req.bytes).as_bytes())
+        {
+            fail!(ErrorCode::Forbidden);
+        }
         let blobs = shared.blobs.clone();
         let id = tokio::task::spawn_blocking(move || blobs.put(&req.bytes))
             .await?
@@ -305,6 +314,10 @@ pub async fn handle(
     }
 
     if let Some(Ok(req)) = frame.decode::<pblob::BlobGet>() {
+        // Never serve deny-listed content, even if a copy is still on disk.
+        if shared.moderation.is_denied(&req.id) {
+            fail!(ErrorCode::Forbidden);
+        }
         let blobs = shared.blobs.clone();
         match tokio::task::spawn_blocking(move || blobs.get(&BlobId(req.id))).await? {
             Ok(bytes) => reply!(&pblob::BlobData::new(bytes)),

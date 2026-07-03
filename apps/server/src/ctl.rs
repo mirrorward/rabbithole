@@ -38,6 +38,13 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
             .map(str::to_owned)
             .ok_or_else(|| format!("missing {key}"))
     };
+    let parse_hash = |s: &str| -> Result<[u8; 32], String> {
+        let bytes = hex::decode(s.trim()).map_err(|_| "hash must be hex".to_string())?;
+        bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| "hash must be 32 bytes (64 hex chars)".to_string())
+    };
 
     let audit = |action: &str, detail: String| {
         let pool = shared.pool.clone();
@@ -116,6 +123,46 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
             Ok(
                 json!({"root": login, "count": tree.len(), "invited": tree.len().saturating_sub(1), "tree": tree}),
             )
+        }
+        // ---- Content hash deny-list (Wave 13): a local-operator ctl surface
+        // over the moderation service's blake3 hash-deny list. -----------
+        "hash-deny" => {
+            let hash = parse_hash(&str_arg("hash")?)?;
+            let reason = req.get("reason").and_then(Value::as_str).unwrap_or("");
+            shared
+                .moderation
+                .deny_add(&hash, reason, "ctl")
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(json!({"denied": hex::encode(hash), "reason": reason}))
+        }
+        "hash-allow" => {
+            let hash = parse_hash(&str_arg("hash")?)?;
+            let removed = shared
+                .moderation
+                .deny_remove(&hash, "ctl")
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(json!({"removed": removed}))
+        }
+        "hash-deny-list" => {
+            let rows = shared
+                .moderation
+                .deny_list()
+                .await
+                .map_err(|e| e.to_string())?;
+            let denied: Vec<Value> = rows
+                .iter()
+                .map(|r| {
+                    json!({
+                        "hash": hex::encode(r.hash),
+                        "reason": r.reason,
+                        "added_by": r.added_by,
+                        "created_at": r.created_at,
+                    })
+                })
+                .collect();
+            Ok(json!({"count": denied.len(), "denied": denied}))
         }
         "who" => {
             let users: Vec<Value> = shared
