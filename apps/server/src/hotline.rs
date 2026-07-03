@@ -104,7 +104,10 @@
 //! native members of the same room follow it through their own pushes, but a
 //! topic set natively is not (yet) echoed as a 119, and a member dropping
 //! its connection is announced by the global roster delete (302) rather than
-//! a per-chat 118.
+//! a per-chat 118. Room mute / slow-mode (Wave 13) is *enforced* here — a
+//! refused SEND_CHAT gets a private ChatMsg refusal line — but the native
+//! `RoomMuted`/`RoomSlowModeChanged` change pushes are not projected into a
+//! classic transaction (there is none to map them to).
 //! The listener is opt-in via config (`hotline_enabled`) and off by default.
 
 use std::collections::HashMap;
@@ -122,9 +125,9 @@ use rabbithole_legacy_hotline::flatten::{FORK_DATA, FORK_INFO};
 use rabbithole_legacy_hotline::{read_int, Field, Handshake, HandshakeReply, Reassembler};
 use rabbithole_legacy_hotline::{AccessMask, Privilege, Transaction, TransactionHeader};
 use rabbithole_legacy_hotline::{FileResumeData, FlatHeader, ForkHeader, InfoFork};
-use rabbithole_server_core::chat::LOBBY;
+use rabbithole_server_core::chat::{ChatError, Sender, LOBBY};
 use rabbithole_server_core::files::{KIND_ALIAS, KIND_FILE, KIND_FOLDER};
-use rabbithole_server_core::ratelimit::{class as rl, Scope};
+use rabbithole_server_core::ratelimit::{class as rl, now_ms, Scope};
 use rabbithole_server_core::{AuthError, Caps, PresenceEntry, Role, ServerEvent, Subject};
 use rabbithole_store_server::repo::{Account, AccountsRepo, AuditRepo};
 use rabbithole_store_server::repo4::{BoardRow, PostRow};
@@ -1219,10 +1222,36 @@ async fn handle_txn(
             if permitted {
                 // The bus broadcast (ServerEvent::Chat) fans the line out to
                 // every subscriber — native, telnet, and Hotline alike; the
-                // room service enforces membership for private rooms.
-                let _ = shared
-                    .chat
-                    .send(&room, active.session_id, &active.screen_name, &text);
+                // room service enforces membership for private rooms and the
+                // Wave 13 moderation gates (mute, slow-mode).
+                let sender = Sender {
+                    session_id: active.session_id,
+                    account_id: active.subject.account_id,
+                    is_moderator: shared
+                        .perms
+                        .allows(&active.subject, "chat", Caps::CHAT_MODERATE),
+                    screen_name: &active.screen_name,
+                };
+                // ChatSend is a notify (no reply to carry an error), so a
+                // mute/slow-mode refusal surfaces as a server line in the
+                // same chat window, sent to the refused sender only.
+                if let Err(e @ (ChatError::Muted | ChatError::SlowMode { .. })) =
+                    shared.chat.send(&room, sender, &text, now_ms())
+                {
+                    let mut fields = Vec::with_capacity(2);
+                    if !room.eq_ignore_ascii_case(LOBBY) {
+                        fields.push(Field::int(
+                            field::CHAT_ID,
+                            shared.hotline.chat_id_for_room(&room),
+                        ));
+                    }
+                    fields.push(Field::new(
+                        field::CHAT_TEXT,
+                        format!("\r ** {e}").into_bytes(),
+                    ));
+                    wr.write_all(&Transaction::request(transaction::CHAT_MSG, 0, fields).encode())
+                        .await?;
+                }
             }
             // ChatSend is a notify in the classic protocol: no reply expected.
         }

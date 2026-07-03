@@ -38,6 +38,12 @@ pub enum ErrorCode {
     TotpRequired,
     /// The session was disconnected by an operator.
     Kicked,
+    /// The principal is muted in the target chat room.
+    Muted,
+    /// Room slow-mode is active: wait `retry_after_secs` before the next
+    /// message. Distinct from [`RateLimited`](Self::RateLimited) (the global
+    /// send budget) — this is per-room moderation policy.
+    SlowMode { retry_after_secs: u32 },
     /// Escape hatch for codes this build doesn't know.
     Other(u16),
 }

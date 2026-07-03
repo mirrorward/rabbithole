@@ -388,3 +388,145 @@ impl Message for RoomMemberList {
     const FAMILY: Family = Family::CHAT;
     const MESSAGE_TYPE: u16 = 22;
 }
+
+// ---- Moderation: mute + slow-mode (Wave 13) --------------------------------
+
+/// Mute a member in a room (creator or CHAT_MODERATE; room creators can't
+/// be muted). A muted member stays in the room and keeps receiving events,
+/// but their sends are refused with `Muted`. `duration_secs = None` is
+/// permanent (until unmuted or the room is reaped); expiry is lazy.
+/// → empty ack; room members get a [`RoomMuted`] push.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomMute {
+    pub room: String,
+    pub screen_name: String,
+    /// `None` = permanent; `Some(secs)` expires after that many seconds.
+    pub duration_secs: Option<u32>,
+}
+
+impl RoomMute {
+    pub fn new(
+        room: impl Into<String>,
+        screen_name: impl Into<String>,
+        duration_secs: Option<u32>,
+    ) -> Self {
+        Self {
+            room: room.into(),
+            screen_name: screen_name.into(),
+            duration_secs,
+        }
+    }
+}
+
+impl Message for RoomMute {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 23;
+}
+
+/// Lift a mute (creator or CHAT_MODERATE). → empty ack (`NotFound` when the
+/// target wasn't muted); room members get a [`RoomMuted`] push with
+/// `muted = false`.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomUnmute {
+    pub room: String,
+    pub screen_name: String,
+}
+
+impl RoomUnmute {
+    pub fn new(room: impl Into<String>, screen_name: impl Into<String>) -> Self {
+        Self {
+            room: room.into(),
+            screen_name: screen_name.into(),
+        }
+    }
+}
+
+impl Message for RoomUnmute {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 24;
+}
+
+/// Set a room's slow-mode interval: the between-message minimum per member
+/// (creator and CHAT_MODERATE holders are exempt). `0` turns it off; values
+/// above the server cap (3600) are clamped. Sends inside the window are
+/// refused with `SlowMode { retry_after_secs }`. → empty ack; room members
+/// get a [`RoomSlowModeChanged`] push carrying the applied value.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomSlowMode {
+    pub room: String,
+    pub seconds: u32,
+}
+
+impl RoomSlowMode {
+    pub fn new(room: impl Into<String>, seconds: u32) -> Self {
+        Self {
+            room: room.into(),
+            seconds,
+        }
+    }
+}
+
+impl Message for RoomSlowMode {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 25;
+}
+
+/// Push to room members: someone was muted (`muted = true`, with the mute's
+/// duration) or unmuted (`muted = false`).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomMuted {
+    pub room: String,
+    pub screen_name: String,
+    pub muted: bool,
+    /// Meaningful only when `muted`; `None` = permanent.
+    pub duration_secs: Option<u32>,
+}
+
+impl RoomMuted {
+    pub fn new(
+        room: impl Into<String>,
+        screen_name: impl Into<String>,
+        muted: bool,
+        duration_secs: Option<u32>,
+    ) -> Self {
+        Self {
+            room: room.into(),
+            screen_name: screen_name.into(),
+            muted,
+            duration_secs,
+        }
+    }
+}
+
+impl Message for RoomMuted {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 26;
+}
+
+/// Push to room members: the slow-mode interval changed (`0` = off).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomSlowModeChanged {
+    pub room: String,
+    pub seconds: u32,
+    pub by: String,
+}
+
+impl RoomSlowModeChanged {
+    pub fn new(room: impl Into<String>, seconds: u32, by: impl Into<String>) -> Self {
+        Self {
+            room: room.into(),
+            seconds,
+            by: by.into(),
+        }
+    }
+}
+
+impl Message for RoomSlowModeChanged {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 27;
+}

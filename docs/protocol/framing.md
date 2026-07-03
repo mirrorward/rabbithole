@@ -64,8 +64,12 @@ not a Rust enum, so unknown families still decode.
 
 `BadRequest, Unauthenticated, Forbidden, NotFound, AlreadyExists,
 RateLimited, Internal, VersionMismatch, Unsupported, TooLarge,
-SessionExpired, Unavailable, TotpRequired, Kicked, Other(u16)` —
+SessionExpired, Unavailable, TotpRequired, Kicked, Muted,
+SlowMode { retry_after_secs: u32 }, Other(u16)` —
 non-exhaustive; unknown codes decode as `Other` and must be treated as
 generic failures. `TotpRequired`: credentials were valid but the account has
 2FA enrolled and no (or a wrong) code was supplied. `Kicked`: the session was
-disconnected by an operator.
+disconnected by an operator. `Muted`: the principal is muted in the target
+chat room. `SlowMode`: the room's slow-mode window hasn't elapsed — retry
+after the carried number of seconds (distinct from `RateLimited`, the global
+budget).

@@ -298,7 +298,17 @@ async fn chat_bridges_telnet_clients_and_native_sessions() {
     burrow
         .shared
         .chat
-        .send(LOBBY, native_session, "carol", "greetings from native")
+        .send(
+            LOBBY,
+            rabbithole_server_core::chat::Sender {
+                session_id: native_session,
+                account_id: 999,
+                is_moderator: false,
+                screen_name: "carol",
+            },
+            "greetings from native",
+            0,
+        )
         .unwrap();
     a.expect(b"<carol> greetings from native").await;
     b.expect(b"<carol> greetings from native").await;

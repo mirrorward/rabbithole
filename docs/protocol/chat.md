@@ -43,3 +43,28 @@ ad-hoc, and private rooms arrive in Wave 2 using these same messages.
 to member sessions (the lobby is everyone). Public-room scrollback is
 open; private scrollback requires membership. Rooms are in-memory
 (lobby permanent; persistence of operator rooms is future work).
+
+## Moderation: mute + slow-mode (Wave 13)
+
+| type | name | direction | payload |
+|---|---|---|---|
+| 23 | RoomMute | Request | `room`, `screen_name`, `duration_secs: Option<u32>` (`None` = permanent); creator or CHAT_MODERATE; creators can't be muted |
+| 24 | RoomUnmute | Request | `room`, `screen_name`; `NotFound` when the target wasn't (still) muted |
+| 25 | RoomSlowMode | Request | `room`, `seconds` (0 = off; clamped to 3600); creator or CHAT_MODERATE |
+| 26 | RoomMuted | Push | `room`, `screen_name`, `muted`, `duration_secs` — to room members (lobby: everyone) |
+| 27 | RoomSlowModeChanged | Push | `room`, `seconds` (the applied value), `by` — to room members (lobby: everyone) |
+
+- Mutes and slow-mode are per-room state (lobby included), in-memory like
+  the rooms themselves, and enforced in the shared chat service — native,
+  Hotline, and telnet sends all pass the same gates.
+- A muted member stays in the room and keeps receiving pushes; their
+  `ChatSend` is refused with the distinct `Muted` code. Timed mutes expire
+  lazily.
+- Slow-mode is a between-message minimum per member (the room's creator
+  and CHAT_MODERATE holders are exempt), separate from the global `msg`
+  rate budget (`RateLimited`). A send inside the window is refused with
+  `SlowMode { retry_after_secs }` — the retry-after rides in the error
+  code. Legacy surfaces surface both refusals as text (Hotline: a private
+  ChatMsg line; telnet: the parenthesized refusal line).
+- Both operations are audit-logged (`room-mute`, `room-unmute`,
+  `room-slow-mode`).

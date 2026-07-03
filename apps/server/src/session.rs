@@ -419,11 +419,19 @@ async fn handle_request(
                 .await?;
             return Ok(());
         }
-        use rabbithole_server_core::chat::ChatError;
-        match shared
-            .chat
-            .send(&req.room, ctx.session_id, &ctx.screen_name, &req.text)
-        {
+        use rabbithole_server_core::chat::{ChatError, Sender};
+        let sender = Sender {
+            session_id: ctx.session_id,
+            account_id: ctx.account_id,
+            is_moderator: ctx.allows(shared, "chat", Caps::CHAT_MODERATE),
+            screen_name: &ctx.screen_name,
+        };
+        match shared.chat.send(
+            &req.room,
+            sender,
+            &req.text,
+            rabbithole_server_core::ratelimit::now_ms(),
+        ) {
             Ok(_) => conn.send(Frame::ack(frame)).await?,
             Err(ChatError::NoSuchRoom(_)) => {
                 conn.send(Frame::error_reply(frame, ErrorCode::NotFound))
@@ -436,6 +444,20 @@ async fn handle_request(
             Err(ChatError::TooLong { .. }) => {
                 conn.send(Frame::error_reply(frame, ErrorCode::TooLarge))
                     .await?
+            }
+            // Room moderation refusals (Wave 13) are distinct from the
+            // global RateLimited budget above; slow-mode carries its
+            // retry-after inside the error code.
+            Err(ChatError::Muted) => {
+                conn.send(Frame::error_reply(frame, ErrorCode::Muted))
+                    .await?
+            }
+            Err(ChatError::SlowMode { retry_after_secs }) => {
+                conn.send(Frame::error_reply(
+                    frame,
+                    ErrorCode::SlowMode { retry_after_secs },
+                ))
+                .await?
             }
             Err(_) => {
                 conn.send(Frame::error_reply(frame, ErrorCode::BadRequest))
@@ -665,6 +687,42 @@ pub(crate) fn push_for_event(
                 return None;
             }
             Frame::push(&pchat::RoomKicked::new(room.clone(), *banned)).ok()
+        }
+        // Mute / slow-mode changes go to room members, lobby to everyone —
+        // the same scoping as chat lines (the room string is client-cased,
+        // hence the case-insensitive lobby test).
+        ServerEvent::RoomMuted {
+            screen_name,
+            room,
+            muted,
+            duration_secs,
+            ..
+        } => {
+            if !room.eq_ignore_ascii_case(rabbithole_server_core::LOBBY)
+                && !shared.chat.is_member(room, viewer_session)
+            {
+                return None;
+            }
+            Frame::push(&pchat::RoomMuted::new(
+                room.clone(),
+                screen_name.clone(),
+                *muted,
+                *duration_secs,
+            ))
+            .ok()
+        }
+        ServerEvent::RoomSlowModeChanged { room, seconds, by } => {
+            if !room.eq_ignore_ascii_case(rabbithole_server_core::LOBBY)
+                && !shared.chat.is_member(room, viewer_session)
+            {
+                return None;
+            }
+            Frame::push(&pchat::RoomSlowModeChanged::new(
+                room.clone(),
+                *seconds,
+                by.clone(),
+            ))
+            .ok()
         }
         ServerEvent::BoardPost { .. } => crate::handlers6::board_push(event),
         ServerEvent::FileAdded { .. } => crate::handlers8::file_push(event),

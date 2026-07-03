@@ -71,7 +71,8 @@ use std::time::Instant;
 
 use rabbithole_legacy_telnet::{Echo, Encoding, TelnetStream};
 use rabbithole_proto::welcome as pw;
-use rabbithole_server_core::ratelimit::{class as rl, Scope};
+use rabbithole_server_core::chat::Sender;
+use rabbithole_server_core::ratelimit::{class as rl, now_ms, Scope};
 use rabbithole_server_core::{AuthedUser, Caps, PresenceEntry, Role, ServerEvent, LOBBY};
 use rabbithole_store_server::repo2::PersonasRepo;
 use rabbithole_store_server::repo3::{dm_receipts_enabled, BlocksRepo, DmsRepo};
@@ -1776,12 +1777,17 @@ where
                         .await?;
                     continue;
                 }
-                if let Err(e) = shared.chat.send(
-                    room,
+                // The service's mute / slow-mode refusals (Wave 13) print as
+                // the parenthesized refusal line like any other send error.
+                let sender = Sender {
                     session_id,
-                    &authed.persona.screen_name,
-                    text,
-                ) {
+                    account_id: authed.account.id,
+                    is_moderator: shared
+                        .perms
+                        .allows(&authed.subject, "chat", Caps::CHAT_MODERATE),
+                    screen_name: &authed.persona.screen_name,
+                };
+                if let Err(e) = shared.chat.send(room, sender, text, now_ms()) {
                     t.write_str(&format!("({e})\n")).await?;
                 }
             }

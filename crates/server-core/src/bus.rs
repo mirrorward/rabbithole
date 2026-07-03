@@ -74,6 +74,23 @@ pub enum ServerEvent {
         room: String,
         banned: bool,
     },
+    /// `account` was muted (`muted = true`, with the mute's duration) or
+    /// unmuted in a room; fanned out to the room's members.
+    RoomMuted {
+        account: i64,
+        screen_name: String,
+        room: String,
+        muted: bool,
+        /// `None` = permanent (meaningful only when `muted`).
+        duration_secs: Option<u32>,
+    },
+    /// A room's slow-mode interval changed (`0` = off); fanned out to the
+    /// room's members.
+    RoomSlowModeChanged {
+        room: String,
+        seconds: u32,
+        by: String,
+    },
     /// An operator notice for every session.
     Notice { text: String, from: String },
     /// A notice for moderators only (e.g. "a new report was filed").
