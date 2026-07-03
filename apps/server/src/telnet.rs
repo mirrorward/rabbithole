@@ -316,6 +316,31 @@ where
 
 /// The main menu. `[O]` appears only when door hosting is switched on, but
 /// the commands always answer (with a polite refusal when disabled).
+/// A one-line, ASCII-only now-playing banner for the telnet MAIN MENU — safe
+/// across CP437/UTF-8 TTYPEs (no note glyph, no em dash), or `None` when
+/// nothing is on the air. A live DJ's station is featured over playlist
+/// automation; ties break on the slug.
+fn radio_now_playing_line(
+    stations: &[rabbithole_server_core::presence::RadioStatus],
+) -> Option<String> {
+    let s = stations
+        .iter()
+        .filter(|s| s.live)
+        .min_by_key(|s| &s.station)
+        .or_else(|| stations.iter().min_by_key(|s| &s.station))?;
+    let track = if s.artist.is_empty() {
+        s.title.clone()
+    } else {
+        format!("{} - {}", s.title, s.artist)
+    };
+    let mut line = format!("Now playing on {}: {}", s.station, track);
+    if s.live && !s.dj.is_empty() {
+        line.push_str(&format!(" (DJ {})", s.dj));
+    }
+    line.push_str(&format!(" [{} listening]", s.listeners));
+    Some(line)
+}
+
 async fn menu_loop<S>(
     t: &mut TelnetStream<S>,
     shared: &Arc<Shared>,
@@ -334,8 +359,12 @@ where
             pending = jump(t, shared, authed, session_id, peer_ip, target).await?;
             continue;
         }
-        let mut menu = String::from(
-            "\n=== MAIN MENU ===\n [B] Message boards\n [C] Chat (the lobby)\n \
+        let mut menu = String::from("\n=== MAIN MENU ===\n");
+        if let Some(np) = radio_now_playing_line(&shared.presence.radio_now_playing()) {
+            menu.push_str(&format!(" {np}\n\n"));
+        }
+        menu.push_str(
+            " [B] Message boards\n [C] Chat (the lobby)\n \
              [D] Direct mail\n [F] Files\n",
         );
         if shared.config.read().qwk_enabled {
@@ -2223,4 +2252,56 @@ fn fmt_datetime(unix_ms: i64) -> String {
         .unwrap_or_default()
         .format("%Y-%m-%d %H:%M")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::radio_now_playing_line;
+    use rabbithole_server_core::presence::RadioStatus;
+
+    fn status(
+        station: &str,
+        title: &str,
+        artist: &str,
+        dj: &str,
+        listeners: usize,
+        live: bool,
+    ) -> RadioStatus {
+        RadioStatus {
+            station: station.into(),
+            title: title.into(),
+            artist: artist.into(),
+            dj: dj.into(),
+            listeners,
+            live,
+        }
+    }
+
+    #[test]
+    fn off_air_has_no_banner() {
+        assert_eq!(radio_now_playing_line(&[]), None);
+    }
+
+    #[test]
+    fn automation_banner_is_ascii_and_dj_less() {
+        let line =
+            radio_now_playing_line(&[status("ambient", "Warren Dawn", "", "rotation", 3, false)])
+                .unwrap();
+        assert_eq!(line, "Now playing on ambient: Warren Dawn [3 listening]");
+        assert!(line.is_ascii(), "safe on CP437/UTF-8 TTYPEs alike");
+    }
+
+    #[test]
+    fn a_live_dj_is_featured_over_automation() {
+        // Auto "ambient" sorts first alphabetically, but the live "night" wins.
+        let line = radio_now_playing_line(&[
+            status("ambient", "Drift", "Eno", "rotation", 9, false),
+            status("night", "Request Hour", "The Lagomorphs", "Robin", 2, true),
+        ])
+        .unwrap();
+        assert_eq!(
+            line,
+            "Now playing on night: Request Hour - The Lagomorphs (DJ Robin) [2 listening]"
+        );
+    }
 }
