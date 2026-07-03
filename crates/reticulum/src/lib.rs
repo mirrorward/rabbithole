@@ -31,6 +31,15 @@
 //! - [`lxmf`]: a Lightweight Extensible Message Format (LXMF) message — the
 //!   addressed, Ed25519-signed message that rides inside a Reticulum packet
 //!   body (see the divergence note below).
+//! - [`tunnel`]: the delay-tolerant, content-addressed [`TunnelMessage`] and a
+//!   [`MessageStore`] (TTL + de-dup seen-set, injected clock) — the
+//!   store-and-forward unit of the S2S tunnel core.
+//! - [`floodfill`]: the sans-I/O flood-fill (epidemic dissemination) engine —
+//!   [`FloodFill::plan_forward`] computes the loop-safe set of peers to relay a
+//!   message to, backed by a [`ForwardLedger`] (seen-by TTL, injected clock).
+//! - [`batch`]: bandwidth-aware batching — a [`Batcher`] packs messages per
+//!   peer into MTU-bounded, priority/age-ordered [`Batch`]es metered by a
+//!   per-peer token-bucket rate governor (see the divergence note below).
 //!
 //! # Fidelity to upstream Reticulum
 //!
@@ -78,6 +87,20 @@
 //!    with counter nonces and replay rejection, instead of upstream's single
 //!    32-byte key + random-IV token; the RTT message is a u64 of
 //!    milliseconds, not a msgpack float of seconds. See [`link`].
+//! 6. **Delay-tolerant tunnel model.** The [`tunnel`] / [`floodfill`] / [`batch`]
+//!    layers are a **pure model** of delay-tolerant store-and-forward over the
+//!    mesh (the analogue of an LXMF *propagation node*), not an RNS/LXMF wire
+//!    format. The [`TunnelMessage`] and [`Batch`] framings are this crate's own;
+//!    the content-addressed message id excludes the in-transit `hops` counter
+//!    (mirroring [`Packet::packet_hash`](packet::Packet::packet_hash));
+//!    flood-fill's "all peers but the source and known holders" rule, the
+//!    message-level hop horizon, the [`ForwardLedger`] seen-by TTL, and the
+//!    token-bucket bandwidth governor are all local policy. A later RNS tunnel
+//!    adapter/sidecar drives this core and maps it onto real RNS
+//!    packets/resources and LXMF propagation transfers; fragmenting a payload
+//!    larger than [`packet::MTU`] across multiple packets is **deferred** (this
+//!    slice is single-packet only). See [`tunnel`], [`floodfill`], and
+//!    [`batch`].
 //!
 //! Uncertain spec interpretations are additionally flagged inline with
 //! `// SPEC-CHECK:` comments and pinned by tests, so a later interop pass can
@@ -94,17 +117,25 @@
 #![forbid(unsafe_code)]
 
 pub mod announce;
+pub mod batch;
 pub mod crypto;
 pub mod destination;
+pub mod floodfill;
 pub mod identity;
 pub mod link;
 pub mod lxmf;
 pub mod packet;
+pub mod tunnel;
 
 pub use announce::{Announce, AnnounceCache, AnnounceVerdict};
+pub use batch::{
+    Batch, BatchError, Batcher, TokenBucket, BATCH_ENVELOPE_HEADER_LEN, BATCH_FRAMING_RESERVE,
+    BATCH_VERSION, DEFAULT_BATCH_BUDGET, MAX_BATCH_MESSAGES,
+};
 pub use destination::{
     Destination, DestinationHash, DestinationHashError, DESTINATION_HASH_LENGTH, NAME_HASH_LENGTH,
 };
+pub use floodfill::{FloodFill, ForwardLedger};
 pub use identity::{Identity, PublicIdentity, IDENTITY_HASH_LENGTH, PUBLIC_IDENTITY_LENGTH};
 pub use link::{
     CloseReason, LinkError, LinkId, LinkInitiator, LinkProof, LinkRequest, LinkResponder, LinkRole,
@@ -114,4 +145,8 @@ pub use lxmf::{LxmfError, LxmfMessage, SignedLxmf, LXMF_HASH_LENGTH};
 pub use packet::{
     max_data_len, DestinationType, HeaderType, Packet, PacketError, PacketType, PropagationType,
     MTU,
+};
+pub use tunnel::{
+    content_id, MessageStore, OfferOutcome, PeerId, TunnelError, TunnelMessage, MAX_TUNNEL_PAYLOAD,
+    TUNNEL_ID_LENGTH, TUNNEL_MESSAGE_HEADER_LEN,
 };
