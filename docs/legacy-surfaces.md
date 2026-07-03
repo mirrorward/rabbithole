@@ -27,7 +27,7 @@ disables that class.
 | NNTP peer feed over implicit TLS | 1563 (`nntp_feed_tls_addr`) | `nntp_feed_tls_enabled` | same allowlist as the plaintext feed | conn, legacy, auth | — |
 | Hotline (+HTXF) | 5500 (`hotline_addr`); HTXF bulk channel binds control port + 1 (5501) | `hotline_enabled` | `hotline_min_role` — Hotline guest sign-ins (empty credentials) count as guest and are refused above it | conn, auth (login), legacy (per transaction), post (news), transfer (downloads) | HTXF **upload**, fork-offset resume, folder downloads (tolerated with empty success replies); DisconnectUser bans are in-memory only; DeleteUser is a soft delete (disable); a few private-chat push edges (native topic set not echoed as 119) |
 | FTN / binkp mailer | 24554 (`ftn_addr`) | `ftn_enabled` (tossing/scanning also needs non-empty `ftn_node`) | binkp session password `ftn_password` (`""`/`"-"` = unsecured); gateway posts/DMs only under a member-baseline subject holding the `board`/`dm` caps | conn | ARCmail bundle decompression (raw `.PKT` only; bundles left in spool), answering-side sending (outbound rides `poll_uplink` dials), crash-recovery resume / `M_GET` |
-| QWK / QWKE | — | — | — | — | **codec + packet builder only** (`rabbithole-legacy-qwk`: MESSAGES.DAT, CONTROL.DAT, NDX, QWKE kludges, `.REP` ingest). No listener, no config keys, no ZIP bundling or board wiring yet |
+| QWK / QWKE | — (no listener; telnet `[M]` + `ctl qwk-build`/`qwk-ingest`) | `qwk_enabled` | telnet's `telnet_min_role`; REP ingest posts under `BOARD_POST` per board | (telnet's) | ZIP bundling, HTTP spool serving, zmodem upload path, durable cross-restart reply dedupe, per-user scheduled packets |
 | Radio delivery (Icecast/ICY) | 8000 (`radio_addr`) | `radio_enabled` | listeners (`GET`) are anonymous; a `SOURCE`/`PUT` DJ on this port authenticates HTTP Basic against a **real account** and needs cap `BROADCAST` on the `radio` resource | conn, auth (failed source logins) | live sources are fanned out **verbatim** (no decode/transcode into the audio `Station` playout) |
 | Radio source ingest + updinfo | 8001 (`radio_source_addr`) | `radio_source_enabled` | shared credentials `radio_source_user` (default `"source"`) / `radio_source_password` — **empty password refuses every source and updinfo** (fail safe); guests never broadcast | conn, auth | same passthrough caveat as delivery |
 | Syndication fetcher (RSS/Atom) | — (outbound only, no listener) | `syndication_enabled` (+ non-empty `syndication_feeds`) | gateway posts under a member-baseline subject holding `BOARD_POST` | — (its own politeness floor + per-feed backoff) | feed-declared TTLs (`<ttl>`/`sy:updatePeriod` not wired), IPv6 literal feed hosts, compressed responses (no `Accept-Encoding`) |
@@ -60,6 +60,12 @@ disables that class.
   `ftn/inbound`), `ftn_outbound_dir` (default `ftn/outbound`), `ftn_areas`
   (AREA tag → board slug, *TOML-only*). Loop-broken by author origin: only
   `@{origin}`-authored posts are scanned outbound.
+- **QWK**: `qwk_enabled` (default off, live), `qwk_spool_dir` (default `qwk`,
+  under `data_dir`; live). No listener — delivery is the telnet `[M]` menu plus
+  the `ctl qwk-build`/`qwk-ingest` admin commands. Conferences are postable
+  boards (sorted by slug, numbered 1–255); message selection and read pointers
+  share the Wave-3 offline-read subsystem. REP ingest posts with the user's
+  author seed and dedupes on `SeenKey::QwkReply`.
 - **Radio**: `radio_enabled`, `radio_addr`, `radio_source_enabled`,
   `radio_source_addr`, `radio_source_user`, `radio_source_password`,
   `radio_library_areas` (mount slug → file-area slug, *TOML-only*) — each

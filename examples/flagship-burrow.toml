@@ -1,0 +1,463 @@
+# =============================================================================
+# flagship-burrow.toml — an opinionated public RabbitHole server (0.61.0)
+# =============================================================================
+#
+# A worked configuration for a PUBLIC flagship Burrow: native RHP always on,
+# a handful of legacy surfaces opened deliberately, radio, federation, and the
+# embedded web/PWA. Every key the server understands appears here; keys whose
+# built-in default is fine are shown COMMENTED with their default value, so you
+# can see the whole surface at a glance and uncomment only what you change.
+#
+# Precedence (low -> high):  defaults < this file < RABBITHOLE_* env vars
+#                            < runtime `burrow ctl config-set` edits.
+#
+# Load it with:   burrow --config /etc/burrow/flagship-burrow.toml run
+# (or drop it as `burrow.toml` next to your --data-dir).
+#
+# NOTES ON EDITING
+#   * The config uses `deny_unknown_fields`: a misspelled key refuses to load.
+#     Do not invent keys — every key below is real.
+#   * Scalar keys must all appear BEFORE the first [table]/[[array]] header
+#     (a TOML rule) — that's why the map/array sections live at the bottom.
+#   * Keys marked "restart" bind a listener at startup; changing them needs a
+#     server restart. Keys marked "live" are re-read per request, so a
+#     `ctl config-set` takes effect immediately.
+#   * Keys marked "TOML-only" (the maps/arrays) are edited here on disk;
+#     `ctl config-set` cannot touch them.
+#   * After editing a listener/restart key: stop -> edit -> start. To restore a
+#     snapshot the server must be stopped first (see the BACKUPS note at end).
+
+
+# -----------------------------------------------------------------------------
+# Identity & membership  (all live)
+# -----------------------------------------------------------------------------
+
+# Display name of this burrow.
+name = "The Rabbit Hole"
+
+# Message of the day, shown in the welcome push. (live)
+motd = "Welcome down the rabbit hole. Be excellent to each other."
+
+# Agreement text users must accept before participating. Empty = no gate. (live)
+agreement = """
+By connecting you agree to the house rules: no spam, no harassment, no illegal
+uploads. Moderators' decisions are final. Have fun.
+"""
+
+# Whether guests may sign in without an account. Public flagship: yes. (live)
+# guest_enabled = true
+
+# Registration policy: "open" | "invite" | "closed". A public flagship that
+# wants to keep the doors open runs "open"; switch to "invite" if you get
+# brigaded. (live)
+# registration_mode = "open"
+
+# Maximum personas (identities) per account. (live)
+# persona_max = 5
+
+
+# -----------------------------------------------------------------------------
+# Storage & session  (restart)
+# -----------------------------------------------------------------------------
+
+# Where the database, blobs, keys, and ctl socket live. Relative paths resolve
+# against the process working directory. (restart)
+# data_dir = "./burrow-data"
+
+# Session token lifetime in seconds (default 30 days). (live)
+# session_ttl_secs = 2592000
+
+# Maximum chat line length in bytes. (live)
+# chat_max_len = 4096
+
+
+# -----------------------------------------------------------------------------
+# Native transports  (restart) — these are ALWAYS ON; only the bind changes
+# -----------------------------------------------------------------------------
+
+# QUIC listener (primary transport, TLS 1.3, fingerprint-pinned). (restart)
+# quic_addr = "0.0.0.0:4653"
+
+# WebSocket listener (fallback transport; also what the web SPA speaks). (restart)
+# ws_addr = "0.0.0.0:4654"
+
+
+# -----------------------------------------------------------------------------
+# Profile art & file quotas
+# -----------------------------------------------------------------------------
+
+# Size caps for profile blobs, in bytes. (live)
+# avatar_max_bytes = 262144      # 256 KiB
+# banner_max_bytes = 1048576     # 1 MiB
+
+# Per-account file-library upload quota in bytes (0 = unlimited). A public
+# flagship usually wants a cap — e.g. 5 GiB. (live)
+# upload_quota_bytes = 0
+
+# Max simultaneous in-flight transfers per account (0 = unlimited). (live)
+# max_concurrent_transfers = 0
+
+# Per-transfer download bandwidth cap in bytes/sec (0 = unlimited). (live)
+# transfer_rate_bytes_per_sec = 0
+
+
+# -----------------------------------------------------------------------------
+# The Warren (swarm)
+# -----------------------------------------------------------------------------
+
+# Max TTL granted to a swarm advertisement, in seconds. (live)
+# swarm_advert_ttl_secs = 3600
+
+# Max live swarm advertisements per account (0 = unlimited). (live)
+# swarm_adverts_max = 4096
+
+# Disk cap for unreferenced (cache/swarm) blobs, in bytes; the maintenance
+# sweep evicts oldest-first over this. 0 = unlimited ("mirror": keep everything
+# ever held). Referenced library content is never evicted. (live)
+# swarm_cache_max_bytes = 0
+
+
+# -----------------------------------------------------------------------------
+# Embedded HTTP + PWA  (restart)
+# -----------------------------------------------------------------------------
+# Serves the web SPA shell plus the /files/<area>/<path> download handoff that
+# telnet's `get` command mints links for. `burrow --http [--http-addr] [--web-root]`
+# flips these on from the CLI without editing this file.
+
+http_enabled = true
+
+# HTTP listener address. Terminate TLS at a reverse proxy in front of it
+# (keep-alive/Range/TLS are not built in). (restart)
+# http_addr = "0.0.0.0:8080"
+
+# Directory of built SPA assets to serve at `/` — point it at a `trunk build`
+# output dir (see examples/README.md). Empty disables static serving (only the
+# /files handoff answers). Relative paths resolve under data_dir. (restart)
+http_web_root = "/var/lib/burrow/web"
+
+# Base URL the telnet `files` browser prints for download links, i.e.
+# <base>/files/<area>/<path>. Set this to the PUBLIC address of the HTTP
+# surface above. Empty = telnet reports transfers unavailable. (live)
+files_http_base = "https://bbs.example.org"
+
+
+# -----------------------------------------------------------------------------
+# Telnet BBS  (enable: restart; min-role: live)
+# -----------------------------------------------------------------------------
+# CP437/ANSI welcome, boards/chat/DM shells, /go teleport, a files browser
+# (HTTP-link handoff or ZMODEM), and optional door games.
+
+telnet_enabled = true
+
+# Listener address (default 2323 — port 23 needs privilege). (restart)
+# telnet_addr = "0.0.0.0:2323"
+
+# Minimum role: "guest" | "user" | "moderator" | "admin" ("member" aliases
+# "user"). "guest" = everyone the auth service accepts. (live)
+# telnet_min_role = "guest"
+
+
+# -----------------------------------------------------------------------------
+# Door games  (restart) — requires telnet_enabled + at least one [[doors]] entry
+# -----------------------------------------------------------------------------
+
+# Host classic door games on the telnet surface. See the sample [[doors]]
+# block at the bottom of this file. (restart)
+# doors_enabled = false
+
+# Working root for door sessions (per-node drop dirs are created under it).
+# Relative paths resolve under data_dir. (restart)
+# doors_dir = "doors"
+
+# How many door nodes (simultaneous sessions) the shared pool offers.
+# 0 refuses every launch. (restart)
+# doors_max_nodes = 4
+
+# Wall-clock cap on one door session, in seconds (0 = unlimited). A door's own
+# daily_limit_mins lowers it further; the smaller budget wins. (restart)
+# doors_session_max_secs = 3600
+
+
+# -----------------------------------------------------------------------------
+# Finger (RFC 1288)  (enable: restart; min-role: live)
+# -----------------------------------------------------------------------------
+# Empty query = who's online; `user` = profile + presence + .plan.
+
+finger_enabled = true
+
+# Listener address (default 7979 — port 79 needs privilege). (restart)
+# finger_addr = "0.0.0.0:7979"
+
+# Finger is anonymous, so ANY value above "guest" refuses every query with a
+# polite notice. Leave at "guest" to actually answer. (live)
+# finger_min_role = "guest"
+
+
+# -----------------------------------------------------------------------------
+# NNTP (RFC 3977 reader; RFC 4644 peer feed; STARTTLS per RFC 4642)
+# -----------------------------------------------------------------------------
+# Groups are postable boards mapped by identity slug; Message-IDs are
+# <hex(event-id)@origin>.
+
+# --- Reader (newsreaders read/post boards) ---
+nntp_enabled = true
+
+# Listener address (default 1119 — port 119 needs privilege). (restart)
+# nntp_addr = "0.0.0.0:1119"
+
+# Anonymous reading counts as "guest"; above that, unauthenticated commands get
+# 480 and a below-minimum AUTHINFO gets 481. (live)
+# nntp_min_role = "guest"
+
+# NNTPS reader over implicit TLS, using the burrow's persistent self-signed
+# identity (the QUIC-pinned fingerprint). Independent of nntp_enabled. (restart)
+# nntp_tls_enabled = false
+# nntp_tls_addr = "0.0.0.0:563"        # IANA nntps; binding needs privilege
+
+# Refuse AUTHINFO on non-TLS connections (RFC 4643 §2.3.1). ON by default:
+# plaintext AUTHINFO answers 483 until STARTTLS or an NNTPS reconnect. (live)
+# nntp_auth_require_tls = true
+
+# --- Peer feed (server-to-server news transit) ---
+# Off unless you actually peer with another news server. Needs a non-empty
+# [nntp_feed_peers] allowlist (bottom of file) — empty = refuse every peer.
+# nntp_feed_enabled = false
+# nntp_feed_addr = "0.0.0.0:1120"
+# nntp_feed_tls_enabled = false
+# nntp_feed_tls_addr = "0.0.0.0:1563"
+
+
+# -----------------------------------------------------------------------------
+# Hotline (+ HTXF)  (enable: restart; min-role: live)
+# -----------------------------------------------------------------------------
+# Real classic Hotline clients: public + private chat rooms, admin
+# transactions, HTXF file upload/download with fork-offset resume. The HTXF
+# bulk channel binds control-port + 1 (5500 -> 5501).
+
+hotline_enabled = true
+
+# Listener address (default 5500 — the classic Hotline port). (restart)
+# hotline_addr = "0.0.0.0:5500"
+
+# Hotline guest sign-ins (empty credentials) count as "guest". (live)
+# hotline_min_role = "guest"
+
+
+# -----------------------------------------------------------------------------
+# FidoNet / binkp mailer  (restart)
+# -----------------------------------------------------------------------------
+# Off unless you actually join an FTN network. Echomail <-> boards and
+# netmail <-> DM gateways. Tossing/scanning also needs a non-empty ftn_node.
+
+# ftn_enabled = false
+# ftn_addr = "0.0.0.0:24554"           # IANA binkp port
+# ftn_node = ""                        # this system's FTN address, e.g. "2:280/464"
+# ftn_uplink = ""                      # boss node, e.g. "2:280/1"
+# ftn_uplink_host = ""                 # binkp host:port to dial, e.g. "hub.example.org:24554"
+# ftn_password = ""                    # binkp session password ("" or "-" = unsecured)
+# ftn_inbound_dir = "ftn/inbound"      # received PKT/bundles (under data_dir)
+# ftn_outbound_dir = "ftn/outbound"    # staged BSO outbound (under data_dir)
+# AREA-tag -> board-slug map lives in [ftn_areas] at the bottom.
+
+
+# -----------------------------------------------------------------------------
+# QWK / QWKE offline mail  (live)
+# -----------------------------------------------------------------------------
+# No listener: delivery is the telnet [M] menu plus `ctl qwk-build` /
+# `ctl qwk-ingest`. Conferences are postable boards; read pointers are shared
+# with the native offline-sync subsystem.
+
+# qwk_enabled = false
+# qwk_spool_dir = "qwk"                # per-user packet members (under data_dir)
+
+
+# -----------------------------------------------------------------------------
+# Radio (Icecast/ICY)  (restart)
+# -----------------------------------------------------------------------------
+# Delivery = listeners pulling ICY mounts (anonymous). Source ingest = a DJ
+# pushing a live stream (SOURCE/PUT), which pre-empts the playlist automation.
+
+radio_enabled = true
+
+# Delivery listener (default 8000 — the Icecast convention). (restart)
+# radio_addr = "0.0.0.0:8000"
+
+# DJ source ingest + the /admin/metadata + /admin.cgi `updinfo` endpoints. (restart)
+radio_source_enabled = true
+
+# Source ingest listener (default 8001). (restart)
+# radio_source_addr = "0.0.0.0:8001"
+
+# Shared DJ credentials (HTTP Basic). Default user is "source" (Icecast
+# convention). An EMPTY password refuses every source + updinfo (fail safe:
+# no blank-password broadcasting). CHANGE THIS. (restart)
+# radio_source_user = "source"
+radio_source_password = "CHANGE-ME-to-a-strong-source-password"
+# Library-automation stations (mount slug -> file-area slug) live in
+# [radio_library_areas] at the bottom. A live DJ takes the mount over and
+# rotation resumes when they leave.
+
+
+# -----------------------------------------------------------------------------
+# RSS/Atom syndication (inbound)  (restart)
+# -----------------------------------------------------------------------------
+# Outbound fetcher only (no listener). Polls [syndication_feeds] and posts
+# fresh items to the mapped boards; dedupe is durable per feed + burrow-wide.
+
+# syndication_enabled = false
+# syndication_poll_secs = 1800         # base interval; backoff/TTL stretch it
+
+
+# -----------------------------------------------------------------------------
+# Federation (Tunnels, S2S)  (restart)
+# -----------------------------------------------------------------------------
+# Dedicated QUIC endpoint for server-to-server peering: nonce-bound Ed25519
+# handshake, admin approval, signed file-catalog sync. Configured dial targets
+# live in [[federation_peers]] at the bottom; unknown inbound peers stay
+# Pending until an admin runs `ctl peer-approve`.
+
+federation_enabled = true
+
+# S2S listener (default 4655 — beside the QUIC 4653 / WS 4654 client ports). (restart)
+# federation_addr = "0.0.0.0:4655"
+
+
+# -----------------------------------------------------------------------------
+# Rate limiting (Wave 13)  (all live; master switch + per-class buckets)
+# -----------------------------------------------------------------------------
+# ON by default with generous budgets. A knob of 0 DISABLES that class; a burst
+# of 0 refuses everything in that class. Shown here at their defaults — tune for
+# your hardware and threat model. Every check re-reads config, so edits are live.
+
+# ratelimit_enabled = true
+
+# New connections /IP/min across every accept loop (native + legacy). (live)
+# ratelimit_conn_per_min = 30
+# ratelimit_conn_burst = 10
+
+# FAILED logins /IP/min (native auth, NNTP AUTHINFO, Hotline, telnet, radio
+# source). Successful logins never consume this budget. (live)
+# ratelimit_auth_per_min = 5
+# ratelimit_auth_burst = 5
+
+# Chat lines + DM sends /account/sec (native surface). (live)
+# ratelimit_msg_per_sec = 10
+# ratelimit_msg_burst = 20
+
+# Board posts /account/min (native, NNTP POST, Hotline news). (live)
+# ratelimit_post_per_min = 6
+# ratelimit_post_burst = 6
+
+# Transfer opens /account/min. (live)
+# ratelimit_transfer_per_min = 10
+# ratelimit_transfer_burst = 10
+
+# Legacy-surface commands /IP/sec (telnet, Hotline, NNTP — one coarse bucket). (live)
+# ratelimit_legacy_per_sec = 20
+# ratelimit_legacy_burst = 60
+
+
+# -----------------------------------------------------------------------------
+# Welcome screen & theme  (live)
+# -----------------------------------------------------------------------------
+
+# Featured block: title on the first line, body after. (live)
+welcome_featured = """
+New here?
+Type /go help in any client, or hit [B]oards from the telnet menu.
+"""
+
+# One-line ticker. (live)
+welcome_ticker = "Now playing: the flagship stream on :8000 — tune in!"
+
+# Accent color as hex "RRGGBB" (a leading # is accepted and stripped). (live)
+theme_accent = "6c9cff"
+
+# ANSI logo art, also the telnet welcome banner. Multi-line ANSI goes here; keep
+# it commented unless you have art to paste. (live)
+# theme_logo_ansi = ""
+
+# Theme bundle display name (empty = the server name). (live)
+# theme_name = "The Rabbit Hole"
+
+# Theme banner-image blob id (32-byte hex). Written by the admin ThemeBundleSet
+# op after size validation — usually not hand-edited. (live)
+# theme_banner = ""
+
+# The structured theme maps below are written by the admin `ThemeBundleSet`
+# family / theme editor, NOT hand-edited, and are listed here only for
+# completeness (they default to empty and are content-hashed for the signed
+# bundle):
+#   [theme_icons]           name -> blob-id hex
+#   [theme_tokens_light]    "--rh-*" -> value   (light mode)
+#   [theme_tokens_dark]     "--rh-*" -> value   (dark mode)
+#   [theme_tokens_shared]   "--rh-*" -> value   (metrics: spacing/radii/scale)
+# theme_applied_at_unix / theme_applied_by are informational (get-only) and set
+# when a bundle is applied.
+
+
+# =============================================================================
+# Map & array sections  (TOML-only — `ctl config-set` cannot edit these)
+# Everything below is a [table] or [[array-of-tables]]; keep all scalar keys
+# above this line.
+# =============================================================================
+
+# --- NNTP peer-feed allowlist: AUTHINFO user -> password ---------------------
+# Empty (the default) = refuse every peer (fail safe). Uncomment to peer.
+# [nntp_feed_peers]
+# "peer.example.net" = "shared-feed-secret"
+
+# --- Radio library automation: mount slug -> file-area slug ------------------
+# Each entry runs a playlist-automation station from that area's audio files.
+# [radio_library_areas]
+# "main" = "music"
+# "lounge" = "ambient"
+
+# --- FTN echomail: AREA tag -> board slug ------------------------------------
+# Drives the echomail <-> board gateway both directions. Requires ftn_enabled.
+# [ftn_areas]
+# "GENERAL" = "fido.general"
+# "RUST" = "fido.rust"
+
+# --- Syndication: feed URL -> board slug -------------------------------------
+# Requires syndication_enabled. Fresh items post to the mapped board.
+# [syndication_feeds]
+# "https://blog.rust-lang.org/feed.xml" = "news.rust"
+# "https://lobste.rs/rss" = "news.lobsters"
+
+# --- Keyword teleport map: word -> target ------------------------------------
+# Targets: "room:<name>" | "user:<name>" | "url:<...>" | "board:<slug>" |
+# "area:<slug>" | "door:<id>". The last three land on the telnet surfaces.
+# [keywords]
+# "help" = "board:meta.help"
+# "music" = "area:music"
+# "lord" = "door:lord"
+
+# --- Door games: one [[doors]] table per installed door ----------------------
+# Requires doors_enabled = true AND telnet_enabled = true. Fields:
+#   id               registry key, non-empty, no whitespace
+#   title            shown on the door menu
+#   command          argv; command[0] is the program
+#   working_dir      optional; default = the session's drop directory
+#   dropfile         "door.sys" | "dorinfo1.def" | "door32.sys"
+#   io_mode          "stdio" (default) | "socket"   (optional)
+#   nodes            { first = N, last = M }         (optional; default any)
+#   daily_limit_mins per-user daily budget           (optional; omit = unlimited)
+# [[doors]]
+# id = "lord"
+# title = "Legend of the Red Dragon"
+# command = ["/opt/doors/lord/dosemu-run.sh", "%N"]   # %N node, %D drop-dir, %F drop-file, %H socket handle
+# dropfile = "door32.sys"
+# io_mode = "stdio"
+# nodes = { first = 1, last = 4 }
+# daily_limit_mins = 60
+
+# --- Federation dial targets: one [[federation_peers]] table per peer --------
+# Requires federation_enabled = true. Dialing a peer implies you approve them;
+# the peer still approves YOU before a session is established.
+# [[federation_peers]]
+# name = "Sister Burrow"
+# addr = "sister.example.org:4655"     # the peer's federation_addr
+# server_name = "localhost"            # TLS SNI / cert name (self-signed = "localhost")
+# key = ""                             # peer's Ed25519 server key, 32-byte hex ("" = accept + pin)
+# fingerprint = ""                     # peer's pinned TLS cert blake3 fingerprint, hex
