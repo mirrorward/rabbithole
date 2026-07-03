@@ -107,7 +107,8 @@ async fn nntp_login_hammer_is_limited_and_closed() {
     let cfg = ServerConfig {
         nntp_enabled: true,
         nntp_addr: "127.0.0.1:0".parse().unwrap(),
-        ratelimit_auth_per_min: 1, // refill far slower than the test runs
+        nntp_auth_require_tls: false, // plaintext AUTHINFO under test
+        ratelimit_auth_per_min: 1,    // refill far slower than the test runs
         ratelimit_auth_burst: 2,
         ..base_config(&dir.path().join("srv"))
     };
@@ -193,6 +194,7 @@ async fn disabled_ratelimit_imposes_no_limits() {
     let cfg = ServerConfig {
         nntp_enabled: true,
         nntp_addr: "127.0.0.1:0".parse().unwrap(),
+        nntp_auth_require_tls: false, // plaintext AUTHINFO under test
         ratelimit_enabled: false,
         ratelimit_conn_per_min: 1,
         ratelimit_conn_burst: 1,

@@ -65,6 +65,8 @@ pub enum Status {
     SendArticle,
     /// 381 — more authentication information required (send `PASS`).
     MoreAuthRequired,
+    /// 382 — continue with TLS negotiation (`STARTTLS`, RFC 4642).
+    ContinueTls,
     /// 400 — service not available or no longer available.
     ServiceUnavailable,
     /// 403 — internal fault; command not performed.
@@ -147,6 +149,7 @@ impl Status {
             Status::IhaveSendArticle => 335,
             Status::SendArticle => 340,
             Status::MoreAuthRequired => 381,
+            Status::ContinueTls => 382,
             Status::ServiceUnavailable => 400,
             Status::InternalFault => 403,
             Status::NoSuchGroup => 411,
@@ -203,6 +206,7 @@ impl Status {
             Status::IhaveSendArticle => "Send it",
             Status::SendArticle => "Send article to be posted",
             Status::MoreAuthRequired => "Password required",
+            Status::ContinueTls => "Continue with TLS negotiation",
             Status::ServiceUnavailable => "Service not available",
             Status::InternalFault => "Internal fault",
             Status::NoSuchGroup => "No such newsgroup",
@@ -351,6 +355,7 @@ mod tests {
         assert_eq!(Status::PostingOk.code(), 240);
         assert_eq!(Status::SendArticle.code(), 340);
         assert_eq!(Status::MoreAuthRequired.code(), 381);
+        assert_eq!(Status::ContinueTls.code(), 382);
         assert_eq!(Status::AuthAccepted.code(), 281);
         assert_eq!(Status::AuthRejected.code(), 481);
         assert_eq!(Status::NoSuchGroup.code(), 411);

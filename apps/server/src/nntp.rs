@@ -30,6 +30,25 @@
 //! Message-ID `<{hex}@{origin}>` where `origin` is the server origin name, and
 //! recover the event id by hex-decoding the local part — so `ARTICLE
 //! <hex@origin>` round-trips to a post regardless of the selected group.
+//!
+//! # TLS (Wave 10)
+//!
+//! The reader surface speaks TLS two ways, both presenting the burrow's
+//! persistent self-signed identity (same certificate/fingerprint the QUIC and
+//! federation listeners pin against):
+//!
+//! * **NNTPS** (RFC 8143, implicit TLS): a dedicated listener
+//!   (`nntp_tls_enabled` / `nntp_tls_addr`) handshakes before the greeting
+//!   and runs the ordinary session loop over the TLS stream.
+//! * **STARTTLS** (RFC 4642): the plaintext listener advertises `STARTTLS`
+//!   pre-TLS, answers the verb with `382`, handshakes, and then runs a
+//!   *fresh* session — prior group/auth state and any pipelined plaintext
+//!   are discarded, and no second greeting is sent. Once TLS is up the verb
+//!   is refused with `502`.
+//!
+//! `AUTHINFO` is gated per RFC 4643 §2.3.1: with `nntp_auth_require_tls`
+//! (the default) a plaintext `AUTHINFO` answers `483` and the capability
+//! list omits `AUTHINFO`, until the connection is secured.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -42,18 +61,58 @@ use rabbithole_legacy_nntp::{
 use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::{AuthedUser, Caps, Role, ServerEvent, Subject};
 use rabbithole_store_server::repo4::PostRow;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+use tokio_rustls::TlsAcceptor;
 
 use crate::Shared;
 
+/// How a session's transport is secured — drives the `STARTTLS` offer, the
+/// RFC 4642 refuse-once-secure rule, the RFC 4643 `AUTHINFO` gate, and
+/// whether the loop opens with a greeting. Shared with the peer-feed
+/// listener ([`crate::nntp_feed`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionSecurity {
+    /// Plaintext connection: greet, offer `STARTTLS`.
+    Plain,
+    /// TLS from the first byte (the NNTPS listener): greet, refuse
+    /// `STARTTLS`.
+    ImplicitTls,
+    /// A completed `STARTTLS` upgrade: secure, but **no** fresh greeting —
+    /// RFC 4642 resumes straight at the command loop.
+    UpgradedTls,
+}
+
+impl SessionSecurity {
+    pub(crate) fn secure(self) -> bool {
+        !matches!(self, SessionSecurity::Plain)
+    }
+
+    pub(crate) fn greets(self) -> bool {
+        !matches!(self, SessionSecurity::UpgradedTls)
+    }
+}
+
+/// How a session loop ended.
+pub(crate) enum SessionEnd<S> {
+    /// The connection is done: `QUIT`, EOF, or a budget-exhausted close.
+    Closed,
+    /// `STARTTLS` accepted: the `382` has been written and the raw stream is
+    /// handed back for the handshake. Any bytes the client pipelined behind
+    /// `STARTTLS` are deliberately dropped with the read buffer (RFC 4642
+    /// §2.2.1's plaintext-injection countermeasure).
+    StartTls(S),
+}
+
 /// Bind + serve the NNTP surface. Returns the bound address (useful when the
 /// config asked for port 0) and the accept-loop task handle. Mirrors the
-/// telnet/finger spawn helpers in [`crate::legacy`].
+/// telnet/finger spawn helpers in [`crate::legacy`]. The `acceptor` serves
+/// `STARTTLS` upgrades (RFC 4642).
 pub async fn spawn_nntp(
     shared: Arc<Shared>,
     addr: SocketAddr,
+    acceptor: TlsAcceptor,
 ) -> Result<(SocketAddr, JoinHandle<()>)> {
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
@@ -67,14 +126,74 @@ pub async fn spawn_nntp(
                 continue;
             }
             let shared = shared.clone();
+            let acceptor = acceptor.clone();
             tokio::spawn(async move {
-                if let Err(e) = serve(sock, shared, Some(peer.ip())).await {
+                if let Err(e) = serve_plain(sock, shared, Some(peer.ip()), acceptor).await {
                     tracing::debug!("nntp session error: {e}");
                 }
             });
         }
     });
     Ok((local, handle))
+}
+
+/// Bind + serve the NNTPS surface (RFC 8143): implicit TLS, then the same
+/// reader session loop the plaintext listener runs.
+pub async fn spawn_nntps(
+    shared: Arc<Shared>,
+    addr: SocketAddr,
+    acceptor: TlsAcceptor,
+) -> Result<(SocketAddr, JoinHandle<()>)> {
+    let listener = TcpListener::bind(addr).await?;
+    let local = listener.local_addr()?;
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((sock, peer)) = listener.accept().await else {
+                break;
+            };
+            if !shared.rate_allow(Scope::Ip(peer.ip()), rl::CONN) {
+                continue;
+            }
+            let shared = shared.clone();
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                // A failed handshake (wrong pin, a plaintext probe) dooms
+                // only this connection — mirrors the QUIC accept loop.
+                match acceptor.accept(sock).await {
+                    Ok(tls) => {
+                        if let Err(e) =
+                            session_loop(tls, shared, Some(peer.ip()), SessionSecurity::ImplicitTls)
+                                .await
+                        {
+                            tracing::debug!("nntps session error: {e}");
+                        }
+                    }
+                    Err(e) => tracing::debug!("nntps handshake failed: {e}"),
+                }
+            });
+        }
+    });
+    Ok((local, handle))
+}
+
+/// One plaintext connection: run the session loop, and if it asks for a TLS
+/// upgrade, handshake and run a fresh secured loop (RFC 4642: prior state
+/// discarded, no second greeting).
+async fn serve_plain(
+    sock: tokio::net::TcpStream,
+    shared: Arc<Shared>,
+    peer_ip: Option<std::net::IpAddr>,
+    acceptor: TlsAcceptor,
+) -> Result<()> {
+    match session_loop(sock, shared.clone(), peer_ip, SessionSecurity::Plain).await? {
+        SessionEnd::Closed => {}
+        SessionEnd::StartTls(sock) => {
+            let tls = acceptor.accept(sock).await?;
+            // A secured loop refuses STARTTLS, so it can only end Closed.
+            session_loop(tls, shared, peer_ip, SessionSecurity::UpgradedTls).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Per-connection state.
@@ -277,15 +396,22 @@ fn range_bounds(range: Range, count: u64) -> (u64, u64) {
     (low, high)
 }
 
-/// The accept-loop handler for one client. `peer_ip` keys the per-IP
-/// auth/legacy rate buckets (`None` = unlimited, for in-memory harnesses).
-async fn serve(
-    mut sock: tokio::net::TcpStream,
+/// The command loop for one reader connection, generic over the byte stream —
+/// a plain [`tokio::net::TcpStream`] or a server-side TLS stream (NNTPS, or a
+/// completed STARTTLS upgrade). `peer_ip` keys the per-IP auth/legacy rate
+/// buckets (`None` = unlimited, for in-memory harnesses). Writes go through
+/// the read buffer's inner stream (`reader.get_mut()`): the protocol is
+/// lockstep, so nothing is ever buffered on the write side.
+async fn session_loop<S>(
+    stream: S,
     shared: Arc<Shared>,
     peer_ip: Option<std::net::IpAddr>,
-) -> Result<()> {
-    let (read_half, mut write) = sock.split();
-    let mut reader = BufReader::new(read_half);
+    security: SessionSecurity,
+) -> Result<SessionEnd<S>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut reader = BufReader::new(stream);
     let origin = shared.origin_name();
 
     let mut session = NntpSession {
@@ -297,12 +423,20 @@ async fn serve(
     };
 
     // Greeting: posting is offered (the client authenticates before POST).
-    write
-        .write_all(Status::PostingAllowed.response().render().as_bytes())
-        .await?;
+    // A STARTTLS upgrade resumes without one (RFC 4642 §2.2.2).
+    if security.greets() {
+        reader
+            .get_mut()
+            .write_all(Status::PostingAllowed.response().render().as_bytes())
+            .await?;
+    }
 
     let mut line = String::new();
     loop {
+        // Push any buffered TLS records out before blocking on the next
+        // command (a no-op for plain TCP; every `continue` passes through
+        // here, so no response can be left stranded in the record buffer).
+        reader.get_mut().flush().await?;
         line.clear();
         if reader.read_line(&mut line).await? == 0 {
             break; // client hung up
@@ -311,7 +445,8 @@ async fn serve(
         // service unavailable), keep the session.
         if let Some(ip) = peer_ip {
             if !shared.rate_allow(Scope::Ip(ip), rl::LEGACY) {
-                write
+                reader
+                    .get_mut()
                     .write_all(Status::ServiceUnavailable.response().render().as_bytes())
                     .await?;
                 continue;
@@ -320,48 +455,95 @@ async fn serve(
         let cmd = match Command::parse(&line) {
             Ok(c) => c,
             Err(_) => {
-                write
+                reader
+                    .get_mut()
                     .write_all(Status::SyntaxError.response().render().as_bytes())
                     .await?;
                 continue;
             }
         };
 
+        // RFC 4643 §2.3.1: AUTHINFO carries credentials, so it is refused on
+        // an unsecured connection while the gate is up (483 — encryption
+        // required — until STARTTLS or a reconnect on the NNTPS port).
+        if cmd.requires_secure_transport()
+            && !security.secure()
+            && shared.config.read().nntp_auth_require_tls
+        {
+            reader
+                .get_mut()
+                .write_all(Status::EncryptionRequired.response().render().as_bytes())
+                .await?;
+            continue;
+        }
+
         match cmd {
             Command::Quit => {
-                write
+                reader
+                    .get_mut()
                     .write_all(Status::ConnectionClosing.response().render().as_bytes())
                     .await?;
                 break;
             }
 
+            Command::StartTls => {
+                if security.secure() {
+                    // RFC 4642 §2.1: once TLS is active, STARTTLS is refused.
+                    reader
+                        .get_mut()
+                        .write_all(Status::CommandUnavailable.response().render().as_bytes())
+                        .await?;
+                } else {
+                    reader
+                        .get_mut()
+                        .write_all(Status::ContinueTls.response().render().as_bytes())
+                        .await?;
+                    reader.get_mut().flush().await?;
+                    // Hand the raw stream back for the handshake. Dropping the
+                    // BufReader discards any plaintext pipelined behind
+                    // STARTTLS (RFC 4642 §2.2.1) along with all session state.
+                    return Ok(SessionEnd::StartTls(reader.into_inner()));
+                }
+            }
+
             Command::Capabilities => {
-                write
+                reader
+                    .get_mut()
                     .write_all(Status::CapabilitiesFollow.response().render().as_bytes())
                     .await?;
-                let caps = [
+                let mut caps = vec![
                     "VERSION 2",
                     "READER",
                     "POST",
                     "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT",
                     "OVER",
                     "XOVER",
-                    "AUTHINFO USER",
                 ];
-                write
+                // STARTTLS is only offered before TLS is up (RFC 4642 §2.2.2);
+                // AUTHINFO only where it would be honoured (RFC 4643 §2.2).
+                if !security.secure() {
+                    caps.push("STARTTLS");
+                }
+                if security.secure() || !shared.config.read().nntp_auth_require_tls {
+                    caps.push("AUTHINFO USER");
+                }
+                reader
+                    .get_mut()
                     .write_all(datablock::encode_lines(&caps).as_bytes())
                     .await?;
             }
 
             Command::ModeReader => {
-                write
+                reader
+                    .get_mut()
                     .write_all(Status::PostingAllowed.response().render().as_bytes())
                     .await?;
             }
 
             Command::Date => {
                 let now = chrono::Utc::now().format("%Y%m%d%H%M%S");
-                write
+                reader
+                    .get_mut()
                     .write_all(
                         Response::with_text(Status::DateFollows, now.to_string())
                             .render()
@@ -372,7 +554,8 @@ async fn serve(
 
             Command::AuthInfoUser(user) => {
                 session.pending_user = Some(user);
-                write
+                reader
+                    .get_mut()
                     .write_all(Status::MoreAuthRequired.response().render().as_bytes())
                     .await?;
             }
@@ -382,7 +565,8 @@ async fn serve(
                 // bucket refuses the attempt outright and closes.
                 if let Some(ip) = peer_ip {
                     if !shared.rate_probe(Scope::Ip(ip), rl::AUTH) {
-                        write
+                        reader
+                            .get_mut()
                             .write_all(Status::AuthRejected.response().render().as_bytes())
                             .await?;
                         break;
@@ -401,7 +585,8 @@ async fn serve(
                         Err(_) => Status::AuthRejected,
                     },
                 };
-                write
+                reader
+                    .get_mut()
                     .write_all(status.response().render().as_bytes())
                     .await?;
                 if status == Status::AuthRejected {
@@ -414,48 +599,71 @@ async fn serve(
             }
 
             Command::List(keyword) => {
-                handle_list(&mut write, &session, keyword).await?;
+                handle_list(reader.get_mut(), &session, keyword).await?;
             }
 
             Command::Group(name) => {
-                handle_group(&mut write, &mut session, &name).await?;
+                handle_group(reader.get_mut(), &mut session, &name).await?;
             }
 
             Command::ListGroup { group, range } => {
-                handle_listgroup(&mut write, &mut session, group, range).await?;
+                handle_listgroup(reader.get_mut(), &mut session, group, range).await?;
             }
 
             Command::Article(r) => {
-                handle_article(&mut write, &mut session, r, &origin, ArticlePart::All).await?;
+                handle_article(reader.get_mut(), &mut session, r, &origin, ArticlePart::All)
+                    .await?;
             }
             Command::Head(r) => {
-                handle_article(&mut write, &mut session, r, &origin, ArticlePart::Head).await?;
+                handle_article(
+                    reader.get_mut(),
+                    &mut session,
+                    r,
+                    &origin,
+                    ArticlePart::Head,
+                )
+                .await?;
             }
             Command::Body(r) => {
-                handle_article(&mut write, &mut session, r, &origin, ArticlePart::Body).await?;
+                handle_article(
+                    reader.get_mut(),
+                    &mut session,
+                    r,
+                    &origin,
+                    ArticlePart::Body,
+                )
+                .await?;
             }
             Command::Stat(r) => {
-                handle_article(&mut write, &mut session, r, &origin, ArticlePart::Stat).await?;
+                handle_article(
+                    reader.get_mut(),
+                    &mut session,
+                    r,
+                    &origin,
+                    ArticlePart::Stat,
+                )
+                .await?;
             }
 
             Command::Over(r) | Command::Xover(r) => {
-                handle_over(&mut write, &mut session, r, &origin).await?;
+                handle_over(reader.get_mut(), &mut session, r, &origin).await?;
             }
 
             Command::Next => {
-                handle_step(&mut write, &mut session, &origin, true).await?;
+                handle_step(reader.get_mut(), &mut session, &origin, true).await?;
             }
             Command::Last => {
-                handle_step(&mut write, &mut session, &origin, false).await?;
+                handle_step(reader.get_mut(), &mut session, &origin, false).await?;
             }
 
             Command::Post => {
-                handle_post(&mut reader, &mut write, &mut session, &origin).await?;
+                handle_post(&mut reader, &mut session, &origin).await?;
             }
 
             // Recognised but unsupported here (not advertised in CAPABILITIES).
             Command::NewNews { .. } | Command::NewGroups { .. } => {
-                write
+                reader
+                    .get_mut()
                     .write_all(Status::FeatureNotSupported.response().render().as_bytes())
                     .await?;
             }
@@ -465,20 +673,25 @@ async fn serve(
             // refused rather than half-implemented. The peering service slice
             // will run these on its own session type.
             Command::ModeStream | Command::IHave(_) | Command::Check(_) | Command::TakeThis(_) => {
-                write
+                reader
+                    .get_mut()
                     .write_all(Status::CommandUnavailable.response().render().as_bytes())
                     .await?;
             }
 
             Command::Unknown(_) => {
-                write
+                reader
+                    .get_mut()
                     .write_all(Status::UnknownCommand.response().render().as_bytes())
                     .await?;
             }
         }
     }
 
-    Ok(())
+    // Deliver the final response (205, or a budget-exhausted 481) before the
+    // stream drops — TLS may still hold it in the record buffer.
+    reader.get_mut().flush().await?;
+    Ok(SessionEnd::Closed)
 }
 
 /// Which part(s) of an article a retrieval command wants.
@@ -944,24 +1157,24 @@ async fn handle_step<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-async fn handle_post<R, W>(
-    reader: &mut BufReader<R>,
-    write: &mut W,
+async fn handle_post<S>(
+    reader: &mut BufReader<S>,
     session: &mut NntpSession,
     origin: &str,
 ) -> Result<()>
 where
-    R: tokio::io::AsyncRead + Unpin,
-    W: AsyncWriteExt + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
 {
     if session.authed.is_none() {
-        write
+        reader
+            .get_mut()
             .write_all(Status::AuthRequired.response().render().as_bytes())
             .await?;
         return Ok(());
     }
     if !session.can_post() {
-        write
+        reader
+            .get_mut()
             .write_all(Status::PostingNotPermitted.response().render().as_bytes())
             .await?;
         return Ok(());
@@ -972,14 +1185,19 @@ where
         .shared
         .rate_allow(Scope::Account(account_id), rl::POST)
     {
-        write
+        reader
+            .get_mut()
             .write_all(Status::PostingNotPermitted.response().render().as_bytes())
             .await?;
         return Ok(());
     }
-    write
+    reader
+        .get_mut()
         .write_all(Status::SendArticle.response().render().as_bytes())
         .await?;
+    // The client waits for the 340 before sending the article — push it past
+    // any TLS record buffering before blocking on the read.
+    reader.get_mut().flush().await?;
 
     // Read the article until the "." terminator, undoing dot-stuffing.
     let mut lines: Vec<String> = Vec::new();
@@ -999,7 +1217,8 @@ where
 
     let article = ParsedArticle::from_lines(&lines);
     let Some(board_slug) = article.newsgroup() else {
-        write
+        reader
+            .get_mut()
             .write_all(Status::PostingFailed.response().render().as_bytes())
             .await?;
         return Ok(());
@@ -1009,7 +1228,8 @@ where
     match session.shared.boards.board(&board_slug).await {
         Ok(Some(b)) if b.kind == 2 => {}
         _ => {
-            write
+            reader
+                .get_mut()
                 .write_all(Status::PostingFailed.response().render().as_bytes())
                 .await?;
             return Ok(());
@@ -1059,12 +1279,14 @@ where
                 id: row.event_id,
                 root: row.root_id,
             });
-            write
+            reader
+                .get_mut()
                 .write_all(Status::PostingOk.response().render().as_bytes())
                 .await?;
         }
         Err(_) => {
-            write
+            reader
+                .get_mut()
                 .write_all(Status::PostingFailed.response().render().as_bytes())
                 .await?;
         }

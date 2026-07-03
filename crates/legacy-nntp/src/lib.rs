@@ -8,10 +8,12 @@
 //! networking, session state, or message-base wiring — those land in later
 //! Wave 10 slices so they can evolve without churning this codec.
 //!
-//! It also covers the transit/peering and authentication surface: the
-//! streaming feed ([RFC 4644]) `MODE STREAM`/`CHECK`/`TAKETHIS` verbs and the
-//! classic `IHAVE` offer, `NEWNEWS`/`NEWGROUPS` with wildmat group selection,
-//! and `AUTHINFO USER`/`PASS` ([RFC 4643]).
+//! It also covers the transit/peering and security surface: the streaming
+//! feed ([RFC 4644]) `MODE STREAM`/`CHECK`/`TAKETHIS` verbs and the classic
+//! `IHAVE` offer, `NEWNEWS`/`NEWGROUPS` with wildmat group selection,
+//! `AUTHINFO USER`/`PASS` ([RFC 4643]), and the `STARTTLS` verb with its
+//! `382` continue response ([RFC 4642]). The codec models the commands and
+//! responses only — the TLS handshake itself belongs to the session layer.
 //!
 //! # Modules
 //!
@@ -33,6 +35,7 @@
 //! line on the wire.
 //!
 //! [RFC 3977]: https://www.rfc-editor.org/rfc/rfc3977
+//! [RFC 4642]: https://www.rfc-editor.org/rfc/rfc4642
 //! [RFC 4643]: https://www.rfc-editor.org/rfc/rfc4643
 //! [RFC 4644]: https://www.rfc-editor.org/rfc/rfc4644
 

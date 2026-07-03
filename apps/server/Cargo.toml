@@ -52,6 +52,7 @@ serde_json.workspace = true
 chrono.workspace = true
 hex.workspace = true
 rustls.workspace = true
+tokio-rustls.workspace = true
 rustls-pki-types.workspace = true
 webpki-roots.workspace = true
 

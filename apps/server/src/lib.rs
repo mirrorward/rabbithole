@@ -175,9 +175,15 @@ pub struct Burrow {
     pub http_addr: Option<SocketAddr>,
     /// Bound NNTP address when `nntp_enabled` (else `None`).
     pub nntp_addr: Option<SocketAddr>,
+    /// Bound NNTPS (implicit TLS, RFC 8143) address when `nntp_tls_enabled`
+    /// (else `None`).
+    pub nntp_tls_addr: Option<SocketAddr>,
     /// Bound NNTP peer-feed (transit) address when `nntp_feed_enabled`
     /// (else `None`).
     pub nntp_feed_addr: Option<SocketAddr>,
+    /// Bound implicit-TLS peer-feed address when `nntp_feed_tls_enabled`
+    /// (else `None`).
+    pub nntp_feed_tls_addr: Option<SocketAddr>,
     /// Bound radio (ICY) delivery address when `radio_enabled` (else `None`).
     pub radio_addr: Option<SocketAddr>,
     /// Bound radio DJ source-ingest address when `radio_source_enabled`
@@ -221,6 +227,10 @@ impl Burrow {
         let quic_addr = quic.local_addr()?;
         let ws_addr = ws.local_addr()?;
 
+        // TLS-over-TCP acceptor for the NNTPS/STARTTLS surfaces — the same
+        // persistent identity (and pinned fingerprint) QUIC presents.
+        let tls_acceptor = tokio_rustls::TlsAcceptor::from(identity.tls.server_config()?);
+
         // Legacy listener toggles (captured before `config` moves into the
         // live handle).
         let telnet = config.telnet_enabled.then_some(config.telnet_addr);
@@ -231,7 +241,11 @@ impl Burrow {
         let http_web_root = (!config.http_web_root.as_os_str().is_empty())
             .then(|| resolve_dir(&data_dir, &config.http_web_root));
         let nntp = config.nntp_enabled.then_some(config.nntp_addr);
+        let nntp_tls = config.nntp_tls_enabled.then_some(config.nntp_tls_addr);
         let nntp_feed = config.nntp_feed_enabled.then_some(config.nntp_feed_addr);
+        let nntp_feed_tls = config
+            .nntp_feed_tls_enabled
+            .then_some(config.nntp_feed_tls_addr);
         let radio = config.radio_enabled.then_some(config.radio_addr);
         let radio_source = config
             .radio_source_enabled
@@ -346,16 +360,34 @@ impl Burrow {
         }
         let mut nntp_addr = None;
         if let Some(addr) = nntp {
-            let (bound, handle) = nntp::spawn_nntp(shared.clone(), addr).await?;
+            let (bound, handle) =
+                nntp::spawn_nntp(shared.clone(), addr, tls_acceptor.clone()).await?;
             tracing::info!(nntp = %bound, "NNTP gateway listening");
             nntp_addr = Some(bound);
             tasks.push(handle);
         }
+        let mut nntp_tls_addr = None;
+        if let Some(addr) = nntp_tls {
+            let (bound, handle) =
+                nntp::spawn_nntps(shared.clone(), addr, tls_acceptor.clone()).await?;
+            tracing::info!(nntps = %bound, "NNTPS (implicit TLS) gateway listening");
+            nntp_tls_addr = Some(bound);
+            tasks.push(handle);
+        }
         let mut nntp_feed_addr = None;
         if let Some(addr) = nntp_feed {
-            let (bound, handle) = nntp_feed::spawn_nntp_feed(shared.clone(), addr).await?;
+            let (bound, handle) =
+                nntp_feed::spawn_nntp_feed(shared.clone(), addr, tls_acceptor.clone()).await?;
             tracing::info!(nntp_feed = %bound, "NNTP peer-feed (transit) listening");
             nntp_feed_addr = Some(bound);
+            tasks.push(handle);
+        }
+        let mut nntp_feed_tls_addr = None;
+        if let Some(addr) = nntp_feed_tls {
+            let (bound, handle) =
+                nntp_feed::spawn_nntp_feed_tls(shared.clone(), addr, tls_acceptor.clone()).await?;
+            tracing::info!(nntp_feed_tls = %bound, "NNTP peer-feed (implicit TLS) listening");
+            nntp_feed_tls_addr = Some(bound);
             tasks.push(handle);
         }
         let mut radio_addr = None;
@@ -418,7 +450,9 @@ impl Burrow {
             finger_addr,
             http_addr,
             nntp_addr,
+            nntp_tls_addr,
             nntp_feed_addr,
+            nntp_feed_tls_addr,
             radio_addr,
             radio_source_addr,
             hotline_addr,

@@ -129,6 +129,13 @@ pub enum Command {
     /// The article body follows the command line as a data block; this codec
     /// models only the command itself.
     TakeThis(MessageId),
+    /// `STARTTLS` (RFC 4642) — negotiate TLS on the current connection.
+    ///
+    /// Takes no argument. The server answers `382` and begins the TLS
+    /// handshake, or refuses with `502` if the connection is already using
+    /// TLS (RFC 4642 §2.1). After a successful negotiation both sides MUST
+    /// discard prior session state (selected group, authentication).
+    StartTls,
     /// `AUTHINFO USER <name>` (RFC 4643).
     ///
     /// Per RFC 4643 §2.3.1 this MUST only be honoured over a secure transport;
@@ -205,6 +212,10 @@ impl Command {
 
         match verb_uc.as_str() {
             "CAPABILITIES" => Ok(Command::Capabilities),
+            "STARTTLS" => match rest.as_slice() {
+                [] => Ok(Command::StartTls),
+                _ => Err(CommandError::UnexpectedArgument { verb: "STARTTLS" }),
+            },
             "QUIT" => Ok(Command::Quit),
             "DATE" => Ok(Command::Date),
             "POST" => Ok(Command::Post),
@@ -678,6 +689,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_starttls() {
+        assert_eq!(Command::parse("STARTTLS"), Ok(Command::StartTls));
+        assert_eq!(Command::parse("starttls\r\n"), Ok(Command::StartTls));
+        assert_eq!(
+            Command::parse("STARTTLS now"),
+            Err(CommandError::UnexpectedArgument { verb: "STARTTLS" })
+        );
+        // Negotiating TLS is how a connection *becomes* secure; the verb
+        // itself carries no credentials.
+        assert!(!Command::parse("STARTTLS")
+            .unwrap()
+            .requires_secure_transport());
+    }
+
+    #[test]
     fn authinfo_flagged_as_tls_only() {
         assert!(Command::parse("AUTHINFO USER kevin")
             .unwrap()
@@ -745,6 +771,7 @@ mod tests {
             "IHAVE <a@b> c",
             "NEWGROUPS",
             "NEWGROUPS 1",
+            "STARTTLS extra",
         ] {
             let _ = Command::parse(probe);
         }

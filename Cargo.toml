@@ -38,7 +38,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.52.0"
+version = "0.53.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]
@@ -94,6 +94,8 @@ bytes = "1"
 # networking
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# async TLS-over-TCP for the NNTPS/STARTTLS listeners (ring-only, matching rustls)
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls-pki-types = "1"
 webpki-roots = "1"
 rcgen = "0.13"

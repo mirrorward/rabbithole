@@ -120,6 +120,22 @@ pub struct ServerConfig {
     /// unauthenticated commands get 480 (auth required) and an `AUTHINFO` by
     /// an account below the minimum is rejected with 481. Applies live.
     pub nntp_min_role: String,
+    /// Serve the reader surface over implicit TLS (NNTPS, RFC 8143) on
+    /// `nntp_tls_addr`, using the burrow's persistent self-signed TLS
+    /// identity (same certificate/fingerprint the QUIC transport presents).
+    /// Independent of `nntp_enabled` — either or both listeners may run.
+    /// Off by default.
+    pub nntp_tls_enabled: bool,
+    /// NNTPS listener address (default 0.0.0.0:563 — the IANA nntps port;
+    /// binding it needs privilege, like the other well-known ports).
+    pub nntp_tls_addr: SocketAddr,
+    /// Refuse `AUTHINFO` on connections that are not TLS-secured (RFC 4643
+    /// §2.3.1: credentials travel in the clear otherwise). When true (the
+    /// default), a plaintext `AUTHINFO USER`/`PASS` answers 483 (encryption
+    /// required) until the client upgrades via `STARTTLS` or reconnects on
+    /// the NNTPS port; the capability list omits `AUTHINFO` accordingly.
+    /// Applies to both the reader and peer-feed surfaces. Applies live.
+    pub nntp_auth_require_tls: bool,
     /// Serve the NNTP peer-feed (transit) surface — `IHAVE` plus RFC 4644
     /// streaming `CHECK`/`TAKETHIS` — on `nntp_feed_addr`. Distinct from the
     /// reader surface (`nntp_enabled`): this one talks to *peers*, not
@@ -128,6 +144,13 @@ pub struct ServerConfig {
     /// NNTP peer-feed listener address (default 0.0.0.0:1120 — beside the
     /// reader port 1119).
     pub nntp_feed_addr: SocketAddr,
+    /// Serve the peer-feed surface over implicit TLS on `nntp_feed_tls_addr`,
+    /// with the same server identity as the reader's NNTPS listener. Off by
+    /// default.
+    pub nntp_feed_tls_enabled: bool,
+    /// Implicit-TLS peer-feed listener address (default 0.0.0.0:1563 — the
+    /// unprivileged shadow of nntps 563, as 1120 shadows the feed's 119-side).
+    pub nntp_feed_tls_addr: SocketAddr,
     /// Peer credential allowlist for the feed surface: `AUTHINFO` user →
     /// password. Empty = refuse every peer (fail safe). Serialized as a TOML
     /// table and edited on disk (like `ftn_areas`), not via `ctl config set`.
@@ -320,8 +343,13 @@ impl Default for ServerConfig {
             nntp_enabled: false,
             nntp_addr: "0.0.0.0:1119".parse().expect("valid"),
             nntp_min_role: "guest".into(),
+            nntp_tls_enabled: false,
+            nntp_tls_addr: "0.0.0.0:563".parse().expect("valid"),
+            nntp_auth_require_tls: true,
             nntp_feed_enabled: false,
             nntp_feed_addr: "0.0.0.0:1120".parse().expect("valid"),
+            nntp_feed_tls_enabled: false,
+            nntp_feed_tls_addr: "0.0.0.0:1563".parse().expect("valid"),
             nntp_feed_peers: std::collections::HashMap::new(),
             radio_enabled: false,
             radio_addr: "0.0.0.0:8000".parse().expect("valid"),
@@ -472,8 +500,13 @@ impl ServerConfig {
             "nntp_enabled" => self.nntp_enabled.to_string(),
             "nntp_addr" => self.nntp_addr.to_string(),
             "nntp_min_role" => self.nntp_min_role.clone(),
+            "nntp_tls_enabled" => self.nntp_tls_enabled.to_string(),
+            "nntp_tls_addr" => self.nntp_tls_addr.to_string(),
+            "nntp_auth_require_tls" => self.nntp_auth_require_tls.to_string(),
             "nntp_feed_enabled" => self.nntp_feed_enabled.to_string(),
             "nntp_feed_addr" => self.nntp_feed_addr.to_string(),
+            "nntp_feed_tls_enabled" => self.nntp_feed_tls_enabled.to_string(),
+            "nntp_feed_tls_addr" => self.nntp_feed_tls_addr.to_string(),
             "radio_enabled" => self.radio_enabled.to_string(),
             "radio_addr" => self.radio_addr.to_string(),
             "radio_source_enabled" => self.radio_source_enabled.to_string(),
@@ -707,12 +740,33 @@ impl ServerConfig {
                 self.nntp_min_role = parse_min_role(key, value)?;
                 Ok(true)
             }
+            "nntp_tls_enabled" => {
+                self.nntp_tls_enabled = parse_bool(key, value)?;
+                Ok(false) // listener binds at startup
+            }
+            "nntp_tls_addr" => {
+                self.nntp_tls_addr = parse_addr(key, value)?;
+                Ok(false)
+            }
+            // Checked per AUTHINFO command, so it applies live.
+            "nntp_auth_require_tls" => {
+                self.nntp_auth_require_tls = parse_bool(key, value)?;
+                Ok(true)
+            }
             "nntp_feed_enabled" => {
                 self.nntp_feed_enabled = parse_bool(key, value)?;
                 Ok(false)
             }
             "nntp_feed_addr" => {
                 self.nntp_feed_addr = parse_addr(key, value)?;
+                Ok(false)
+            }
+            "nntp_feed_tls_enabled" => {
+                self.nntp_feed_tls_enabled = parse_bool(key, value)?;
+                Ok(false)
+            }
+            "nntp_feed_tls_addr" => {
+                self.nntp_feed_tls_addr = parse_addr(key, value)?;
                 Ok(false)
             }
             "radio_enabled" => {
@@ -1053,6 +1107,41 @@ mod tests {
             }
             assert_eq!(live.get_key(key).unwrap(), "admin");
         }
+    }
+
+    #[test]
+    fn nntp_tls_knobs_default_and_roundtrip() {
+        let live = LiveConfig::new(ServerConfig::default());
+        // TLS listeners are off by default; the AUTHINFO gate is on.
+        assert_eq!(live.get_key("nntp_tls_enabled").unwrap(), "false");
+        assert_eq!(live.get_key("nntp_tls_addr").unwrap(), "0.0.0.0:563");
+        assert_eq!(live.get_key("nntp_auth_require_tls").unwrap(), "true");
+        assert_eq!(live.get_key("nntp_feed_tls_enabled").unwrap(), "false");
+        assert_eq!(live.get_key("nntp_feed_tls_addr").unwrap(), "0.0.0.0:1563");
+        // Listener knobs need a restart; the AUTHINFO gate applies live.
+        assert!(!live.set_key("nntp_tls_enabled", "on").unwrap());
+        assert!(!live.set_key("nntp_tls_addr", "127.0.0.1:5630").unwrap());
+        assert!(live.set_key("nntp_auth_require_tls", "off").unwrap());
+        assert!(!live.set_key("nntp_feed_tls_enabled", "on").unwrap());
+        assert_eq!(live.get_key("nntp_auth_require_tls").unwrap(), "false");
+        assert!(matches!(
+            live.set_key("nntp_tls_addr", "not-an-addr"),
+            Err(ConfigError::BadValue { .. })
+        ));
+
+        // TOML round trip carries the new keys.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("burrow.toml");
+        let mut cfg = ServerConfig::default();
+        cfg.set_key("nntp_tls_enabled", "true").unwrap();
+        cfg.set_key("nntp_auth_require_tls", "false").unwrap();
+        cfg.save(&path).unwrap();
+        let loaded: ServerConfig =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(loaded.nntp_tls_enabled);
+        assert!(!loaded.nntp_auth_require_tls);
+        assert_eq!(loaded.nntp_tls_addr.port(), 563);
+        assert_eq!(loaded.nntp_feed_tls_addr.port(), 1563);
     }
 
     #[test]

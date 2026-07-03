@@ -21,8 +21,10 @@ disables that class.
 | — doors (on telnet) | — | `doors_enabled` (+ `telnet_enabled`) | cap `DOOR_RUN` on `doors/<id>` (member+ default) | (telnet's) | socket-handle inheritance (`%H` is always `0`; both io modes bridge stdio) |
 | — files browser (on telnet) | — | (with telnet) | caps `FILE_LIST` / `FILE_DOWNLOAD` / `DROPBOX_VIEW`, same ACLs as native/Hotline | (telnet's) | byte transfers — `get` prints `<files_http_base>/files/<area>/<path>`; empty `files_http_base` (default) turns the handoff off. Serving the links is the web slice's job |
 | Finger (RFC 1288) | 7979 (`finger_addr`) | `finger_enabled` | `finger_min_role` — finger is anonymous, so **any value above guest refuses every query** with a polite notice | conn | — (one capped query per connection by design) |
-| NNTP reader (RFC 3977) | 1119 (`nntp_addr`) | `nntp_enabled` | `nntp_min_role` — anonymous reading counts as guest; above that, unauthenticated commands get 480 and a below-minimum `AUTHINFO` gets 481 | conn, legacy, auth (failed AUTHINFO), post (`POST`, per account) | article numbering shifts when retention drops posts (accepted for a read gateway) |
-| NNTP peer feed (IHAVE + RFC 4644 CHECK/TAKETHIS, NEWNEWS) | 1120 (`nntp_feed_addr`) | `nntp_feed_enabled` | `nntp_feed_peers` allowlist (user → password, *TOML-only*); **empty = refuse every peer** (fail safe); every transit verb answers 480 until authenticated | conn, legacy, auth | — |
+| NNTP reader (RFC 3977; STARTTLS per RFC 4642) | 1119 (`nntp_addr`) | `nntp_enabled` | `nntp_min_role` — anonymous reading counts as guest; above that, unauthenticated commands get 480 and a below-minimum `AUTHINFO` gets 481. `AUTHINFO` on plaintext answers 483 while `nntp_auth_require_tls` (default **on**) holds | conn, legacy, auth (failed AUTHINFO), post (`POST`, per account) | article numbering shifts when retention drops posts (accepted for a read gateway) |
+| NNTPS reader (implicit TLS, RFC 8143) | 563 (`nntp_tls_addr`; privileged) | `nntp_tls_enabled` | same as the reader — the TLS transport satisfies the `AUTHINFO` gate | conn, legacy, auth, post | self-signed identity only (clients pin the burrow fingerprint; ACME certs land with the web slice) |
+| NNTP peer feed (IHAVE + RFC 4644 CHECK/TAKETHIS, NEWNEWS; STARTTLS) | 1120 (`nntp_feed_addr`) | `nntp_feed_enabled` | `nntp_feed_peers` allowlist (user → password, *TOML-only*); **empty = refuse every peer** (fail safe); every transit verb answers 480 until authenticated; plaintext `AUTHINFO` answers 483 under `nntp_auth_require_tls` | conn, legacy, auth | — |
+| NNTP peer feed over implicit TLS | 1563 (`nntp_feed_tls_addr`) | `nntp_feed_tls_enabled` | same allowlist as the plaintext feed | conn, legacy, auth | — |
 | Hotline (+HTXF) | 5500 (`hotline_addr`); HTXF bulk channel binds control port + 1 (5501) | `hotline_enabled` | `hotline_min_role` — Hotline guest sign-ins (empty credentials) count as guest and are refused above it | conn, auth (login), legacy (per transaction), post (news), transfer (downloads) | HTXF **upload**, fork-offset resume, folder downloads (tolerated with empty success replies); DisconnectUser bans are in-memory only; DeleteUser is a soft delete (disable); a few private-chat push edges (native topic set not echoed as 119) |
 | FTN / binkp mailer | 24554 (`ftn_addr`) | `ftn_enabled` (tossing/scanning also needs non-empty `ftn_node`) | binkp session password `ftn_password` (`""`/`"-"` = unsecured); gateway posts/DMs only under a member-baseline subject holding the `board`/`dm` caps | conn | ARCmail bundle decompression (raw `.PKT` only; bundles left in spool), answering-side sending (outbound rides `poll_uplink` dials), crash-recovery resume / `M_GET` |
 | QWK / QWKE | — | — | — | — | **codec + packet builder only** (`rabbithole-legacy-qwk`: MESSAGES.DAT, CONTROL.DAT, NDX, QWKE kludges, `.REP` ingest). No listener, no config keys, no ZIP bundling or board wiring yet |
@@ -39,11 +41,18 @@ disables that class.
   `doors_session_max_secs` (default 3600; 0 = unlimited; a door's own
   `daily_limit_mins` lowers it), `[[doors]]` array (*TOML-only*).
 - **Finger**: `finger_enabled`, `finger_addr`, `finger_min_role`.
-- **NNTP reader**: `nntp_enabled`, `nntp_addr`, `nntp_min_role`. Groups are
+- **NNTP reader**: `nntp_enabled`, `nntp_addr`, `nntp_min_role`,
+  `nntp_tls_enabled`, `nntp_tls_addr` (NNTPS, implicit TLS),
+  `nntp_auth_require_tls` (default **true**; live — plaintext `AUTHINFO`
+  answers 483 until STARTTLS or an NNTPS reconnect, and the capability list
+  omits `AUTHINFO`). Both listeners present the burrow's persistent
+  self-signed TLS identity (the QUIC-pinned fingerprint). Groups are
   postable boards (`kind == 2`) by identity slug mapping; Message-IDs are
   `<hex(event id)@origin>`.
-- **NNTP feed**: `nntp_feed_enabled`, `nntp_feed_addr`, `nntp_feed_peers`
-  (*TOML-only*). Accepted articles post as `{name}@usenet` gateway authors;
+- **NNTP feed**: `nntp_feed_enabled`, `nntp_feed_addr`,
+  `nntp_feed_tls_enabled`, `nntp_feed_tls_addr`, `nntp_feed_peers`
+  (*TOML-only*); STARTTLS and the `nntp_auth_require_tls` gate work as on
+  the reader. Accepted articles post as `{name}@usenet` gateway authors;
   dedupe via the shared `SeenKey::MessageId` store.
 - **Hotline**: `hotline_enabled`, `hotline_addr`, `hotline_min_role`.
 - **FTN**: `ftn_enabled`, `ftn_addr`, `ftn_node`, `ftn_uplink`,

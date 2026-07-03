@@ -23,6 +23,10 @@ fn feed_config(dir: &std::path::Path) -> ServerConfig {
         nntp_feed_enabled: true,
         nntp_feed_addr: "127.0.0.1:0".parse().unwrap(),
         nntp_feed_peers: peers,
+        // This suite exercises the plaintext transit flow end-to-end; the
+        // RFC 4643 TLS gate (on by default) has its own suite in
+        // `e2e_w10_nntps.rs`.
+        nntp_auth_require_tls: false,
         data_dir: dir.to_path_buf(),
         ..ServerConfig::default()
     }
@@ -307,6 +311,7 @@ async fn feed_off_by_default_and_empty_allowlist_refuses() {
         ws_addr: "127.0.0.1:0".parse().unwrap(),
         nntp_feed_enabled: true,
         nntp_feed_addr: "127.0.0.1:0".parse().unwrap(),
+        nntp_auth_require_tls: false, // plaintext AUTHINFO under test
         data_dir: work.path().join("srv-b"),
         ..ServerConfig::default()
     };

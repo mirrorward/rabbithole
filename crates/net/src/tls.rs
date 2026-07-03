@@ -42,6 +42,18 @@ impl TlsIdentity {
         CertFingerprint::of_der(&self.cert_der)
     }
 
+    /// A plain rustls server config presenting this identity, for TLS-over-TCP
+    /// listeners (NNTPS, STARTTLS upgrades). No ALPN — protocols that need it
+    /// (QUIC) build their own config.
+    pub fn server_config(&self) -> Result<Arc<rustls::ServerConfig>, NetError> {
+        ensure_crypto_provider();
+        let cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![self.cert_der.clone()], self.clone_key().into())
+            .map_err(|e| NetError::Tls(e.to_string()))?;
+        Ok(Arc::new(cfg))
+    }
+
     pub fn clone_key(&self) -> PrivatePkcs8KeyDer<'static> {
         self.key_der.clone_key()
     }
@@ -151,6 +163,13 @@ impl ServerCertVerifier for PinnedCertVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_config_presents_identity_without_alpn() {
+        let id = TlsIdentity::self_signed(&["localhost".into()]).unwrap();
+        let cfg = id.server_config().unwrap();
+        assert!(cfg.alpn_protocols.is_empty(), "no ALPN on the TCP config");
+    }
 
     #[test]
     fn self_signed_identity_and_fingerprint() {

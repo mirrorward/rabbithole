@@ -19,6 +19,10 @@ fn test_config(dir: &std::path::Path) -> ServerConfig {
         ws_addr: "127.0.0.1:0".parse().unwrap(),
         nntp_enabled: true,
         nntp_addr: "127.0.0.1:0".parse().unwrap(),
+        // This suite exercises the plaintext reader flow end-to-end; the
+        // RFC 4643 TLS gate (on by default) has its own suite in
+        // `e2e_w10_nntps.rs`.
+        nntp_auth_require_tls: false,
         data_dir: dir.to_path_buf(),
         ..ServerConfig::default()
     }
