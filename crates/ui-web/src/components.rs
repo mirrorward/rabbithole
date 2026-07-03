@@ -601,6 +601,16 @@ pub fn BoardView() -> impl IntoView {
         }
     });
 
+    let new_subject = create_rw_signal(String::new());
+    let new_body = create_rw_signal(String::new());
+    let post = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        let slug = state.with(|s| s.selected_board.clone()).unwrap_or_default();
+        app.post_thread(&slug, &new_subject.get(), &new_body.get());
+        new_subject.set(String::new());
+        new_body.set(String::new());
+    };
+
     let board_name = move || {
         state.with(|s| {
             let slug = s.selected_board.clone().unwrap_or_default();
@@ -652,6 +662,23 @@ pub fn BoardView() -> impl IntoView {
                         }
                     />
                 </ul>
+                <form class="rh-newthread" on:submit=post>
+                    <input
+                        class="rh-input"
+                        placeholder="New thread subject\u{2026}"
+                        aria-label="New thread subject"
+                        prop:value=new_subject
+                        on:input=move |ev| new_subject.set(event_target_value(&ev))
+                    />
+                    <textarea
+                        class="rh-input"
+                        placeholder="Write the first post\u{2026}"
+                        aria-label="First post body"
+                        prop:value=new_body
+                        on:input=move |ev| new_body.set(event_target_value(&ev))
+                    ></textarea>
+                    <button class="rh-btn" type="submit">"Post thread"</button>
+                </form>
             </section>
             <section class="rh-panel rh-reader" aria-label="Thread posts">
                 <Show

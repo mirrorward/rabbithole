@@ -54,12 +54,14 @@
 //!
 //! - Session resume ([`AuthResume`] is unused here).
 //! - Binary attachments and the blob/transfer families.
-//! - **Board (family 4) read path is wired** through dedicated sinks (like
-//!   who/presence): [`board_list_request`]/[`frame_to_boards`],
-//!   [`thread_list_request`]/[`frame_to_threads`], and
+//! - **Board (family 4) is wired** through dedicated sinks (like who/presence):
+//!   [`board_list_request`]/[`frame_to_boards`],
+//!   [`thread_list_request`]/[`frame_to_threads`],
 //!   [`thread_request`]/[`frame_to_posts`] (ids carried as hex via
-//!   [`id_to_hex`]/[`hex_to_id`]). Board *posting* and the DM family (3) still
-//!   have no mapping.
+//!   [`id_to_hex`]/[`hex_to_id`]), and new-thread posting via
+//!   [`post_create`] (the ordered connection lets a following
+//!   `thread_list_request` see the committed post). Reply threading and the DM
+//!   family (3) still have no mapping.
 //! - [`AuthOk`]/[`Welcome`] carry no api [`Event`] counterpart, so a successful
 //!   sign-in emits nothing until the api grows an auth-success event; the
 //!   history back-fill a client would issue after auth is likewise deferred.
@@ -77,7 +79,8 @@ use rabbithole_proto::admin::{
     InviteCreate, Kick,
 };
 use rabbithole_proto::board::{
-    BoardList, BoardListRequest, ThreadList, ThreadListRequest, ThreadPosts, ThreadRequest,
+    BoardList, BoardListRequest, PostCreate, ThreadList, ThreadListRequest, ThreadPosts,
+    ThreadRequest,
 };
 use rabbithole_proto::chat::{ChatMessage, ChatSend};
 use rabbithole_proto::filelib::{
@@ -218,6 +221,16 @@ pub fn thread_list_request(board: &str, limit: u32, id: RequestId) -> Result<Fra
 /// Build a [`ThreadRequest`] for a thread's posts, keyed by its root id.
 pub fn thread_request(root: [u8; 32], limit: u32, id: RequestId) -> Result<Frame, ProtoError> {
     Frame::request(id, &ThreadRequest::new(root, limit))
+}
+
+/// Build a [`PostCreate`] frame for a **new thread** (no parent).
+pub fn post_create(
+    board: &str,
+    subject: &str,
+    body: &str,
+    id: RequestId,
+) -> Result<Frame, ProtoError> {
+    Frame::request(id, &PostCreate::new(board, subject, body))
 }
 
 /// Decode a [`ThreadList`] reply to the [`Thread`](crate::state::Thread) rows

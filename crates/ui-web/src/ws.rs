@@ -299,6 +299,18 @@ impl WsClient {
         }
     }
 
+    /// Post a new thread to `board`. The connection is ordered, so a following
+    /// [`request_threads`](Self::request_threads) sees the committed post.
+    pub fn send_post(&self, board: &str, subject: &str, body: &str) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) =
+            wire::post_create(board, subject, body, id).and_then(|f| encode_frame(&f))
+        {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
     /// Drive one [`FileCommand`]: encode it via the host-tested
     /// [`wire::file_command_to_frame`] and write it to the open socket. Replies
     /// arrive asynchronously through the FILE-family sink.

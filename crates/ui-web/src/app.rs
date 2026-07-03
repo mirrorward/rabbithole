@@ -356,6 +356,39 @@ impl AppState {
         self.state.update(|s| s.open_thread(id, posts));
     }
 
+    /// Start a new thread on `board`. Live: post it, then re-request the thread
+    /// list (the connection is ordered, so the new thread is included). Mock:
+    /// prepend it locally so the demo composer stays interactive.
+    pub fn post_thread(&self, board: &str, subject: &str, body: &str) {
+        if subject.trim().is_empty() {
+            return;
+        }
+        #[cfg(target_arch = "wasm32")]
+        if self.live.get_untracked() {
+            self.ws.update_value(|c| {
+                c.send_post(board, subject, body);
+                c.request_threads(board);
+            });
+            return;
+        }
+        // The mock models a thread by its subject; the first-post body is only
+        // sent over a live transport.
+        let _ = body;
+        let (board, subject) = (board.to_string(), subject.to_string());
+        self.state.update(|s| {
+            let id = format!("tnew{}", s.threads.len());
+            s.threads.insert(
+                0,
+                crate::state::Thread {
+                    id,
+                    board,
+                    title: subject,
+                    author: "you".to_string(),
+                },
+            );
+        });
+    }
+
     /// Load the DM conversation snapshots into state.
     pub fn load_dms(&self) {
         let threads = self.client.with_value(|c| c.dm_threads());

@@ -127,9 +127,9 @@ pub use wire::{
     admin_command_to_frame, board_list_request, command_to_frame, file_command_to_frame,
     frame_to_admin_events, frame_to_boards, frame_to_events, frame_to_file_events,
     frame_to_notice_route, frame_to_posts, frame_to_presence, frame_to_threads, frame_to_who,
-    hello_request, hex_to_id, id_to_hex, normalize_ws_url, ping_request, thread_list_request,
-    thread_request, who_request, AdminCommand, AdminEvent, EventClient, EventSink, FileCommand,
-    FileEvent, NoticeRoute, PresenceDelta,
+    hello_request, hex_to_id, id_to_hex, normalize_ws_url, ping_request, post_create,
+    thread_list_request, thread_request, who_request, AdminCommand, AdminEvent, EventClient,
+    EventSink, FileCommand, FileEvent, NoticeRoute, PresenceDelta,
 };
 
 #[cfg(target_arch = "wasm32")]
