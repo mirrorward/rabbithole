@@ -28,8 +28,19 @@ enum Cmd {
         /// e.g.: status | config-get | config-set | account-create | who
         cmd: String,
         /// Positional args: config-get KEY, config-set KEY VALUE,
-        /// account-create LOGIN PASSWORD [ROLE]
+        /// account-create LOGIN PASSWORD [ROLE], backup DEST-DIR,
+        /// backup-verify SNAPSHOT-DIR
         args: Vec<String>,
+    },
+    /// OFFLINE restore of a `ctl backup` snapshot into --data-dir.
+    ///
+    /// The server must be stopped first (a live ctl socket makes this
+    /// refuse). Verifies the snapshot's MANIFEST.json hashes, moves the
+    /// current data dir aside to `<data_dir>.pre-restore-<ts>`, and copies
+    /// the snapshot into place. Flow: stop -> restore -> start.
+    Restore {
+        /// Snapshot directory created by `burrow ctl backup <dest-dir>`.
+        snapshot_dir: PathBuf,
     },
 }
 
@@ -50,7 +61,22 @@ async fn main() -> Result<()> {
     match cli.command.unwrap_or(Cmd::Run) {
         Cmd::Run => run(config).await,
         Cmd::Ctl { cmd, args } => ctl_client(config, &cmd, &args).await,
+        Cmd::Restore { snapshot_dir } => restore(config, &snapshot_dir),
     }
+}
+
+fn restore(config: ServerConfig, snapshot_dir: &std::path::Path) -> Result<()> {
+    let outcome = burrow::backup::restore_offline(snapshot_dir, &config.data_dir)?;
+    if let Some(aside) = &outcome.moved_aside {
+        println!("previous data dir moved to {}", aside.display());
+    }
+    println!(
+        "restored {} files ({} bytes) into {}; start the server to come back up",
+        outcome.files,
+        outcome.total_bytes,
+        config.data_dir.display()
+    );
+    Ok(())
 }
 
 async fn run(config: ServerConfig) -> Result<()> {
@@ -83,8 +109,12 @@ async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<
         ("fed-search", terms) if !terms.is_empty() => {
             json!({"cmd": "fed-search", "terms": terms.join(" ")})
         }
+        ("backup", [dest]) => json!({"cmd": "backup", "dest": dest}),
+        ("backup-verify", [dir]) => json!({"cmd": "backup-verify", "path": dir}),
+        // Always refused by the server with the offline procedure.
+        ("restore", [dir]) => json!({"cmd": "restore", "path": dir}),
         _ => anyhow::bail!(
-            "usage: burrow ctl <status|who|config-get KEY|config-set KEY VALUE|account-create LOGIN PASSWORD [ROLE]|fed-catalogs|fed-search TERMS…>"
+            "usage: burrow ctl <status|who|config-get KEY|config-set KEY VALUE|account-create LOGIN PASSWORD [ROLE]|fed-catalogs|fed-search TERMS…|backup DEST-DIR|backup-verify SNAPSHOT-DIR>"
         ),
     };
 

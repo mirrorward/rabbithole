@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod admin_store;
+pub mod backup;
 pub mod ctl;
 pub mod doors;
 pub mod fed_catalog;

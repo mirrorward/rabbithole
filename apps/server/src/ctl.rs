@@ -188,6 +188,61 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
                 "rejected": rejected,
             }))
         }
+        // ---- Backups (Wave 13) ------------------------------------------
+        "backup" => {
+            let dest = str_arg("dest")?;
+            let outcome = crate::backup::snapshot(shared, std::path::Path::new(&dest))
+                .await
+                .map_err(|e| format!("{e:#}"))?;
+            audit(
+                "backup",
+                format!(
+                    "{} files={} bytes={}",
+                    outcome.dir.display(),
+                    outcome.files,
+                    outcome.total_bytes
+                ),
+            );
+            Ok(json!({
+                "snapshot_dir": outcome.dir.display().to_string(),
+                "files": outcome.files,
+                "total_bytes": outcome.total_bytes,
+            }))
+        }
+        "backup-verify" => {
+            let path = str_arg("path")?;
+            let dir = std::path::PathBuf::from(&path);
+            let manifest = tokio::task::spawn_blocking({
+                let dir = dir.clone();
+                move || crate::backup::verify_snapshot(&dir)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("{e:#}"))?;
+            let integrity = rabbithole_store_server::integrity_check(&dir.join("burrow.db"))
+                .await
+                .map_err(|e| e.to_string())?;
+            if integrity != "ok" {
+                return Err(format!("database integrity_check failed: {integrity}"));
+            }
+            Ok(json!({
+                "files": manifest.files.len(),
+                "total_bytes": manifest.total_bytes(),
+                "integrity_check": integrity,
+                "created_at": manifest.created_at,
+                "workspace_version": manifest.workspace_version,
+            }))
+        }
+        "restore" => {
+            // A running server can't safely swap out its own database, so
+            // this always refuses and points at the offline path.
+            let path = str_arg("path")?;
+            Err(format!(
+                "restore must run offline: a running burrow cannot replace its own \
+                 database. Stop the server, then run `burrow restore {path} --data-dir \
+                 <dir>`, then start it again."
+            ))
+        }
         // ---- S2S federation peers (Wave 9) -----------------------------
         "peer-list" => {
             let peers: Vec<Value> = shared

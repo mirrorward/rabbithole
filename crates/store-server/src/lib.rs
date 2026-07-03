@@ -64,6 +64,36 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Online backup: `VACUUM INTO` writes a consistent point-in-time copy of
+/// the database to `dest` (which must not exist yet). It runs inside a read
+/// transaction, so it's safe under WAL with concurrent readers *and*
+/// writers — writes that land after the vacuum's snapshot simply aren't in
+/// the copy. The `INTO` target is an SQL expression, so the path binds as a
+/// regular parameter (no string splicing).
+pub async fn vacuum_into(pool: &SqlitePool, dest: &Path) -> Result<(), StoreError> {
+    sqlx::query("VACUUM INTO ?1")
+        .bind(dest.to_string_lossy().into_owned())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Open the database at `path` read-only (no migrations, no writes) and run
+/// `PRAGMA integrity_check`, returning its first result row — `"ok"` when
+/// the file is sound. Used to vet backup snapshots without touching them.
+pub async fn integrity_check(path: &Path) -> Result<String, StoreError> {
+    let options = SqliteConnectOptions::new().filename(path).read_only(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    let (result,): (String,) = sqlx::query_as("PRAGMA integrity_check")
+        .fetch_one(&pool)
+        .await?;
+    pool.close().await;
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +118,24 @@ mod tests {
         let pool = open(&path).await.unwrap();
         drop(pool);
         assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn vacuum_into_produces_sound_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = open(&dir.path().join("live.db")).await.unwrap();
+        sqlx::query("INSERT INTO server_meta (key, value) VALUES ('probe', 'x')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let copy = dir.path().join("copy.db");
+        vacuum_into(&pool, &copy).await.unwrap();
+        assert!(copy.exists());
+        assert_eq!(integrity_check(&copy).await.unwrap(), "ok");
+
+        // Vacuuming into an existing file is refused by SQLite (the online
+        // backup never clobbers).
+        assert!(vacuum_into(&pool, &copy).await.is_err());
     }
 }
