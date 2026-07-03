@@ -4,6 +4,20 @@
 //! client-opened bidirectional stream is the **control stream** carrying
 //! RHP frames. Later waves add server push uni-streams and per-transfer
 //! bulk streams on the same connection.
+//!
+//! # Connection migration (mobile resilience)
+//!
+//! The client-side `QuicConnection` retains its [`quinn::Endpoint`] (rather
+//! than letting it drop after the dial) so that
+//! [`Connection::migrate`] can call
+//! [`Endpoint::rebind`](quinn::Endpoint::rebind) with a fresh wildcard UDP
+//! socket. quinn moves every connection on the endpoint onto the new socket
+//! without a new handshake — QUIC connection IDs keep the session identified
+//! across the local-address change — so a phone roaming WiFi↔cellular keeps
+//! its live streams and in-flight frames. Contrast the WebSocket path, which
+//! can't migrate and instead reconnects + `auth_resume`s (see the crate-level
+//! docs). Server-accepted connections don't retain a per-connection endpoint
+//! and report [`NetError::Unsupported`] from `migrate`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -77,6 +91,12 @@ impl Listener for QuicListener {
                 transport: TransportKind::Quic,
             };
             return Ok(Box::new(QuicConnection {
+                // Server side: the listening endpoint is shared across every
+                // accepted connection, so it is not held here — a server
+                // connection can't migrate its socket (and wouldn't want to;
+                // it's the roaming client that moves). `migrate` reports
+                // Unsupported for these.
+                endpoint: None,
                 conn,
                 send,
                 recv,
@@ -138,11 +158,7 @@ impl Transport for QuicTransport {
             .next()
             .ok_or_else(|| NetError::Quic(format!("cannot resolve {endpoint}")))?;
 
-        let bind: SocketAddr = if addr.is_ipv4() {
-            "0.0.0.0:0".parse().unwrap()
-        } else {
-            "[::]:0".parse().unwrap()
-        };
+        let bind: SocketAddr = wildcard_bind(addr.is_ipv4());
         let mut client = quinn::Endpoint::client(bind)?;
         client.set_default_client_config(self.client_config()?);
 
@@ -161,7 +177,12 @@ impl Transport for QuicTransport {
             remote_addr: conn.remote_address(),
             transport: TransportKind::Quic,
         };
+        // Retain the client endpoint so the connection can migrate its local
+        // UDP socket later (mobile WiFi↔cellular). Without this the endpoint
+        // would drop here — the live connection keeps it alive internally, but
+        // it'd be unreachable, and `Endpoint::rebind` needs a handle to it.
         Ok(Box::new(QuicConnection {
+            endpoint: Some(client),
             conn,
             send,
             recv,
@@ -171,7 +192,24 @@ impl Transport for QuicTransport {
     }
 }
 
+/// The wildcard bind address for a fresh client UDP socket: any local port on
+/// any interface, matching the peer's address family. Used both for the
+/// initial dial and for [`QuicConnection::migrate`]'s replacement socket.
+fn wildcard_bind(ipv4: bool) -> SocketAddr {
+    if ipv4 {
+        "0.0.0.0:0".parse().unwrap()
+    } else {
+        "[::]:0".parse().unwrap()
+    }
+}
+
 struct QuicConnection {
+    /// The client-side endpoint, retained so the connection can [`rebind`] its
+    /// local UDP socket for migration. `None` on server-accepted connections
+    /// (the listener owns the shared endpoint), which therefore can't migrate.
+    ///
+    /// [`rebind`]: quinn::Endpoint::rebind
+    endpoint: Option<quinn::Endpoint>,
     conn: quinn::Connection,
     send: quinn::SendStream,
     recv: quinn::RecvStream,
@@ -242,6 +280,32 @@ impl Connection for QuicConnection {
         // concurrently with the control loop (which keeps the original
         // control bi-stream). Extra bi-streams ride the same connection.
         Some(Box::new(QuicBulk(self.conn.clone())))
+    }
+
+    fn local_addr(&self) -> Option<SocketAddr> {
+        // The endpoint's bound address; after `migrate` this is the new
+        // socket. `None` for server connections (no retained endpoint).
+        self.endpoint.as_ref().and_then(|e| e.local_addr().ok())
+    }
+
+    fn migrate(&self) -> Result<(), NetError> {
+        // Client only: server connections share the listener's endpoint and
+        // report Unsupported (the trait default), so callers fall back.
+        let endpoint = self
+            .endpoint
+            .as_ref()
+            .ok_or(NetError::Unsupported("connection migration"))?;
+        // Bind a brand-new wildcard UDP socket (fresh local port) in the same
+        // address family, then hand it to the endpoint. `rebind` swaps every
+        // connection on the endpoint onto the new socket in place: QUIC
+        // connection IDs keep the session identified across the local-address
+        // change, so no handshake and no re-auth occur — exactly what a phone
+        // roaming WiFi↔cellular needs. Path validation happens transparently
+        // on the next packet sent over the connection.
+        let ipv4 = endpoint.local_addr()?.is_ipv4();
+        let socket = std::net::UdpSocket::bind(wildcard_bind(ipv4))?;
+        endpoint.rebind(socket)?;
+        Ok(())
     }
 
     async fn close(&mut self) {

@@ -4,6 +4,17 @@
 //! message boundary is the frame boundary). Wave 0 carries `ws://` for
 //! loopback and development; in Wave 1 this rides the server's HTTPS
 //! endpoint (`wss://…/rhp`) behind axum, sharing the web port.
+//!
+//! # No transport-layer migration
+//!
+//! Unlike QUIC, WebSocket rides a TCP connection whose 4-tuple is fixed for
+//! the socket's life: it cannot follow a client that changes local address
+//! (the mobile WiFi↔cellular case). So `WsConnection` leaves
+//! [`Connection::migrate`] at its default, which
+//! returns [`NetError::Unsupported`] — the caller's signal that this transport
+//! can't migrate and it must instead reconnect and resume the server-side
+//! session via `auth_resume(token, replay_cursor)` (`rabbithole-core`'s
+//! client). See the crate-level docs for how the two paths compose.
 
 use std::net::SocketAddr;
 

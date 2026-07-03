@@ -10,6 +10,31 @@
 //!   speak raw QUIC, and some networks block UDP. One binary message = one
 //!   frame.
 //!
+//! # Transport resilience on mobile
+//!
+//! A phone that roams WiFi↔cellular changes its local IP/port mid-session.
+//! The two transports survive this differently, and the difference is
+//! deliberately visible through one API — [`Connection::migrate`]:
+//!
+//! - **QUIC migrates in place.** A QUIC session is keyed by connection IDs,
+//!   not by the 4-tuple, so it can move to a fresh local UDP socket without a
+//!   new handshake and without losing stream state. [`Connection::migrate`]
+//!   on a QUIC client rebinds the underlying [`quinn::Endpoint`] to a new
+//!   wildcard socket (see [`quic`]); the live connection — control stream,
+//!   bulk streams, in-flight frames — carries straight over. No re-auth, no
+//!   replay: the session never dropped.
+//! - **WebSocket cannot migrate at the transport layer.** A TCP/WS socket is
+//!   bound to its 4-tuple; losing the path kills the connection. So
+//!   [`Connection::migrate`] returns [`NetError::Unsupported`] for WebSocket,
+//!   which is the caller's signal to fall back to the *reconnect-with-replay*
+//!   path: dial again and call `auth_resume(token, replay_cursor)` (see
+//!   `rabbithole-core`'s client), which re-attaches to the server-side
+//!   session and replays any pushes missed since `replay_cursor`.
+//!
+//! These compose: a client tries [`Connection::migrate`] first (cheap, keeps
+//! the session hot on QUIC) and treats [`NetError::Unsupported`] — the only
+//! outcome on WebSocket — as "reconnect and resume" instead.
+//!
 //! Certificates: servers generate a self-signed cert ([`tls`]) whose
 //! blake3 fingerprint is pinned by clients (fingerprints travel in rabbit
 //! links, Looking Glass listings, and `.well-known`). ACME/Let's Encrypt
@@ -38,6 +63,12 @@ pub enum NetError {
     Proto(#[from] rabbithole_proto::ProtoError),
     #[error("connection closed")]
     Closed,
+    /// The requested operation isn't supported by this transport. Notably,
+    /// [`Connection::migrate`] returns this on WebSocket (which can't migrate
+    /// at the transport layer): the caller's cue to fall back to reconnect +
+    /// `auth_resume(token, replay_cursor)`. The payload names the operation.
+    #[error("unsupported on this transport: {0}")]
+    Unsupported(&'static str),
 }
 
 /// Metadata about the remote end of a connection.
@@ -100,6 +131,40 @@ pub trait Connection: Send {
     /// single-stream transport transfer over control-frame chunks instead.
     fn bulk(&self) -> Option<Box<dyn BulkStreams>> {
         None
+    }
+
+    /// The local socket address this connection currently sends from, if the
+    /// transport exposes one. For QUIC this is the client endpoint's bound
+    /// UDP address and it *changes* after a successful [`Connection::migrate`]
+    /// — the observable proof that the session moved sockets without
+    /// reconnecting. Defaults to `None`.
+    fn local_addr(&self) -> Option<std::net::SocketAddr> {
+        None
+    }
+
+    /// Move this connection to a fresh local socket **without tearing down the
+    /// session** — QUIC connection migration, the mobile WiFi↔cellular story.
+    ///
+    /// On a QUIC client this rebinds the underlying endpoint to a new wildcard
+    /// UDP socket; connection IDs let the live QUIC session (control stream,
+    /// bulk streams, in-flight frames) continue on the new local address with
+    /// **no new handshake and no re-auth**. [`Connection::local_addr`] reflects
+    /// the new socket afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Unsupported`] on transports that cannot migrate at
+    /// the transport layer — notably WebSocket, whose TCP 4-tuple is fixed for
+    /// the socket's life, and QUIC *server* connections (the listener endpoint
+    /// is shared, not per-connection). This is a distinct, documented signal:
+    /// a client that gets it must fall back to the reconnect-with-replay path
+    /// (dial again, then `auth_resume(token, replay_cursor)` in
+    /// `rabbithole-core`) rather than expecting the session to survive.
+    ///
+    /// The default implementation returns [`NetError::Unsupported`], so every
+    /// non-QUIC transport reports "can't migrate" for free.
+    fn migrate(&self) -> Result<(), NetError> {
+        Err(NetError::Unsupported("connection migration"))
     }
 
     /// Close gracefully.
