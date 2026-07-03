@@ -44,7 +44,8 @@ pub type VarMap = BTreeMap<String, String>;
 pub struct PackTokens {
     /// Human-readable pack name.
     pub name: String,
-    /// Mode-independent tokens: spacing, radii, typography.
+    /// Mode-independent tokens: spacing, the radii scale, the type scale,
+    /// and the elevation (shadow) ramp.
     pub shared: VarMap,
     /// Light-mode colour tokens.
     pub light: VarMap,
@@ -83,33 +84,72 @@ fn colour_vars(p: &Palette, bg_image: &str) -> VarMap {
     m
 }
 
-/// The mode-independent tokens, parameterised by the pack's type scale and
-/// corner rounding.
-#[allow(clippy::too_many_arguments)]
-fn shared_vars(
-    font_sans: &str,
-    font_mono: &str,
-    font_size: &str,
-    font_sm: &str,
-    font_xs: &str,
-    radius: &str,
-    radius_lg: &str,
-) -> VarMap {
+/// The mode-independent tokens a pack contributes: the type scale, the
+/// corner-rounding scale, and the elevation (shadow) scale. Spacing is
+/// universal (same rhythm on every pack) and filled in by [`shared_vars`];
+/// everything here is what makes Clean feel airy and elevated, Retro boxy
+/// and flat, and High Contrast crisp.
+struct SharedSpec {
+    font_sans: &'static str,
+    font_mono: &'static str,
+    /// Type scale: xs < sm < base < lg < xl < 2xl < 3xl.
+    font_xs: &'static str,
+    font_sm: &'static str,
+    font_size: &'static str,
+    font_lg: &'static str,
+    font_xl: &'static str,
+    font_2xl: &'static str,
+    font_3xl: &'static str,
+    /// Corner rounding: sm < base < lg < xl, plus a pill/circle `full`.
+    radius_sm: &'static str,
+    radius: &'static str,
+    radius_lg: &'static str,
+    radius_xl: &'static str,
+    radius_full: &'static str,
+    /// Elevation ramp (`none` for the flat packs).
+    shadow_1: &'static str,
+    shadow_2: &'static str,
+    shadow_3: &'static str,
+}
+
+/// The mode-independent tokens: universal spacing rhythm plus the pack's
+/// [`SharedSpec`] (type scale, rounding, elevation).
+fn shared_vars(s: &SharedSpec) -> VarMap {
     let mut m = VarMap::new();
     m.insert("--rh-space-1".into(), ".25rem".into());
     m.insert("--rh-space-2".into(), ".5rem".into());
     m.insert("--rh-space-3".into(), ".75rem".into());
     m.insert("--rh-space-4".into(), "1rem".into());
+    m.insert("--rh-space-5".into(), "1.25rem".into());
     m.insert("--rh-space-6".into(), "1.5rem".into());
-    m.insert("--rh-radius".into(), radius.into());
-    m.insert("--rh-radius-lg".into(), radius_lg.into());
-    m.insert("--rh-font-sans".into(), font_sans.into());
-    m.insert("--rh-font-mono".into(), font_mono.into());
-    m.insert("--rh-font-size".into(), font_size.into());
-    m.insert("--rh-font-sm".into(), font_sm.into());
-    m.insert("--rh-font-xs".into(), font_xs.into());
+    m.insert("--rh-space-8".into(), "2rem".into());
+    m.insert("--rh-radius-sm".into(), s.radius_sm.into());
+    m.insert("--rh-radius".into(), s.radius.into());
+    m.insert("--rh-radius-lg".into(), s.radius_lg.into());
+    m.insert("--rh-radius-xl".into(), s.radius_xl.into());
+    m.insert("--rh-radius-full".into(), s.radius_full.into());
+    m.insert("--rh-font-sans".into(), s.font_sans.into());
+    m.insert("--rh-font-mono".into(), s.font_mono.into());
+    m.insert("--rh-font-xs".into(), s.font_xs.into());
+    m.insert("--rh-font-sm".into(), s.font_sm.into());
+    m.insert("--rh-font-size".into(), s.font_size.into());
+    m.insert("--rh-font-lg".into(), s.font_lg.into());
+    m.insert("--rh-font-xl".into(), s.font_xl.into());
+    m.insert("--rh-font-2xl".into(), s.font_2xl.into());
+    m.insert("--rh-font-3xl".into(), s.font_3xl.into());
+    m.insert("--rh-shadow-1".into(), s.shadow_1.into());
+    m.insert("--rh-shadow-2".into(), s.shadow_2.into());
+    m.insert("--rh-shadow-3".into(), s.shadow_3.into());
     m
 }
+
+/// Clean's soft, cool elevation ramp. In dark mode these near-black shadows
+/// read as faint depth (the lighter surface token carries most of the
+/// elevation); in light mode they lift cards off the page.
+const CLEAN_SHADOW_1: &str = "0 1px 2px rgba(15,23,42,.10)";
+const CLEAN_SHADOW_2: &str = "0 2px 4px -1px rgba(15,23,42,.14),0 6px 16px -4px rgba(15,23,42,.18)";
+const CLEAN_SHADOW_3: &str =
+    "0 12px 32px -8px rgba(15,23,42,.35),0 4px 10px -4px rgba(15,23,42,.22)";
 
 /// The default sans stack (Clean and High Contrast).
 const SANS: &str = "system-ui,-apple-system,'Segoe UI',Roboto,sans-serif";
@@ -130,7 +170,25 @@ impl PackTokens {
         match pack {
             ThemePack::Clean => PackTokens {
                 name: "Clean".into(),
-                shared: shared_vars(SANS, MONO, "1rem", ".85rem", ".8rem", ".4rem", ".6rem"),
+                shared: shared_vars(&SharedSpec {
+                    font_sans: SANS,
+                    font_mono: MONO,
+                    font_xs: ".75rem",
+                    font_sm: ".875rem",
+                    font_size: "1rem",
+                    font_lg: "1.125rem",
+                    font_xl: "1.375rem",
+                    font_2xl: "1.75rem",
+                    font_3xl: "2.25rem",
+                    radius_sm: ".375rem",
+                    radius: ".625rem",
+                    radius_lg: ".875rem",
+                    radius_xl: "1.25rem",
+                    radius_full: "9999px",
+                    shadow_1: CLEAN_SHADOW_1,
+                    shadow_2: CLEAN_SHADOW_2,
+                    shadow_3: CLEAN_SHADOW_3,
+                }),
                 light: colour_vars(&Palette::builtin(ThemePack::Clean, Mode::Light), "none"),
                 dark: colour_vars(&Palette::builtin(ThemePack::Clean, Mode::Dark), "none"),
             },
@@ -140,7 +198,25 @@ impl PackTokens {
             // counterpart with ANSI blue/red accents.
             ThemePack::Retro => PackTokens {
                 name: "Retro".into(),
-                shared: shared_vars(MONO, MONO, ".95rem", ".85rem", ".8rem", ".15rem", ".25rem"),
+                shared: shared_vars(&SharedSpec {
+                    font_sans: MONO,
+                    font_mono: MONO,
+                    font_xs: ".8rem",
+                    font_sm: ".85rem",
+                    font_size: ".95rem",
+                    font_lg: "1.05rem",
+                    font_xl: "1.2rem",
+                    font_2xl: "1.45rem",
+                    font_3xl: "1.8rem",
+                    radius_sm: ".1rem",
+                    radius: ".15rem",
+                    radius_lg: ".25rem",
+                    radius_xl: ".35rem",
+                    radius_full: ".35rem",
+                    shadow_1: "none",
+                    shadow_2: "none",
+                    shadow_3: "none",
+                }),
                 light: colour_vars(
                     &Palette {
                         background: Rgb(0xf2, 0xef, 0xe2),
@@ -161,7 +237,25 @@ impl PackTokens {
             // slightly larger type scale.
             ThemePack::HighContrast => PackTokens {
                 name: "High Contrast".into(),
-                shared: shared_vars(SANS, MONO, "1.05rem", ".9rem", ".85rem", ".4rem", ".6rem"),
+                shared: shared_vars(&SharedSpec {
+                    font_sans: SANS,
+                    font_mono: MONO,
+                    font_xs: ".85rem",
+                    font_sm: ".9rem",
+                    font_size: "1.05rem",
+                    font_lg: "1.2rem",
+                    font_xl: "1.45rem",
+                    font_2xl: "1.8rem",
+                    font_3xl: "2.3rem",
+                    radius_sm: ".25rem",
+                    radius: ".4rem",
+                    radius_lg: ".6rem",
+                    radius_xl: ".9rem",
+                    radius_full: "9999px",
+                    shadow_1: "none",
+                    shadow_2: "none",
+                    shadow_3: "none",
+                }),
                 light: colour_vars(
                     &Palette::builtin(ThemePack::HighContrast, Mode::Light),
                     "none",
