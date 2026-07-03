@@ -266,6 +266,20 @@ pub struct ServerConfig {
     /// array and edited on disk (like `federation_peers`), not via
     /// `ctl config set`.
     pub federation_board_subscribe: Vec<String>,
+    /// Best-effort UPnP-IGD / NAT-PMP / PCP port mapping: on startup ask the
+    /// LAN router to open the QUIC and WS ports so a self-hosted burrow behind
+    /// a consumer NAT is reachable without a manual port-forward. Off by
+    /// default. Even when enabled the feature is inert unless
+    /// `portmap_gateway` is set. The attempt is fire-and-forget with its own
+    /// timeout; it never delays or fails boot.
+    pub portmap_enabled: bool,
+    /// The router's LAN IP to send NAT-PMP/PCP requests to (e.g.
+    /// "192.168.1.1"). Empty (the default) turns the feature off even when
+    /// `portmap_enabled` is true — there is no routing-table auto-discovery.
+    pub portmap_gateway: String,
+    /// Requested lifetime, in seconds, for each mapping. NAT-PMP/PCP leases
+    /// are short-lived, so the mapper refreshes at roughly half this interval.
+    pub portmap_lifetime_secs: u32,
     /// Master switch for token-bucket rate limiting (Wave 13). On by default
     /// with generous per-class budgets; see the `ratelimit_*` knobs below.
     pub ratelimit_enabled: bool,
@@ -417,6 +431,9 @@ impl Default for ServerConfig {
             federation_addr: "0.0.0.0:4655".parse().expect("valid"),
             federation_peers: Vec::new(),
             federation_board_subscribe: Vec::new(),
+            portmap_enabled: false,
+            portmap_gateway: String::new(),
+            portmap_lifetime_secs: 7200,
             ratelimit_enabled: true,
             ratelimit_conn_per_min: 30,
             ratelimit_conn_burst: 10,
@@ -576,6 +593,9 @@ impl ServerConfig {
             "syndication_poll_secs" => self.syndication_poll_secs.to_string(),
             "federation_enabled" => self.federation_enabled.to_string(),
             "federation_addr" => self.federation_addr.to_string(),
+            "portmap_enabled" => self.portmap_enabled.to_string(),
+            "portmap_gateway" => self.portmap_gateway.clone(),
+            "portmap_lifetime_secs" => self.portmap_lifetime_secs.to_string(),
             "ratelimit_enabled" => self.ratelimit_enabled.to_string(),
             "ratelimit_conn_per_min" => self.ratelimit_conn_per_min.to_string(),
             "ratelimit_conn_burst" => self.ratelimit_conn_burst.to_string(),
@@ -949,6 +969,27 @@ impl ServerConfig {
                 self.federation_addr = parse_addr(key, value)?;
                 Ok(false)
             }
+            // Port mapping is set up in a startup task, so changes need a
+            // restart to take effect.
+            "portmap_enabled" => {
+                self.portmap_enabled = parse_bool(key, value)?;
+                Ok(false)
+            }
+            "portmap_gateway" => {
+                let v = value.trim();
+                if !v.is_empty() && v.parse::<std::net::IpAddr>().is_err() {
+                    return Err(ConfigError::BadValue {
+                        key: key.into(),
+                        detail: value.into(),
+                    });
+                }
+                self.portmap_gateway = v.to_string();
+                Ok(false)
+            }
+            "portmap_lifetime_secs" => {
+                self.portmap_lifetime_secs = parse_u32(key, value)?;
+                Ok(false)
+            }
             // Rate limiting applies live: every check re-reads the config,
             // so a `ctl config set` takes effect on the next request.
             "ratelimit_enabled" => {
@@ -1251,6 +1292,45 @@ mod tests {
             live.set_key("qwk_enabled", "maybe"),
             Err(ConfigError::BadValue { .. })
         ));
+    }
+
+    #[test]
+    fn portmap_keys_default_off_validate_and_roundtrip() {
+        let live = LiveConfig::new(ServerConfig::default());
+        // Off by default, no gateway, 2h lease.
+        assert_eq!(live.get_key("portmap_enabled").unwrap(), "false");
+        assert_eq!(live.get_key("portmap_gateway").unwrap(), "");
+        assert_eq!(live.get_key("portmap_lifetime_secs").unwrap(), "7200");
+        // All three need a restart (set up in a startup task).
+        assert!(!live.set_key("portmap_enabled", "on").unwrap());
+        assert!(!live.set_key("portmap_gateway", "192.168.1.1").unwrap());
+        assert!(!live.set_key("portmap_lifetime_secs", "3600").unwrap());
+        assert_eq!(live.get_key("portmap_enabled").unwrap(), "true");
+        assert_eq!(live.get_key("portmap_gateway").unwrap(), "192.168.1.1");
+        assert_eq!(live.get_key("portmap_lifetime_secs").unwrap(), "3600");
+        // An empty gateway clears the feature; a non-IP is refused.
+        assert!(!live.set_key("portmap_gateway", "").unwrap());
+        assert!(matches!(
+            live.set_key("portmap_gateway", "not-an-ip"),
+            Err(ConfigError::BadValue { .. })
+        ));
+        assert!(matches!(
+            live.set_key("portmap_lifetime_secs", "forever"),
+            Err(ConfigError::BadValue { .. })
+        ));
+
+        // TOML round trip carries the new keys.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("burrow.toml");
+        let mut cfg = ServerConfig::default();
+        cfg.set_key("portmap_enabled", "true").unwrap();
+        cfg.set_key("portmap_gateway", "10.0.0.1").unwrap();
+        cfg.save(&path).unwrap();
+        let loaded: ServerConfig =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(loaded.portmap_enabled);
+        assert_eq!(loaded.portmap_gateway, "10.0.0.1");
+        assert_eq!(loaded.portmap_lifetime_secs, 7200);
     }
 
     #[test]

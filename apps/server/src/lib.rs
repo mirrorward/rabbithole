@@ -28,6 +28,7 @@ pub mod identity_store;
 pub mod legacy;
 pub mod nntp;
 pub mod nntp_feed;
+pub mod portmap;
 pub mod qwk;
 pub mod radio;
 pub mod session;
@@ -270,6 +271,19 @@ impl Burrow {
         let ftn = config.ftn_enabled.then_some(config.ftn_addr);
         let federation = config.federation_enabled.then_some(config.federation_addr);
         let federation_peers = config.federation_peers.clone();
+        // Best-effort port mapping: only when enabled *and* a gateway IP that
+        // actually parses is configured (empty or garbage = feature off).
+        let portmap_gateway = config
+            .portmap_enabled
+            .then(|| {
+                config
+                    .portmap_gateway
+                    .trim()
+                    .parse::<std::net::IpAddr>()
+                    .ok()
+            })
+            .flatten();
+        let portmap_lifetime = config.portmap_lifetime_secs;
         // Feed ingest is worth spawning only when enabled *and* mapped.
         let syndication_on = config.syndication_enabled && !config.syndication_feeds.is_empty();
         // FTN spool dirs resolve under data_dir when relative.
@@ -458,6 +472,22 @@ impl Burrow {
             tracing::info!(federation = %bound, "S2S federation peering listening");
             federation_addr = Some(bound);
             tasks.push(handle);
+        }
+        // Best-effort router port mapping (opt-in). Spawned last, after every
+        // listener is already accepting: it is fire-and-forget and can neither
+        // fail nor delay boot.
+        if let Some(gateway) = portmap_gateway {
+            let ports = portmap::Ports {
+                quic: quic_addr.port(),
+                ws: ws_addr.port(),
+            };
+            tracing::info!(gateway = %gateway, "best-effort port mapping starting");
+            tasks.push(portmap::spawn_portmap(
+                shared.clone(),
+                gateway,
+                portmap_lifetime,
+                ports,
+            ));
         }
 
         Ok(Burrow {

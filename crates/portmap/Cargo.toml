@@ -1,0 +1,12 @@
+[package]
+name = "rabbithole-portmap"
+description = "Best-effort consumer-router port mapping: pure NAT-PMP (RFC 6886), PCP (RFC 6887) and UPnP-IGD codecs plus a bounded async PortMapper, so a self-hosted burrow can ask its gateway to open its QUIC/WS ports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true

@@ -28,6 +28,7 @@ members = [
     "crates/legacy-binkp",
     "crates/legacy-icecast",
     "crates/legacy-syndication",
+    "crates/portmap",
     "crates/ui-web",
     "apps/cli",
     "apps/tui",
@@ -38,7 +39,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.72.0"
+version = "0.73.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]
@@ -75,6 +76,7 @@ rabbithole-legacy-zmodem = { path = "crates/legacy-zmodem" }
 rabbithole-legacy-binkp = { path = "crates/legacy-binkp" }
 rabbithole-legacy-icecast = { path = "crates/legacy-icecast" }
 rabbithole-legacy-syndication = { path = "crates/legacy-syndication" }
+rabbithole-portmap = { path = "crates/portmap" }
 
 # serialization
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }

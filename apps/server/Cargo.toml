@@ -40,6 +40,7 @@ rabbithole-art.workspace = true
 rabbithole-audio.workspace = true
 rabbithole-radio.workspace = true
 rabbithole-legacy-icecast.workspace = true
+rabbithole-portmap.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
 clap.workspace = true
