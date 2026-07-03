@@ -67,7 +67,7 @@ burrow ctl account-create <login> <password> [role]
 Requires a Rust toolchain (edition 2021, rust-version 1.85+).
 
 ```sh
-git clone https://github.com/kevinelliott/RabbitHole
+git clone https://github.com/mirrorward/rabbithole
 cd RabbitHole
 cargo build --release -p burrow -p rabbit -p rabbit-tui -p looking-glass
 ```
