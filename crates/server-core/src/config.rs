@@ -301,6 +301,30 @@ pub struct ServerConfig {
     pub theme_accent: String,
     /// Theme ANSI logo art (also the telnet welcome banner since Wave 6).
     pub theme_logo_ansi: String,
+    /// Theme bundle display name (Wave 8; empty = the server name, the v1
+    /// behavior).
+    pub theme_name: String,
+    /// Theme banner art blob id, hex (empty = none). `ThemeBundleSet`
+    /// validates existence and size against `banner_max_bytes` before it
+    /// lands here.
+    pub theme_banner: String,
+    /// Named icon overrides: icon name → blob id hex. Written by the admin
+    /// `ThemeBundleSet` op (a TOML table on disk, like `keywords` — not via
+    /// `config set`).
+    pub theme_icons: std::collections::BTreeMap<String, String>,
+    /// Structured light-mode design tokens (`--rh-*` name → value), applied
+    /// by `ThemeBundleSet` after grammar + contrast validation
+    /// ([`crate::theme`]). BTreeMaps so the served bundle bytes (and its
+    /// blake3 id) are deterministic.
+    pub theme_tokens_light: std::collections::BTreeMap<String, String>,
+    /// Structured dark-mode design tokens (same grammar).
+    pub theme_tokens_dark: std::collections::BTreeMap<String, String>,
+    /// Mode-independent metric tokens (spacing, radii, type scale).
+    pub theme_tokens_shared: std::collections::BTreeMap<String, String>,
+    /// When the current bundle was applied (unix seconds; 0 = never).
+    pub theme_applied_at_unix: i64,
+    /// Who applied the current bundle (login, or "ctl"; empty = nobody).
+    pub theme_applied_by: String,
     /// Keyword teleport map: word → "room:<name>" | "user:<name>" |
     /// "url:<…>" | "board:<slug>" | "area:<slug>" | "door:<id>" (the last
     /// three land on the telnet surfaces; native clients see them via /go
@@ -400,6 +424,14 @@ impl Default for ServerConfig {
             welcome_ticker: String::new(),
             theme_accent: String::new(),
             theme_logo_ansi: String::new(),
+            theme_name: String::new(),
+            theme_banner: String::new(),
+            theme_icons: std::collections::BTreeMap::new(),
+            theme_tokens_light: std::collections::BTreeMap::new(),
+            theme_tokens_dark: std::collections::BTreeMap::new(),
+            theme_tokens_shared: std::collections::BTreeMap::new(),
+            theme_applied_at_unix: 0,
+            theme_applied_by: String::new(),
             keywords: std::collections::HashMap::new(),
         }
     }
@@ -551,6 +583,10 @@ impl ServerConfig {
             "welcome_ticker" => self.welcome_ticker.clone(),
             "theme_accent" => self.theme_accent.clone(),
             "theme_logo_ansi" => self.theme_logo_ansi.clone(),
+            "theme_name" => self.theme_name.clone(),
+            "theme_banner" => self.theme_banner.clone(),
+            "theme_applied_at_unix" => self.theme_applied_at_unix.to_string(),
+            "theme_applied_by" => self.theme_applied_by.clone(),
             other => return Err(ConfigError::UnknownKey(other.to_string())),
         })
     }
@@ -610,6 +646,21 @@ impl ServerConfig {
             }
             "theme_logo_ansi" => {
                 self.theme_logo_ansi = value.to_string();
+                Ok(true)
+            }
+            "theme_name" => {
+                self.theme_name = value.trim().to_string();
+                Ok(true)
+            }
+            "theme_banner" => {
+                let v = value.trim();
+                if !v.is_empty() && (v.len() != 64 || hex::decode(v).is_err()) {
+                    return Err(ConfigError::BadValue {
+                        key: key.into(),
+                        detail: value.into(),
+                    });
+                }
+                self.theme_banner = v.to_string();
                 Ok(true)
             }
             "registration_mode" => {
@@ -1018,6 +1069,13 @@ impl LiveConfig {
     pub fn set_key(&self, key: &str, value: &str) -> Result<bool, ConfigError> {
         self.0.write().set_key(key, value)
     }
+
+    /// Mutate the whole config under one write lock — for operations that
+    /// must land several fields atomically (theme-bundle application writes
+    /// accent + art + token maps together, Wave 8).
+    pub fn update<R>(&self, f: impl FnOnce(&mut ServerConfig) -> R) -> R {
+        f(&mut self.0.write())
+    }
 }
 
 #[cfg(test)]
@@ -1183,6 +1241,91 @@ mod tests {
             live.set_key("qwk_enabled", "maybe"),
             Err(ConfigError::BadValue { .. })
         ));
+    }
+
+    #[test]
+    fn theme_keys_validate_apply_live_and_roundtrip() {
+        let live = LiveConfig::new(ServerConfig::default());
+        // Defaults: no theme applied.
+        assert_eq!(live.get_key("theme_name").unwrap(), "");
+        assert_eq!(live.get_key("theme_banner").unwrap(), "");
+        assert_eq!(live.get_key("theme_applied_at_unix").unwrap(), "0");
+        assert_eq!(live.get_key("theme_applied_by").unwrap(), "");
+        // Name and banner apply live; the banner must be 32-byte hex.
+        assert!(live.set_key("theme_name", " Wonderland ").unwrap());
+        assert_eq!(live.get_key("theme_name").unwrap(), "Wonderland");
+        let blob_hex = "ab".repeat(32);
+        assert!(live.set_key("theme_banner", &blob_hex).unwrap());
+        assert_eq!(live.get_key("theme_banner").unwrap(), blob_hex);
+        assert!(live.set_key("theme_banner", "").unwrap(), "clearable");
+        for bad in ["zz", "abcd", &"ab".repeat(33)] {
+            assert!(
+                matches!(
+                    live.set_key("theme_banner", bad),
+                    Err(ConfigError::BadValue { .. })
+                ),
+                "theme_banner={bad:?} must be refused"
+            );
+        }
+        // Applied-at/by are informational: get-only, never set-keyable.
+        assert!(matches!(
+            live.set_key("theme_applied_at_unix", "1"),
+            Err(ConfigError::UnknownKey(_))
+        ));
+        assert!(matches!(
+            live.set_key("theme_applied_by", "me"),
+            Err(ConfigError::UnknownKey(_))
+        ));
+
+        // TOML round trip carries the maps and scalars.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("burrow.toml");
+        let mut cfg = ServerConfig {
+            theme_name: "Wonderland".into(),
+            theme_applied_at_unix: 42,
+            theme_applied_by: "root".into(),
+            ..ServerConfig::default()
+        };
+        cfg.theme_icons.insert("dm".into(), "cd".repeat(32));
+        cfg.theme_tokens_light
+            .insert("--rh-accent".into(), "#2b63d8".into());
+        cfg.theme_tokens_dark
+            .insert("--rh-accent".into(), "#6c9cff".into());
+        cfg.theme_tokens_shared
+            .insert("--rh-radius".into(), ".5rem".into());
+        cfg.save(&path).unwrap();
+        let loaded: ServerConfig =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.theme_name, "Wonderland");
+        assert_eq!(loaded.theme_icons.get("dm").unwrap(), &"cd".repeat(32));
+        assert_eq!(
+            loaded.theme_tokens_light.get("--rh-accent").unwrap(),
+            "#2b63d8"
+        );
+        assert_eq!(
+            loaded.theme_tokens_dark.get("--rh-accent").unwrap(),
+            "#6c9cff"
+        );
+        assert_eq!(
+            loaded.theme_tokens_shared.get("--rh-radius").unwrap(),
+            ".5rem"
+        );
+        assert_eq!(loaded.theme_applied_at_unix, 42);
+        assert_eq!(loaded.theme_applied_by, "root");
+    }
+
+    #[test]
+    fn live_config_update_is_atomic_and_returns() {
+        let live = LiveConfig::new(ServerConfig::default());
+        let prev = live.update(|c| {
+            let prev = c.theme_name.clone();
+            c.theme_name = "New".into();
+            c.theme_applied_at_unix = 7;
+            prev
+        });
+        assert_eq!(prev, "");
+        assert_eq!(live.get_key("theme_name").unwrap(), "New");
+        assert_eq!(live.get_key("theme_applied_at_unix").unwrap(), "7");
     }
 
     #[test]

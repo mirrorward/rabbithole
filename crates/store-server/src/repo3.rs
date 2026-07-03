@@ -294,6 +294,33 @@ pub async fn dm_receipts_enabled(pool: &SqlitePool, account: i64) -> Result<bool
         .unwrap_or(true))
 }
 
+/// Read the account's server-theme opt-out (Wave 8). Unknown accounts —
+/// guests never have a row — read as `false` (server theme applies).
+pub async fn theme_server_disabled(pool: &SqlitePool, account: i64) -> Result<bool, StoreError> {
+    Ok(
+        sqlx::query("SELECT theme_server_disabled FROM accounts WHERE id = ?")
+            .bind(account)
+            .fetch_optional(pool)
+            .await?
+            .map(|r| r.get::<i64, _>("theme_server_disabled") != 0)
+            .unwrap_or(false),
+    )
+}
+
+/// Set the account's server-theme opt-out (Wave 8).
+pub async fn set_theme_server_disabled(
+    pool: &SqlitePool,
+    account: i64,
+    disabled: bool,
+) -> Result<(), StoreError> {
+    sqlx::query("UPDATE accounts SET theme_server_disabled = ? WHERE id = ?")
+        .bind(disabled as i64)
+        .bind(account)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +433,21 @@ mod tests {
         assert_eq!(newest.last().unwrap().text, "m9");
         let older = dms.thread(a, b, newest[0].id, 4).await.unwrap();
         assert_eq!(older.last().unwrap().text, "m5");
+    }
+
+    #[tokio::test]
+    async fn theme_server_disabled_pref_roundtrips() {
+        let (pool, a, b) = two_accounts().await;
+        // Defaults off; unknown accounts (guests) read as off too.
+        assert!(!theme_server_disabled(&pool, a).await.unwrap());
+        assert!(!theme_server_disabled(&pool, -42).await.unwrap());
+        set_theme_server_disabled(&pool, a, true).await.unwrap();
+        assert!(theme_server_disabled(&pool, a).await.unwrap());
+        assert!(
+            !theme_server_disabled(&pool, b).await.unwrap(),
+            "per-account"
+        );
+        set_theme_server_disabled(&pool, a, false).await.unwrap();
+        assert!(!theme_server_disabled(&pool, a).await.unwrap());
     }
 }

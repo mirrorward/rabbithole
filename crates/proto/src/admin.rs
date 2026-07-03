@@ -325,7 +325,7 @@ impl Message for ConfigApplied {
 }
 
 // ---------------------------------------------------------------------------
-// Moderation suite (Wave 13): types 30..49 of the ADMIN family.
+// Moderation suite (Wave 13): types 30..40 of the ADMIN family.
 // ---------------------------------------------------------------------------
 
 /// What a report/quarantine subject reference points at (and the shape of
@@ -662,4 +662,120 @@ impl DenyHashList {
 impl Message for DenyHashList {
     const FAMILY: Family = Family::ADMIN;
     const MESSAGE_TYPE: u16 = 40;
+}
+
+// ---------------------------------------------------------------------------
+// Server theme-bundle application (Wave 8): types 41..44 of the ADMIN
+// family. Gated on `CONFIG_ADMIN` (theming is server configuration) and
+// audited server-side.
+// ---------------------------------------------------------------------------
+
+/// Upload and activate a theme bundle. `bundle` is a postcard-encoded
+/// [`crate::welcome::ThemeBundle`] — the exact bytes a
+/// [`crate::welcome::ThemeReply`] would carry (art travels as blob refs
+/// uploaded via `BlobPut` first, matching v1). `signature`, when
+/// non-empty, must be a valid Ed25519 signature over `bundle` by the
+/// server identity key (the re-import path for a previously served
+/// bundle); empty means the server signs at serve time as usual.
+///
+/// The server validates before applying — structured tokens only, WCAG
+/// contrast rails (≥ 4.5:1 text-on-bg and accent-on-bg per mode), blob
+/// size caps — and **rejects** anything below the bar. →
+/// [`ThemeBundleInfo`] on success. Requires `CONFIG_ADMIN`.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemeBundleSet {
+    pub bundle: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
+impl ThemeBundleSet {
+    pub fn new(bundle: Vec<u8>, signature: Vec<u8>) -> Self {
+        Self { bundle, signature }
+    }
+}
+
+impl Message for ThemeBundleSet {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 41;
+}
+
+/// Clear the applied theme bundle: every client falls back to default
+/// tokens on its next fetch. → empty ack. Requires `CONFIG_ADMIN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ThemeBundleClear;
+
+impl Message for ThemeBundleClear {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 42;
+}
+
+/// Inspect the currently applied theme bundle. → [`ThemeBundleInfo`].
+/// Requires `CONFIG_ADMIN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ThemeBundleGet;
+
+impl Message for ThemeBundleGet {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 43;
+}
+
+/// Summary of the applied theme bundle (all-default when `present` is
+/// false).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ThemeBundleInfo {
+    pub present: bool,
+    /// blake3 of the canonical bundle bytes (zeroes when absent) — the
+    /// same id clients cache [`crate::welcome::ThemeReply`] payloads by.
+    pub id: [u8; 32],
+    pub name: String,
+    pub applied_at_unix: i64,
+    /// Login that applied it ("ctl" for the local socket; empty = none).
+    pub applied_by: String,
+    pub accent_rgb: Option<[u8; 3]>,
+    pub has_logo: bool,
+    pub has_banner: bool,
+    /// Token summary: icon overrides and per-map token counts.
+    pub icons: u32,
+    pub tokens_light: u32,
+    pub tokens_dark: u32,
+    pub tokens_shared: u32,
+}
+
+impl Message for ThemeBundleInfo {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 44;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_admin_messages_roundtrip() {
+        let set = ThemeBundleSet::new(vec![1, 2, 3], vec![]);
+        let bytes = postcard::to_allocvec(&set).unwrap();
+        assert_eq!(postcard::from_bytes::<ThemeBundleSet>(&bytes).unwrap(), set);
+
+        let info = ThemeBundleInfo {
+            present: true,
+            id: [5; 32],
+            name: "Wonderland".into(),
+            applied_at_unix: 12345,
+            applied_by: "root".into(),
+            accent_rgb: Some([0x2b, 0x63, 0xd8]),
+            has_logo: false,
+            has_banner: true,
+            icons: 2,
+            tokens_light: 3,
+            tokens_dark: 3,
+            tokens_shared: 1,
+        };
+        let bytes = postcard::to_allocvec(&info).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<ThemeBundleInfo>(&bytes).unwrap(),
+            info
+        );
+    }
 }

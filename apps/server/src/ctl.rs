@@ -111,6 +111,36 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
                 .collect();
             Ok(Value::Array(users))
         }
+        // ---- Server theme bundle (Wave 8) -------------------------------
+        "theme-status" => {
+            let cfg = shared.config.read();
+            match rabbithole_server_core::theme::applied_from_config(&cfg) {
+                Some(applied) => Ok(json!({
+                    "present": true,
+                    "id": hex::encode(applied.id),
+                    "name": applied.bundle.name,
+                    "applied_at_unix": cfg.theme_applied_at_unix,
+                    "applied_by": cfg.theme_applied_by,
+                    "accent": cfg.theme_accent,
+                    "has_logo": !cfg.theme_logo_ansi.is_empty(),
+                    "banner": cfg.theme_banner,
+                    "icons": applied.bundle.icons.len(),
+                    "tokens": {
+                        "light": applied.bundle.tokens_light.len(),
+                        "dark": applied.bundle.tokens_dark.len(),
+                        "shared": applied.bundle.tokens_shared.len(),
+                    },
+                })),
+                None => Ok(json!({"present": false})),
+            }
+        }
+        "theme-clear" => {
+            shared
+                .config
+                .update(rabbithole_server_core::theme::clear_config);
+            audit("theme-clear", String::new());
+            Ok(json!({"cleared": true}))
+        }
         // ---- QWK offline mail (Wave 10) --------------------------------
         // Admin/testing surfaces over crate::qwk: both are gated on
         // `qwk_enabled` inside the service (same gate as the telnet `qwk`

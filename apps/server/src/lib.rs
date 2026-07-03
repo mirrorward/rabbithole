@@ -11,6 +11,7 @@ pub mod federation;
 pub mod ftn;
 pub mod handlers10;
 pub mod handlers11;
+pub mod handlers12;
 pub mod handlers2;
 pub mod handlers3;
 pub mod handlers4;

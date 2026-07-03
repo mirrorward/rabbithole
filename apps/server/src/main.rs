@@ -37,7 +37,8 @@ enum Cmd {
     Run,
     /// Talk to a running burrow through its local ctl socket.
     Ctl {
-        /// e.g.: status | config-get | config-set | account-create | who
+        /// e.g.: status | config-get | config-set | account-create | who |
+        /// theme-status | theme-clear
         cmd: String,
         /// Positional args: config-get KEY, config-set KEY VALUE,
         /// account-create LOGIN PASSWORD [ROLE], backup DEST-DIR,
@@ -129,6 +130,8 @@ async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<
         ("account-create", [login, password, role]) => {
             json!({"cmd": "account-create", "login": login, "password": password, "role": role})
         }
+        ("theme-status", _) => json!({"cmd": "theme-status"}),
+        ("theme-clear", _) => json!({"cmd": "theme-clear"}),
         ("fed-catalogs", _) => json!({"cmd": "fed-catalogs"}),
         ("fed-search", terms) if !terms.is_empty() => {
             json!({"cmd": "fed-search", "terms": terms.join(" ")})
@@ -138,7 +141,7 @@ async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<
         // Always refused by the server with the offline procedure.
         ("restore", [dir]) => json!({"cmd": "restore", "path": dir}),
         _ => anyhow::bail!(
-            "usage: burrow ctl <status|who|config-get KEY|config-set KEY VALUE|account-create LOGIN PASSWORD [ROLE]|fed-catalogs|fed-search TERMS…|backup DEST-DIR|backup-verify SNAPSHOT-DIR>"
+            "usage: burrow ctl <status|who|config-get KEY|config-set KEY VALUE|account-create LOGIN PASSWORD [ROLE]|theme-status|theme-clear|fed-catalogs|fed-search TERMS…|backup DEST-DIR|backup-verify SNAPSHOT-DIR>"
         ),
     };
 

@@ -25,6 +25,7 @@ pub mod presence;
 pub mod pushlog;
 pub mod ratelimit;
 pub mod swarm;
+pub mod theme;
 
 pub use auth::{AuthError, AuthService, AuthedUser, RegistrationMode};
 pub use boards::{BoardError, BoardService};

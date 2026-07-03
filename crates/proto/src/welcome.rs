@@ -1,5 +1,5 @@
 //! Welcome screen, theme bundle, and keyword teleport (session family,
-//! Wave 2.3).
+//! Wave 2.3), plus the per-account server-theme preference (Wave 8).
 
 use serde::{Deserialize, Serialize};
 
@@ -78,6 +78,17 @@ pub struct ThemeBundle {
     pub banner: Option<[u8; 32]>,
     /// Named icon overrides → blob ids.
     pub icons: Vec<(String, [u8; 32])>,
+    /// Structured light-mode design tokens (Wave 8): `--rh-*` custom
+    /// property name → value, canonically sorted by name. Colours are hex
+    /// (`#rgb`/`#rrggbb`); metrics are simple CSS lengths. The server
+    /// validates against a closed grammar plus WCAG contrast rails before
+    /// applying (`rabbithole-server-core::theme`) — free-form CSS never
+    /// travels here.
+    pub tokens_light: Vec<(String, String)>,
+    /// Structured dark-mode design tokens (same grammar as `tokens_light`).
+    pub tokens_dark: Vec<(String, String)>,
+    /// Mode-independent metric tokens (spacing, radii, type scale).
+    pub tokens_shared: Vec<(String, String)>,
 }
 
 impl ThemeBundle {
@@ -88,6 +99,9 @@ impl ThemeBundle {
             logo_ansi: None,
             banner: None,
             icons: Vec::new(),
+            tokens_light: Vec::new(),
+            tokens_dark: Vec::new(),
+            tokens_shared: Vec::new(),
         }
     }
 }
@@ -162,4 +176,90 @@ impl KeywordTarget {
 impl Message for KeywordTarget {
     const FAMILY: Family = Family::SESSION;
     const MESSAGE_TYPE: u16 = 47;
+}
+
+// ---------------------------------------------------------------------------
+// Per-account server-theme preference (Wave 8): types 57..59.
+// ---------------------------------------------------------------------------
+
+/// Read this account's server-theme preference. → [`ThemePrefState`].
+/// Accounts only (guests have no stored preferences).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ThemePrefGet;
+
+impl Message for ThemePrefGet {
+    const FAMILY: Family = Family::SESSION;
+    const MESSAGE_TYPE: u16 = 57;
+}
+
+/// Set this account's server-theme preference — the safety valve: with
+/// `disable_server_theme` set, [`ThemeGet`] answers `NotFound` for this
+/// account and the client renders its default tokens. → [`ThemePrefState`]
+/// (the new state). Accounts only.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ThemePrefSet {
+    pub disable_server_theme: bool,
+}
+
+impl ThemePrefSet {
+    pub fn new(disable_server_theme: bool) -> Self {
+        Self {
+            disable_server_theme,
+        }
+    }
+}
+
+impl Message for ThemePrefSet {
+    const FAMILY: Family = Family::SESSION;
+    const MESSAGE_TYPE: u16 = 58;
+}
+
+/// The account's current server-theme preference.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ThemePrefState {
+    pub disable_server_theme: bool,
+}
+
+impl ThemePrefState {
+    pub fn new(disable_server_theme: bool) -> Self {
+        Self {
+            disable_server_theme,
+        }
+    }
+}
+
+impl Message for ThemePrefState {
+    const FAMILY: Family = Family::SESSION;
+    const MESSAGE_TYPE: u16 = 59;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_bundle_roundtrips_with_tokens() {
+        let mut bundle = ThemeBundle::new("Wonderland");
+        bundle.accent_rgb = Some([1, 2, 3]);
+        bundle.logo_ansi = Some("== W8 ==".into());
+        bundle.banner = Some([7; 32]);
+        bundle.icons = vec![("dm".into(), [9; 32])];
+        bundle.tokens_light = vec![("--rh-accent".into(), "#2b63d8".into())];
+        bundle.tokens_dark = vec![("--rh-accent".into(), "#6c9cff".into())];
+        bundle.tokens_shared = vec![("--rh-radius".into(), ".5rem".into())];
+        let bytes = postcard::to_allocvec(&bundle).unwrap();
+        let back: ThemeBundle = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back, bundle);
+    }
+
+    #[test]
+    fn theme_pref_roundtrips() {
+        for on in [true, false] {
+            let bytes = postcard::to_allocvec(&ThemePrefSet::new(on)).unwrap();
+            let back: ThemePrefSet = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(back.disable_server_theme, on);
+        }
+    }
 }

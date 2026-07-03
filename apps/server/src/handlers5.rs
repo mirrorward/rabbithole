@@ -1,14 +1,15 @@
-//! Wave 2.3 handlers: welcome screen, theme bundle, keyword teleport.
+//! Wave 2.3 handlers: welcome screen, theme bundle, keyword teleport —
+//! plus the Wave 8 per-account server-theme preference (the safety valve
+//! for admin-applied theme bundles).
 
 use std::sync::Arc;
 
-use rabbithole_blobs::BlobId;
 use rabbithole_identity::keys::IdentityKey;
 use rabbithole_net::Connection;
 use rabbithole_proto::welcome as pw;
 use rabbithole_proto::{ErrorCode, Frame};
 use rabbithole_store_server::repo2::PersonasRepo;
-use rabbithole_store_server::repo3::DmsRepo;
+use rabbithole_store_server::repo3::{set_theme_server_disabled, theme_server_disabled, DmsRepo};
 
 use crate::session::SessionCtx;
 use crate::Shared;
@@ -78,19 +79,12 @@ pub(crate) async fn compose_welcome(
 }
 
 /// Build the signed theme bundle (None when the server has no theme set).
+/// The bundle is rebuilt from config on every fetch, so an admin
+/// `ThemeBundleSet`/`Clear` (or a legacy `config set theme_accent`)
+/// hot-applies to the next request.
 fn build_theme(shared: &Shared) -> Option<pw::ThemeReply> {
     let cfg = shared.config.read();
-    let accent = (!cfg.theme_accent.is_empty())
-        .then(|| hex::decode(&cfg.theme_accent).ok())
-        .flatten()
-        .and_then(|v| <[u8; 3]>::try_from(v).ok());
-    let logo = (!cfg.theme_logo_ansi.is_empty()).then(|| cfg.theme_logo_ansi.clone());
-    if accent.is_none() && logo.is_none() {
-        return None;
-    }
-    let mut bundle = pw::ThemeBundle::new(cfg.name.clone());
-    bundle.accent_rgb = accent;
-    bundle.logo_ansi = logo;
+    let bundle = rabbithole_server_core::theme::bundle_from_config(&cfg)?;
     drop(cfg);
     let bytes = postcard::to_allocvec(&bundle).ok()?;
     let key = IdentityKey::from_seed(&shared.server_signing_seed);
@@ -117,13 +111,40 @@ pub async fn handle(
     }
 
     if frame.decode::<pw::ThemeGet>().is_some() {
-        match build_theme(shared) {
+        // The Wave 8 safety valve: an account that disabled server theming
+        // gets NotFound — its client renders default tokens. Guests have no
+        // stored preference and take the server theme.
+        let disabled = !ctx.is_guest && theme_server_disabled(&shared.pool, ctx.account_id).await?;
+        match (!disabled).then(|| build_theme(shared)).flatten() {
             Some(theme) => reply!(&theme),
             None => {
                 conn.send(Frame::error_reply(frame, ErrorCode::NotFound))
                     .await?
             }
         }
+        return Ok(true);
+    }
+
+    // ---- Per-account server-theme preference (Wave 8) ---------------------
+    if frame.decode::<pw::ThemePrefGet>().is_some() {
+        if ctx.is_guest {
+            conn.send(Frame::error_reply(frame, ErrorCode::Forbidden))
+                .await?;
+            return Ok(true);
+        }
+        let disabled = theme_server_disabled(&shared.pool, ctx.account_id).await?;
+        reply!(&pw::ThemePrefState::new(disabled));
+        return Ok(true);
+    }
+
+    if let Some(Ok(req)) = frame.decode::<pw::ThemePrefSet>() {
+        if ctx.is_guest {
+            conn.send(Frame::error_reply(frame, ErrorCode::Forbidden))
+                .await?;
+            return Ok(true);
+        }
+        set_theme_server_disabled(&shared.pool, ctx.account_id, req.disable_server_theme).await?;
+        reply!(&pw::ThemePrefState::new(req.disable_server_theme));
         return Ok(true);
     }
 
@@ -209,10 +230,4 @@ pub fn verify_theme(reply: &pw::ThemeReply, server_key: &[u8; 32]) -> Option<pw:
         return None;
     }
     postcard::from_bytes(&reply.bundle).ok()
-}
-
-/// Suppress unused import warnings until BlobId is used by theme banners.
-#[allow(dead_code)]
-fn _blob_touch(id: [u8; 32]) -> BlobId {
-    BlobId(id)
 }
