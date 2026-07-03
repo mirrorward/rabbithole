@@ -36,8 +36,45 @@ pub fn ThemeToggle() -> impl IntoView {
     let app = expect_context::<AppState>();
     let pack = move || pack_label(app.theme.get().pack);
     let mode = move || mode_label(app.theme.get().mode);
+    // The server-theming opt-out only appears when the connected burrow ships
+    // a theme (PLAN §9.11: server theming is on by default, user can disable).
+    let server_name = move || {
+        app.server_theme
+            .with(|s| s.as_ref().map(|o| o.name.clone()))
+    };
+    let disabled = move || app.server_theme_disabled.get();
+    let server_title = move || match (server_name(), disabled()) {
+        (Some(name), false) => {
+            format!("Server theme \u{201c}{name}\u{201d} on \u{2014} click to use your own")
+        }
+        (Some(name), true) => {
+            format!("Server theme \u{201c}{name}\u{201d} off \u{2014} click to apply it")
+        }
+        (None, _) => String::new(),
+    };
+    // Solid when the server theme is applied (its accent tints the button
+    // itself), ghost when the user has switched it off.
+    let server_class = move || {
+        if disabled() {
+            "rh-btn ghost small"
+        } else {
+            "rh-btn small"
+        }
+    };
     view! {
         <span class="rh-theme-menu">
+            <Show when=move || server_name().is_some() fallback=|| ()>
+                <button
+                    class=server_class
+                    aria-pressed=move || (!disabled()).to_string()
+                    title=server_title
+                    on:click=move |_| {
+                        app.set_server_theme_disabled(!app.server_theme_disabled.get_untracked())
+                    }
+                >
+                    "\u{25C6} Server"
+                </button>
+            </Show>
             <button
                 class="rh-btn ghost"
                 title="Cycle theme pack: Clean / Retro / High Contrast"
@@ -162,6 +199,9 @@ pub fn Login() -> impl IntoView {
         app.refresh_who();
         // Seeded now-playing notices, so the status segment shows on arrival.
         app.load_radio();
+        // The server's published theme bundle (welcome frame in the real
+        // transport), so the overlay + opt-out are live on arrival.
+        app.load_server_theme();
         navigate("/lobby", Default::default());
     };
 

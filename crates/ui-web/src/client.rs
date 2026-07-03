@@ -24,6 +24,7 @@ use rabbithole_proto::filelib::{
 };
 use rabbithole_proto::session::ServerNotice;
 use rabbithole_proto::transfer::{FileChunk, TransferTicket};
+use rabbithole_proto::welcome::ThemeBundle;
 use rabbithole_proto::{Frame, Message, RequestId};
 
 use crate::files::{KIND_FILE, KIND_FOLDER};
@@ -587,6 +588,19 @@ impl MockClient {
             .filter_map(|text| Frame::push(&ServerNotice::new(text.clone(), "radio")).ok())
             .filter_map(|frame| frame_to_notice_route(&frame))
             .collect()
+    }
+
+    /// A sample server-published theme bundle, so the server-theming overlay
+    /// and the user opt-out are demonstrable in dev. The real transport
+    /// delivers this (already server-validated + signed) in the welcome frame;
+    /// here it is a plain in-memory [`ThemeBundle`] whose warm per-mode accent
+    /// visibly differs from the default pack's indigo. Only tokens the server
+    /// grammar permits are set (per-mode `--rh-accent`).
+    pub fn server_theme_bundle(&self) -> Option<ThemeBundle> {
+        let mut b = ThemeBundle::new("The Warren");
+        b.tokens_light = vec![("--rh-accent".to_string(), "#b45309".to_string())];
+        b.tokens_dark = vec![("--rh-accent".to_string(), "#f59e0b".to_string())];
+        Some(b)
     }
 
     /// The lobby scrollback every fresh session is seeded with.

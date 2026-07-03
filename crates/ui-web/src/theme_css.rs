@@ -21,6 +21,7 @@
 use rabbithole_core::theme::{Mode, ThemePack};
 
 use crate::packs::PackTokens;
+use crate::server_theme::ServerOverlay;
 
 /// The pack a fresh session renders with before any persisted choice.
 pub const DEFAULT_PACK: ThemePack = ThemePack::Clean;
@@ -31,14 +32,30 @@ pub fn root_style(pack: ThemePack, mode: Mode) -> String {
     PackTokens::builtin(pack).style_for(mode)
 }
 
-/// Resolve the app-root style with the theme editor's **custom pack override
-/// slot**: when a custom [`PackTokens`] has been applied to the session it
-/// wins wholesale; otherwise the built-in `pack` renders. Pure and
-/// host-tested — the reactive layer in [`crate::app`] only feeds it signals.
-pub fn resolve_root_style(custom: Option<&PackTokens>, pack: ThemePack, mode: Mode) -> String {
-    match custom {
-        Some(tokens) => tokens.style_for(mode),
-        None => root_style(pack, mode),
+/// Resolve the app-root style from the three appearance layers, in priority
+/// order:
+///
+/// 1. the theme editor's **custom pack override slot** — when a custom
+///    [`PackTokens`] is applied (a live edit preview) it wins wholesale, so the
+///    editor shows exactly what is being edited, unlayered;
+/// 2. otherwise a **server theme overlay** (PLAN §9.11), when present and not
+///    disabled by the user, layered on top of the built-in `pack` — the
+///    operator's accent/metric tokens nudge the chosen pack without replacing
+///    it;
+/// 3. otherwise the plain built-in `pack`.
+///
+/// Pure and host-tested — the reactive layer in [`crate::app`] only feeds it
+/// signals (passing `None` for the server overlay switches server theming off).
+pub fn resolve_root_style(
+    custom: Option<&PackTokens>,
+    server: Option<&ServerOverlay>,
+    pack: ThemePack,
+    mode: Mode,
+) -> String {
+    match (custom, server) {
+        (Some(tokens), _) => tokens.style_for(mode),
+        (None, Some(overlay)) => overlay.over(&PackTokens::builtin(pack)).style_for(mode),
+        (None, None) => root_style(pack, mode),
     }
 }
 
@@ -514,27 +531,56 @@ mod tests {
 
     #[test]
     fn custom_override_slot_wins_over_the_builtin_pack() {
-        // No override: the built-in pack renders.
+        // No override of either kind: the built-in pack renders.
         assert_eq!(
-            resolve_root_style(None, ThemePack::Retro, Mode::Dark),
+            resolve_root_style(None, None, ThemePack::Retro, Mode::Dark),
             root_style(ThemePack::Retro, Mode::Dark)
         );
         // An applied custom pack overrides wholesale, per mode.
         let mut custom = PackTokens::builtin(ThemePack::Clean);
         custom.dark.insert("--rh-accent".into(), "#ff00ff".into());
         for mode in MODES {
-            let style = resolve_root_style(Some(&custom), ThemePack::Retro, mode);
+            let style = resolve_root_style(Some(&custom), None, ThemePack::Retro, mode);
             assert_eq!(style, custom.style_for(mode), "{mode:?}");
         }
         assert!(
-            resolve_root_style(Some(&custom), ThemePack::Retro, Mode::Dark)
+            resolve_root_style(Some(&custom), None, ThemePack::Retro, Mode::Dark)
                 .contains("--rh-accent:#ff00ff;")
         );
         // Light mode is untouched by the dark-only edit.
         assert_eq!(
-            resolve_root_style(Some(&custom), ThemePack::Retro, Mode::Light),
+            resolve_root_style(Some(&custom), None, ThemePack::Retro, Mode::Light),
             root_style(ThemePack::Clean, Mode::Light)
         );
+        // The editor's custom slot also wins over a server overlay (a live
+        // edit preview is shown unlayered).
+        let mut server = ServerOverlay::default();
+        server.dark.insert("--rh-accent".into(), "#00ff00".into());
+        assert_eq!(
+            resolve_root_style(Some(&custom), Some(&server), ThemePack::Retro, Mode::Dark),
+            custom.style_for(Mode::Dark),
+            "custom preview beats the server overlay"
+        );
+    }
+
+    #[test]
+    fn server_overlay_layers_on_the_pack_when_no_custom_preview() {
+        // A server overlay nudges the chosen pack: the accent changes, the
+        // rest of the pack (its type/elevation extras) stays put.
+        let mut server = ServerOverlay::default();
+        server.dark.insert("--rh-accent".into(), "#00c2ff".into());
+        let style = resolve_root_style(None, Some(&server), ThemePack::Clean, Mode::Dark);
+        assert!(
+            style.contains("--rh-accent:#00c2ff;"),
+            "server accent applied"
+        );
+        // A pack token the overlay didn't name still comes from Clean.
+        let base = root_style(ThemePack::Clean, Mode::Dark);
+        let shadow = base
+            .split(';')
+            .find(|d| d.starts_with("--rh-shadow-2:"))
+            .unwrap();
+        assert!(style.contains(shadow), "unnamed tokens keep the pack value");
     }
 
     #[test]

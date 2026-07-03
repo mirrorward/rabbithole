@@ -10,6 +10,7 @@ use leptos::*;
 use leptos_router::*;
 use rabbithole_core::api::Command;
 use rabbithole_core::theme::Mode;
+use rabbithole_proto::welcome::ThemeBundle;
 
 use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
@@ -19,6 +20,7 @@ use crate::components::{
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
 use crate::radio::{clamp_volume, RadioPrefs, RadioState};
+use crate::server_theme::ServerOverlay;
 use crate::state::UiState;
 use crate::syndication_admin::SynAdminState;
 use crate::theme_css::{next_mode, next_pack, resolve_root_style, ThemeChoice, STYLESHEET};
@@ -48,6 +50,13 @@ pub struct AppState {
     /// still applies). Session-local and unpersisted — Apply is a preview,
     /// not a save.
     pub custom_pack: RwSignal<Option<PackTokens>>,
+    /// The server-published theme overlay (PLAN §9.11), when the connected
+    /// burrow ships one. Layered on top of the chosen pack (below the editor's
+    /// custom slot) unless the user has disabled server theming.
+    pub server_theme: RwSignal<Option<ServerOverlay>>,
+    /// The user's opt-out of server theming (persisted). `true` = ignore any
+    /// server overlay and render the user's own pack/mode choice only.
+    pub server_theme_disabled: RwSignal<bool>,
     /// Radio now-playing per station, folded from routed `[radio]` notices.
     pub radio: RwSignal<RadioState>,
     /// The user's radio player preferences (enable/volume/mute/station plus
@@ -72,6 +81,8 @@ impl AppState {
             is_admin: create_rw_signal(false),
             theme: create_rw_signal(initial_theme_choice()),
             custom_pack: create_rw_signal(None),
+            server_theme: create_rw_signal(None),
+            server_theme_disabled: create_rw_signal(initial_server_theme_disabled()),
             radio: create_rw_signal(RadioState::default()),
             radio_prefs: create_rw_signal(initial_radio_prefs()),
             client: store_value(MockClient::new()),
@@ -110,6 +121,45 @@ impl AppState {
     /// Clear the custom override slot, returning to the chosen built-in pack.
     pub fn clear_custom_pack(&self) {
         self.custom_pack.set(None);
+    }
+
+    /// Apply a server-published theme bundle to this session (from the welcome
+    /// frame / `ThemeGet`). An all-empty bundle clears any prior server theme.
+    pub fn apply_server_theme(&self, bundle: &ThemeBundle) {
+        let overlay = ServerOverlay::from_bundle(bundle);
+        self.server_theme
+            .set((!overlay.is_empty()).then_some(overlay));
+    }
+
+    /// Drop the current server theme (e.g. on disconnect).
+    pub fn clear_server_theme(&self) {
+        self.server_theme.set(None);
+    }
+
+    /// The connected server's theme name, if it ships one — labels the opt-out
+    /// control in [`crate::components::ThemeToggle`].
+    pub fn server_theme_name(&self) -> Option<String> {
+        self.server_theme
+            .with(|s| s.as_ref().map(|o| o.name.clone()))
+    }
+
+    /// Turn server theming on/off for this user (persisted), per PLAN §9.11's
+    /// "user can disable server theming" rail.
+    pub fn set_server_theme_disabled(&self, disabled: bool) {
+        self.server_theme_disabled.set(disabled);
+        #[cfg(target_arch = "wasm32")]
+        crate::server_theme::storage::save_disabled(disabled);
+    }
+
+    /// Load the mock's seeded server theme bundle so the overlay + opt-out are
+    /// demonstrable in dev (the real transport delivers this in the welcome
+    /// frame). Mirrors [`AppState::load_radio`].
+    pub fn load_server_theme(&self) {
+        let bundle = self.client.with_value(|c| c.server_theme_bundle());
+        match bundle {
+            Some(b) => self.apply_server_theme(&b),
+            None => self.clear_server_theme(),
+        }
     }
 
     /// Persist the current theme choice (browser only; no-op on the host).
@@ -512,6 +562,19 @@ fn initial_radio_prefs() -> RadioPrefs {
     }
 }
 
+/// Whether server theming starts disabled: the persisted opt-out on the
+/// browser, else `false` (server themes apply by default, per PLAN §9.11).
+fn initial_server_theme_disabled() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::server_theme::storage::load_disabled()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
 /// Whether the OS prefers dark mode. On the host (tests) this defaults to
 /// `true`, preserving the SPA's original dark-first default.
 fn os_prefers_dark() -> bool {
@@ -546,8 +609,15 @@ pub fn App() -> impl IntoView {
 
     let style = move || {
         let (pack, mode) = (app.theme.get().pack, app.mode());
-        app.custom_pack
-            .with(|custom| resolve_root_style(custom.as_ref(), pack, mode))
+        // Server theming layers below the editor's live preview and only when
+        // the user hasn't switched it off.
+        let show_server = !app.server_theme_disabled.get();
+        app.custom_pack.with(|custom| {
+            app.server_theme.with(|server| {
+                let server = show_server.then_some(server.as_ref()).flatten();
+                resolve_root_style(custom.as_ref(), server, pack, mode)
+            })
+        })
     };
 
     view! {

@@ -87,6 +87,7 @@ pub mod files;
 pub mod packs;
 pub mod pwa;
 pub mod radio;
+pub mod server_theme;
 pub mod state;
 pub mod syndication_admin;
 pub mod theme_css;
@@ -113,6 +114,7 @@ pub use radio::{
     parse_radio_notice, status_segment, stream_url, RadioPrefs, RadioState, RadioUpdate,
     StationStatus,
 };
+pub use server_theme::ServerOverlay;
 pub use state::{Board, ChatLine, DmMessage, DmThread, Member, Post, Thread, UiState};
 pub use syndication_admin::{
     expected_applies_live, parse_feeds_value, validate_poll_secs, FeedRow, FeedsStatus, GatewayRow,
