@@ -46,6 +46,12 @@ web-sys = { workspace = true, features = [
     # PWA install-readiness (`src/pwa.rs`): navigator.serviceWorker.register.
     "Navigator",
     "ServiceWorkerContainer",
+    # Route-change focus management (`src/a11y.rs`):
+    # document.getElementById(...).focus(), so keyboard and screen-reader
+    # users land on the new view's <h1> after client-side navigation.
+    "Document",
+    "Element",
+    "HtmlElement",
 ] }
 gloo-timers.workspace = true
 

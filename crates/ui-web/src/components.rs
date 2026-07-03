@@ -4,12 +4,22 @@
 //! [`crate::state`] (the DOM-free reducer) and [`crate::client`] (the seam),
 //! both host-testable. Components only wire reactive signals to markup and
 //! forward user intent to [`AppState::dispatch`].
+//!
+//! ## Accessibility contract
+//!
+//! Every routed view renders one `<main id="rh-main">` (the skip-link
+//! target) containing exactly one `<h1 id="rh-view-title" tabindex="-1">`
+//! (the route-change focus target — visible where the design has a title,
+//! `.rh-visually-hidden` otherwise), with headings descending without skips
+//! beneath it. The full checklist — landmarks, labels, live regions, tables,
+//! keyboard, focus — lives in [`crate::a11y`].
 
 use leptos::*;
 use leptos_router::{use_navigate, use_params_map, A};
 use rabbithole_core::api::Command;
 use rabbithole_core::theme::{Mode, ThemePack};
 
+use crate::a11y;
 use crate::app::AppState;
 use crate::client::LOBBY;
 use crate::files::{human_size, node_kind_label, TransferStatus, KIND_FOLDER};
@@ -47,13 +57,15 @@ pub fn ThemeToggle() -> impl IntoView {
 }
 
 /// The primary section links. Rendered inside the [`StatusBar`], they preserve
-/// the shared session (context) while switching routes.
+/// the shared session (context) while switching routes. The router's
+/// [`A`] stamps `aria-current="page"` on the active link, and the stylesheet
+/// keys the active style off that attribute.
 #[component]
 pub fn Nav() -> impl IntoView {
     let app = expect_context::<AppState>();
     let is_admin = app.is_admin;
     view! {
-        <nav class="rh-nav">
+        <nav class="rh-nav" aria-label="Primary">
             <A href="/lobby">"Lobby"</A>
             <A href="/boards">"Boards"</A>
             <A href="/dms">"DMs"</A>
@@ -95,23 +107,32 @@ pub fn StatusBar() -> impl IntoView {
     };
     let radio = app.radio;
     let now_playing = move || radio.with(crate::radio::status_segment).unwrap_or_default();
+    // The connection label and status line are polite live regions so
+    // transient states ("Connecting…", "Reconnecting…", command errors)
+    // announce without stealing focus; the now-playing segment sits in an
+    // always-mounted `role="status"` slot (collapsed via CSS when empty) so
+    // track changes announce too. The dot is decorative — the label beside
+    // it carries the state as text.
     view! {
         <header class="rh-header">
-            <span class=dot_class></span>
-            <span class="rh-conn">{conn_label}</span>
+            <span class=dot_class aria-hidden="true"></span>
+            <span class="rh-conn" role="status">{conn_label}</span>
             <span class="rh-title">{title}</span>
-            <span class="rh-status">{status}</span>
+            <span class="rh-status" role="status">{status}</span>
             <span class="rh-spacer"></span>
-            <Show when=move || radio.with(|r| r.on_air().is_some()) fallback=|| ()>
-                <A href="/radio" class="rh-radio-now">{now_playing}</A>
-            </Show>
+            <span class="rh-live-slot" role="status">
+                <Show when=move || radio.with(|r| r.on_air().is_some()) fallback=|| ()>
+                    <A href="/radio" class="rh-radio-now">{now_playing}</A>
+                </Show>
+            </span>
             <Nav/>
             <ThemeToggle/>
         </header>
     }
 }
 
-/// Connect screen: server URL + handle + connect button.
+/// Connect screen: server URL + handle + connect button. A real `<form>`
+/// (Enter submits from either field) with `<label for=…>` on both inputs.
 #[component]
 pub fn Login() -> impl IntoView {
     let app = expect_context::<AppState>();
@@ -119,7 +140,8 @@ pub fn Login() -> impl IntoView {
     let endpoint = create_rw_signal("ws://localhost:9000".to_string());
     let handle = create_rw_signal(String::new());
 
-    let connect = move |_| {
+    let connect = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
         let who = handle.get();
         if who.trim().is_empty() {
             return;
@@ -144,23 +166,27 @@ pub fn Login() -> impl IntoView {
     };
 
     view! {
-        <div class="rh-login">
-            <h1>"RabbitHole"</h1>
-            <label>"Server"</label>
-            <input
-                class="rh-input"
-                prop:value=endpoint
-                on:input=move |ev| endpoint.set(event_target_value(&ev))
-            />
-            <label>"Handle"</label>
-            <input
-                class="rh-input"
-                placeholder="your handle"
-                prop:value=handle
-                on:input=move |ev| handle.set(event_target_value(&ev))
-            />
-            <button class="rh-btn" on:click=connect>"Connect"</button>
-        </div>
+        <main id=a11y::MAIN_ID tabindex="-1">
+            <form class="rh-login" on:submit=connect>
+                <h1 id=a11y::VIEW_TITLE_ID tabindex="-1">"RabbitHole"</h1>
+                <label for=a11y::LOGIN_SERVER_ID>"Server"</label>
+                <input
+                    id=a11y::LOGIN_SERVER_ID
+                    class="rh-input"
+                    prop:value=endpoint
+                    on:input=move |ev| endpoint.set(event_target_value(&ev))
+                />
+                <label for=a11y::LOGIN_HANDLE_ID>"Handle"</label>
+                <input
+                    id=a11y::LOGIN_HANDLE_ID
+                    class="rh-input"
+                    placeholder="your handle"
+                    prop:value=handle
+                    on:input=move |ev| handle.set(event_target_value(&ev))
+                />
+                <button class="rh-btn" type="submit">"Connect"</button>
+            </form>
+        </main>
     }
 }
 
@@ -204,21 +230,26 @@ pub fn Lobby() -> impl IntoView {
 
     view! {
         <StatusBar/>
-        <div class="rh-body">
-            <section class="rh-chat">
-                <div class="rh-scroll">
-                    <For
-                        each=move || {
-                            state.with(|s| s.messages.clone().into_iter().enumerate().collect::<Vec<_>>())
-                        }
-                        key=|(i, _)| *i
-                        children=move |(_, line)| view! {
-                            <div class="rh-line">
-                                <span class="rh-from">{line.from}</span>
-                                {line.text}
-                            </div>
-                        }
-                    />
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
+            <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Lobby"</h1>
+            <section class="rh-chat" aria-label="Lobby chat">
+                // role=log: an implicitly polite live region — new messages
+                // are announced without moving focus off the compose box.
+                <div class="rh-scroll" role="log" aria-label="Chat messages">
+                    <ul class="rh-lines">
+                        <For
+                            each=move || {
+                                state.with(|s| s.messages.clone().into_iter().enumerate().collect::<Vec<_>>())
+                            }
+                            key=|(i, _)| *i
+                            children=move |(_, line)| view! {
+                                <li class="rh-line">
+                                    <span class="rh-from">{line.from}</span>
+                                    {line.text}
+                                </li>
+                            }
+                        />
+                    </ul>
                 </div>
                 <form
                     class="rh-compose"
@@ -229,6 +260,7 @@ pub fn Lobby() -> impl IntoView {
                 >
                     <input
                         class="rh-input"
+                        aria-label="Message the lobby"
                         placeholder="Message the lobby\u{2026}"
                         prop:value=draft
                         on:input=move |ev| draft.set(event_target_value(&ev))
@@ -237,7 +269,7 @@ pub fn Lobby() -> impl IntoView {
                 </form>
             </section>
             <WhoList/>
-        </div>
+        </main>
     }
 }
 
@@ -250,9 +282,9 @@ pub fn Boards() -> impl IntoView {
 
     view! {
         <StatusBar/>
-        <div class="rh-body">
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <section class="rh-panel">
-                <h2 class="rh-panel-title">"Boards"</h2>
+                <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">"Boards"</h1>
                 <ul class="rh-tree">
                     <For
                         each=move || state.with(|s| s.boards.clone())
@@ -271,7 +303,7 @@ pub fn Boards() -> impl IntoView {
                     />
                 </ul>
             </section>
-        </div>
+        </main>
     }
 }
 
@@ -302,10 +334,10 @@ pub fn BoardView() -> impl IntoView {
 
     view! {
         <StatusBar/>
-        <div class="rh-body">
-            <section class="rh-panel rh-threads">
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
+            <section class="rh-panel rh-threads" aria-label="Threads">
                 <A href="/boards" class="rh-back">"\u{2190} All boards"</A>
-                <h2 class="rh-panel-title">{board_name}</h2>
+                <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">{board_name}</h1>
                 <ul class="rh-tree">
                     <For
                         each=move || state.with(|s| s.threads.clone())
@@ -326,6 +358,7 @@ pub fn BoardView() -> impl IntoView {
                                 <li class="rh-tree-item">
                                     <button
                                         class=class
+                                        aria-current=move || selected().then_some("true")
                                         on:click=move |_| app.open_thread(id)
                                     >
                                         <span class="rh-thread-title">{t.title}</span>
@@ -337,7 +370,7 @@ pub fn BoardView() -> impl IntoView {
                     />
                 </ul>
             </section>
-            <section class="rh-panel rh-reader">
+            <section class="rh-panel rh-reader" aria-label="Thread posts">
                 <Show
                     when=move || state.with(|s| s.selected_thread.is_some())
                     fallback=|| view! {
@@ -358,7 +391,7 @@ pub fn BoardView() -> impl IntoView {
                     </div>
                 </Show>
             </section>
-        </div>
+        </main>
     }
 }
 
@@ -382,7 +415,10 @@ pub fn Dms() -> impl IntoView {
 
     view! {
         <StatusBar/>
-        <div class="rh-body">
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
+            <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">
+                "Direct messages"
+            </h1>
             <aside class="rh-who">
                 <h2>"Conversations"</h2>
                 <ul>
@@ -395,6 +431,7 @@ pub fn Dms() -> impl IntoView {
                                 let id = id.clone();
                                 move || state.with(|s| s.selected_dm.as_deref() == Some(id.as_str()))
                             };
+                            let current = selected.clone();
                             let class = move || {
                                 if selected() {
                                     "rh-dm-peer active"
@@ -406,6 +443,7 @@ pub fn Dms() -> impl IntoView {
                                 <li>
                                     <button
                                         class=class
+                                        aria-current=move || current().then_some("true")
                                         on:click=move |_| state.update(|s| s.select_dm(&id))
                                     >
                                         {t.peer}
@@ -416,33 +454,35 @@ pub fn Dms() -> impl IntoView {
                     />
                 </ul>
             </aside>
-            <section class="rh-chat">
+            <section class="rh-chat" aria-label="Conversation">
                 <Show
                     when=move || state.with(|s| s.selected_dm.is_some())
                     fallback=|| view! {
                         <p class="rh-empty">"Select a conversation."</p>
                     }
                 >
-                    <div class="rh-scroll">
-                        <For
-                            each=move || {
-                                state.with(|s| {
-                                    s.active_dm()
-                                        .map(|t| t.messages.clone())
-                                        .unwrap_or_default()
-                                        .into_iter()
-                                        .enumerate()
-                                        .collect::<Vec<_>>()
-                                })
-                            }
-                            key=|(i, _)| *i
-                            children=move |(_, m)| view! {
-                                <div class="rh-line">
-                                    <span class="rh-from">{m.from}</span>
-                                    {m.text}
-                                </div>
-                            }
-                        />
+                    <div class="rh-scroll" role="log" aria-label="Conversation messages">
+                        <ul class="rh-lines">
+                            <For
+                                each=move || {
+                                    state.with(|s| {
+                                        s.active_dm()
+                                            .map(|t| t.messages.clone())
+                                            .unwrap_or_default()
+                                            .into_iter()
+                                            .enumerate()
+                                            .collect::<Vec<_>>()
+                                    })
+                                }
+                                key=|(i, _)| *i
+                                children=move |(_, m)| view! {
+                                    <li class="rh-line">
+                                        <span class="rh-from">{m.from}</span>
+                                        {m.text}
+                                    </li>
+                                }
+                            />
+                        </ul>
                     </div>
                     <form
                         class="rh-compose"
@@ -453,6 +493,7 @@ pub fn Dms() -> impl IntoView {
                     >
                         <input
                             class="rh-input"
+                            aria-label="Write a direct message"
                             placeholder="Write a message\u{2026}"
                             prop:value=draft
                             on:input=move |ev| draft.set(event_target_value(&ev))
@@ -461,7 +502,7 @@ pub fn Dms() -> impl IntoView {
                     </form>
                 </Show>
             </section>
-        </div>
+        </main>
     }
 }
 
@@ -475,11 +516,13 @@ pub fn Directory() -> impl IntoView {
 
     view! {
         <StatusBar/>
-        <div class="rh-body">
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <section class="rh-panel rh-members">
-                <h2 class="rh-panel-title">"Members"</h2>
+                <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">"Members"</h1>
                 <input
                     class="rh-input"
+                    type="search"
+                    aria-label="Search members"
                     placeholder="Search members\u{2026}"
                     prop:value=move || state.with(|s| s.directory_query.clone())
                     on:input=move |ev| {
@@ -494,6 +537,9 @@ pub fn Directory() -> impl IntoView {
                         children=move |m| {
                             let handle = m.handle.clone();
                             let dot = if m.online { "rh-dot on" } else { "rh-dot off" };
+                            // The dot alone carried presence; keep it
+                            // decorative and speak the state as hidden text.
+                            let presence = if m.online { "Online:" } else { "Offline:" };
                             view! {
                                 <li class="rh-tree-item">
                                     <button
@@ -502,7 +548,8 @@ pub fn Directory() -> impl IntoView {
                                             state.update(|s| s.select_member(&handle))
                                         }
                                     >
-                                        <span class=dot></span>
+                                        <span class=dot aria-hidden="true"></span>
+                                        <span class="rh-visually-hidden">{presence}</span>
                                         <span class="rh-member-name">{m.display_name}</span>
                                         <span class="rh-member-handle">"@"{m.handle}</span>
                                     </button>
@@ -512,7 +559,7 @@ pub fn Directory() -> impl IntoView {
                     />
                 </ul>
             </section>
-            <section class="rh-panel rh-profile">
+            <section class="rh-panel rh-profile" aria-label="Member profile">
                 <Show
                     when=move || state.with(|s| s.active_member().is_some())
                     fallback=|| view! {
@@ -524,7 +571,7 @@ pub fn Directory() -> impl IntoView {
                             let status = if m.online { "Online" } else { "Offline" };
                             view! {
                                 <div class="rh-card">
-                                    <h3 class="rh-card-name">{m.display_name.clone()}</h3>
+                                    <h2 class="rh-card-name">{m.display_name.clone()}</h2>
                                     <p class="rh-card-handle">"@"{m.handle.clone()}</p>
                                     <p class="rh-card-status">{status}</p>
                                     <p class="rh-card-bio">{m.bio.clone()}</p>
@@ -534,7 +581,7 @@ pub fn Directory() -> impl IntoView {
                     })}
                 </Show>
             </section>
-        </div>
+        </main>
     }
 }
 
@@ -554,8 +601,9 @@ pub fn Files() -> impl IntoView {
 
     view! {
         <StatusBar/>
-        <div class="rh-body">
-            <section class="rh-panel rh-files">
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
+            <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Files"</h1>
+            <section class="rh-panel rh-files" aria-label="File browser">
                 <Show
                     when=move || files.with(|f| f.current_area.is_some())
                     fallback=move || view! { <AreaList/> }
@@ -563,11 +611,11 @@ pub fn Files() -> impl IntoView {
                     <FolderBrowser/>
                 </Show>
             </section>
-            <section class="rh-panel">
+            <section class="rh-panel" aria-label="File details and transfers">
                 <FileDetail/>
                 <TransferQueue/>
             </section>
-        </div>
+        </main>
     }
 }
 
@@ -619,7 +667,7 @@ fn FolderBrowser() -> impl IntoView {
 
     view! {
         <button class="rh-back" on:click=leave>"\u{2190} All areas"</button>
-        <div class="rh-crumbs">
+        <nav class="rh-crumbs" aria-label="Folder path">
             <For
                 each=move || {
                     files.with(|f| f.breadcrumbs().into_iter().enumerate().collect::<Vec<_>>())
@@ -627,7 +675,9 @@ fn FolderBrowser() -> impl IntoView {
                 key=|(i, (label, _))| format!("{i}:{label}")
                 children=move |(i, (label, path))| {
                     view! {
-                        {(i > 0).then(|| view! { <span class="rh-crumb sep">"/"</span> })}
+                        {(i > 0).then(|| view! {
+                            <span class="rh-crumb sep" aria-hidden="true">"/"</span>
+                        })}
                         <button
                             class="rh-crumb"
                             on:click=move |_| app.go_to_path(path.clone())
@@ -637,7 +687,7 @@ fn FolderBrowser() -> impl IntoView {
                     }
                 }
             />
-        </div>
+        </nav>
         <div class="rh-toolbar">
             <button
                 class="rh-btn small"
@@ -646,6 +696,7 @@ fn FolderBrowser() -> impl IntoView {
                 "Upload sample"
             </button>
         </div>
+        <h2 class="rh-visually-hidden">"Folder contents"</h2>
         <ul class="rh-tree">
             <For
                 each=move || files.with(|f| f.nodes.clone())
@@ -655,6 +706,8 @@ fn FolderBrowser() -> impl IntoView {
                     let is_folder = n.kind == KIND_FOLDER;
                     let name = n.name.clone();
                     let icon = if is_folder { "\u{1F4C1}" } else { "\u{1F4C4}" };
+                    // The kind emoji is decorative: folders already say
+                    // "Folder" in their meta text, files show a size.
                     let meta = if is_folder {
                         node_kind_label(n.kind).to_string()
                     } else {
@@ -677,8 +730,12 @@ fn FolderBrowser() -> impl IntoView {
                     };
                     view! {
                         <li class="rh-tree-item">
-                            <button class=class on:click=on_click>
-                                <span class="rh-file-icon">{icon}</span>
+                            <button
+                                class=class
+                                aria-current=move || selected().then_some("true")
+                                on:click=on_click
+                            >
+                                <span class="rh-file-icon" aria-hidden="true">{icon}</span>
                                 <span class="rh-file-name">{n.name.clone()}</span>
                                 <span class="rh-file-meta">{meta}</span>
                             </button>
@@ -706,7 +763,7 @@ fn FileDetail() -> impl IntoView {
                         let id = n.id;
                         view! {
                             <div class="rh-card">
-                                <h3 class="rh-card-name">{n.name.clone()}</h3>
+                                <h2 class="rh-card-name">{n.name.clone()}</h2>
                                 <dl class="rh-meta-grid">
                                     <dt>"Type"</dt>
                                     <dd>{n.mime.clone()}</dd>
@@ -758,6 +815,7 @@ fn TransferQueue() -> impl IntoView {
                             TransferStatus::Failed => "failed",
                         };
                         let width = format!("width:{pct}%");
+                        let bar_label = format!("{} transfer progress", t.name);
                         view! {
                             <li class="rh-queue-item">
                                 <div class="rh-queue-head">
@@ -765,7 +823,14 @@ fn TransferQueue() -> impl IntoView {
                                     <span class=badge>{status}</span>
                                     <span class="rh-queue-pct">{format!("{pct}%")}</span>
                                 </div>
-                                <div class="rh-bar">
+                                <div
+                                    class="rh-bar"
+                                    role="progressbar"
+                                    aria-label=bar_label
+                                    aria-valuemin="0"
+                                    aria-valuemax="100"
+                                    aria-valuenow=pct.to_string()
+                                >
                                     <div class=bar style=width></div>
                                 </div>
                             </li>
@@ -793,7 +858,8 @@ pub fn Radio() -> impl IntoView {
 
     view! {
         <StatusBar/>
-        <div class="rh-body">
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
+            <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Radio"</h1>
             <section class="rh-panel rh-stations">
                 <h2 class="rh-panel-title">"On the air"</h2>
                 <Show
@@ -810,6 +876,7 @@ pub fn Radio() -> impl IntoView {
                                     let slug = slug.clone();
                                     move || prefs.with(|p| p.station.as_deref() == Some(slug.as_str()))
                                 };
+                                let current = selected.clone();
                                 let class = move || {
                                     if selected() {
                                         "rh-station-link active"
@@ -829,6 +896,7 @@ pub fn Radio() -> impl IntoView {
                                     <li class="rh-tree-item">
                                         <button
                                             class=class
+                                            aria-current=move || current().then_some("true")
                                             on:click=move |_| app.select_station(&slug)
                                         >
                                             <span class="rh-station-head">
@@ -847,10 +915,10 @@ pub fn Radio() -> impl IntoView {
                     </ul>
                 </Show>
             </section>
-            <section class="rh-panel">
+            <section class="rh-panel" aria-label="Radio player">
                 <RadioPlayerPanel/>
             </section>
-        </div>
+        </main>
     }
 }
 
@@ -899,7 +967,8 @@ fn RadioPlayerPanel() -> impl IntoView {
         <Show when=move || base_ok() && !has_station() fallback=|| ()>
             <p class="rh-hint">"Pick a station from the list to tune in."</p>
         </Show>
-        <div class="rh-toolbar">
+        <fieldset class="rh-fieldset rh-toolbar">
+            <legend class="rh-visually-hidden">"Playback controls"</legend>
             <button
                 class="rh-btn small"
                 disabled=move || !ready()
@@ -919,6 +988,7 @@ fn RadioPlayerPanel() -> impl IntoView {
                 type="range"
                 min="0"
                 max="100"
+                aria-label="Volume"
                 disabled=move || !ready()
                 prop:value=move || volume_pct().to_string()
                 on:input=move |ev| {
@@ -927,8 +997,10 @@ fn RadioPlayerPanel() -> impl IntoView {
                     }
                 }
             />
-            <span class="rh-file-meta">{move || format!("{}%", volume_pct())}</span>
-        </div>
+            <span class="rh-file-meta" aria-hidden="true">
+                {move || format!("{}%", volume_pct())}
+            </span>
+        </fieldset>
         <Show when=move || tuned().is_some() fallback=|| ()>
             <p class="rh-hint">
                 {move || {
@@ -942,9 +1014,16 @@ fn RadioPlayerPanel() -> impl IntoView {
 
 /// Render CP437/ANSI `bytes` to an HTML `<canvas>`. Parsing and the
 /// cells→draw-ops transform are pure ([`crate::art`]); only the paint call is
-/// wasm-gated.
+/// wasm-gated. The canvas is exposed as an image with `label` as its
+/// alternative text — canvas content is otherwise invisible to assistive
+/// technology.
 #[component]
-pub fn ArtCanvas(#[prop(into)] bytes: Vec<u8>) -> impl IntoView {
+pub fn ArtCanvas(
+    #[prop(into)] bytes: Vec<u8>,
+    /// Alternative text for the rendered artwork.
+    #[prop(into, default = String::from("ANSI artwork"))]
+    label: String,
+) -> impl IntoView {
     let canvas = crate::art::parse_art(&bytes);
     let (w, h) = crate::art::pixel_size(&canvas);
     let node = create_node_ref::<leptos::html::Canvas>();
@@ -959,7 +1038,16 @@ pub fn ArtCanvas(#[prop(into)] bytes: Vec<u8>) -> impl IntoView {
         });
     }
 
-    view! { <canvas node_ref=node width=w height=h class="rh-art"></canvas> }
+    view! {
+        <canvas
+            node_ref=node
+            width=w
+            height=h
+            class="rh-art"
+            role="img"
+            aria-label=label
+        ></canvas>
+    }
 }
 
 /// The web-admin console: server config, accounts & classes, and a moderation
@@ -983,38 +1071,41 @@ pub fn Admin() -> impl IntoView {
 
     view! {
         <StatusBar/>
-        <Show
-            when=move || is_admin.get()
-            fallback=|| view! {
-                <div class="rh-body">
+        <main class="rh-admin-main" id=a11y::MAIN_ID tabindex="-1">
+            <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Admin"</h1>
+            <Show
+                when=move || is_admin.get()
+                fallback=|| view! {
+                    <div class="rh-body">
+                        <section class="rh-panel">
+                            <p class="rh-empty">"You do not have admin access."</p>
+                        </section>
+                    </div>
+                }
+            >
+                <div class="rh-admin-status" role="status">{status}</div>
+                <div class="rh-body rh-admin">
                     <section class="rh-panel">
-                        <p class="rh-empty">"You do not have admin access."</p>
+                        <AdminConfigPanel/>
+                        <AdminModerationPanel/>
+                    </section>
+                    <section class="rh-panel">
+                        <AdminAccountsPanel/>
+                        <AdminClassesPanel/>
                     </section>
                 </div>
-            }
-        >
-            <div class="rh-admin-status">{status}</div>
-            <div class="rh-body rh-admin">
-                <section class="rh-panel">
-                    <AdminConfigPanel/>
-                    <AdminModerationPanel/>
-                </section>
-                <section class="rh-panel">
-                    <AdminAccountsPanel/>
-                    <AdminClassesPanel/>
-                </section>
-            </div>
-            <div class="rh-body">
-                <section class="rh-panel">
-                    <SyndicationPanel/>
-                </section>
-            </div>
-            <div class="rh-body">
-                <section class="rh-panel">
-                    <ThemeEditorPanel/>
-                </section>
-            </div>
-        </Show>
+                <div class="rh-body">
+                    <section class="rh-panel">
+                        <SyndicationPanel/>
+                    </section>
+                </div>
+                <div class="rh-body">
+                    <section class="rh-panel">
+                        <ThemeEditorPanel/>
+                    </section>
+                </div>
+            </Show>
+        </main>
     }
 }
 
@@ -1045,63 +1136,81 @@ fn SyndicationPanel() -> impl IntoView {
     view! {
         <h2 class="rh-panel-title">"Syndication & gateways"</h2>
         <Show when=has_status fallback=|| ()>
-            <p class="rh-hint">{status}</p>
+            <p class="rh-hint" role="status">{status}</p>
         </Show>
 
-        <h2 class="rh-panel-title">"Gateway matrix"</h2>
-        <ul class="rh-tree">
-            <For
-                each=matrix
-                key=|r| format!("{}:{:?}:{:?}:{}", r.toggle_key, r.enabled, r.port, r.applies_live)
-                children=move |r| {
-                    let dot = match r.enabled {
-                        Some(true) => "rh-dot on",
-                        Some(false) => "rh-dot off",
-                        None => "rh-dot pending",
-                    };
-                    let port = r
-                        .port
-                        .map(|p| format!("port {p}"))
-                        .unwrap_or_else(|| "\u{2014}".to_string());
-                    let (badge, badge_text) = if r.applies_live {
-                        ("rh-badge done", "live")
-                    } else {
-                        ("rh-badge", "restart")
-                    };
-                    let toggle_key = r.toggle_key;
-                    let can_toggle = r.enabled.is_some();
-                    let label = match r.enabled {
-                        Some(true) => "Disable",
-                        _ => "Enable",
-                    };
-                    view! {
-                        <li class="rh-tree-item rh-account-row">
-                            <span class=dot></span>
-                            <span class="rh-member-name">{r.family}</span>
-                            <span class="rh-file-meta">{port}</span>
-                            <span class=badge>{badge_text}</span>
-                            <button
-                                class="rh-btn small"
-                                disabled=!can_toggle
-                                on:click=move |_| app.syn_toggle(toggle_key)
-                            >
-                                {label}
-                            </button>
-                        </li>
+        <h3 class="rh-panel-title">"Gateway matrix"</h3>
+        <table class="rh-table">
+            <thead>
+                <tr>
+                    <th scope="col">"State"</th>
+                    <th scope="col">"Network"</th>
+                    <th scope="col">"Port"</th>
+                    <th scope="col">"Applies"</th>
+                    <th scope="col"><span class="rh-visually-hidden">"Toggle"</span></th>
+                </tr>
+            </thead>
+            <tbody>
+                <For
+                    each=matrix
+                    key=|r| format!("{}:{:?}:{:?}:{}", r.toggle_key, r.enabled, r.port, r.applies_live)
+                    children=move |r| {
+                        let (dot, state_text) = match r.enabled {
+                            Some(true) => ("rh-dot on", "enabled"),
+                            Some(false) => ("rh-dot off", "disabled"),
+                            None => ("rh-dot pending", "unknown"),
+                        };
+                        let port = r
+                            .port
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "\u{2014}".to_string());
+                        let (badge, badge_text) = if r.applies_live {
+                            ("rh-badge done", "live")
+                        } else {
+                            ("rh-badge", "restart")
+                        };
+                        let toggle_key = r.toggle_key;
+                        let can_toggle = r.enabled.is_some();
+                        let label = match r.enabled {
+                            Some(true) => "Disable",
+                            _ => "Enable",
+                        };
+                        view! {
+                            <tr>
+                                <td>
+                                    <span class=dot aria-hidden="true"></span>
+                                    <span class="rh-visually-hidden">{state_text}</span>
+                                </td>
+                                <td class="rh-member-name">{r.family}</td>
+                                <td class="rh-file-meta">{port}</td>
+                                <td><span class=badge>{badge_text}</span></td>
+                                <td>
+                                    <button
+                                        class="rh-btn small"
+                                        disabled=!can_toggle
+                                        on:click=move |_| app.syn_toggle(toggle_key)
+                                    >
+                                        {label}
+                                        <span class="rh-visually-hidden">" "{r.family}</span>
+                                    </button>
+                                </td>
+                            </tr>
+                        }
                     }
-                }
-            />
-        </ul>
+                />
+            </tbody>
+        </table>
         <p class="rh-hint">
             "\"restart\" keys save to burrow.toml but take effect only after a \
              server restart (listeners bind at boot); \"live\" keys apply \
              immediately."
         </p>
 
-        <h2 class="rh-panel-title">"Feed polling"</h2>
+        <h3 class="rh-panel-title">"Feed polling"</h3>
         <div class="rh-toolbar">
-            <span class="rh-config-key">"syndication_poll_secs"</span>
+            <label class="rh-config-key" for="rh-syn-poll-secs">"syndication_poll_secs"</label>
             <input
+                id="rh-syn-poll-secs"
                 class="rh-input"
                 prop:value=move || syn.with(|s| s.poll_draft.clone())
                 on:input=move |ev| app.syn_set_poll_draft(&event_target_value(&ev))
@@ -1115,7 +1224,7 @@ fn SyndicationPanel() -> impl IntoView {
             </button>
         </div>
         <Show when=has_poll_error fallback=|| ()>
-            <p class="rh-warn">{poll_error}</p>
+            <p class="rh-warn" role="alert">{poll_error}</p>
         </Show>
         <p class="rh-hint">
             "Base seconds between feed polls (1\u{2013}604800). The server \
@@ -1124,7 +1233,7 @@ fn SyndicationPanel() -> impl IntoView {
              poll task starts at boot."
         </p>
 
-        <h2 class="rh-panel-title">"Feeds (URL \u{2192} board)"</h2>
+        <h3 class="rh-panel-title">"Feeds (URL \u{2192} board)"</h3>
         <Show when=feeds_unavailable fallback=|| ()>
             <p class="rh-hint">
                 "This server does not expose syndication_feeds over the admin \
@@ -1138,19 +1247,28 @@ fn SyndicationPanel() -> impl IntoView {
                 when=move || !feed_rows().is_empty()
                 fallback=|| view! { <p class="rh-empty">"(no feeds configured)"</p> }
             >
-                <ul class="rh-tree">
-                    <For
-                        each=feed_rows
-                        key=|f| f.url.clone()
-                        children=move |f| view! {
-                            <li class="rh-tree-item rh-account-row">
-                                <span class="rh-member-name">{f.url}</span>
-                                <span class="rh-member-handle">"\u{2192} "{f.board}</span>
-                                <span class="rh-file-meta">{feed_state}</span>
-                            </li>
-                        }
-                    />
-                </ul>
+                <table class="rh-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">"Feed URL"</th>
+                            <th scope="col">"Board"</th>
+                            <th scope="col">"State"</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <For
+                            each=feed_rows
+                            key=|f| f.url.clone()
+                            children=move |f| view! {
+                                <tr>
+                                    <td class="rh-member-name">{f.url}</td>
+                                    <td class="rh-member-handle">{f.board}</td>
+                                    <td class="rh-file-meta">{feed_state}</td>
+                                </tr>
+                            }
+                        />
+                    </tbody>
+                </table>
             </Show>
             <p class="rh-hint">
                 "Read-only here: the mapping itself is TOML-only \u{2014} edit \
@@ -1159,7 +1277,7 @@ fn SyndicationPanel() -> impl IntoView {
             </p>
         </Show>
 
-        <h2 class="rh-panel-title">"Feed monitor"</h2>
+        <h3 class="rh-panel-title">"Feed monitor"</h3>
         <p class="rh-hint">
             "Configured state only. Live per-feed stats (last poll, \
              conditional-GET 304s, dedupe hits) land with a future server \
@@ -1183,17 +1301,23 @@ fn ThemeEditorPanel() -> impl IntoView {
     let import_text = create_rw_signal(String::new());
     let dispatch = move |action: EditorAction| editor.update(|e| e.apply(action));
 
-    // Base-pack selector.
+    // Base-pack selector. `aria-pressed` mirrors the visual selected state
+    // the ghost/solid classes convey.
     let base_buttons = [ThemePack::Clean, ThemePack::Retro, ThemePack::HighContrast].map(|pack| {
+        let selected = move || editor.with(|e| e.base == pack);
         let class = move || {
-            if editor.with(|e| e.base == pack) {
+            if selected() {
                 "rh-btn small"
             } else {
                 "rh-btn small ghost"
             }
         };
         view! {
-            <button class=class on:click=move |_| dispatch(EditorAction::SelectBase(pack))>
+            <button
+                class=class
+                aria-pressed=move || selected().to_string()
+                on:click=move |_| dispatch(EditorAction::SelectBase(pack))
+            >
                 {pack_label(pack)}
             </button>
         }
@@ -1201,15 +1325,22 @@ fn ThemeEditorPanel() -> impl IntoView {
 
     // Light/dark tabs select which colour map is edited and previewed.
     let mode_tabs = [(Mode::Light, "Light"), (Mode::Dark, "Dark")].map(|(mode, label)| {
+        let selected = move || edit_mode.get() == mode;
         let class = move || {
-            if edit_mode.get() == mode {
+            if selected() {
                 "rh-btn small"
             } else {
                 "rh-btn small ghost"
             }
         };
         view! {
-            <button class=class on:click=move |_| edit_mode.set(mode)>{label}</button>
+            <button
+                class=class
+                aria-pressed=move || selected().to_string()
+                on:click=move |_| edit_mode.set(mode)
+            >
+                {label}
+            </button>
         }
     });
 
@@ -1262,19 +1393,19 @@ fn ThemeEditorPanel() -> impl IntoView {
                     <span class="rh-badge active">"edited"</span>
                 </Show>
             </h2>
-            <div class="rh-toolbar">
-                <span class="rh-var-name">"base pack"</span>
+            <fieldset class="rh-fieldset rh-toolbar">
+                <legend class="rh-var-name">"base pack"</legend>
                 {base_buttons.to_vec()}
                 <button class="rh-btn small ghost" on:click=reset>"Reset"</button>
-            </div>
-            <div class="rh-toolbar">
-                <span class="rh-var-name">"mode"</span>
+            </fieldset>
+            <fieldset class="rh-fieldset rh-toolbar">
+                <legend class="rh-var-name">"mode"</legend>
                 {mode_tabs.to_vec()}
-            </div>
+            </fieldset>
             <Show when=has_error fallback=|| ()>
-                <p class="rh-warn">{error}</p>
+                <p class="rh-warn" role="alert">{error}</p>
             </Show>
-            <h2 class="rh-panel-title">"Colours"</h2>
+            <h3 class="rh-panel-title">"Colours"</h3>
             <ul class="rh-tree">
                 <For
                     each=colour_rows
@@ -1282,47 +1413,70 @@ fn ThemeEditorPanel() -> impl IntoView {
                     children=move |(mode, var, value)| {
                         let swatch = format!("background:{value}");
                         let name = var.clone();
+                        let scope = match mode {
+                            Mode::Light => "light",
+                            Mode::Dark => "dark",
+                        };
+                        let input_id = a11y::token_input_id(scope, &var);
+                        let refocus_id = input_id.clone();
+                        // Committing re-keys (and so re-creates) this row;
+                        // put focus back on the same input so a keyboard
+                        // (Enter) commit does not strand focus on <body>.
                         let on_commit = move |ev| {
                             dispatch(EditorAction::SetColor {
                                 mode,
                                 var: var.clone(),
                                 value: event_target_value(&ev),
                             });
+                            a11y::focus_id(&refocus_id);
                         };
                         view! {
                             <li class="rh-editor-row">
-                                <span class="rh-swatch" style=swatch></span>
-                                <span class="rh-var-name">{name}</span>
-                                <input class="rh-input" prop:value=value.clone() on:change=on_commit/>
+                                <span class="rh-swatch" style=swatch aria-hidden="true"></span>
+                                <label class="rh-var-name" for=input_id.clone()>{name}</label>
+                                <input
+                                    id=input_id
+                                    class="rh-input"
+                                    prop:value=value.clone()
+                                    on:change=on_commit
+                                />
                             </li>
                         }
                     }
                 />
             </ul>
-            <h2 class="rh-panel-title">"Spacing, radii & type"</h2>
+            <h3 class="rh-panel-title">"Spacing, radii & type"</h3>
             <ul class="rh-tree">
                 <For
                     each=shared_rows
                     key=|(var, value)| format!("{var}:{value}")
                     children=move |(var, value)| {
                         let name = var.clone();
+                        let input_id = a11y::token_input_id("shared", &var);
+                        let refocus_id = input_id.clone();
                         let on_commit = move |ev| {
                             dispatch(EditorAction::SetShared {
                                 var: var.clone(),
                                 value: event_target_value(&ev),
                             });
+                            a11y::focus_id(&refocus_id);
                         };
                         view! {
                             <li class="rh-editor-row">
-                                <span class="rh-var-name">{name}</span>
-                                <input class="rh-input" prop:value=value.clone() on:change=on_commit/>
+                                <label class="rh-var-name" for=input_id.clone()>{name}</label>
+                                <input
+                                    id=input_id
+                                    class="rh-input"
+                                    prop:value=value.clone()
+                                    on:change=on_commit
+                                />
                             </li>
                         }
                     }
                 />
             </ul>
             <Show when=move || !warnings().is_empty() fallback=|| ()>
-                <h2 class="rh-panel-title">"Contrast warnings"</h2>
+                <h3 class="rh-panel-title">"Contrast warnings"</h3>
                 <ul class="rh-tree">
                     <For
                         each=warnings
@@ -1331,7 +1485,7 @@ fn ThemeEditorPanel() -> impl IntoView {
                     />
                 </ul>
             </Show>
-            <h2 class="rh-panel-title">"Preview"</h2>
+            <h3 class="rh-panel-title">"Preview"</h3>
             <ThemeEditorPreview style=Signal::derive(preview_style)/>
             <div class="rh-toolbar">
                 <button class="rh-btn small" on:click=apply_session>"Apply to my session"</button>
@@ -1344,15 +1498,17 @@ fn ThemeEditorPanel() -> impl IntoView {
                     "Publish to server"
                 </button>
             </div>
-            <h2 class="rh-panel-title">"Export (token file)"</h2>
+            <h3 class="rh-panel-title">"Export (token file)"</h3>
             <textarea
                 class="rh-textarea"
                 readonly=true
+                aria-label="Exported token file JSON"
                 prop:value=move || editor.with(|e| e.export_json())
             ></textarea>
-            <h2 class="rh-panel-title">"Import (paste a token file)"</h2>
+            <h3 class="rh-panel-title">"Import (paste a token file)"</h3>
             <textarea
                 class="rh-textarea"
+                aria-label="Token file JSON to import"
                 placeholder="Paste token-file JSON here\u{2026}"
                 prop:value=import_text
                 on:input=move |ev| import_text.set(event_target_value(&ev))
@@ -1367,20 +1523,25 @@ fn ThemeEditorPanel() -> impl IntoView {
 /// The scoped live-preview pane: a small mock of nav/status/chat inside a
 /// container whose `style` attribute carries the working tokens, so only this
 /// subtree re-themes (the app root keeps its own variables).
+///
+/// The mock is purely decorative, so it is `aria-hidden` and built from
+/// non-interactive elements — no `<a>`/`<button>`/`<header>`/`<nav>` that
+/// would put fake stops in the tab order or fake landmarks in the outline
+/// (the old `href="#"` anchors were even router-interceptable).
 #[component]
 fn ThemeEditorPreview(style: Signal<String>) -> impl IntoView {
     view! {
-        <div class="rh-preview" style=move || style.get()>
-            <header class="rh-header">
+        <div class="rh-preview" style=move || style.get() aria-hidden="true">
+            <div class="rh-header">
                 <span class="rh-dot on"></span>
                 <span class="rh-title">"RabbitHole"</span>
                 <span class="rh-status">"Connected"</span>
                 <span class="rh-spacer"></span>
-                <nav class="rh-nav">
-                    <a href="#" class="active">"Lobby"</a>
-                    <a href="#">"Boards"</a>
-                </nav>
-            </header>
+                <span class="rh-nav">
+                    <span class="rh-nav-item active">"Lobby"</span>
+                    <span class="rh-nav-item">"Boards"</span>
+                </span>
+            </div>
             <div class="rh-preview-body">
                 <div class="rh-line">
                     <span class="rh-from">"rabbit"</span>
@@ -1391,13 +1552,15 @@ fn ThemeEditorPreview(style: Signal<String>) -> impl IntoView {
                     "This theme is looking sharp."
                 </div>
                 <p class="rh-warn">"A sample error line."</p>
-                <button class="rh-btn small">"Send"</button>
+                <span class="rh-btn small">"Send"</span>
             </div>
         </div>
     }
 }
 
-/// Server-config editor: one row per known key with a Save action.
+/// Server-config editor: one row per known key with a Save action. Each
+/// input is labelled by its config key via a real `<label for=…>` pair
+/// (ids from [`a11y::config_input_id`]).
 #[component]
 fn AdminConfigPanel() -> impl IntoView {
     let app = expect_context::<AppState>();
@@ -1410,13 +1573,15 @@ fn AdminConfigPanel() -> impl IntoView {
                 key=|c| c.key.clone()
                 children=move |c| {
                     let key = c.key.clone();
+                    let input_id = a11y::config_input_id(&key);
                     let draft = create_rw_signal(c.value.clone());
                     let save_key = key.clone();
                     let save = move |_| app.set_config(&save_key, &draft.get());
                     view! {
                         <li class="rh-tree-item rh-config-row">
-                            <span class="rh-config-key">{key}</span>
+                            <label class="rh-config-key" for=input_id.clone()>{key}</label>
                             <input
+                                id=input_id
                                 class="rh-input"
                                 prop:value=move || draft.get()
                                 on:input=move |ev| draft.set(event_target_value(&ev))
@@ -1458,6 +1623,7 @@ fn AdminModerationPanel() -> impl IntoView {
         <div class="rh-toolbar">
             <input
                 class="rh-input"
+                aria-label="Notice to broadcast"
                 placeholder="Broadcast a notice\u{2026}"
                 prop:value=move || notice.get()
                 on:input=move |ev| notice.set(event_target_value(&ev))
@@ -1467,6 +1633,7 @@ fn AdminModerationPanel() -> impl IntoView {
         <div class="rh-toolbar">
             <input
                 class="rh-input"
+                aria-label="Session id to kick"
                 placeholder="Session id to kick\u{2026}"
                 prop:value=move || session.get()
                 on:input=move |ev| session.set(event_target_value(&ev))
@@ -1480,7 +1647,8 @@ fn AdminModerationPanel() -> impl IntoView {
 }
 
 /// Account directory: role/class/status per account, with an enable/disable
-/// toggle.
+/// toggle. Rendered as a real `<table>` — the data is tabular, and column
+/// headers give screen readers the grid context the flex rows lacked.
 #[component]
 fn AdminAccountsPanel() -> impl IntoView {
     let app = expect_context::<AppState>();
@@ -1488,56 +1656,90 @@ fn AdminAccountsPanel() -> impl IntoView {
     let total = move || admin.with(|a| a.account_total);
     view! {
         <h2 class="rh-panel-title">"Accounts (" {total} ")"</h2>
-        <ul class="rh-tree">
-            <For
-                each=move || admin.with(|a| a.accounts.clone())
-                key=|a| a.id
-                children=move |a| {
-                    let login = a.login.clone();
-                    let disabled = a.disabled;
-                    let class = a.class.clone().unwrap_or_else(|| "\u{2014}".to_string());
-                    let dot = if disabled { "rh-dot off" } else { "rh-dot on" };
-                    let toggle_login = login.clone();
-                    let toggle = move |_| app.set_account_disabled(&toggle_login, !disabled);
-                    let btn_label = if disabled { "Enable" } else { "Disable" };
-                    view! {
-                        <li class="rh-tree-item rh-account-row">
-                            <span class=dot></span>
-                            <span class="rh-member-name">{login}</span>
-                            <span class="rh-member-handle">"class: "{class}</span>
-                            <span class="rh-account-role">"role "{a.role.to_string()}</span>
-                            <button class="rh-btn small" on:click=toggle>{btn_label}</button>
-                        </li>
+        <table class="rh-table">
+            <thead>
+                <tr>
+                    <th scope="col">"State"</th>
+                    <th scope="col">"Login"</th>
+                    <th scope="col">"Class"</th>
+                    <th scope="col">"Role"</th>
+                    <th scope="col"><span class="rh-visually-hidden">"Toggle"</span></th>
+                </tr>
+            </thead>
+            <tbody>
+                <For
+                    each=move || admin.with(|a| a.accounts.clone())
+                    key=|a| a.id
+                    children=move |a| {
+                        let login = a.login.clone();
+                        let disabled = a.disabled;
+                        let class = a.class.clone().unwrap_or_else(|| "\u{2014}".to_string());
+                        let (dot, state_text) = if disabled {
+                            ("rh-dot off", "disabled")
+                        } else {
+                            ("rh-dot on", "enabled")
+                        };
+                        let toggle_login = login.clone();
+                        let toggle = move |_| app.set_account_disabled(&toggle_login, !disabled);
+                        let btn_label = if disabled { "Enable" } else { "Disable" };
+                        let btn_target = login.clone();
+                        view! {
+                            <tr>
+                                <td>
+                                    <span class=dot aria-hidden="true"></span>
+                                    <span class="rh-visually-hidden">{state_text}</span>
+                                </td>
+                                <td class="rh-member-name">{login}</td>
+                                <td class="rh-member-handle">{class}</td>
+                                <td class="rh-account-role">{a.role.to_string()}</td>
+                                <td>
+                                    <button class="rh-btn small" on:click=toggle>
+                                        {btn_label}
+                                        <span class="rh-visually-hidden">" "{btn_target}</span>
+                                    </button>
+                                </td>
+                            </tr>
+                        }
                     }
-                }
-            />
-        </ul>
+                />
+            </tbody>
+        </table>
     }
 }
 
-/// Permission classes: name, member count, and capability mask (hex).
+/// Permission classes: name, member count, and capability mask (hex), as a
+/// table for the same reason as the accounts panel.
 #[component]
 fn AdminClassesPanel() -> impl IntoView {
     let app = expect_context::<AppState>();
     let admin = app.admin;
     view! {
         <h2 class="rh-panel-title">"Classes"</h2>
-        <ul class="rh-tree">
-            <For
-                each=move || admin.with(|a| a.classes.clone())
-                key=|c| c.name.clone()
-                children=move |c| {
-                    let mask = format!("0x{:016x}", c.base_mask);
-                    view! {
-                        <li class="rh-tree-item rh-account-row">
-                            <span class="rh-member-name">{c.name}</span>
-                            <span class="rh-member-handle">{c.members.to_string()}" members"</span>
-                            <span class="rh-file-meta">{mask}</span>
-                        </li>
+        <table class="rh-table">
+            <thead>
+                <tr>
+                    <th scope="col">"Name"</th>
+                    <th scope="col">"Members"</th>
+                    <th scope="col">"Capability mask"</th>
+                </tr>
+            </thead>
+            <tbody>
+                <For
+                    each=move || admin.with(|a| a.classes.clone())
+                    key=|c| c.name.clone()
+                    children=move |c| {
+                        let mask = format!("0x{:016x}", c.base_mask);
+                        view! {
+                            <tr>
+                                <td class="rh-member-name">{c.name}</td>
+                                <td class="rh-member-handle">{c.members.to_string()}</td>
+                                <td class="rh-file-meta">{mask}</td>
+                            </tr>
+                        }
                     }
-                }
-            />
-        </ul>
+                />
+            </tbody>
+        </table>
     }
 }
 
@@ -1546,16 +1748,19 @@ fn AdminClassesPanel() -> impl IntoView {
 pub fn ArtGallery() -> impl IntoView {
     view! {
         <StatusBar/>
-        <div class="rh-body">
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <section class="rh-panel">
-                <h2 class="rh-panel-title">"ANSI Art"</h2>
+                <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">"ANSI Art"</h1>
                 <p class="rh-empty">
                     "CP437/ANSI rendered to a canvas through the shared art pipeline."
                 </p>
                 <div class="rh-art-wrap">
-                    <ArtCanvas bytes=SAMPLE_ANSI.to_vec()/>
+                    <ArtCanvas
+                        bytes=SAMPLE_ANSI.to_vec()
+                        label="Sample ANSI artwork: RabbitHole warren art in classic CP437 blocks"
+                    />
                 </div>
             </section>
-        </div>
+        </main>
     }
 }

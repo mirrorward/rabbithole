@@ -29,6 +29,10 @@ use crate::packs::PackTokens;
 /// The WCAG AA threshold for normal text; ratios below this warn.
 pub const MIN_CONTRAST: f64 = 4.5;
 
+/// The WCAG threshold for non-text elements (SC 1.4.11) — the keyboard
+/// focus outline (`--rh-focus`) warns below this.
+pub const MIN_CONTRAST_NON_TEXT: f64 = 3.0;
+
 /// One editor intent, folded into [`EditorState`] via [`EditorState::apply`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditorAction {
@@ -261,21 +265,26 @@ pub struct ContrastWarning {
     pub pair: &'static str,
     /// The measured contrast ratio.
     pub ratio: f64,
+    /// The threshold this pair failed: [`MIN_CONTRAST`] for text,
+    /// [`MIN_CONTRAST_NON_TEXT`] for the focus outline.
+    pub min: f64,
 }
 
 impl ContrastWarning {
     /// A one-line message for the editor UI.
     pub fn message(&self) -> String {
         format!(
-            "{:?} mode: {} contrast is {:.2}:1 (below {MIN_CONTRAST}:1).",
-            self.mode, self.pair, self.ratio
+            "{:?} mode: {} contrast is {:.2}:1 (below {}:1).",
+            self.mode, self.pair, self.ratio, self.min
         )
     }
 }
 
-/// Check the key foreground/background pairs (text-on-bg, accent-on-bg) in
-/// both modes and report every ratio below [`MIN_CONTRAST`]. Variables that
-/// are not parseable hex (e.g. after a hand-imported token file) are simply
+/// Check the key foreground/background pairs — text-on-bg and accent-on-bg
+/// at the [`MIN_CONTRAST`] text threshold, plus the keyboard focus outline
+/// (`--rh-focus`) at the [`MIN_CONTRAST_NON_TEXT`] non-text threshold — in
+/// both modes and report every ratio below its minimum. Variables that are
+/// not parseable hex (e.g. after a hand-imported token file) are simply
 /// skipped — warnings advise, they never block.
 pub fn contrast_warnings(tokens: &PackTokens) -> Vec<ContrastWarning> {
     let mut out = Vec::new();
@@ -283,14 +292,24 @@ pub fn contrast_warnings(tokens: &PackTokens) -> Vec<ContrastWarning> {
         let Some(bg) = map.get("--rh-bg").and_then(|v| parse_hex(v)) else {
             continue;
         };
-        for (pair, var) in [
-            ("text on background", "--rh-text"),
-            ("accent on background", "--rh-accent"),
+        for (pair, var, min) in [
+            ("text on background", "--rh-text", MIN_CONTRAST),
+            ("accent on background", "--rh-accent", MIN_CONTRAST),
+            (
+                "focus outline on background",
+                "--rh-focus",
+                MIN_CONTRAST_NON_TEXT,
+            ),
         ] {
             if let Some(fg) = map.get(var).and_then(|v| parse_hex(v)) {
                 let ratio = contrast_ratio(fg, bg);
-                if ratio < MIN_CONTRAST {
-                    out.push(ContrastWarning { mode, pair, ratio });
+                if ratio < min {
+                    out.push(ContrastWarning {
+                        mode,
+                        pair,
+                        ratio,
+                        min,
+                    });
                 }
             }
         }
@@ -505,6 +524,29 @@ mod tests {
         // #767676 on white is the canonical AA borderline (~4.54:1).
         let ratio = contrast_ratio((0x76, 0x76, 0x76), white);
         assert!((4.4..4.7).contains(&ratio), "got {ratio}");
+    }
+
+    #[test]
+    fn focus_outline_pair_warns_at_the_non_text_threshold() {
+        // No built-in pack warns (their focus token rides the accent, which
+        // every pack keeps readable — asserted exhaustively in crate::packs).
+        for pack in [ThemePack::Clean, ThemePack::Retro, ThemePack::HighContrast] {
+            assert_eq!(contrast_warnings(&PackTokens::builtin(pack)), vec![]);
+        }
+        // A murky custom focus colour trips the 3:1 non-text rule…
+        let mut e = EditorState::new(ThemePack::Clean);
+        set_color(&mut e, Mode::Dark, "--rh-focus", "#333333");
+        let warnings = contrast_warnings(&e.working);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].pair, "focus outline on background");
+        assert_eq!(warnings[0].min, MIN_CONTRAST_NON_TEXT);
+        assert!(warnings[0].message().contains("below 3:1"));
+        // …while a focus colour between 3:1 and 4.5:1 is fine: the outline
+        // is non-text, so the text threshold must not apply to it.
+        set_color(&mut e, Mode::Dark, "--rh-focus", "#8a55d1");
+        let ratio = contrast_ratio((0x8a, 0x55, 0xd1), (0x14, 0x16, 0x1b));
+        assert!((3.0..4.5).contains(&ratio), "fixture ratio {ratio:.2}");
+        assert_eq!(contrast_warnings(&e.working), vec![]);
     }
 
     #[test]

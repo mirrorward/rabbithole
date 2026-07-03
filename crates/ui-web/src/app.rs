@@ -533,6 +533,12 @@ impl Default for AppState {
 
 /// Root component: mounts the stylesheet, provides [`AppState`], applies the
 /// theme variables to the app root, and routes between login and lobby.
+///
+/// Accessibility wiring at the root: the **skip link** is the first
+/// focusable element on every page (`rel="external"` opts it out of the
+/// router's click interception, so the browser performs the native in-page
+/// jump to `<main id="rh-main">`), and [`RouteFocus`] moves focus to each
+/// view's `<h1>` after client-side navigation.
 #[component]
 pub fn App() -> impl IntoView {
     let app = AppState::new();
@@ -548,6 +554,10 @@ pub fn App() -> impl IntoView {
         <style>{STYLESHEET}</style>
         <Router>
             <div class="rh-app" style=style>
+                <a class="rh-skip" href=crate::a11y::SKIP_HREF rel="external">
+                    "Skip to main content"
+                </a>
+                <RouteFocus/>
                 <Routes>
                     <Route path="/" view=Login/>
                     <Route path="/lobby" view=Lobby/>
@@ -563,6 +573,31 @@ pub fn App() -> impl IntoView {
             </div>
         </Router>
     }
+}
+
+/// Focus management for client-side navigation: after every route change
+/// (not the initial load, where the browser's own focus handling is right),
+/// move focus to the new view's `<h1 id="rh-view-title">` — falling back to
+/// `<main id="rh-main">` — via [`crate::a11y::focus_view_title`]. Without
+/// this, keyboard and screen-reader users are stranded on the *previous*
+/// page's (now unmounted) link and reading order silently resets to `<body>`.
+///
+/// Renders nothing; it only owns the effect (it must live inside the
+/// `<Router>` to reach `use_location`). The DOM call is a wasm-gated
+/// no-op on the host, so the effect itself is host-safe.
+#[component]
+fn RouteFocus() -> impl IntoView {
+    let location = use_location();
+    create_effect(move |prev: Option<String>| {
+        let path = location.pathname.get();
+        // Focus only on genuine transitions: `prev` is None on first run.
+        if let Some(prev) = prev {
+            if prev != path {
+                crate::a11y::focus_view_title();
+            }
+        }
+        path
+    });
 }
 
 /// Mount the app into `document.body`. Called from the wasm entry point

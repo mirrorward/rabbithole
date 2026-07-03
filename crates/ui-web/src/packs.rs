@@ -60,8 +60,16 @@ impl Default for PackTokens {
     }
 }
 
-/// The colour variables for one mode: the six palette roles plus the
-/// pack's background texture (`--rh-bg-image`, `none` for flat packs).
+/// The colour variables for one mode: the six palette roles, the pack's
+/// background texture (`--rh-bg-image`, `none` for flat packs), and the
+/// keyboard focus-outline colour (`--rh-focus`).
+///
+/// `--rh-focus` is seeded from the accent — the strongest-chroma role every
+/// pack already keeps readable against its fields — and is asserted to
+/// clear WCAG's 3:1 non-text minimum against both `--rh-bg` and
+/// `--rh-surface` in every built-in pack × mode (see the tests below). It is
+/// a distinct token so custom packs can tune the outline independently; the
+/// theme editor validates and contrast-warns on it like any other colour.
 fn colour_vars(p: &Palette, bg_image: &str) -> VarMap {
     let mut m = VarMap::new();
     m.insert("--rh-bg".into(), hex(p.background));
@@ -70,6 +78,7 @@ fn colour_vars(p: &Palette, bg_image: &str) -> VarMap {
     m.insert("--rh-muted".into(), hex(p.muted));
     m.insert("--rh-accent".into(), hex(p.accent));
     m.insert("--rh-error".into(), hex(p.error));
+    m.insert("--rh-focus".into(), hex(p.accent));
     m.insert("--rh-bg-image".into(), bg_image.into());
     m
 }
@@ -296,6 +305,32 @@ mod tests {
             let t = PackTokens::builtin(pack);
             assert_eq!(t.light["--rh-bg-image"], "none");
             assert_eq!(t.dark["--rh-bg-image"], "none");
+        }
+    }
+
+    #[test]
+    fn focus_outline_clears_3_to_1_in_every_pack_and_mode() {
+        // WCAG 2.x SC 1.4.11 (non-text contrast): the keyboard focus
+        // indicator must reach 3:1 against adjacent colours. With a 2px
+        // outline-offset the outline sits on the page background or a panel
+        // surface, so both pairs are checked, in all six pack × mode combos,
+        // with the same gamma-corrected math the theme editor warns with.
+        for pack in PACKS {
+            let tokens = PackTokens::builtin(pack);
+            for (mode, map) in [(Mode::Light, &tokens.light), (Mode::Dark, &tokens.dark)] {
+                let get = |var: &str| {
+                    crate::theme_editor::parse_hex(&map[var])
+                        .unwrap_or_else(|| panic!("{pack:?}/{mode:?} {var} is hex"))
+                };
+                let focus = get("--rh-focus");
+                for against in ["--rh-bg", "--rh-surface"] {
+                    let ratio = crate::theme_editor::contrast_ratio(focus, get(against));
+                    assert!(
+                        ratio >= 3.0,
+                        "{pack:?}/{mode:?}: focus outline on {against} is {ratio:.2}:1 (< 3:1)"
+                    );
+                }
+            }
         }
     }
 

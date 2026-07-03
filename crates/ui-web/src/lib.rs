@@ -63,6 +63,10 @@
 //!   derivation, the poll-interval editor with validation, and a total
 //!   `syndication_feeds` parser — all riding the existing ADMIN config
 //!   vocabulary in [`wire`].
+//! - [`a11y`] is the accessibility layer: the shared landmark/heading id
+//!   vocabulary, label/input id pairing helpers, the wasm-gated
+//!   route-change focus helpers, and the audit checklist (what is
+//!   host-verified vs. what needs a browser).
 //! - [`app`] and [`components`] are the Leptos view layer.
 //!
 //! ## wasm hygiene
@@ -72,6 +76,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod a11y;
 pub mod admin;
 pub mod app;
 pub mod art;
@@ -96,6 +101,7 @@ pub mod ws;
 #[cfg(target_arch = "wasm32")]
 pub mod player;
 
+pub use a11y::{config_input_id, token_input_id, MAIN_ID, SKIP_HREF, VIEW_TITLE_ID};
 pub use admin::{AdminState, ConfigEntry};
 pub use app::{mount, App, AppState};
 pub use client::{MockClient, UiClient};

@@ -220,12 +220,27 @@ pub mod storage {
 /// A compact, framework-free stylesheet mounted once by the app root. All
 /// colours and metrics reference the `--rh-*` custom properties emitted by
 /// [`root_style`].
+///
+/// Accessibility blocks (host-asserted by the shape tests below):
+/// `:focus-visible` outlines on the `--rh-focus` token, the `.rh-skip` skip
+/// link, the `.rh-visually-hidden` screen-reader-only helper,
+/// `[aria-current=page]` styling for the active nav link, and a
+/// `prefers-reduced-motion: reduce` block that neutralises all motion.
 pub const STYLESHEET: &str = "\
 *{box-sizing:border-box}\
 .rh-app{font-family:var(--rh-font-sans);font-size:var(--rh-font-size);\
 color:var(--rh-text);background-color:var(--rh-bg);\
 background-image:var(--rh-bg-image);min-height:100vh;\
 display:flex;flex-direction:column}\
+:focus-visible{outline:2px solid var(--rh-focus);outline-offset:2px}\
+.rh-visually-hidden{position:absolute;width:1px;height:1px;padding:0;\
+margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);\
+white-space:nowrap;border:0}\
+.rh-skip{position:fixed;left:-999rem;top:var(--rh-space-2);z-index:99;\
+background:var(--rh-accent);color:var(--rh-bg);\
+padding:var(--rh-space-2) var(--rh-space-3);\
+border-radius:var(--rh-radius);text-decoration:none}\
+.rh-skip:focus{left:var(--rh-space-2)}\
 .rh-header{display:flex;align-items:center;gap:var(--rh-space-3);\
 padding:.6rem var(--rh-space-4);\
 background:var(--rh-surface);border-bottom:1px solid var(--rh-bg)}\
@@ -253,6 +268,8 @@ border-radius:var(--rh-radius-lg)}\
 .rh-chat{flex:1;display:flex;flex-direction:column;min-width:0}\
 .rh-scroll{flex:1;overflow-y:auto;padding:var(--rh-space-4);display:flex;\
 flex-direction:column;gap:var(--rh-space-2)}\
+.rh-lines{list-style:none;margin:0;padding:0;display:flex;\
+flex-direction:column;gap:var(--rh-space-2)}\
 .rh-line .rh-from{color:var(--rh-accent);font-weight:600;margin-right:var(--rh-space-2)}\
 .rh-compose{display:flex;gap:var(--rh-space-2);padding:var(--rh-space-3);\
 border-top:1px solid var(--rh-surface)}\
@@ -265,10 +282,11 @@ letter-spacing:.05em;color:var(--rh-muted);margin:.2rem 0 var(--rh-space-2)}\
 flex-direction:column;gap:.35rem}\
 .rh-who li::before{content:'\\2022';color:var(--rh-accent);margin-right:var(--rh-space-2)}\
 .rh-nav{display:flex;gap:var(--rh-space-3);align-items:center}\
-.rh-nav a{color:var(--rh-muted);text-decoration:none;font-size:.9rem;\
-padding:.2rem .1rem;border-bottom:2px solid transparent}\
+.rh-nav a,.rh-nav .rh-nav-item{color:var(--rh-muted);text-decoration:none;\
+font-size:.9rem;padding:.2rem .1rem;border-bottom:2px solid transparent}\
 .rh-nav a:hover{color:var(--rh-text)}\
-.rh-nav a.active{color:var(--rh-accent);border-bottom-color:var(--rh-accent)}\
+.rh-nav a.active,.rh-nav a[aria-current=page],.rh-nav .rh-nav-item.active{\
+color:var(--rh-accent);border-bottom-color:var(--rh-accent)}\
 .rh-panel{flex:1;padding:var(--rh-space-4);overflow-y:auto;min-width:0}\
 .rh-panel-title{font-size:var(--rh-font-xs);text-transform:uppercase;\
 letter-spacing:.05em;color:var(--rh-muted);margin:.2rem 0 var(--rh-space-3)}\
@@ -352,8 +370,19 @@ border-radius:var(--rh-radius);image-rendering:pixelated;max-width:100%}\
 text-transform:uppercase;letter-spacing:.04em;margin-right:var(--rh-space-2)}\
 .rh-admin-status{padding:var(--rh-space-2) var(--rh-space-4);\
 color:var(--rh-muted);font-size:var(--rh-font-sm)}\
+.rh-admin-main{flex:1;display:flex;flex-direction:column;min-width:0}\
 .rh-config-row,.rh-account-row{flex-direction:row;align-items:center;\
 gap:var(--rh-space-2);flex-wrap:wrap}\
+.rh-table{width:100%;border-collapse:collapse;font-size:var(--rh-font-sm);\
+margin:0 0 var(--rh-space-3)}\
+.rh-table th{text-align:left;font-size:var(--rh-font-xs);font-weight:600;\
+text-transform:uppercase;letter-spacing:.05em;color:var(--rh-muted);\
+padding:.25rem var(--rh-space-3) .25rem 0}\
+.rh-table td{padding:.35rem var(--rh-space-3) .35rem 0;\
+vertical-align:middle}\
+.rh-table tbody tr{border-top:1px solid var(--rh-surface)}\
+.rh-fieldset{border:0;padding:0;margin:0;min-width:0}\
+.rh-fieldset legend{float:left;padding:0}\
 .rh-config-key{font-weight:600;min-width:12rem}\
 .rh-account-role{font-size:var(--rh-font-xs);color:var(--rh-muted)}\
 .rh-editor{display:flex;flex-direction:column;gap:var(--rh-space-3)}\
@@ -377,6 +406,7 @@ flex-direction:column;gap:var(--rh-space-2);align-items:flex-start}\
 font-size:var(--rh-font-sm);white-space:nowrap;overflow:hidden;\
 text-overflow:ellipsis;max-width:18rem}\
 .rh-radio-now:hover{text-decoration:underline}\
+.rh-live-slot:empty{display:none}\
 .rh-stations{max-width:32rem;border-right:1px solid var(--rh-surface);\
 display:flex;flex-direction:column;gap:.6rem}\
 .rh-station-link{display:flex;flex-direction:column;gap:.15rem;width:100%;\
@@ -391,6 +421,11 @@ width:100%}\
 .rh-badge.live{background:var(--rh-accent);color:var(--rh-bg)}\
 .rh-slider{accent-color:var(--rh-accent)}\
 .rh-hint{color:var(--rh-muted);font-size:var(--rh-font-sm);margin:.2rem 0}\
+@media (prefers-reduced-motion:reduce){\
+*,*::before,*::after{transition-duration:.01ms!important;\
+transition-delay:0s!important;animation-duration:.01ms!important;\
+animation-delay:0s!important;animation-iteration-count:1!important;\
+scroll-behavior:auto!important}}\
 ";
 
 #[cfg(test)]
@@ -558,5 +593,90 @@ mod tests {
             let styles: BTreeSet<String> = PACKS.iter().map(|&p| root_style(p, mode)).collect();
             assert_eq!(styles.len(), PACKS.len(), "{mode:?}");
         }
+    }
+
+    // ---- a11y shape tests -------------------------------------------------
+    //
+    // The crate has no DOM-rendering path on the host (CSR-only Leptos), so
+    // the stylesheet's accessibility contract is asserted textually — the
+    // same style as the PWA shell-asset tests in `crate::pwa`.
+
+    #[test]
+    fn stylesheet_has_a_visible_focus_indicator_on_the_focus_token() {
+        // A global :focus-visible outline, driven by the theme token so it
+        // re-colours with every pack/mode (contrast asserted in
+        // `crate::packs`), offset so it reads against the control's fill.
+        assert!(STYLESHEET.contains(":focus-visible{outline:2px solid var(--rh-focus)"));
+        assert!(STYLESHEET.contains("outline-offset:2px"));
+        // Nothing suppresses outlines wholesale.
+        assert!(
+            !STYLESHEET.contains("outline:none") && !STYLESHEET.contains("outline:0"),
+            "no rule may blanket-remove focus outlines"
+        );
+    }
+
+    #[test]
+    fn stylesheet_ships_skip_link_and_screen_reader_only_helper() {
+        // The skip link parks off-screen and snaps into view on focus.
+        assert!(STYLESHEET.contains(".rh-skip{position:fixed;left:-999rem"));
+        assert!(STYLESHEET.contains(".rh-skip:focus{left:var(--rh-space-2)}"));
+        // The sr-only helper uses the standard clip/clip-path recipe.
+        assert!(STYLESHEET.contains(".rh-visually-hidden{position:absolute;width:1px;height:1px"));
+        assert!(STYLESHEET.contains("clip-path:inset(50%)"));
+    }
+
+    #[test]
+    fn stylesheet_styles_router_aria_current_nav_state() {
+        // leptos_router's <A> stamps aria-current="page" on the active link;
+        // the stylesheet must key the active style off that attribute (not
+        // only off a class the router never sets).
+        assert!(STYLESHEET.contains(".rh-nav a[aria-current=page]"));
+    }
+
+    #[test]
+    fn stylesheet_neutralises_motion_under_reduced_motion() {
+        let block = STYLESHEET
+            .split("@media (prefers-reduced-motion:reduce){")
+            .nth(1)
+            .expect("reduced-motion media block present");
+        for marker in [
+            "transition-duration:.01ms!important",
+            "animation-duration:.01ms!important",
+            "animation-iteration-count:1!important",
+            "scroll-behavior:auto!important",
+        ] {
+            assert!(block.contains(marker), "reduced-motion block: {marker}");
+        }
+        // The block sits at the end of the sheet so it wins the cascade over
+        // every transition declared above it (the transfer bar today).
+        let media_at = STYLESHEET.find("@media (prefers-reduced-motion").unwrap();
+        let last_transition = STYLESHEET.rfind("transition:width").unwrap();
+        assert!(
+            media_at > last_transition,
+            "reduced-motion block must follow the motion it neutralises"
+        );
+    }
+
+    #[test]
+    fn stylesheet_carries_a11y_layout_helpers() {
+        // Chat/DM scrollback list reset (real <ul> message lists).
+        assert!(STYLESHEET.contains(".rh-lines{list-style:none"));
+        // Admin matrices are real tables.
+        assert!(STYLESHEET.contains(".rh-table{width:100%;border-collapse:collapse"));
+        assert!(STYLESHEET.contains(".rh-table th{text-align:left"));
+        // Grouped controls keep their toolbar layout inside real fieldsets.
+        assert!(STYLESHEET.contains(".rh-fieldset{border:0"));
+        assert!(STYLESHEET.contains(".rh-fieldset legend{float:left"));
+        // The header's live now-playing slot collapses when empty, so the
+        // always-present role=status wrapper never leaves a phantom flex gap.
+        assert!(STYLESHEET.contains(".rh-live-slot:empty{display:none}"));
+    }
+
+    #[test]
+    fn stylesheet_never_sets_a_positive_tabindex_or_hides_focus() {
+        // Belt-and-braces textual checks mirroring the markup rules: CSS
+        // cannot set tabindex, but it can break keyboard UX with these.
+        assert!(!STYLESHEET.contains("pointer-events:none"));
+        assert!(!STYLESHEET.contains("user-select:none"));
     }
 }
