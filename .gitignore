@@ -10,3 +10,11 @@ node_modules
 
 # mdBook rendered output
 docs/book/
+
+# Playwright E2E web harness (e2e-web/) build + run artifacts
+e2e-web/node_modules/
+e2e-web/test-results/
+e2e-web/playwright-report/
+
+# Built SPA output from `trunk build` (serve via `burrow --web-root`)
+crates/ui-web/dist/
