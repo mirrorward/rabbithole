@@ -389,8 +389,26 @@ impl AppState {
         });
     }
 
+    /// Whether the mock seed loaders should no-op: they must not fold seeded
+    /// [`MockClient`] data into a **live** session (DMs / members / files /
+    /// radio are not wired over the socket yet, so the view stays empty rather
+    /// than showing fabricated data). Always `false` off-wasm.
+    fn skip_mock_load(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.live.get_untracked()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            false
+        }
+    }
+
     /// Load the DM conversation snapshots into state.
     pub fn load_dms(&self) {
+        if self.skip_mock_load() {
+            return;
+        }
         let threads = self.client.with_value(|c| c.dm_threads());
         self.state.update(|s| s.set_dm_threads(threads));
     }
@@ -411,6 +429,9 @@ impl AppState {
 
     /// Load the member directory snapshot into state.
     pub fn load_members(&self) {
+        if self.skip_mock_load() {
+            return;
+        }
         let members = self.client.with_value(|c| c.members());
         self.state.update(|s| s.set_members(members));
     }
@@ -431,6 +452,9 @@ impl AppState {
 
     /// Load the file-area list into state.
     pub fn load_areas(&self) {
+        if self.skip_mock_load() {
+            return;
+        }
         self.dispatch_file(FileCommand::ListAreas);
     }
 
@@ -681,6 +705,11 @@ impl AppState {
     /// real `ServerNotice` push routed through the host-tested wire mapping),
     /// so the Radio view and status segment render in dev.
     pub fn load_radio(&self) {
+        // In a live session the radio reducer is fed by real `[radio]` pushes
+        // through the notice sink; never mix seeded mock stations in.
+        if self.skip_mock_load() {
+            return;
+        }
         for route in self.client.with_value(|c| c.radio_routes()) {
             self.apply_notice(route);
         }

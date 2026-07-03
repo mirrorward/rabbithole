@@ -377,10 +377,16 @@ pub fn Login() -> impl IntoView {
     let connect = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         if go_live.get() {
+            // Live requires a handle to authenticate — without one the session
+            // connects but never signs in (a silent dead session).
+            let who = handle.get();
+            if who.trim().is_empty() {
+                return;
+            }
             // Live: open a real socket + authenticate; state fills from
             // transport events (the handshake sets the header to Online, and
             // the lobby fills with live chat once signed in).
-            app.connect_live(endpoint.get(), handle.get(), password.get());
+            app.connect_live(endpoint.get(), who, password.get());
             navigate("/lobby", Default::default());
             return;
         }

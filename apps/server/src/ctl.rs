@@ -158,13 +158,16 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no such account: {author}"))?;
             let seed = crate::handlers6::author_seed(shared, account.id);
+            // Match the network post path's author string (`screen_name@origin`)
+            // so ctl-seeded and live-posted authors are consistent.
+            let display = format!("{}@{}", author, shared.origin_name());
             let now = chrono::Utc::now().timestamp_millis();
             let post = shared
                 .boards
                 .post(
                     &board,
                     None,
-                    &author,
+                    &display,
                     &seed,
                     &subject,
                     &body,

@@ -115,6 +115,10 @@ struct Inner {
     endpoint: String,
     /// 0-based count of consecutive reconnect attempts; reset on a clean open.
     reconnect_attempt: u32,
+    /// Bumped on every `connect()`. The keepalive loop captures its socket's
+    /// generation and exits once a newer socket supersedes it, so reconnects
+    /// don't accumulate zombie ping loops.
+    generation: u64,
     // The browser holds these callbacks by reference; we own them so they live
     // exactly as long as the socket.
     _on_open: Option<Closure<dyn FnMut(WebEvent)>>,
@@ -206,6 +210,7 @@ impl WsClient {
                 want_connected: false,
                 endpoint: String::new(),
                 reconnect_attempt: 0,
+                generation: 0,
                 _on_open: None,
                 _on_message: None,
                 _on_close: None,
@@ -330,13 +335,18 @@ impl WsClient {
     /// Write `bytes` to the socket, surfacing failures on the api-event sink.
     fn write(b: &mut Inner, bytes: &[u8]) {
         match &b.ws {
-            Some(ws) => {
+            Some(ws) if ws.ready_state() == WS_OPEN => {
                 if let Err(err) = ws.send_with_u8_array(bytes) {
                     b.emit(Event::CommandFailed {
                         detail: format!("send failed: {err:?}"),
                     });
                 }
             }
+            // Socket present but still CONNECTING (or closing): drop silently.
+            // Sending on a non-OPEN socket throws a spurious error; a read
+            // request re-fires on the next navigation, and auth/who are (re)sent
+            // from the `open` callback once the socket is ready.
+            Some(_) => {}
             None => b.emit(Event::CommandFailed {
                 detail: "not connected".to_string(),
             }),
@@ -478,6 +488,7 @@ impl WsClient {
 
         {
             let mut b = inner.borrow_mut();
+            b.generation = b.generation.wrapping_add(1);
             b.ws = Some(ws);
             b._on_open = Some(on_open);
             b._on_message = Some(on_message);
@@ -515,11 +526,15 @@ impl WsClient {
 
     /// Drive a periodic keepalive ping until the socket closes.
     fn spawn_keepalive(inner: Rc<RefCell<Inner>>) {
+        let my_generation = inner.borrow().generation;
         spawn_local(async move {
             loop {
                 TimeoutFuture::new(KEEPALIVE_MS).await;
                 let mut b = inner.borrow_mut();
-                if !b.alive {
+                // Exit once a newer socket (reconnect) has superseded this one,
+                // otherwise the loop would resurrect itself on the shared
+                // `alive` flag and pings would multiply across reconnects.
+                if !b.alive || b.generation != my_generation {
                     break;
                 }
                 let Some(ws) = b.ws.clone() else { break };

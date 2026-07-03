@@ -173,7 +173,9 @@ pub fn board_list_request(id: RequestId) -> Result<Frame, ProtoError> {
 /// Decode a [`BoardList`] reply frame to the [`Board`](crate::state::Board)
 /// rows the tree renders. `None` for any other frame or an error reply. Like
 /// the who-list, this rides its own transport sink (the core [`Event`] enum
-/// has no board variant).
+/// has no board variant). Only **postable boards** (`kind == 2`) are surfaced;
+/// the flat, clickable list can't represent categories/bundles (kind 0/1),
+/// which aren't postable and would resolve to no threads.
 pub fn frame_to_boards(frame: &Frame) -> Option<Vec<crate::state::Board>> {
     if frame.error.is_some() {
         return None;
@@ -182,6 +184,7 @@ pub fn frame_to_boards(frame: &Frame) -> Option<Vec<crate::state::Board>> {
     Some(
         list.boards
             .into_iter()
+            .filter(|b| b.kind == 2)
             .map(|b| crate::state::Board {
                 slug: b.slug,
                 name: b.title,
@@ -201,9 +204,11 @@ pub fn id_to_hex(id: &[u8; 32]) -> String {
     s
 }
 
-/// Parse a 64-char lower-hex id back to 32 bytes. `None` if malformed.
+/// Parse a 64-char lower-hex id back to 32 bytes. `None` if malformed. The
+/// `is_ascii` guard keeps the byte-slicing below on char boundaries (a 64-byte
+/// multibyte string would otherwise panic).
 pub fn hex_to_id(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
+    if s.len() != 64 || !s.is_ascii() {
         return None;
     }
     let mut out = [0u8; 32];
@@ -1004,11 +1009,13 @@ mod tests {
         use rabbithole_proto::board::{BoardInfo, BoardList};
         let mut info = BoardInfo::new("general", "General", 2);
         info.description = "Chit-chat".into();
-        let list = BoardList::new(vec![info]);
+        // A category (kind 0) must be filtered out — only postable boards show.
+        let category = BoardInfo::new("meta", "Meta", 0);
+        let list = BoardList::new(vec![category, info]);
         let req = board_list_request(RequestId(1)).unwrap();
         let reply = Frame::reply_to(&req, &list).unwrap();
         let boards = frame_to_boards(&reply).unwrap();
-        assert_eq!(boards.len(), 1);
+        assert_eq!(boards.len(), 1, "category excluded");
         assert_eq!(boards[0].slug, "general");
         assert_eq!(boards[0].name, "General");
         assert_eq!(boards[0].description, "Chit-chat");
@@ -1028,6 +1035,8 @@ mod tests {
         assert_eq!(hex_to_id(&hex), Some(id));
         assert_eq!(hex_to_id("nope"), None);
         assert_eq!(hex_to_id(&"z".repeat(64)), None);
+        // A 64-*byte* multibyte string must return None, not panic.
+        assert_eq!(hex_to_id(&"é".repeat(32)), None);
     }
 
     #[test]
