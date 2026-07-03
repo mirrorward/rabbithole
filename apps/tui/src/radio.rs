@@ -19,6 +19,10 @@
 //! When the RADIO proto slice exists, decode it in `apply_push` and call
 //! [`RadioState::apply_radio_status`] with the same struct — everything below
 //! the reducer (status segment, panel) is already wired.
+//!
+//! Listening itself is a **handoff**: the radio view derives a stream URL
+//! from these station slugs and hands it to an external player — see the
+//! `handoff` module; the TUI never decodes audio.
 
 /// One station's now-playing, mirroring the server-side `RadioStatus`.
 #[derive(Debug, Clone, PartialEq, Eq)]
