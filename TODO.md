@@ -42,7 +42,7 @@
 - [x] `rabbit` CLI: login, who, chat, JSON output mode
 - [x] `burrow ctl`: config get/set, account create, local admin socket
 - [x] Config system: TOML + env overrides + hot-reload-where-safe
-- [x] `tracing` + audit-log skeleton
+- [x] `tracing` + audit-log skeleton — operator read surface added: ctl `audit-log {limit?, actor?, action?}` over `AuditRepo::recent` (recent-first window, optional actor/action filters); 1 e2e
 
 ## Wave 2 — Community layer
 *Depends on: W1*

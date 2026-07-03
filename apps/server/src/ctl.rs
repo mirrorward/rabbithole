@@ -72,6 +72,35 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
                 shared.config.get_key(&key).map_err(|e| e.to_string())?,
             ))
         }
+        "audit-log" => {
+            let limit = req
+                .get("limit")
+                .and_then(Value::as_i64)
+                .unwrap_or(50)
+                .clamp(1, 1000);
+            let actor = req.get("actor").and_then(Value::as_str);
+            let action = req.get("action").and_then(Value::as_str);
+            let rows = AuditRepo(&shared.pool)
+                .recent(limit)
+                .await
+                .map_err(|e| e.to_string())?;
+            // Optional actor/action filters applied within the recent window.
+            let entries: Vec<Value> = rows
+                .iter()
+                .filter(|r| actor.is_none_or(|a| r.actor == a))
+                .filter(|r| action.is_none_or(|a| r.action == a))
+                .map(|r| {
+                    json!({
+                        "id": r.id,
+                        "at": r.at,
+                        "actor": r.actor,
+                        "action": r.action,
+                        "detail": r.detail,
+                    })
+                })
+                .collect();
+            Ok(json!({"count": entries.len(), "entries": entries}))
+        }
         "config-set" => {
             let key = str_arg("key")?;
             let value = str_arg("value")?;
