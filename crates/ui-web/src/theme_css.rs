@@ -373,6 +373,24 @@ background-image:var(--rh-bg-image);border:1px solid var(--rh-muted);\
 border-radius:var(--rh-radius-lg);overflow:hidden;margin:var(--rh-space-2) 0}\
 .rh-preview-body{padding:var(--rh-space-3);display:flex;\
 flex-direction:column;gap:var(--rh-space-2);align-items:flex-start}\
+.rh-radio-now{color:var(--rh-accent);text-decoration:none;\
+font-size:var(--rh-font-sm);white-space:nowrap;overflow:hidden;\
+text-overflow:ellipsis;max-width:18rem}\
+.rh-radio-now:hover{text-decoration:underline}\
+.rh-stations{max-width:32rem;border-right:1px solid var(--rh-surface);\
+display:flex;flex-direction:column;gap:.6rem}\
+.rh-station-link{display:flex;flex-direction:column;gap:.15rem;width:100%;\
+text-align:left;font:inherit;cursor:pointer;background:var(--rh-surface);\
+color:var(--rh-text);border:1px solid var(--rh-surface);\
+border-radius:var(--rh-radius);padding:.6rem var(--rh-space-3)}\
+.rh-station-link:hover,.rh-station-link.active{border-color:var(--rh-accent)}\
+.rh-station-head{display:flex;gap:var(--rh-space-2);align-items:baseline;\
+width:100%}\
+.rh-station-name{font-weight:600;color:var(--rh-text)}\
+.rh-station-track{font-size:var(--rh-font-sm);color:var(--rh-muted)}\
+.rh-badge.live{background:var(--rh-accent);color:var(--rh-bg)}\
+.rh-slider{accent-color:var(--rh-accent)}\
+.rh-hint{color:var(--rh-muted);font-size:var(--rh-font-sm);margin:.2rem 0}\
 ";
 
 #[cfg(test)]

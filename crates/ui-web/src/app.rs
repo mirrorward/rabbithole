@@ -14,13 +14,14 @@ use rabbithole_core::theme::Mode;
 use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
-    Admin, ArtGallery, BoardView, Boards, Directory, Dms, Files, Lobby, Login,
+    Admin, ArtGallery, BoardView, Boards, Directory, Dms, Files, Lobby, Login, Radio,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
+use crate::radio::{clamp_volume, RadioPrefs, RadioState};
 use crate::state::UiState;
 use crate::theme_css::{next_mode, next_pack, resolve_root_style, ThemeChoice, STYLESHEET};
-use crate::wire::{AdminCommand, AdminEvent, FileCommand, FileEvent};
+use crate::wire::{AdminCommand, AdminEvent, FileCommand, FileEvent, NoticeRoute};
 
 /// Reactive, `Copy` handle bundle shared through context.
 #[derive(Clone, Copy)]
@@ -43,8 +44,17 @@ pub struct AppState {
     /// still applies). Session-local and unpersisted — Apply is a preview,
     /// not a save.
     pub custom_pack: RwSignal<Option<PackTokens>>,
+    /// Radio now-playing per station, folded from routed `[radio]` notices.
+    pub radio: RwSignal<RadioState>,
+    /// The user's radio player preferences (enable/volume/mute/station plus
+    /// the Icecast delivery address), persisted to `localStorage`.
+    pub radio_prefs: RwSignal<RadioPrefs>,
     /// The command seam. `MockClient` today; a real transport later.
     pub client: StoredValue<MockClient>,
+    /// The wasm-only `<audio>` element wrapper the preference setters keep in
+    /// sync ([`crate::player`]). Absent on the host, where there is no DOM.
+    #[cfg(target_arch = "wasm32")]
+    player: StoredValue<crate::player::RadioPlayer>,
 }
 
 impl AppState {
@@ -57,7 +67,11 @@ impl AppState {
             is_admin: create_rw_signal(false),
             theme: create_rw_signal(initial_theme_choice()),
             custom_pack: create_rw_signal(None),
+            radio: create_rw_signal(RadioState::default()),
+            radio_prefs: create_rw_signal(initial_radio_prefs()),
             client: store_value(MockClient::new()),
+            #[cfg(target_arch = "wasm32")]
+            player: store_value(crate::player::RadioPlayer::new()),
         }
     }
 
@@ -343,6 +357,73 @@ impl AppState {
     pub fn kick(&self, session_id: u64) {
         self.dispatch_admin(AdminCommand::Kick { session_id });
     }
+
+    /// Fold one routed notice: `[radio]` bridge updates feed the radio
+    /// reducer silently; ordinary operator notices land in the chat log.
+    /// Mirrors the TUI's routing split — the transport slice calls this from
+    /// its notice sink.
+    pub fn apply_notice(&self, route: NoticeRoute) {
+        match route {
+            NoticeRoute::Radio(update) => self.radio.update(|r| r.apply_update(update)),
+            NoticeRoute::Chat { from, text } => {
+                self.state.update(|s| s.push_notice(&from, &text));
+            }
+        }
+    }
+
+    /// Load the mock's seeded radio notices into the radio state (each is a
+    /// real `ServerNotice` push routed through the host-tested wire mapping),
+    /// so the Radio view and status segment render in dev.
+    pub fn load_radio(&self) {
+        for route in self.client.with_value(|c| c.radio_routes()) {
+            self.apply_notice(route);
+        }
+    }
+
+    /// Set the Icecast delivery base address (e.g. `http://host:8000`),
+    /// persist it, and re-sync the player.
+    pub fn set_radio_base(&self, base: &str) {
+        self.radio_prefs
+            .update(|p| p.base = base.trim().to_string());
+        self.radio_prefs_changed();
+    }
+
+    /// Tune the player in or out, persist the choice, and re-sync.
+    pub fn set_radio_enabled(&self, enabled: bool) {
+        self.radio_prefs.update(|p| p.enabled = enabled);
+        self.radio_prefs_changed();
+    }
+
+    /// Mute or unmute playback (volume is remembered underneath).
+    pub fn set_radio_muted(&self, muted: bool) {
+        self.radio_prefs.update(|p| p.muted = muted);
+        self.radio_prefs_changed();
+    }
+
+    /// Set the playback volume (clamped into `0.0..=1.0`), persist, re-sync.
+    pub fn set_radio_volume(&self, volume: f32) {
+        self.radio_prefs.update(|p| p.volume = clamp_volume(volume));
+        self.radio_prefs_changed();
+    }
+
+    /// Select a station: record the slug in the preferences and — when the
+    /// player is enabled — start playing its delivery mount.
+    pub fn select_station(&self, station: &str) {
+        self.radio_prefs
+            .update(|p| p.station = Some(station.to_string()));
+        self.radio_prefs_changed();
+    }
+
+    /// Persist the preferences and reconcile the audio element (both are
+    /// browser-only edges; no-ops on the host).
+    fn radio_prefs_changed(&self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let prefs = self.radio_prefs.get_untracked();
+            crate::radio::storage::save_prefs(&prefs);
+            self.player.update_value(|p| p.sync(&prefs));
+        }
+    }
 }
 
 /// The theme choice a fresh session starts with: the persisted choice on the
@@ -355,6 +436,19 @@ fn initial_theme_choice() -> ThemeChoice {
     #[cfg(not(target_arch = "wasm32"))]
     {
         ThemeChoice::default()
+    }
+}
+
+/// The radio preferences a fresh session starts with: the persisted
+/// preferences on the browser, else the defaults.
+fn initial_radio_prefs() -> RadioPrefs {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::radio::storage::load_prefs().unwrap_or_default()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        RadioPrefs::default()
     }
 }
 
@@ -402,6 +496,7 @@ pub fn App() -> impl IntoView {
                     <Route path="/dms" view=Dms/>
                     <Route path="/directory" view=Directory/>
                     <Route path="/files" view=Files/>
+                    <Route path="/radio" view=Radio/>
                     <Route path="/art" view=ArtGallery/>
                     <Route path="/admin" view=Admin/>
                 </Routes>

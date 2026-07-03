@@ -58,6 +58,7 @@ pub fn Nav() -> impl IntoView {
             <A href="/dms">"DMs"</A>
             <A href="/directory">"Directory"</A>
             <A href="/files">"Files"</A>
+            <A href="/radio">"Radio"</A>
             <A href="/art">"Art"</A>
             <Show when=move || is_admin.get() fallback=|| ()>
                 <A href="/admin">"Admin"</A>
@@ -91,6 +92,8 @@ pub fn StatusBar() -> impl IntoView {
             "rh-dot off"
         }
     };
+    let radio = app.radio;
+    let now_playing = move || radio.with(crate::radio::status_segment).unwrap_or_default();
     view! {
         <header class="rh-header">
             <span class=dot_class></span>
@@ -98,6 +101,9 @@ pub fn StatusBar() -> impl IntoView {
             <span class="rh-title">{title}</span>
             <span class="rh-status">{status}</span>
             <span class="rh-spacer"></span>
+            <Show when=move || radio.with(|r| r.on_air().is_some()) fallback=|| ()>
+                <A href="/radio" class="rh-radio-now">{now_playing}</A>
+            </Show>
             <Nav/>
             <ThemeToggle/>
         </header>
@@ -131,6 +137,8 @@ pub fn Login() -> impl IntoView {
         });
         app.set_admin(is_admin);
         app.refresh_who();
+        // Seeded now-playing notices, so the status segment shows on arrival.
+        app.load_radio();
         navigate("/lobby", Default::default());
     };
 
@@ -764,6 +772,169 @@ fn TransferQueue() -> impl IntoView {
                     }
                 />
             </ul>
+        </Show>
+    }
+}
+
+/// The radio view: the station list (live/auto badges + listener counts) and
+/// the stream player. All state and logic live in the host-tested
+/// [`crate::radio`] (reducer, prefs, URL derivation); the wasm-only `<audio>`
+/// element behind the controls is [`crate::player`], driven through the
+/// [`AppState`] preference setters.
+#[component]
+pub fn Radio() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let radio = app.radio;
+    let prefs = app.radio_prefs;
+    app.load_radio();
+
+    let stations = move || radio.with(|r| r.stations().cloned().collect::<Vec<_>>());
+
+    view! {
+        <StatusBar/>
+        <div class="rh-body">
+            <section class="rh-panel rh-stations">
+                <h2 class="rh-panel-title">"On the air"</h2>
+                <Show
+                    when=move || radio.with(|r| !r.is_empty())
+                    fallback=|| view! { <p class="rh-empty">"(off the air)"</p> }
+                >
+                    <ul class="rh-tree">
+                        <For
+                            each=stations
+                            key=|s| format!("{}:{}:{}:{}", s.station, s.live, s.listeners, s.title)
+                            children=move |s| {
+                                let slug = s.station.clone();
+                                let selected = {
+                                    let slug = slug.clone();
+                                    move || prefs.with(|p| p.station.as_deref() == Some(slug.as_str()))
+                                };
+                                let class = move || {
+                                    if selected() {
+                                        "rh-station-link active"
+                                    } else {
+                                        "rh-station-link"
+                                    }
+                                };
+                                let badge = if s.live { "rh-badge live" } else { "rh-badge" };
+                                let badge_text = if s.live { "LIVE" } else { "auto" };
+                                let dj = if s.live {
+                                    format!("DJ {}", s.dj)
+                                } else {
+                                    s.dj.clone()
+                                };
+                                let track = crate::radio::track_line(&s);
+                                view! {
+                                    <li class="rh-tree-item">
+                                        <button
+                                            class=class
+                                            on:click=move |_| app.select_station(&slug)
+                                        >
+                                            <span class="rh-station-head">
+                                                <span class="rh-station-name">{s.station.clone()}</span>
+                                                <span class=badge>{badge_text}</span>
+                                                <span class="rh-file-meta">
+                                                    {dj}" \u{b7} "{s.listeners}" listening"
+                                                </span>
+                                            </span>
+                                            <span class="rh-station-track">{track}</span>
+                                        </button>
+                                    </li>
+                                }
+                            }
+                        />
+                    </ul>
+                </Show>
+            </section>
+            <section class="rh-panel">
+                <RadioPlayerPanel/>
+            </section>
+        </div>
+    }
+}
+
+/// The player controls: the Icecast delivery address, enable/mute toggles,
+/// and the volume slider. Controls are disabled (with a hint) until a valid
+/// delivery address is set.
+#[component]
+fn RadioPlayerPanel() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let prefs = app.radio_prefs;
+
+    let base_ok = move || prefs.with(|p| crate::radio::base_is_valid(&p.base));
+    let has_station = move || prefs.with(|p| p.station.is_some());
+    let ready = move || base_ok() && has_station();
+    let enabled = move || prefs.with(|p| p.enabled);
+    let muted = move || prefs.with(|p| p.muted);
+    let volume_pct = move || (prefs.with(|p| p.volume) * 100.0).round() as i32;
+
+    let tuned = move || {
+        prefs.with(|p| {
+            p.station
+                .as_deref()
+                .and_then(|s| crate::radio::stream_url(&p.base, s))
+        })
+    };
+
+    view! {
+        <h2 class="rh-panel-title">"Player"</h2>
+        <label class="rh-hint" for="rh-radio-base">
+            "Your server's Icecast delivery address, e.g. http://host:8000"
+        </label>
+        <div class="rh-toolbar">
+            <input
+                id="rh-radio-base"
+                class="rh-input"
+                placeholder="http://host:8000"
+                prop:value=move || prefs.with(|p| p.base.clone())
+                on:change=move |ev| app.set_radio_base(&event_target_value(&ev))
+            />
+        </div>
+        <Show when=move || !base_ok() fallback=|| ()>
+            <p class="rh-hint">
+                "Set a valid http:// or https:// delivery address to enable the player."
+            </p>
+        </Show>
+        <Show when=move || base_ok() && !has_station() fallback=|| ()>
+            <p class="rh-hint">"Pick a station from the list to tune in."</p>
+        </Show>
+        <div class="rh-toolbar">
+            <button
+                class="rh-btn small"
+                disabled=move || !ready()
+                on:click=move |_| app.set_radio_enabled(!prefs.get_untracked().enabled)
+            >
+                {move || if enabled() { "\u{25a0} Stop" } else { "\u{25b6} Listen" }}
+            </button>
+            <button
+                class="rh-btn small ghost"
+                disabled=move || !ready()
+                on:click=move |_| app.set_radio_muted(!prefs.get_untracked().muted)
+            >
+                {move || if muted() { "Unmute" } else { "Mute" }}
+            </button>
+            <input
+                class="rh-slider"
+                type="range"
+                min="0"
+                max="100"
+                disabled=move || !ready()
+                prop:value=move || volume_pct().to_string()
+                on:input=move |ev| {
+                    if let Ok(v) = event_target_value(&ev).parse::<f32>() {
+                        app.set_radio_volume(v / 100.0);
+                    }
+                }
+            />
+            <span class="rh-file-meta">{move || format!("{}%", volume_pct())}</span>
+        </div>
+        <Show when=move || tuned().is_some() fallback=|| ()>
+            <p class="rh-hint">
+                {move || {
+                    let url = tuned().unwrap_or_default();
+                    if enabled() { format!("Playing {url}") } else { format!("Ready: {url}") }
+                }}
+            </p>
         </Show>
     }
 }

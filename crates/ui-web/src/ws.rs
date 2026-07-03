@@ -20,8 +20,10 @@
 //!    the connection state becomes [`ConnState::Online`].
 //! 3. Each inbound binary message is decoded once to a [`Frame`] and fanned out:
 //!    [`wire::frame_to_events`](crate::wire::frame_to_events) → the api-event
-//!    sink, and [`wire::frame_to_file_events`](crate::wire::frame_to_file_events)
-//!    → the FILE-family sink.
+//!    sink, [`wire::frame_to_file_events`](crate::wire::frame_to_file_events)
+//!    → the FILE-family sink, and
+//!    [`wire::frame_to_notice_route`](crate::wire::frame_to_notice_route) →
+//!    the notice sink (radio bridge updates vs. operator notices, pre-split).
 //! 4. [`Command::Disconnect`] clears "connection wanted" and closes the socket
 //!    (emitting [`Event::Disconnected`]); an *unexpected* close instead
 //!    schedules a jittered, capped exponential-backoff reconnect
@@ -49,7 +51,7 @@ use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::{decode_frame, encode_frame, RequestId};
 
 use crate::conn::{backoff_delay, ConnState};
-use crate::wire::{self, EventClient, EventSink, FileCommand, FileEvent};
+use crate::wire::{self, EventClient, EventSink, FileCommand, FileEvent, NoticeRoute};
 
 /// Keepalive interval, milliseconds.
 const KEEPALIVE_MS: u32 = 30_000;
@@ -60,6 +62,10 @@ const WS_OPEN: u16 = 1;
 pub type ConnSink = Rc<dyn Fn(ConnState)>;
 /// A sink the transport pushes decoded [`FileEvent`]s into.
 pub type FileSink = Rc<dyn Fn(FileEvent)>;
+/// A sink the transport pushes routed `ServerNotice` pushes into (radio
+/// bridge updates vs. operator notices, already split by
+/// [`wire::frame_to_notice_route`]).
+pub type NoticeSink = Rc<dyn Fn(NoticeRoute)>;
 
 /// A browser WebSocket [`EventClient`] speaking RHP.
 ///
@@ -77,6 +83,7 @@ struct Inner {
     sink: Option<EventSink>,
     conn_sink: Option<ConnSink>,
     file_sink: Option<FileSink>,
+    notice_sink: Option<NoticeSink>,
     next_id: u64,
     /// While `true`, the keepalive loop keeps pinging; cleared on close.
     alive: bool,
@@ -114,6 +121,12 @@ impl Inner {
         }
     }
 
+    fn emit_notice(&self, route: NoticeRoute) {
+        if let Some(sink) = &self.notice_sink {
+            sink(route);
+        }
+    }
+
     fn next_request_id(&mut self) -> RequestId {
         self.next_id += 1;
         RequestId(self.next_id)
@@ -131,6 +144,7 @@ impl WsClient {
                 sink: None,
                 conn_sink: None,
                 file_sink: None,
+                notice_sink: None,
                 next_id: 0,
                 alive: false,
                 want_connected: false,
@@ -153,6 +167,12 @@ impl WsClient {
     /// Register the FILE-family event sink. The most recent registration wins.
     pub fn on_file_event(&mut self, sink: FileSink) {
         self.inner.borrow_mut().file_sink = Some(sink);
+    }
+
+    /// Register the notice sink (routed `ServerNotice` pushes: radio bridge
+    /// updates and operator notices). The most recent registration wins.
+    pub fn on_notice(&mut self, sink: NoticeSink) {
+        self.inner.borrow_mut().notice_sink = Some(sink);
     }
 
     /// Drive one [`FileCommand`]: encode it via the host-tested
@@ -253,6 +273,9 @@ impl WsClient {
                         }
                         for event in wire::frame_to_file_events(&frame) {
                             b.emit_file(event);
+                        }
+                        if let Some(route) = wire::frame_to_notice_route(&frame) {
+                            b.emit_notice(route);
                         }
                     }
                     Err(err) => b.emit(Event::CommandFailed {

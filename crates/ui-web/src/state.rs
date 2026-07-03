@@ -171,6 +171,16 @@ impl UiState {
         }
     }
 
+    /// Append an operator notice to the chat scrollback as a marked system
+    /// line. Radio bridge notices never reach here — they are split off by
+    /// [`route_notice`](crate::wire::route_notice) before the chat log.
+    pub fn push_notice(&mut self, from: &str, text: &str) {
+        self.messages.push(ChatLine {
+            from: format!("! {from}"),
+            text: text.to_string(),
+        });
+    }
+
     /// Set the transport connection state (driven by the transport's
     /// connection-lifecycle callback: `Connecting`/`Reconnecting` between the
     /// `Connected`/`Disconnected` events the reducer already folds).
@@ -314,6 +324,15 @@ mod tests {
         assert_eq!(s.messages.len(), 2);
         assert_eq!(s.messages[0].from, "alice");
         assert_eq!(s.messages[1].text, "yo");
+    }
+
+    #[test]
+    fn operator_notice_lands_in_the_scrollback_marked() {
+        let mut s = UiState::default();
+        s.push_notice("rabbit", "server restarts at midnight");
+        assert_eq!(s.messages.len(), 1);
+        assert_eq!(s.messages[0].from, "! rabbit");
+        assert_eq!(s.messages[0].text, "server restarts at midnight");
     }
 
     #[test]

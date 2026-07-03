@@ -33,6 +33,14 @@
 //! - [`admin`] holds the DOM-free web-admin reducer
 //!   ([`AdminState`](admin::AdminState)); the ADMIN-family mapping lives in
 //!   [`wire`].
+//! - [`radio`] holds the DOM-free radio model: the now-playing reducer
+//!   ([`RadioState`](radio::RadioState)), the total `[radio]` notice-bridge
+//!   parser ([`parse_radio_notice`](radio::parse_radio_notice)), player
+//!   preferences with validation + persistence resolve logic, and the pure
+//!   stream-URL join. The `ServerNotice` routing split lives in [`wire`]
+//!   ([`frame_to_notice_route`](wire::frame_to_notice_route)).
+//! - [`player`] (wasm only) wraps the `<audio>` element the radio streams
+//!   through; every decision it acts on is made in [`radio`].
 //! - [`art`] turns parsed CP437/ANSI art (via `rabbithole-art`) into pure,
 //!   host-tested canvas draw ops; only the paint call is wasm-gated.
 //! - [`packs`] defines the theme packs (Clean / Retro / High Contrast) as
@@ -62,6 +70,7 @@ pub mod components;
 pub mod conn;
 pub mod files;
 pub mod packs;
+pub mod radio;
 pub mod state;
 pub mod theme_css;
 pub mod theme_editor;
@@ -71,19 +80,30 @@ pub mod wire;
 #[cfg(target_arch = "wasm32")]
 pub mod ws;
 
+/// Browser `<audio>` playback for the radio (`wasm32-unknown-unknown` only).
+#[cfg(target_arch = "wasm32")]
+pub mod player;
+
 pub use admin::{AdminState, ConfigEntry};
 pub use app::{mount, App, AppState};
 pub use client::{MockClient, UiClient};
 pub use conn::{backoff_delay, ConnState};
 pub use files::{FilesState, Transfer, TransferDir, TransferStatus};
 pub use packs::PackTokens;
+pub use radio::{
+    parse_radio_notice, status_segment, stream_url, RadioPrefs, RadioState, RadioUpdate,
+    StationStatus,
+};
 pub use state::{Board, ChatLine, DmMessage, DmThread, Member, Post, Thread, UiState};
 pub use theme_editor::{contrast_warnings, ContrastWarning, EditorAction, EditorState};
 pub use wire::{
     admin_command_to_frame, command_to_frame, file_command_to_frame, frame_to_admin_events,
-    frame_to_events, frame_to_file_events, hello_request, normalize_ws_url, ping_request,
-    who_request, AdminCommand, AdminEvent, EventClient, EventSink, FileCommand, FileEvent,
+    frame_to_events, frame_to_file_events, frame_to_notice_route, hello_request, normalize_ws_url,
+    ping_request, route_notice, who_request, AdminCommand, AdminEvent, EventClient, EventSink,
+    FileCommand, FileEvent, NoticeRoute,
 };
 
+#[cfg(target_arch = "wasm32")]
+pub use player::RadioPlayer;
 #[cfg(target_arch = "wasm32")]
 pub use ws::WsClient;

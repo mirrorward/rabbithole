@@ -39,5 +39,9 @@ web-sys = { workspace = true, features = [
     "MediaQueryList",
     "HtmlCanvasElement",
     "CanvasRenderingContext2d",
+    # The radio player (`src/player.rs`): a detached <audio> element playing
+    # the Icecast delivery mount. Media controls live on HtmlMediaElement.
+    "HtmlAudioElement",
+    "HtmlMediaElement",
 ] }
 gloo-timers.workspace = true

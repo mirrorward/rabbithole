@@ -33,6 +33,13 @@
 //!   presence event.
 //! - **chat (family 2):** [`ChatSend`] outbound and the [`ChatMessage`] push
 //!   inbound (→ [`Event::ChatMessage`]).
+//! - **notices (family 0):** [`ServerNotice`] pushes. The core [`Event`] enum
+//!   has no notice variant, so — like the FILE/ADMIN families — they surface
+//!   through a *local* vocabulary: [`frame_to_notice_route`] decodes the push
+//!   and [`route_notice`] splits it, mirroring the TUI: `[radio]` bridge
+//!   notices become [`NoticeRoute::Radio`] updates for the radio reducer
+//!   (never the chat log); everything else is [`NoticeRoute::Chat`], an
+//!   operator notice for the scrollback.
 //! - **file (family 5):** the [`FileCommand`]/[`FileEvent`] local vocabulary and
 //!   its [`file_command_to_frame`]/[`frame_to_file_events`] mapping (the core
 //!   api carries no file variants yet).
@@ -74,7 +81,7 @@ use rabbithole_proto::filelib::{
 };
 use rabbithole_proto::hello::{CapabilitySet, Hello, HelloAck};
 use rabbithole_proto::presence::Who;
-use rabbithole_proto::session::{AuthPassword, Ping};
+use rabbithole_proto::session::{AuthPassword, Ping, ServerNotice};
 use rabbithole_proto::transfer::{
     FileChunk, FileChunkRequest, TransferAbort, TransferOpen, TransferTicket,
 };
@@ -192,7 +199,59 @@ pub fn frame_to_events(frame: &Frame) -> Vec<Event> {
 
     // Presence rosters, auth acks, welcomes, pongs and not-yet-mapped families
     // decode fine but have no api::Event counterpart — see module docs.
+    // ServerNotice pushes surface through the local notice vocabulary instead
+    // (frame_to_notice_route), keeping radio bridge traffic out of the chat
+    // reducer.
     Vec::new()
+}
+
+// ---------------------------------------------------------------------------
+// SESSION notices: ServerNotice pushes and the radio-bridge routing split.
+//
+// The core [`Event`] enum carries no notice variant (and this crate must not
+// modify the core), so notices surface through a local vocabulary like the
+// FILE/ADMIN families do. The split mirrors the TUI exactly: `[radio]` bridge
+// notices (see [`crate::radio`] for the format spec) feed the radio reducer
+// silently; anything else is an operator notice for the chat log.
+// ---------------------------------------------------------------------------
+
+/// Where an inbound [`ServerNotice`] push is routed.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoticeRoute {
+    /// A `[radio]` bridge notice: update the radio reducer, silently.
+    Radio(crate::radio::RadioUpdate),
+    /// An ordinary operator notice: show it in the chat scrollback.
+    Chat {
+        /// Who sent the notice (operator handle or "server").
+        from: String,
+        /// The notice text.
+        text: String,
+    },
+}
+
+/// Split one notice between the radio reducer and the chat log (the TUI's
+/// routing rule, verbatim): a well-formed `[radio]` bridge notice is a
+/// [`NoticeRoute::Radio`] update; everything else flows to the chat log.
+pub fn route_notice(from: &str, text: &str) -> NoticeRoute {
+    match crate::radio::parse_radio_notice(text) {
+        Some(update) => NoticeRoute::Radio(update),
+        None => NoticeRoute::Chat {
+            from: from.to_string(),
+            text: text.to_string(),
+        },
+    }
+}
+
+/// Map an inbound [`Frame`] carrying a [`ServerNotice`] push to its
+/// [`NoticeRoute`]. Frames from other families (or error replies) yield
+/// `None` — matching the "tolerate unknown messages" contract.
+pub fn frame_to_notice_route(frame: &Frame) -> Option<NoticeRoute> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let notice = frame.decode::<ServerNotice>()?.ok()?;
+    Some(route_notice(&notice.from, &notice.text))
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,6 +1146,104 @@ mod tests {
     fn non_admin_frame_yields_no_admin_events() {
         let push = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
         assert!(frame_to_admin_events(&push).is_empty());
+    }
+
+    #[test]
+    fn radio_bridge_notice_routes_to_the_radio_reducer() {
+        use crate::radio::RadioUpdate;
+
+        // A live-DJ bridge push.
+        let push = Frame::push(&ServerNotice::new(
+            "[radio] live|live|12|Robin|The Lagomorphs|Down the Hole",
+            "radio",
+        ))
+        .unwrap();
+        match frame_to_notice_route(&push) {
+            Some(NoticeRoute::Radio(RadioUpdate::Playing(s))) => {
+                assert_eq!(s.station, "live");
+                assert!(s.live);
+                assert_eq!(s.listeners, 12);
+                assert_eq!(s.dj, "Robin");
+                assert_eq!(s.artist, "The Lagomorphs");
+                assert_eq!(s.title, "Down the Hole");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Radio traffic never reaches the chat reducer's event mapping.
+        assert!(frame_to_events(&push).is_empty());
+
+        // Playlist automation.
+        let push = Frame::push(&ServerNotice::new(
+            "[radio] ambient|auto|0|rotation||Warren Dawn",
+            "radio",
+        ))
+        .unwrap();
+        assert!(matches!(
+            frame_to_notice_route(&push),
+            Some(NoticeRoute::Radio(RadioUpdate::Playing(s))) if !s.live && s.title == "Warren Dawn"
+        ));
+
+        // Sign-off clears the station.
+        let push = Frame::push(&ServerNotice::new("[radio] live|off", "radio")).unwrap();
+        assert_eq!(
+            frame_to_notice_route(&push),
+            Some(NoticeRoute::Radio(RadioUpdate::Off("live".into())))
+        );
+
+        // Pipes inside the trailing title field survive.
+        let push = Frame::push(&ServerNotice::new(
+            "[radio] live|auto|1|rotation|X|A|B|C",
+            "radio",
+        ))
+        .unwrap();
+        assert!(matches!(
+            frame_to_notice_route(&push),
+            Some(NoticeRoute::Radio(RadioUpdate::Playing(s))) if s.title == "A|B|C"
+        ));
+    }
+
+    #[test]
+    fn ordinary_notice_routes_to_chat() {
+        let push =
+            Frame::push(&ServerNotice::new("server restarts at midnight", "rabbit")).unwrap();
+        assert_eq!(
+            frame_to_notice_route(&push),
+            Some(NoticeRoute::Chat {
+                from: "rabbit".into(),
+                text: "server restarts at midnight".into(),
+            })
+        );
+        // A malformed bridge notice degrades to a visible chat notice rather
+        // than being silently dropped.
+        let push =
+            Frame::push(&ServerNotice::new("[radio] live|nonsense|1|a|b|c", "radio")).unwrap();
+        assert!(matches!(
+            frame_to_notice_route(&push),
+            Some(NoticeRoute::Chat { .. })
+        ));
+    }
+
+    #[test]
+    fn non_notice_frames_yield_no_notice_route() {
+        let chat = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
+        assert_eq!(frame_to_notice_route(&chat), None);
+        // An error reply never decodes as a notice.
+        let req = hello_request(RequestId(1)).unwrap();
+        let err = Frame::error_reply(&req, ErrorCode::Unauthenticated);
+        assert_eq!(frame_to_notice_route(&err), None);
+    }
+
+    #[test]
+    fn notice_route_survives_wire_roundtrip() {
+        let push = Frame::push(&ServerNotice::new("[radio] live|off", "radio")).unwrap();
+        let bytes = encode_frame(&push).unwrap();
+        let decoded = rabbithole_proto::decode_frame(&bytes).unwrap();
+        assert_eq!(
+            frame_to_notice_route(&decoded),
+            Some(NoticeRoute::Radio(crate::radio::RadioUpdate::Off(
+                "live".into()
+            )))
+        );
     }
 
     #[test]

@@ -22,13 +22,15 @@ use rabbithole_proto::admin::{
 use rabbithole_proto::filelib::{
     AreaList, FileAdded, FileAreaView, FileContent, FileNodeView, NodeList, NodeReply,
 };
+use rabbithole_proto::session::ServerNotice;
 use rabbithole_proto::transfer::{FileChunk, TransferTicket};
 use rabbithole_proto::{Frame, Message, RequestId};
 
 use crate::files::{KIND_FILE, KIND_FOLDER};
 use crate::state::{derive_server_name, Board, DmMessage, DmThread, Member, Post, Thread};
 use crate::wire::{
-    frame_to_admin_events, frame_to_file_events, AdminCommand, AdminEvent, FileCommand, FileEvent,
+    frame_to_admin_events, frame_to_file_events, frame_to_notice_route, AdminCommand, AdminEvent,
+    FileCommand, FileEvent, NoticeRoute,
 };
 
 /// The single room the mock exposes.
@@ -92,6 +94,10 @@ pub struct MockClient {
     admin_classes: Vec<ClassEntry>,
     admin_accounts: Vec<AccountEntry>,
     admin_config: Vec<(String, String)>,
+    /// Seeded radio-bridge `ServerNotice` texts (see [`crate::radio`] for the
+    /// format), served through [`MockClient::radio_routes`] so the Radio view
+    /// renders in dev without a live server.
+    radio_notices: Vec<String>,
     invite_seq: u32,
     /// Sink registered through the async [`EventClient`] seam, if any. Skipped
     /// by [`Debug`] (closures are not `Debug`).
@@ -116,6 +122,7 @@ impl std::fmt::Debug for MockClient {
             .field("admin_classes", &self.admin_classes)
             .field("admin_accounts", &self.admin_accounts)
             .field("admin_config", &self.admin_config)
+            .field("radio_notices", &self.radio_notices)
             .field("invite_seq", &self.invite_seq)
             .field("sink", &self.sink.as_ref().map(|_| "<fn>"))
             .finish()
@@ -148,6 +155,7 @@ impl MockClient {
             admin_classes: Self::seeded_classes(),
             admin_accounts: Self::seeded_accounts(),
             admin_config: Self::seeded_config(),
+            radio_notices: Self::seeded_radio_notices(),
             invite_seq: 0,
             sink: None,
         }
@@ -532,6 +540,27 @@ impl MockClient {
                 admin_events(&ConfigApplied::new(live))
             }
         }
+    }
+
+    /// The radio-bridge notices a fresh session is seeded with: one live-DJ
+    /// station and one automation station, so the Radio view and status-bar
+    /// segment render in dev.
+    fn seeded_radio_notices() -> Vec<String> {
+        vec![
+            "[radio] live|live|7|Robin|The Lagomorphs|Down the Hole".to_string(),
+            "[radio] ambient|auto|3|rotation||Warren Dawn".to_string(),
+        ]
+    }
+
+    /// Route the seeded radio notices exactly as the transport would: each is
+    /// framed as a real [`ServerNotice`] push and decoded back through the
+    /// host-tested [`frame_to_notice_route`] — no parallel decode path.
+    pub fn radio_routes(&self) -> Vec<NoticeRoute> {
+        self.radio_notices
+            .iter()
+            .filter_map(|text| Frame::push(&ServerNotice::new(text.clone(), "radio")).ok())
+            .filter_map(|frame| frame_to_notice_route(&frame))
+            .collect()
     }
 
     /// The lobby scrollback every fresh session is seeded with.
@@ -1073,6 +1102,30 @@ mod tests {
             c.dispatch_admin(AdminCommand::Kick { session_id: 9 })
                 .as_slice(),
             [AdminEvent::Ack(_)]
+        ));
+    }
+
+    #[test]
+    fn seeded_radio_notices_route_to_the_radio_reducer() {
+        use crate::radio::RadioState;
+
+        let c = MockClient::new();
+        let routes = c.radio_routes();
+        assert_eq!(routes.len(), 2);
+        let mut radio = RadioState::default();
+        for route in routes {
+            match route {
+                NoticeRoute::Radio(update) => radio.apply_update(update),
+                other => panic!("seeded notice routed to chat: {other:?}"),
+            }
+        }
+        let slugs: Vec<&str> = radio.stations().map(|s| s.station.as_str()).collect();
+        assert_eq!(slugs, ["ambient", "live"]);
+        // The live-DJ station is featured over automation.
+        assert_eq!(radio.on_air().unwrap().station, "live");
+        assert!(matches!(
+            radio.get("ambient"),
+            Some(s) if !s.live && s.listeners == 3
         ));
     }
 
