@@ -9,6 +9,7 @@ that is a bug in one of them.
 | Doc | Status | Contents |
 |---|---|---|
 | [`framing.md`](framing.md) | Wave 0, shipped | Transports, frame layout, length delimiting, size limits, families, error codes |
+| [`versioning.md`](versioning.md) | policy | Wire compatibility: additive-only rules, version negotiation + capabilities, `#[non_exhaustive]` discipline, and the registry-golden guard against accidental wire changes |
 | [`session.md`](session.md) | Waves 1-2, shipped | Hello, auth (password/guest/resume/register), keepalive, welcome/agreement, push replay, personas, TOTP 2FA, key enrollment |
 | [`presence.md`](presence.md) | Waves 1-2, shipped | Who-list, join/leave pushes, buddy lists, states (Cheshire mode), profiles, directory |
 | [`chat.md`](chat.md) | Waves 1-2, shipped | Lobby chat, history, chat pushes, rooms (public/private/ad-hoc) |
