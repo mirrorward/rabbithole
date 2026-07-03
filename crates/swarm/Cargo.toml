@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 rabbithole-identity.workspace = true
 rabbithole-net.workspace = true
+rabbithole-reticulum.workspace = true
 serde.workspace = true
 postcard.workspace = true
 blake3.workspace = true
