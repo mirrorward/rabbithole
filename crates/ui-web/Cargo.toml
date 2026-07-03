@@ -43,5 +43,14 @@ web-sys = { workspace = true, features = [
     # the Icecast delivery mount. Media controls live on HtmlMediaElement.
     "HtmlAudioElement",
     "HtmlMediaElement",
+    # PWA install-readiness (`src/pwa.rs`): navigator.serviceWorker.register.
+    "Navigator",
+    "ServiceWorkerContainer",
 ] }
 gloo-timers.workspace = true
+
+# Host-only: the `#[ignore]`d icon regenerator and the icons-match-generator
+# test in `src/pwa.rs` encode/decode the checked-in PNGs. Pure Rust, and a
+# dev-dependency, so the shipped wasm bundle never carries it.
+[dev-dependencies]
+png.workspace = true

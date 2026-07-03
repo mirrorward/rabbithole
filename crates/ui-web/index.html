@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>RabbitHole</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="RabbitHole — a cozy, modern BBS: chat, boards, DMs, files, art, and radio." />
+
+    <!-- PWA install-readiness. The embedded server (apps/server/src/http.rs)
+         generates /manifest.webmanifest only when the web root does not ship
+         one, so this checked-in manifest wins. Colours are the Clean-dark
+         pack tokens (crates/ui-web/src/packs.rs). -->
+    <meta name="theme-color" content="#6c9cff" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+
+    <!-- Trunk: compile this crate's bin to wasm + JS glue (content-hashed
+         filenames) and inject the loader here. -->
+    <link data-trunk rel="rust" data-bin="rabbithole-ui-web" />
+
+    <!-- Trunk: copy the PWA shell assets to the dist (= web) root. sw.js
+         must sit at the top level: a service worker's default scope is its
+         own directory, and ours must cover the whole app ("/"). -->
+    <link data-trunk rel="copy-file" href="assets/sw.js" />
+    <link data-trunk rel="copy-file" href="assets/manifest.webmanifest" />
+    <link data-trunk rel="copy-file" href="assets/icon-192.png" />
+    <link data-trunk rel="copy-file" href="assets/icon-512.png" />
+
+    <style>
+      /* Pre-boot backdrop: the Clean-dark background token, so the first
+         paint (before the wasm mounts and injects the app stylesheet)
+         does not flash white. The app overrides everything on mount. */
+      html {
+        background: #14161b;
+      }
+    </style>
+  </head>
+  <body></body>
+</html>

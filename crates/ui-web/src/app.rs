@@ -505,9 +505,13 @@ pub fn App() -> impl IntoView {
     }
 }
 
-/// Mount the app into `document.body`. Called from the wasm entry point (a
-/// later trunk/`main.rs` slice); present here so the library is directly
-/// runnable in a browser.
+/// Mount the app into `document.body`. Called from the wasm entry point
+/// (`src/main.rs`, the trunk build target); present here so the library is
+/// directly runnable in a browser. Boot also kicks off the PWA
+/// service-worker registration ([`crate::pwa`]) — browser only, and never
+/// fatal: the app mounts identically whether or not a worker installs.
 pub fn mount() {
+    #[cfg(target_arch = "wasm32")]
+    crate::pwa::register_service_worker();
     mount_to_body(App);
 }

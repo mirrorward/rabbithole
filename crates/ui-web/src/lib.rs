@@ -46,6 +46,11 @@
 //! - [`packs`] defines the theme packs (Clean / Retro / High Contrast) as
 //!   complete CSS-variable token sets that round-trip as JSON token files —
 //!   the future server-theme-bundle seam.
+//! - [`pwa`] is the installable-PWA slice: the wasm-gated service-worker
+//!   registration edge plus the host-tested shape of the shell assets
+//!   (`assets/sw.js`, `assets/manifest.webmanifest`, the maskable icons
+//!   rendered by [`icon_rgba`](pwa::icon_rgba)) that `trunk build` copies
+//!   into `dist/` via `index.html`'s `data-trunk` links.
 //! - [`theme_css`] holds the app stylesheet, the pack+mode
 //!   [`ThemeChoice`](theme_css::ThemeChoice) model, and resolves light/dark
 //!   from `(choice, os_pref)` — plus the custom-pack override slot the theme
@@ -70,6 +75,7 @@ pub mod components;
 pub mod conn;
 pub mod files;
 pub mod packs;
+pub mod pwa;
 pub mod radio;
 pub mod state;
 pub mod theme_css;
@@ -90,6 +96,7 @@ pub use client::{MockClient, UiClient};
 pub use conn::{backoff_delay, ConnState};
 pub use files::{FilesState, Transfer, TransferDir, TransferStatus};
 pub use packs::PackTokens;
+pub use pwa::{icon_rgba, MANIFEST_URL, SW_URL};
 pub use radio::{
     parse_radio_notice, status_segment, stream_url, RadioPrefs, RadioState, RadioUpdate,
     StationStatus,
