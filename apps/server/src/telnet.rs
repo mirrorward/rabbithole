@@ -1,5 +1,6 @@
-//! Burrow's telnet BBS shell: banner → login → MAIN MENU (files, doors,
-//! quit).
+//! Burrow's telnet BBS shell: banner → login → welcome screen → MAIN MENU
+//! (boards, chat, direct mail, files, doors, QWK, quit) with `/go` keyword
+//! teleports.
 //!
 //! The `rabbithole-legacy-telnet` crate owns the protocol layer
 //! ([`TelnetStream`]: negotiation, line IO, encodings) and keeps a minimal
@@ -12,6 +13,33 @@
 //! browser (`files`), and the QWK offline-mail packet command (`qwk` — see
 //! [`crate::qwk`]; it reuses the same HTTP-link handoff discipline as
 //! `get`, one link per raw packet member).
+//!
+//! ## One community, many doors
+//!
+//! A logged-in telnet session is a full citizen of the shared world: it
+//! joins [`PresenceRegistry`](rabbithole_server_core::PresenceRegistry) and
+//! the chat lobby exactly like a native or Hotline session, so who-lists,
+//! keyword lookups, and chat fan-out all see it. The Wave 2.3 welcome
+//! composer ([`crate::handlers5::compose_welcome`]) renders as text after
+//! login — preceded by the operator's `theme_logo_ansi` art, written
+//! verbatim to ANSI-capable terminals (TTYPE) and flattened to plain glyphs
+//! via `rabbithole-art` for everything else. Retro terminal types get CP437
+//! on the wire (the art-crate translation tables behind the
+//! `legacy-telnet` encoding seam); everyone else stays UTF-8.
+//!
+//! **Boards** (`[B]`) list postable boards (RBAC `SEE`/`BOARD_READ` per
+//! `board/<slug>`), page threads and posts, and post replies/new threads
+//! through [`BoardService`](rabbithole_server_core::BoardService) as the
+//! logged-in user — same author seed derivation as QWK ingest, same
+//! `BOARD_POST` + `post` rate budget as every other surface. **Chat**
+//! (`[C]`) is the live lobby: scrollback, then a `tokio::select!` between
+//! typed lines (cancel-safe `read_line`) and bus [`ServerEvent::Chat`]
+//! deltas. **Direct mail** (`[D]`) lists DM conversations, pages threads,
+//! and replies through the same store + bus + away-auto-response path the
+//! native DM handlers use. **`/go <keyword>`** works at every prompt:
+//! operator keyword map first (`board:`/`area:`/`door:`/`room:`/`user:`/
+//! `url:` targets), then direct board/area/door matches, then the Wave 2.3
+//! room/user resolver.
 //!
 //! ## The file browser and the HTTP handoff
 //!
@@ -32,10 +60,15 @@
 use std::io;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use rabbithole_legacy_telnet::{Echo, Encoding, TelnetStream};
+use rabbithole_proto::welcome as pw;
 use rabbithole_server_core::ratelimit::{class as rl, Scope};
-use rabbithole_server_core::{AuthedUser, Caps, Role};
+use rabbithole_server_core::{AuthedUser, Caps, PresenceEntry, Role, ServerEvent, LOBBY};
+use rabbithole_store_server::repo2::PersonasRepo;
+use rabbithole_store_server::repo3::{dm_receipts_enabled, BlocksRepo, DmsRepo};
+use rabbithole_store_server::repo4::PostRow;
 use rabbithole_store_server::repo6::FileNodeRow;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -65,8 +98,62 @@ where
     let Some(authed) = login(&mut t, shared, peer_ip).await? else {
         return Ok(()); // disconnected or out of attempts
     };
+    // Retro terminal types get CP437 on the wire (the art-crate tables
+    // behind the encoding seam); unknown or modern terminals stay UTF-8.
+    if t.terminal().is_some_and(cp437_terminal) {
+        t.set_encoding(Encoding::Cp437);
+    }
     greet(&mut t, &authed).await?;
-    menu_loop(&mut t, shared, &authed, peer_ip).await
+
+    // Join the shared world — presence + the chat lobby — exactly like a
+    // native or Hotline session, and leave it however the shell ends.
+    let session_id = shared.next_session_id();
+    shared.presence.join(PresenceEntry {
+        session_id,
+        account_id: authed.account.id,
+        screen_name: authed.persona.screen_name.clone(),
+        role: authed.subject.role,
+        transport: "telnet".into(),
+        connected_at: Instant::now(),
+        state: 0,
+        status: None,
+    });
+    shared
+        .chat
+        .join_lobby(session_id, &authed.persona.screen_name);
+    let result = async {
+        show_welcome(&mut t, shared, &authed, session_id).await?;
+        menu_loop(&mut t, shared, &authed, session_id, peer_ip).await
+    }
+    .await;
+    shared.chat.session_closed(session_id);
+    shared.presence.leave(session_id);
+    result
+}
+
+/// Does this TTYPE name a terminal that wants CP437 bytes on the wire?
+/// SyncTERM and friends report `ANSI`-family names; modern emulators say
+/// `XTERM`/`VT…` and stay UTF-8.
+fn cp437_terminal(term: &str) -> bool {
+    let t = term.to_ascii_lowercase();
+    t == "ansi"
+        || t == "ansi-bbs"
+        || t == "pcansi"
+        || t == "scoansi"
+        || t.contains("syncterm")
+        || t.contains("cp437")
+}
+
+/// Can this terminal render ANSI escape art? `None` (no TTYPE reported —
+/// e.g. a raw socket) degrades to plain text.
+fn ansi_terminal(term: Option<&str>) -> bool {
+    let Some(term) = term else { return false };
+    let t = term.to_ascii_lowercase();
+    [
+        "ansi", "xterm", "vt1", "vt2", "vt3", "linux", "screen", "syncterm", "color",
+    ]
+    .iter()
+    .any(|n| t.contains(n))
 }
 
 /// Prompt for credentials until success, disconnect, or [`MAX_ATTEMPTS`].
@@ -150,26 +237,105 @@ where
     t.write_str(&line).await
 }
 
-/// The main menu. `[D]` appears only when door hosting is switched on, but
+/// Render the composed welcome screen (Wave 2.3) as terminal text: the
+/// operator's logo art first (verbatim for ANSI-capable terminals, glyphs
+/// only otherwise), then the widget list top to bottom.
+async fn show_welcome<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    session_id: u64,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let logo = shared.config.read().theme_logo_ansi;
+    if !logo.trim().is_empty() {
+        let art = if ansi_terminal(t.terminal()) {
+            logo
+        } else {
+            // Execute the ANSI program, keep only the glyphs.
+            rabbithole_art::render_plain(&rabbithole_art::ansi::parse(logo.as_bytes()))
+        };
+        t.write_str("\n").await?;
+        t.write_str(art.trim_end_matches(['\r', '\n'])).await?;
+        t.write_str("\n").await?;
+    }
+    let screen = crate::handlers5::compose_welcome(
+        shared,
+        authed.account.id,
+        authed.subject.role == Role::Guest,
+        authed.subject.role,
+        session_id,
+    )
+    .await;
+    let mut out = String::new();
+    for widget in &screen.widgets {
+        match widget {
+            pw::WelcomeWidget::Motd(motd) => {
+                out.push_str(&format!("\n{}\n", motd.trim_end()));
+            }
+            pw::WelcomeWidget::UnreadDms(n) => {
+                out.push_str(&format!(
+                    "\nYou have {n} unread direct message(s) — [D] reads them.\n"
+                ));
+            }
+            pw::WelcomeWidget::OnlineNow { count, sample } => {
+                if sample.is_empty() {
+                    out.push_str(&format!("\nOnline now: {count}.\n"));
+                } else {
+                    out.push_str(&format!("\nOnline now ({count}): {}\n", sample.join(", ")));
+                }
+            }
+            pw::WelcomeWidget::Featured { title, body } => {
+                out.push_str(&format!("\n*** {} ***\n", title.trim()));
+                if !body.trim().is_empty() {
+                    out.push_str(&format!("{}\n", body.trim_end()));
+                }
+            }
+            pw::WelcomeWidget::Ticker(line) => {
+                out.push_str(&format!("\nNews: {}\n", line.trim()));
+            }
+            _ => {} // widgets from the future render nowhere on telnet
+        }
+    }
+    if !out.is_empty() {
+        t.write_str(&out).await?;
+    }
+    Ok(())
+}
+
+/// The main menu. `[O]` appears only when door hosting is switched on, but
 /// the commands always answer (with a polite refusal when disabled).
 async fn menu_loop<S>(
     t: &mut TelnetStream<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
+    session_id: u64,
     peer_ip: Option<IpAddr>,
 ) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // A `/go` teleport bubbles up from whichever prompt saw it and lands
+    // here; jumping may itself yield the next hop.
+    let mut pending: Option<GoTarget> = None;
     loop {
-        let mut menu = String::from("\n=== MAIN MENU ===\n [F] Files\n");
+        if let Some(target) = pending.take() {
+            pending = jump(t, shared, authed, session_id, peer_ip, target).await?;
+            continue;
+        }
+        let mut menu = String::from(
+            "\n=== MAIN MENU ===\n [B] Message boards\n [C] Chat (the lobby)\n \
+             [D] Direct mail\n [F] Files\n",
+        );
         if shared.config.read().qwk_enabled {
             menu.push_str(" [M] QWK offline mail\n");
         }
         if shared.doors.enabled() {
-            menu.push_str(" [D] Doors\n");
+            menu.push_str(" [O] Doors\n");
         }
-        menu.push_str(" [Q] Quit\n\nCommand: ");
+        menu.push_str(" [Q] Quit\n\nType /go <keyword> to jump anywhere.\n\nCommand: ");
         t.write_str(&menu).await?;
         let Some(line) = t.read_line(Echo::On).await? else {
             return Ok(()); // peer went away
@@ -182,28 +348,210 @@ where
                 continue;
             }
         }
-        // Lowercase only the verb — door ids are matched exactly.
-        let mut words = line.split_whitespace();
-        let verb = words.next().unwrap_or("").to_ascii_lowercase();
-        let arg = words.next();
-        match (verb.as_str(), arg) {
+        // Lowercase only the verb — door ids and keywords match exactly.
+        let (verb, arg) = split_command(&line);
+        let arg_opt = (!arg.is_empty()).then_some(arg);
+        match (verb.as_str(), arg_opt) {
             ("q" | "quit" | "g" | "goodbye", _) => {
                 t.write_str(&format!("\nGoodbye, {}!\n", authed.persona.screen_name))
                     .await?;
                 return Ok(());
             }
             ("", _) => {}
-            ("f" | "files", _) => browse_files(t, shared, authed, peer_ip).await?,
-            ("m" | "qwk" | "mail", _) => qwk_packet(t, shared, authed).await?,
-            ("d" | "doors", None) => list_doors(t, shared).await?,
-            ("d" | "door" | "doors" | "open", Some(id)) => {
+            ("b" | "boards", _) => {
+                pending = boards_shell(t, shared, authed, peer_ip).await?;
+            }
+            ("c" | "chat", _) => {
+                pending = chat_shell(t, shared, authed, session_id, LOBBY).await?;
+            }
+            ("d" | "dm" | "dms" | "mail", None) => {
+                pending = dm_shell(t, shared, authed, peer_ip).await?;
+            }
+            ("d" | "dm" | "dms" | "mail", Some(peer)) => {
+                pending = dm_thread(t, shared, authed, peer_ip, peer).await?;
+            }
+            ("f" | "files", _) => {
+                pending = browse_files(t, shared, authed, peer_ip, None).await?;
+            }
+            ("m" | "qwk", _) => qwk_packet(t, shared, authed).await?,
+            ("o" | "doors", None) => list_doors(t, shared).await?,
+            ("door" | "doors" | "open", Some(id)) => {
                 doors::run_door(t, shared, authed, id).await?;
+            }
+            ("/go" | "go", word) => {
+                pending = go_command(t, shared, word.unwrap_or("")).await?;
+            }
+            ("help" | "?", _) => {
+                t.write_str(
+                    "\nb boards   c chat   d mail   f files   doors   q quit\n\
+                     /go <keyword> jumps to a board, file area, door, room, or user.\n",
+                )
+                .await?;
             }
             (other, _) => {
                 t.write_str(&format!("\nUnknown command: {other}\n"))
                     .await?;
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `/go` keyword teleports (Wave 2.3's resolver, extended with the legacy
+// surfaces: boards, file areas, doors).
+
+/// Where a telnet `/go` can land.
+enum GoTarget {
+    Board(String),
+    FileArea(String),
+    Door(String),
+    Room(String),
+    User(String),
+    Url(String),
+}
+
+/// Handle a `/go [word]` command at any prompt: no word lists the
+/// keywords, an unknown word explains itself, a resolved word returns the
+/// target for the caller to bubble up to [`menu_loop`].
+async fn go_command<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    word: &str,
+) -> io::Result<Option<GoTarget>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let word = word.trim();
+    if word.is_empty() {
+        return list_keywords(t, shared).await.map(|_| None);
+    }
+    match resolve_go(shared, word).await {
+        Some(target) => Ok(Some(target)),
+        None => {
+            t.write_str(&format!(
+                "\nNothing answers to `{word}`. `/go` alone lists keywords.\n"
+            ))
+            .await?;
+            Ok(None)
+        }
+    }
+}
+
+/// `/go` with no argument: the operator keyword map, plus what else works.
+async fn list_keywords<S>(t: &mut TelnetStream<S>, shared: &Arc<Shared>) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let keywords = shared.config.read().keywords;
+    let mut out = String::from("\n--- Keywords ---\n");
+    if keywords.is_empty() {
+        out.push_str("(none configured)\n");
+    } else {
+        let mut sorted: Vec<(&String, &String)> = keywords.iter().collect();
+        sorted.sort();
+        for (word, target) in sorted {
+            out.push_str(&format!("  {word:<20} {target}\n"));
+        }
+    }
+    out.push_str(
+        "Any board slug, file area, door id, room, or user name works too.\n\
+         Usage: /go <keyword>\n",
+    );
+    t.write_str(&out).await
+}
+
+/// Resolve a `/go` word: the operator keyword map first (`board:`,
+/// `area:`/`files:`, `door:`, `room:`, `user:`, `url:` targets), then a
+/// direct board / file area / door match, then the Wave 2.3 room/user/url
+/// resolver. `None` = nothing answers.
+async fn resolve_go(shared: &Arc<Shared>, word: &str) -> Option<GoTarget> {
+    let lower = word.to_lowercase();
+    if let Some(mapped) = shared.config.read().keywords.get(&lower).cloned() {
+        if let Some(b) = mapped.strip_prefix("board:") {
+            return Some(GoTarget::Board(b.to_string()));
+        }
+        if let Some(a) = mapped
+            .strip_prefix("area:")
+            .or_else(|| mapped.strip_prefix("files:"))
+        {
+            return Some(GoTarget::FileArea(a.to_string()));
+        }
+        if let Some(d) = mapped.strip_prefix("door:") {
+            return Some(GoTarget::Door(d.to_string()));
+        }
+        if let Some(r) = mapped.strip_prefix("room:") {
+            return Some(GoTarget::Room(r.to_string()));
+        }
+        if let Some(u) = mapped.strip_prefix("user:") {
+            return Some(GoTarget::User(u.to_string()));
+        }
+        if let Some(u) = mapped.strip_prefix("url:") {
+            return Some(GoTarget::Url(u.to_string()));
+        }
+    }
+    // Direct matches on the legacy surfaces.
+    if let Ok(Some(board)) = shared.boards.board(&lower).await {
+        if board.kind == 2 {
+            return Some(GoTarget::Board(board.slug));
+        }
+    }
+    if let Ok(areas) = shared.files.areas().await {
+        if areas.iter().any(|a| a.slug == lower) {
+            return Some(GoTarget::FileArea(lower));
+        }
+    }
+    if shared.doors.enabled() && shared.doors.get(word).is_some() {
+        return Some(GoTarget::Door(word.to_string()));
+    }
+    // The Wave 2.3 keyword service: rooms and personas.
+    match crate::handlers5::resolve_keyword(shared, word).await {
+        Ok(target) => match target.kind {
+            pw::KeywordKind::Room => Some(GoTarget::Room(target.target)),
+            pw::KeywordKind::User => Some(GoTarget::User(target.target)),
+            pw::KeywordKind::Url => Some(GoTarget::Url(target.target)),
+            _ => None,
+        },
+        Err(_) => None,
+    }
+}
+
+/// Land a teleport on its surface. May itself return the *next* hop (a
+/// `/go` typed inside the destination shell).
+async fn jump<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    session_id: u64,
+    peer_ip: Option<IpAddr>,
+    target: GoTarget,
+) -> io::Result<Option<GoTarget>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match target {
+        GoTarget::Board(slug) => board_view(t, shared, authed, peer_ip, &slug).await,
+        GoTarget::FileArea(area) => browse_files(t, shared, authed, peer_ip, Some(area)).await,
+        GoTarget::Door(id) => {
+            doors::run_door(t, shared, authed, &id).await?;
+            Ok(None)
+        }
+        GoTarget::Room(room) => chat_shell(t, shared, authed, session_id, &room).await,
+        GoTarget::User(name) => dm_thread(t, shared, authed, peer_ip, &name).await,
+        GoTarget::Url(url) => {
+            t.write_str(&format!("\nThat keyword points at: {url}\n"))
+                .await?;
+            Ok(None)
+        }
+    }
+}
+
+/// Split a prompt line into a lowercased verb and its (trimmed, original
+/// case) argument rest.
+fn split_command(line: &str) -> (String, &str) {
+    let line = line.trim();
+    match line.split_once(char::is_whitespace) {
+        Some((verb, rest)) => (verb.to_ascii_lowercase(), rest.trim()),
+        None => (line.to_ascii_lowercase(), ""),
     }
 }
 
@@ -249,14 +597,16 @@ impl FileCursor {
 }
 
 /// The `files` sub-shell. Commands: `ls`, `cd <name>` / `cd ..`,
-/// `get <name>`, `help`, `q`. Every command spends from the same per-IP
-/// legacy budget as the main menu.
+/// `get <name>`, `/go <keyword>`, `help`, `q`. Every command spends from
+/// the same per-IP legacy budget as the main menu. `start_area` (a `/go`
+/// teleport) opens the browser inside that area.
 async fn browse_files<S>(
     t: &mut TelnetStream<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     peer_ip: Option<IpAddr>,
-) -> io::Result<()>
+    start_area: Option<String>,
+) -> io::Result<Option<GoTarget>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -264,11 +614,19 @@ where
         .perms
         .allows(&authed.subject, "files", Caps::FILE_LIST)
     {
-        return t
-            .write_str("\nYou do not have access to the file library.\n")
-            .await;
+        t.write_str("\nYou do not have access to the file library.\n")
+            .await?;
+        return Ok(None);
     }
     let mut cur = FileCursor::default();
+    if let Some(area) = start_area {
+        match shared.files.areas().await {
+            Ok(areas) if areas.iter().any(|a| a.slug == area) => cur.area = Some(area),
+            _ => {
+                t.write_str(&format!("\nNo such area: {area}\n")).await?;
+            }
+        }
+    }
     t.write_str(
         "\n--- File Library ---\n\
          Commands: ls, cd <name>, cd .., get <name>, q (back to menu)\n",
@@ -279,7 +637,7 @@ where
         t.write_str(&format!("\nfiles {}> ", cur.location()))
             .await?;
         let Some(line) = t.read_line(Echo::On).await? else {
-            return Ok(()); // peer went away
+            return Ok(None); // peer went away
         };
         if let Some(ip) = peer_ip {
             if !shared.rate_allow(Scope::Ip(ip), rl::LEGACY) {
@@ -288,19 +646,16 @@ where
             }
         }
         // Lowercase only the verb — names are matched exactly.
-        let line = line.trim();
-        let (verb, arg) = match line.split_once(char::is_whitespace) {
-            Some((v, rest)) => (v.to_ascii_lowercase(), rest.trim()),
-            None => (line.to_ascii_lowercase(), ""),
-        };
+        let (verb, arg) = split_command(&line);
         match verb.as_str() {
             "" => {}
-            "q" | "quit" | "x" | "exit" => return Ok(()),
+            "q" | "quit" | "x" | "exit" => return Ok(None),
             "help" | "?" => {
                 t.write_str(
                     "\nls           list this level (paged)\n\
                      cd <name>    enter an area or folder (cd .. goes up)\n\
                      get <name>   print an HTTP link for a file\n\
+                     /go <word>   keyword teleport\n\
                      q            back to the main menu\n",
                 )
                 .await?;
@@ -308,6 +663,11 @@ where
             "ls" | "list" | "dir" => list_level(t, shared, authed, &cur).await?,
             "cd" => change_dir(t, shared, authed, &mut cur, arg).await?,
             "get" => hand_off(t, shared, authed, &cur, arg).await?,
+            "/go" => {
+                if let Some(target) = go_command(t, shared, arg).await? {
+                    return Ok(Some(target));
+                }
+            }
             other => {
                 t.write_str(&format!("\nUnknown command: {other} (try `help`)\n"))
                     .await?;
@@ -715,4 +1075,1019 @@ where
     }
     out.push_str("\nType `door <id>` to play.\n");
     t.write_str(&out).await
+}
+
+// ---------------------------------------------------------------------------
+// Message boards: list → paged threads → paged posts, with line-editor
+// posting through the shared BoardService (same author seed as QWK ingest,
+// same BOARD_POST + `post` budget as every surface).
+
+/// Boards the caller may see and read: postable (`kind == 2`) and passing
+/// `SEE | BOARD_READ` on `board/<slug>`.
+async fn visible_boards(
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+) -> Vec<rabbithole_store_server::repo4::BoardRow> {
+    let Ok(all) = shared.boards.boards().await else {
+        return Vec::new();
+    };
+    all.into_iter()
+        .filter(|b| {
+            b.kind == 2
+                && shared.perms.allows(
+                    &authed.subject,
+                    &format!("board/{}", b.slug),
+                    Caps::SEE.union(Caps::BOARD_READ),
+                )
+        })
+        .collect()
+}
+
+/// The `[B]` sub-shell: pick a board by number or slug.
+async fn boards_shell<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    peer_ip: Option<IpAddr>,
+) -> io::Result<Option<GoTarget>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if !shared
+        .perms
+        .allows(&authed.subject, "board", Caps::BOARD_READ)
+    {
+        t.write_str("\nYou do not have access to the message boards.\n")
+            .await?;
+        return Ok(None);
+    }
+    t.write_str(
+        "\n--- Message Boards ---\n\
+         Commands: ls, <n> or <slug> to open, q (back to menu), /go <keyword>\n",
+    )
+    .await?;
+    let mut boards = visible_boards(shared, authed).await;
+    print_board_list(t, &boards).await?;
+    loop {
+        t.write_str("\nboards> ").await?;
+        let Some(line) = t.read_line(Echo::On).await? else {
+            return Ok(None); // peer went away
+        };
+        if let Some(ip) = peer_ip {
+            if !shared.rate_allow(Scope::Ip(ip), rl::LEGACY) {
+                t.write_str("\nRate limited; slow down.\n").await?;
+                continue;
+            }
+        }
+        let (verb, arg) = split_command(&line);
+        match verb.as_str() {
+            "" => {}
+            "q" | "quit" | "x" | "exit" => return Ok(None),
+            "ls" | "list" => {
+                boards = visible_boards(shared, authed).await;
+                print_board_list(t, &boards).await?;
+            }
+            "help" | "?" => {
+                t.write_str(
+                    "\nls        list boards\n<n>/<slug> open a board\n\
+                     q         back to the main menu\n/go <word> keyword teleport\n",
+                )
+                .await?;
+            }
+            "/go" => {
+                if let Some(target) = go_command(t, shared, arg).await? {
+                    return Ok(Some(target));
+                }
+            }
+            _ => {
+                let choice = line.trim();
+                let picked = choice
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| boards.get(n.wrapping_sub(1)))
+                    .map(|b| b.slug.clone())
+                    .or_else(|| {
+                        boards
+                            .iter()
+                            .find(|b| b.slug.eq_ignore_ascii_case(choice))
+                            .map(|b| b.slug.clone())
+                    });
+                match picked {
+                    Some(slug) => {
+                        if let Some(target) = board_view(t, shared, authed, peer_ip, &slug).await? {
+                            return Ok(Some(target));
+                        }
+                    }
+                    None => {
+                        t.write_str(&format!("\nNo such board: {choice}\n")).await?;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The board list as a paged table.
+async fn print_board_list<S>(
+    t: &mut TelnetStream<S>,
+    boards: &[rabbithole_store_server::repo4::BoardRow],
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if boards.is_empty() {
+        return t.write_str("\nNo boards yet.\n").await;
+    }
+    let mut rows = vec![format!("  #  {:<28} {}", "BOARD", "TITLE")];
+    for (i, b) in boards.iter().enumerate() {
+        rows.push(format!("{:>3}  {:<28} {}", i + 1, b.slug, b.title));
+    }
+    page_out(t, &rows).await
+}
+
+/// One board: paged thread list, `n` new thread, `<n>` read a thread.
+async fn board_view<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    peer_ip: Option<IpAddr>,
+    slug: &str,
+) -> io::Result<Option<GoTarget>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // Hide, don't tease: an unreadable or non-postable board reads as absent.
+    let board = match shared.boards.board(slug).await {
+        Ok(Some(b))
+            if b.kind == 2
+                && shared.perms.allows(
+                    &authed.subject,
+                    &format!("board/{}", b.slug),
+                    Caps::SEE.union(Caps::BOARD_READ),
+                ) =>
+        {
+            b
+        }
+        _ => {
+            t.write_str(&format!("\nNo such board: {slug}\n")).await?;
+            return Ok(None);
+        }
+    };
+    let mut header = format!("\n--- {} ({}) ---\n", board.title, board.slug);
+    if !board.description.trim().is_empty() {
+        header.push_str(&format!("{}\n", board.description.trim()));
+    }
+    header.push_str("Commands: ls, <n> to read, n (new thread), q (back), /go <keyword>\n");
+    t.write_str(&header).await?;
+    let mut threads = render_threads(t, shared, &board.slug).await?;
+    loop {
+        t.write_str(&format!("\nboard {}> ", board.slug)).await?;
+        let Some(line) = t.read_line(Echo::On).await? else {
+            return Ok(None); // peer went away
+        };
+        if let Some(ip) = peer_ip {
+            if !shared.rate_allow(Scope::Ip(ip), rl::LEGACY) {
+                t.write_str("\nRate limited; slow down.\n").await?;
+                continue;
+            }
+        }
+        let (verb, arg) = split_command(&line);
+        match verb.as_str() {
+            "" => {}
+            "q" | "quit" | "x" | "exit" => return Ok(None),
+            "ls" | "list" => threads = render_threads(t, shared, &board.slug).await?,
+            "n" | "new" | "post" => {
+                post_editor(t, shared, authed, &board.slug, None, "").await?;
+                threads = render_threads(t, shared, &board.slug).await?;
+            }
+            "help" | "?" => {
+                t.write_str(
+                    "\nls   re-list threads\n<n>  read thread n\n\
+                     n    start a new thread\nq    back\n/go <word> keyword teleport\n",
+                )
+                .await?;
+            }
+            "/go" => {
+                if let Some(target) = go_command(t, shared, arg).await? {
+                    return Ok(Some(target));
+                }
+            }
+            other => match other
+                .parse::<usize>()
+                .ok()
+                .and_then(|n| threads.get(n.wrapping_sub(1)))
+            {
+                Some((root, _, _)) => {
+                    let root_id = root.root_id.unwrap_or(root.event_id);
+                    if let Some(target) =
+                        thread_view(t, shared, authed, peer_ip, &board.slug, root_id).await?
+                    {
+                        return Ok(Some(target));
+                    }
+                }
+                None => {
+                    t.write_str(&format!("\nNo such thread: {other}\n")).await?;
+                }
+            },
+        }
+    }
+}
+
+/// Most threads listed per board screen (newest first).
+const THREAD_LIST_LIMIT: i64 = 200;
+
+/// Print the paged thread table; returns the rows for number selection.
+async fn render_threads<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    slug: &str,
+) -> io::Result<Vec<(PostRow, i64, i64)>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let threads = match shared.boards.threads(slug, THREAD_LIST_LIMIT).await {
+        Ok(list) => list,
+        Err(e) => {
+            t.write_str(&format!("\n{e}\n")).await?;
+            return Ok(Vec::new());
+        }
+    };
+    if threads.is_empty() {
+        t.write_str("\n(no threads yet — `n` starts one)\n").await?;
+        return Ok(threads);
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut rows = vec![format!(
+        "  #  {:<36} {:<18} {:>4}  {}",
+        "SUBJECT", "AUTHOR", "RE", "AGE"
+    )];
+    for (i, (root, replies, last)) in threads.iter().enumerate() {
+        let subject = if root.tombstoned {
+            "(deleted)".to_string()
+        } else {
+            clip(&root.subject, 36)
+        };
+        rows.push(format!(
+            "{:>3}  {:<36} {:<18} {:>4}  {}",
+            i + 1,
+            subject,
+            clip(&root.author, 18),
+            replies,
+            fmt_age(now - (*last).max(root.created_at))
+        ));
+    }
+    page_out(t, &rows).await?;
+    Ok(threads)
+}
+
+/// One thread: every post, paged; `r` replies.
+async fn thread_view<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    peer_ip: Option<IpAddr>,
+    slug: &str,
+    root: [u8; 32],
+) -> io::Result<Option<GoTarget>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let subject = render_posts(t, shared, &root).await?;
+    let Some(root_subject) = subject else {
+        t.write_str("\nThat thread is gone.\n").await?;
+        return Ok(None);
+    };
+    loop {
+        t.write_str("\nthread> ").await?;
+        let Some(line) = t.read_line(Echo::On).await? else {
+            return Ok(None); // peer went away
+        };
+        if let Some(ip) = peer_ip {
+            if !shared.rate_allow(Scope::Ip(ip), rl::LEGACY) {
+                t.write_str("\nRate limited; slow down.\n").await?;
+                continue;
+            }
+        }
+        let (verb, arg) = split_command(&line);
+        match verb.as_str() {
+            "" => {}
+            "q" | "quit" | "x" | "exit" => return Ok(None),
+            "ls" | "list" => {
+                render_posts(t, shared, &root).await?;
+            }
+            "r" | "reply" => {
+                let default = if root_subject.to_lowercase().starts_with("re:") {
+                    root_subject.clone()
+                } else {
+                    format!("Re: {root_subject}")
+                };
+                post_editor(t, shared, authed, slug, Some(root), &default).await?;
+            }
+            "help" | "?" => {
+                t.write_str(
+                    "\nls  re-read the thread\nr   reply\nq   back\n\
+                     /go <word> keyword teleport\n",
+                )
+                .await?;
+            }
+            "/go" => {
+                if let Some(target) = go_command(t, shared, arg).await? {
+                    return Ok(Some(target));
+                }
+            }
+            other => {
+                t.write_str(&format!("\nUnknown command: {other} (try `help`)\n"))
+                    .await?;
+            }
+        }
+    }
+}
+
+/// Most posts rendered per thread read.
+const THREAD_POSTS_LIMIT: i64 = 500;
+
+/// Print a thread's posts (paged); returns the root subject, or `None`
+/// when the thread has no posts.
+async fn render_posts<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    root: &[u8; 32],
+) -> io::Result<Option<String>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let posts = match shared.boards.thread(root, THREAD_POSTS_LIMIT).await {
+        Ok(p) => p,
+        Err(e) => {
+            t.write_str(&format!("\n{e}\n")).await?;
+            return Ok(None);
+        }
+    };
+    let Some(first) = posts.first() else {
+        return Ok(None);
+    };
+    let subject = first.subject.clone();
+    let mut rows = Vec::new();
+    for post in &posts {
+        rows.push(format!(
+            "From: {}   {}",
+            post.author,
+            fmt_datetime(post.created_at)
+        ));
+        rows.push(format!("Subj: {}", post.subject));
+        if post.tombstoned {
+            rows.push("(this post was removed)".to_string());
+        } else {
+            for body_line in post.body.lines() {
+                rows.push(body_line.to_string());
+            }
+        }
+        rows.push("-".repeat(40));
+    }
+    page_out(t, &rows).await?;
+    Ok(Some(subject))
+}
+
+/// Longest accepted post body, in bytes (the classic editor keeps going
+/// until `.`; something has to bound it).
+const MAX_POST_BYTES: usize = 32 * 1024;
+
+/// The classic line editor: subject prompt, then body lines until a lone
+/// `.` — gated on `BOARD_POST` (guests never post) and the shared per-
+/// account `post` budget, posting through BoardService as the logged-in
+/// user (QWK-ingest author-seed derivation).
+async fn post_editor<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    slug: &str,
+    parent: Option<[u8; 32]>,
+    default_subject: &str,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if authed.subject.role == Role::Guest
+        || !shared
+            .perms
+            .allows(&authed.subject, &format!("board/{slug}"), Caps::BOARD_POST)
+    {
+        return t
+            .write_str("\nYou do not have permission to post here.\n")
+            .await;
+    }
+    if !shared.rate_allow(Scope::Account(authed.account.id), rl::POST) {
+        return t.write_str("\nRate limited; slow down.\n").await;
+    }
+    let subject = if default_subject.is_empty() {
+        t.write_str("\nSubject: ").await?;
+        let Some(s) = t.read_line(Echo::On).await? else {
+            return Ok(());
+        };
+        s.trim().to_string()
+    } else {
+        t.write_str(&format!("\nSubject [{default_subject}]: "))
+            .await?;
+        let Some(s) = t.read_line(Echo::On).await? else {
+            return Ok(());
+        };
+        let s = s.trim();
+        if s.is_empty() {
+            default_subject.to_string()
+        } else {
+            s.to_string()
+        }
+    };
+    t.write_str("Enter your message. End with a single `.` on its own line (`/abort` cancels).\n")
+        .await?;
+    let mut body = String::new();
+    loop {
+        let Some(line) = t.read_line(Echo::On).await? else {
+            return Ok(()); // peer went away mid-edit: nothing posts
+        };
+        let trimmed = line.trim_end();
+        if trimmed == "." {
+            break;
+        }
+        if trimmed == "/abort" {
+            return t.write_str("Post abandoned.\n").await;
+        }
+        if body.len() + trimmed.len() > MAX_POST_BYTES {
+            t.write_str("Message too long; posting what fits.\n")
+                .await?;
+            break;
+        }
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(trimmed);
+    }
+    if subject.trim().is_empty() && body.trim().is_empty() {
+        return t.write_str("Empty post abandoned.\n").await;
+    }
+    let author = format!("{}@{}", authed.persona.screen_name, shared.origin_name());
+    let seed = crate::qwk::author_seed(shared, authed.account.id);
+    let now = chrono::Utc::now().timestamp_millis();
+    match shared
+        .boards
+        .post(
+            slug,
+            parent,
+            &author,
+            &seed,
+            &subject,
+            &body,
+            "text/plain",
+            now,
+        )
+        .await
+    {
+        Ok(row) => {
+            shared.bus.publish(ServerEvent::BoardPost {
+                board: row.board_slug.clone(),
+                id: row.event_id,
+                root: row.root_id,
+            });
+            t.write_str("Posted.\n").await
+        }
+        Err(e) => t.write_str(&format!("Could not post: {e}\n")).await,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Live chat: scrollback, then a select! between typed lines (cancel-safe
+// read_line) and bus events — the same lobby every surface shares.
+
+/// Scrollback lines printed when entering a room.
+const CHAT_SCROLLBACK: usize = 15;
+
+/// The `[C]` chat screen for `room` (the lobby from the menu; any joinable
+/// room via `/go`). Typed lines send (`CHAT_SEND` + the per-account `msg`
+/// budget); `/q` leaves; incoming bus lines stream in between keystrokes.
+async fn chat_shell<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    session_id: u64,
+    room: &str,
+) -> io::Result<Option<GoTarget>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let resource = format!("chat/{room}");
+    if !shared
+        .perms
+        .allows(&authed.subject, &resource, Caps::CHAT_READ)
+    {
+        t.write_str("\nYou do not have access to chat.\n").await?;
+        return Ok(None);
+    }
+    let is_lobby = room.eq_ignore_ascii_case(LOBBY);
+    if !is_lobby {
+        if let Err(e) = shared.chat.join(
+            room,
+            session_id,
+            authed.account.id,
+            &authed.persona.screen_name,
+        ) {
+            t.write_str(&format!("\nCannot join {room}: {e}\n")).await?;
+            return Ok(None);
+        }
+    }
+    // Subscribe before printing scrollback so nothing said in between is
+    // lost (a line landing in that instant may print twice; better twice
+    // than never).
+    let mut rx = shared.bus.subscribe();
+    t.write_str(&format!(
+        "\n--- Chat: {room} ---\nType to talk. /q leaves, /go <keyword> jumps.\n"
+    ))
+    .await?;
+    match shared.chat.history(room, session_id, CHAT_SCROLLBACK) {
+        Ok(lines) if !lines.is_empty() => {
+            for line in &lines {
+                t.write_str(&format!("<{}> {}\n", line.from, line.text))
+                    .await?;
+            }
+        }
+        Ok(_) => t.write_str("(no recent chat)\n").await?,
+        Err(e) => t.write_str(&format!("({e})\n")).await?,
+    }
+
+    let result = loop {
+        tokio::select! {
+            line = t.read_line(Echo::On) => {
+                let Some(line) = line? else {
+                    break Ok(None); // peer went away
+                };
+                let text = line.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                if let Some(rest) = text.strip_prefix('/') {
+                    let (cmd, arg) = split_command(rest);
+                    match cmd.as_str() {
+                        "q" | "quit" | "exit" => break Ok(None),
+                        "go" => {
+                            if let Some(target) = go_command(t, shared, arg).await? {
+                                break Ok(Some(target));
+                            }
+                        }
+                        _ => {
+                            t.write_str("Commands: /q leaves, /go <keyword> jumps.\n")
+                                .await?;
+                        }
+                    }
+                    continue;
+                }
+                if !shared.rate_allow(Scope::Account(authed.account.id), rl::MSG) {
+                    t.write_str("Rate limited; slow down.\n").await?;
+                    continue;
+                }
+                if !shared
+                    .perms
+                    .allows(&authed.subject, &resource, Caps::CHAT_SEND)
+                {
+                    t.write_str("You do not have permission to speak here.\n")
+                        .await?;
+                    continue;
+                }
+                if let Err(e) = shared.chat.send(
+                    room,
+                    session_id,
+                    &authed.persona.screen_name,
+                    text,
+                ) {
+                    t.write_str(&format!("({e})\n")).await?;
+                }
+            }
+            event = rx.recv() => {
+                use tokio::sync::broadcast::error::RecvError;
+                match event {
+                    Ok(ServerEvent::Chat { room: r, from, text })
+                        if r.eq_ignore_ascii_case(room) =>
+                    {
+                        t.write_str(&format!("<{from}> {text}\n")).await?;
+                    }
+                    Ok(ServerEvent::Shutdown) => {
+                        t.write_str("The server is going down. Goodbye.\n").await?;
+                        break Ok(None);
+                    }
+                    Ok(_) => {}
+                    Err(RecvError::Lagged(_)) => {
+                        t.write_str("(chat resynced; some lines were missed)\n")
+                            .await?;
+                    }
+                    Err(RecvError::Closed) => break Ok(None),
+                }
+            }
+        }
+    };
+    if !is_lobby {
+        let _ = shared.chat.leave(room, session_id);
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Direct mail: conversation list → paged thread → single-line replies over
+// the same durable store + bus + away-auto-response path the native DM
+// handlers use.
+
+/// The `[D]` sub-shell: conversation list.
+async fn dm_shell<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    peer_ip: Option<IpAddr>,
+) -> io::Result<Option<GoTarget>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if authed.subject.role == Role::Guest {
+        t.write_str("\nDirect mail needs a member account. Ask your sysop.\n")
+            .await?;
+        return Ok(None);
+    }
+    t.write_str(
+        "\n--- Direct Mail ---\n\
+         Commands: ls, <n> or <name> to open, w <name> (write), q (back), /go <keyword>\n",
+    )
+    .await?;
+    let mut peers = print_dm_threads(t, shared, authed.account.id).await?;
+    loop {
+        t.write_str("\nmail> ").await?;
+        let Some(line) = t.read_line(Echo::On).await? else {
+            return Ok(None); // peer went away
+        };
+        if let Some(ip) = peer_ip {
+            if !shared.rate_allow(Scope::Ip(ip), rl::LEGACY) {
+                t.write_str("\nRate limited; slow down.\n").await?;
+                continue;
+            }
+        }
+        let (verb, arg) = split_command(&line);
+        match verb.as_str() {
+            "" => {}
+            "q" | "quit" | "x" | "exit" => return Ok(None),
+            "ls" | "list" => peers = print_dm_threads(t, shared, authed.account.id).await?,
+            "w" | "write" | "send" => {
+                if arg.is_empty() {
+                    t.write_str("\nUsage: w <screen name>\n").await?;
+                } else if let Some(target) = dm_thread(t, shared, authed, peer_ip, arg).await? {
+                    return Ok(Some(target));
+                } else {
+                    peers = print_dm_threads(t, shared, authed.account.id).await?;
+                }
+            }
+            "help" | "?" => {
+                t.write_str(
+                    "\nls        list conversations\n<n>/<name> open one\n\
+                     w <name>  write someone new\nq         back\n\
+                     /go <word> keyword teleport\n",
+                )
+                .await?;
+            }
+            "/go" => {
+                if let Some(target) = go_command(t, shared, arg).await? {
+                    return Ok(Some(target));
+                }
+            }
+            _ => {
+                let choice = line.trim();
+                let picked = choice
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| peers.get(n.wrapping_sub(1)).cloned())
+                    .or_else(|| {
+                        peers
+                            .iter()
+                            .find(|p| p.eq_ignore_ascii_case(choice))
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| choice.to_string());
+                if let Some(target) = dm_thread(t, shared, authed, peer_ip, &picked).await? {
+                    return Ok(Some(target));
+                }
+                peers = print_dm_threads(t, shared, authed.account.id).await?;
+            }
+        }
+    }
+}
+
+/// Print the conversation table; returns peer names for number selection.
+async fn print_dm_threads<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    account_id: i64,
+) -> io::Result<Vec<String>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let threads = match DmsRepo(&shared.pool).threads(account_id).await {
+        Ok(list) => list,
+        Err(e) => {
+            t.write_str(&format!("\nThe mail store is unavailable: {e}\n"))
+                .await?;
+            return Ok(Vec::new());
+        }
+    };
+    if threads.is_empty() {
+        t.write_str("\nNo conversations yet — `w <name>` starts one.\n")
+            .await?;
+        return Ok(Vec::new());
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut rows = vec![format!(
+        "  #  {:<20} {:>6}  {:<6} {}",
+        "WITH", "UNREAD", "AGE", "LAST"
+    )];
+    let mut peers = Vec::new();
+    for (i, (partner_account, last, unread)) in threads.iter().enumerate() {
+        let with = if last.from_account == *partner_account {
+            last.from_persona.clone()
+        } else {
+            last.to_persona.clone()
+        };
+        rows.push(format!(
+            "{:>3}  {:<20} {:>6}  {:<6} {}",
+            i + 1,
+            clip(&with, 20),
+            unread,
+            fmt_age(now - last.at_ms),
+            clip(last.text.lines().next().unwrap_or(""), 40)
+        ));
+        peers.push(with);
+    }
+    page_out(t, &rows).await?;
+    Ok(peers)
+}
+
+/// Most messages shown per DM thread read (newest N, oldest first).
+const DM_PAGE_LIMIT: i64 = 100;
+
+/// One conversation: page it (marking it read, with receipts when the
+/// account has them on), then `r` to reply.
+async fn dm_thread<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    peer_ip: Option<IpAddr>,
+    peer: &str,
+) -> io::Result<Option<GoTarget>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if authed.subject.role == Role::Guest {
+        t.write_str("\nDirect mail needs a member account. Ask your sysop.\n")
+            .await?;
+        return Ok(None);
+    }
+    let partner = match PersonasRepo(&shared.pool).by_screen_name(peer).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            t.write_str(&format!("\nNo such user: {peer}\n")).await?;
+            return Ok(None);
+        }
+        Err(e) => {
+            t.write_str(&format!("\nThe mail store is unavailable: {e}\n"))
+                .await?;
+            return Ok(None);
+        }
+    };
+    if partner.account_id == authed.account.id {
+        t.write_str("\nThat would be talking to yourself.\n")
+            .await?;
+        return Ok(None);
+    }
+    render_dm_history(t, shared, authed, &partner).await?;
+    loop {
+        t.write_str(&format!("\ndm {}> ", partner.screen_name))
+            .await?;
+        let Some(line) = t.read_line(Echo::On).await? else {
+            return Ok(None); // peer went away
+        };
+        if let Some(ip) = peer_ip {
+            if !shared.rate_allow(Scope::Ip(ip), rl::LEGACY) {
+                t.write_str("\nRate limited; slow down.\n").await?;
+                continue;
+            }
+        }
+        let (verb, arg) = split_command(&line);
+        match verb.as_str() {
+            "" => {}
+            "q" | "quit" | "x" | "exit" => return Ok(None),
+            "ls" | "list" => render_dm_history(t, shared, authed, &partner).await?,
+            "r" | "reply" => {
+                t.write_str("Message: ").await?;
+                let Some(text) = t.read_line(Echo::On).await? else {
+                    return Ok(None);
+                };
+                send_dm(t, shared, authed, &partner, text.trim()).await?;
+            }
+            "help" | "?" => {
+                t.write_str(
+                    "\nls  re-read the conversation\nr   reply\nq   back\n\
+                     /go <word> keyword teleport\n",
+                )
+                .await?;
+            }
+            "/go" => {
+                if let Some(target) = go_command(t, shared, arg).await? {
+                    return Ok(Some(target));
+                }
+            }
+            other => {
+                t.write_str(&format!("\nUnknown command: {other} (try `help`)\n"))
+                    .await?;
+            }
+        }
+    }
+}
+
+/// Print a conversation oldest-first and mark it read (publishing the read
+/// receipt when the account has receipts enabled, like the native path).
+async fn render_dm_history<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    partner: &rabbithole_store_server::repo2::PersonaRow,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let dms = DmsRepo(&shared.pool);
+    let messages = match dms
+        .thread(authed.account.id, partner.account_id, 0, DM_PAGE_LIMIT)
+        .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            return t
+                .write_str(&format!("\nThe mail store is unavailable: {e}\n"))
+                .await;
+        }
+    };
+    if messages.is_empty() {
+        t.write_str(&format!(
+            "\nNo messages with {} yet — `r` writes one.\n",
+            partner.screen_name
+        ))
+        .await?;
+        return Ok(());
+    }
+    let mut rows = Vec::new();
+    for m in &messages {
+        let auto = if m.is_auto { " (auto-reply)" } else { "" };
+        rows.push(format!(
+            "[{}] {}{auto}: {}",
+            fmt_datetime(m.at_ms),
+            m.from_persona,
+            m.text
+        ));
+    }
+    page_out(t, &rows).await?;
+    // Reading marks read — and receipts fire exactly like the native path.
+    let last_id = messages.last().map(|m| m.id).unwrap_or(0);
+    let newly = dms
+        .mark_read(authed.account.id, partner.account_id, last_id)
+        .await
+        .unwrap_or(0);
+    if newly > 0
+        && dm_receipts_enabled(&shared.pool, authed.account.id)
+            .await
+            .unwrap_or(false)
+    {
+        shared.bus.publish(ServerEvent::DmRead {
+            to_account: partner.account_id,
+            by: authed.persona.screen_name.clone(),
+            up_to_id: last_id,
+        });
+    }
+    Ok(())
+}
+
+/// Send one DM: `DM_SEND` + the shared `msg` budget + block checks, then
+/// the durable store, the bus, and the away auto-response — the identical
+/// path the native DmSend handler walks.
+async fn send_dm<S>(
+    t: &mut TelnetStream<S>,
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    partner: &rabbithole_store_server::repo2::PersonaRow,
+    text: &str,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if text.is_empty() {
+        return t.write_str("Nothing sent (empty message).\n").await;
+    }
+    if !shared.perms.allows(&authed.subject, "dm", Caps::DM_SEND) {
+        return t
+            .write_str("You do not have permission to send direct messages.\n")
+            .await;
+    }
+    if !shared.rate_allow(Scope::Account(authed.account.id), rl::MSG) {
+        return t.write_str("Rate limited; slow down.\n").await;
+    }
+    if text.len() > shared.config.read().chat_max_len {
+        return t.write_str("Message too long.\n").await;
+    }
+    // Blocked either way = refused, without revealing which side.
+    let blocks = BlocksRepo(&shared.pool);
+    let blocked = blocks
+        .is_blocked(authed.account.id, partner.account_id)
+        .await
+        .unwrap_or(true)
+        || blocks
+            .is_blocked(partner.account_id, authed.account.id)
+            .await
+            .unwrap_or(true);
+    if blocked {
+        return t.write_str("You cannot message that user.\n").await;
+    }
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    let id = match DmsRepo(&shared.pool)
+        .insert(
+            authed.account.id,
+            &authed.persona.screen_name,
+            partner.account_id,
+            &partner.screen_name,
+            text,
+            None,
+            &[],
+            at_ms,
+            false,
+        )
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return t
+                .write_str(&format!("The mail store is unavailable: {e}\n"))
+                .await;
+        }
+    };
+    shared.bus.publish(ServerEvent::Dm {
+        to_account: partner.account_id,
+        message: rabbithole_proto::dm::DmMessage::new(
+            id,
+            authed.persona.screen_name.clone(),
+            partner.screen_name.clone(),
+            text,
+            None,
+            Vec::new(),
+            at_ms,
+            false,
+        ),
+    });
+    t.write_str("Sent.\n").await?;
+    // Away auto-response (once per sender→recipient away period).
+    if let Err(e) = crate::handlers3::maybe_auto_respond(
+        shared,
+        authed.account.id,
+        &authed.persona.screen_name,
+        &partner.screen_name,
+        partner.account_id,
+    )
+    .await
+    {
+        tracing::debug!("telnet dm auto-response failed: {e}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Small formatting helpers shared by the new screens.
+
+/// Clip to `max` characters with an ellipsis marker.
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{cut}…")
+    }
+}
+
+/// Compact age: `now`, `12m`, `5h`, `3d`.
+fn fmt_age(delta_ms: i64) -> String {
+    let mins = delta_ms.max(0) / 60_000;
+    if mins == 0 {
+        "now".to_string()
+    } else if mins < 60 {
+        format!("{mins}m")
+    } else if mins < 60 * 24 {
+        format!("{}h", mins / 60)
+    } else {
+        format!("{}d", mins / (60 * 24))
+    }
+}
+
+/// `YYYY-MM-DD HH:MM` from unix milliseconds.
+fn fmt_datetime(unix_ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(unix_ms)
+        .unwrap_or_default()
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
 }

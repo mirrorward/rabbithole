@@ -417,8 +417,9 @@ fn subject_for(shared: &Shared, account: &Account) -> Subject {
 
 /// A stable per-account author signing seed — identical derivation to the
 /// native/NNTP/Hotline board handlers, so a QWK-authored reply is
-/// indistinguishable from a natively-authored post.
-fn author_seed(shared: &Shared, account_id: i64) -> [u8; 32] {
+/// indistinguishable from a natively-authored post. Shared with the telnet
+/// board shell (Wave 6), which posts as the logged-in user the same way.
+pub(crate) fn author_seed(shared: &Shared, account_id: i64) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"rabbithole-author-seed-v1");
     hasher.update(&shared.server_signing_seed);

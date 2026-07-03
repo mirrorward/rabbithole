@@ -57,6 +57,12 @@ pub struct TelnetStream<S> {
     /// A CR just ended a line; swallow one following LF/NUL (telnet NVT
     /// sends CR LF or CR NUL), even across read boundaries.
     swallow_lf: bool,
+    /// Partial line accumulated by [`TelnetStream::read_line`]. Living on
+    /// the stream (not the future) makes `read_line` **cancel-safe**: a
+    /// caller may race it in `tokio::select!` (e.g. a chat screen splicing
+    /// bus events between keystrokes) and re-call it without losing what
+    /// the user already typed.
+    line_buf: Vec<u8>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> TelnetStream<S> {
@@ -72,6 +78,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TelnetStream<S> {
             terminal: None,
             ttype_requested: false,
             swallow_lf: false,
+            line_buf: Vec::new(),
         }
     }
 
@@ -167,10 +174,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TelnetStream<S> {
     /// option — echoes input back. NAWS/TTYPE updates arriving mid-line are
     /// captured silently. Returns `None` on EOF (any partial line is
     /// discarded).
+    ///
+    /// **Cancel-safe**: the partial line lives on the stream, so dropping
+    /// this future (e.g. losing a `tokio::select!` race against a broadcast
+    /// event) and calling `read_line` again resumes exactly where typing
+    /// left off.
     pub async fn read_line(&mut self, echo: Echo) -> io::Result<Option<String>> {
-        let mut line: Vec<u8> = Vec::new();
         loop {
             let Some(input) = self.next_input().await? else {
+                self.line_buf.clear();
                 return Ok(None);
             };
             let Input::Data(data) = input else {
@@ -193,14 +205,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TelnetStream<S> {
                     }
                     b'\n' => done = true,
                     0x08 | 0x7F => {
-                        if pop_char(&mut line) && echo == Echo::On {
+                        if pop_char(&mut self.line_buf) && echo == Echo::On {
                             echo_out.extend(b"\x08 \x08");
                         }
                     }
                     b if b < 0x20 => {} // other control bytes: ignore
                     b => {
-                        if line.len() < MAX_LINE {
-                            line.push(b);
+                        if self.line_buf.len() < MAX_LINE {
+                            self.line_buf.push(b);
                             if echo == Echo::On {
                                 echo_out.push(b);
                             }
@@ -226,7 +238,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TelnetStream<S> {
                 self.io.flush().await?;
             }
             if done {
-                return Ok(Some(decode(self.encoding, &line)));
+                let complete = std::mem::take(&mut self.line_buf);
+                return Ok(Some(decode(self.encoding, &complete)));
             }
         }
     }
@@ -441,7 +454,8 @@ mod tests {
         // CR arrives at a packet edge; LF follows in the next packet and
         // must be swallowed rather than produce an empty second line.
         let line = t.read_line(Echo::Hidden).await.unwrap();
-        assert_eq!(line.as_deref(), Some("A?B")); // 0xFF is lossy-decoded
+        // 0xFF decodes through the real CP437 table (a no-break space).
+        assert_eq!(line.as_deref(), Some("A\u{a0}B"));
         client.write_all(b"\nnext\r\n").await.unwrap();
         assert_eq!(
             t.read_line(Echo::Hidden).await.unwrap().as_deref(),
@@ -475,7 +489,11 @@ mod tests {
 
         t.set_encoding(Encoding::Cp437);
         t.write_str("café\n").await.unwrap();
-        assert_eq!(drain(&mut client).await, b"caf?\r\n");
+        // The real CP437 table: 'é' is 0x82 on the wire.
+        assert_eq!(
+            drain(&mut client).await,
+            [b'c', b'a', b'f', 0x82, b'\r', b'\n']
+        );
     }
 
     #[tokio::test]

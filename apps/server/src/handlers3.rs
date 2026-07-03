@@ -262,7 +262,14 @@ pub async fn handle(
         reply!(&pdm::DmSent::new(id, at_ms));
 
         // Away auto-response (once per sender→recipient away period).
-        maybe_auto_respond(shared, ctx, &recipient.screen_name, recipient.account_id).await?;
+        maybe_auto_respond(
+            shared,
+            ctx.account_id,
+            &ctx.screen_name,
+            &recipient.screen_name,
+            recipient.account_id,
+        )
+        .await?;
         return Ok(true);
     }
 
@@ -334,10 +341,13 @@ pub async fn handle(
 }
 
 /// If every online session of the recipient is away/idle with a status
-/// message, send it back once as an auto-response DM.
-async fn maybe_auto_respond(
+/// message, send it back once as an auto-response DM. Takes the sender by
+/// account id + screen name so non-native surfaces (the telnet BBS shell)
+/// share the exact same rule and re-arm set.
+pub(crate) async fn maybe_auto_respond(
     shared: &Arc<Shared>,
-    ctx: &SessionCtx,
+    sender_account: i64,
+    sender_name: &str,
     recipient_name: &str,
     recipient_account: i64,
 ) -> anyhow::Result<()> {
@@ -358,7 +368,7 @@ async fn maybe_auto_respond(
 
     {
         let mut seen = shared.auto_responded.lock().expect("lock");
-        if !seen.insert((ctx.account_id, recipient_account)) {
+        if !seen.insert((sender_account, recipient_account)) {
             return Ok(()); // already auto-responded this away period
         }
     }
@@ -368,8 +378,8 @@ async fn maybe_auto_respond(
         .insert(
             recipient_account,
             recipient_name,
-            ctx.account_id,
-            &ctx.screen_name,
+            sender_account,
+            sender_name,
             &status,
             None,
             &[],
@@ -378,11 +388,11 @@ async fn maybe_auto_respond(
         )
         .await?;
     shared.bus.publish(ServerEvent::Dm {
-        to_account: ctx.account_id,
+        to_account: sender_account,
         message: pdm::DmMessage::new(
             id,
             recipient_name,
-            ctx.screen_name.clone(),
+            sender_name,
             status,
             None,
             Vec::new(),

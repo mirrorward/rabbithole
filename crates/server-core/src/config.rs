@@ -276,9 +276,12 @@ pub struct ServerConfig {
     pub welcome_ticker: String,
     /// Theme accent color as hex "RRGGBB" (empty = none).
     pub theme_accent: String,
-    /// Theme ANSI logo art (also the future telnet banner).
+    /// Theme ANSI logo art (also the telnet welcome banner since Wave 6).
     pub theme_logo_ansi: String,
-    /// Keyword teleport map: word → "room:<name>" | "user:<name>" | "url:<…>".
+    /// Keyword teleport map: word → "room:<name>" | "user:<name>" |
+    /// "url:<…>" | "board:<slug>" | "area:<slug>" | "door:<id>" (the last
+    /// three land on the telnet surfaces; native clients see them via /go
+    /// resolution in later waves).
     pub keywords: std::collections::HashMap<String, String>,
 }
 

@@ -15,26 +15,46 @@ use crate::Shared;
 
 /// Build the composed welcome screen for a session.
 async fn build_welcome(shared: &Shared, ctx: &SessionCtx) -> pw::WelcomeScreen {
+    compose_welcome(
+        shared,
+        ctx.account_id,
+        ctx.is_guest,
+        ctx.role,
+        ctx.session_id,
+    )
+    .await
+}
+
+/// The welcome-screen composer proper, callable without a native
+/// [`SessionCtx`] — the telnet BBS shell (Wave 6) renders the same
+/// composition as text after login.
+pub(crate) async fn compose_welcome(
+    shared: &Shared,
+    account_id: i64,
+    is_guest: bool,
+    role: rabbithole_server_core::Role,
+    session_id: u64,
+) -> pw::WelcomeScreen {
     let cfg = shared.config.read();
     let mut widgets = Vec::new();
     if !cfg.motd.is_empty() {
         widgets.push(pw::WelcomeWidget::Motd(cfg.motd.clone()));
     }
     // Unread DMs (accounts only).
-    if !ctx.is_guest {
-        if let Ok(unread) = DmsRepo(&shared.pool).unread_for(ctx.account_id).await {
+    if !is_guest {
+        if let Ok(unread) = DmsRepo(&shared.pool).unread_for(account_id).await {
             if !unread.is_empty() {
                 widgets.push(pw::WelcomeWidget::UnreadDms(unread.len() as u64));
             }
         }
     }
     // Who's on now — a sample, honoring Cheshire mode for non-moderators.
-    let viewer_is_mod = ctx.role >= rabbithole_server_core::Role::Moderator;
+    let viewer_is_mod = role >= rabbithole_server_core::Role::Moderator;
     let visible: Vec<String> = shared
         .presence
         .snapshot()
         .into_iter()
-        .filter(|e| !e.is_invisible() || viewer_is_mod || e.session_id == ctx.session_id)
+        .filter(|e| !e.is_invisible() || viewer_is_mod || e.session_id == session_id)
         .map(|e| e.screen_name)
         .collect();
     widgets.push(pw::WelcomeWidget::OnlineNow {
@@ -117,8 +137,12 @@ pub async fn handle(
 }
 
 /// Resolve a keyword: operator map first, then a live room, then an online
-/// or known persona, else Unknown.
-async fn resolve_keyword(shared: &Shared, word: &str) -> anyhow::Result<pw::KeywordTarget> {
+/// or known persona, else Unknown. Shared with the telnet `/go` command
+/// (Wave 6), which layers board/area/door resolution on top.
+pub(crate) async fn resolve_keyword(
+    shared: &Shared,
+    word: &str,
+) -> anyhow::Result<pw::KeywordTarget> {
     let word = word.trim();
     let lower = word.to_lowercase();
 

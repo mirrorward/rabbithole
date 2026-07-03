@@ -35,6 +35,7 @@ rabbithole-legacy-ftn.workspace = true
 rabbithole-legacy-qwk.workspace = true
 rabbithole-legacy-binkp.workspace = true
 rabbithole-legacy-syndication.workspace = true
+rabbithole-art.workspace = true
 rabbithole-audio.workspace = true
 rabbithole-radio.workspace = true
 rabbithole-legacy-icecast.workspace = true

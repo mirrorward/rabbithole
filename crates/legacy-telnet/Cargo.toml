@@ -10,3 +10,4 @@ publish.workspace = true
 [dependencies]
 tokio.workspace = true
 async-trait.workspace = true
+rabbithole-art.workspace = true
