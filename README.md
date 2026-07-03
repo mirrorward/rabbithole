@@ -42,6 +42,11 @@ $ cargo run -p burrow -- run
 $ burrow ctl account-create alice wonderland user
 $ burrow ctl config-set motd "Down the rabbit hole we go"
 
+# Serve the web SPA + HTTP file links without touching burrow.toml
+# (build the SPA once with `trunk build` in crates/ui-web):
+$ burrow --http --web-root crates/ui-web/dist run
+  INFO burrow: http listening http=0.0.0.0:8080
+
 # Sign in and chat:
 $ rabbit login ws://127.0.0.1:4654 --user alice --password wonderland
 $ rabbit say "oh my ears and whiskers"

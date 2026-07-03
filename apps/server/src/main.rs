@@ -15,6 +15,18 @@ struct Cli {
     /// Data directory override (db, blobs, identity, ctl socket).
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
+    /// Enable the embedded HTTP surface (web SPA + /files downloads)
+    /// without editing burrow.toml. Equivalent to `http_enabled = true`.
+    #[arg(long)]
+    http: bool,
+    /// Bind address for the HTTP surface (implies --http).
+    /// Overrides `http_addr` from the config (default 0.0.0.0:8080).
+    #[arg(long, value_name = "ADDR")]
+    http_addr: Option<std::net::SocketAddr>,
+    /// Directory of built SPA assets to serve at `/` (implies --http).
+    /// Overrides `http_web_root`; relative paths resolve under --data-dir.
+    #[arg(long, value_name = "DIR")]
+    web_root: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Cmd>,
 }
@@ -56,6 +68,18 @@ async fn main() -> Result<()> {
     let mut config = ServerConfig::load(cli.config.as_deref())?;
     if let Some(dir) = cli.data_dir {
         config.data_dir = dir;
+    }
+    // CLI overrides for the embedded HTTP surface, so the web SPA can be
+    // turned on without editing burrow.toml: `burrow --http`, optionally
+    // with `--http-addr` and `--web-root` (each of which implies --http).
+    if cli.http || cli.http_addr.is_some() || cli.web_root.is_some() {
+        config.http_enabled = true;
+    }
+    if let Some(addr) = cli.http_addr {
+        config.http_addr = addr;
+    }
+    if let Some(root) = cli.web_root {
+        config.http_web_root = root;
     }
 
     match cli.command.unwrap_or(Cmd::Run) {
