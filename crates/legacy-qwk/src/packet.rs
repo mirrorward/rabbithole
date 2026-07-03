@@ -69,6 +69,13 @@ impl QwkPacket {
         }
         out
     }
+
+    /// Bundle the members into the delivered `.QWK` file: a STORE-method ZIP
+    /// (see [`crate::zip`]). Deterministic — the same packet yields identical
+    /// bytes.
+    pub fn to_zip(&self) -> Vec<u8> {
+        crate::zip::zip_store(&self.members())
+    }
 }
 
 /// Build the full set of outbound QWK packet members.

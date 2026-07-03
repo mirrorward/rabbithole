@@ -33,16 +33,17 @@
 //! each conference's packed high-water mark, so the next packet contains only
 //! newer mail (shared with the native unread counters).
 //!
-//! # Delivery: raw members, no ZIP
+//! # Delivery: `.QWK` ZIP + raw members
 //!
-//! The codec crate documents ZIP bundling as out of scope, so the build
-//! writes the **raw packet members** (`MESSAGES.DAT`, `CONTROL.DAT`,
-//! `DOOR.ID`, per-conference `NNN.NDX`) into a per-user spool directory
-//! (`<qwk_spool_dir>/<login>/`, wiped and rebuilt each time). The telnet
-//! surface mints one `files_http_base` handoff link per member (link-minting
-//! only — the same Wave 6 discipline the file browser used before Wave 8
-//! served its links); real `.QWK` ZIP bundling, an HTTP route serving the
-//! spool, and a zmodem transfer path are documented follow-ups.
+//! The build writes both the delivered **`<BBSID>.QWK`** file — a
+//! STORE-method ZIP of the members ([`rabbithole_legacy_qwk::zip`]), what a
+//! QWK reader actually downloads — and the **raw members** (`MESSAGES.DAT`,
+//! `CONTROL.DAT`, `DOOR.ID`, per-conference `NNN.NDX`) into a per-user spool
+//! directory (`<qwk_spool_dir>/<login>/`, wiped and rebuilt each time). The
+//! telnet surface mints one `files_http_base` handoff link per member (the
+//! raw members remain so those per-file links keep working). An HTTP route
+//! serving the `.QWK` directly and a zmodem transfer path are documented
+//! follow-ups.
 //!
 //! # `.REP` ingest
 //!
@@ -145,7 +146,11 @@ pub struct QwkMember {
 pub struct QwkBuild {
     /// The per-user spool directory the members were written into.
     pub spool_dir: PathBuf,
-    /// Every member, in the packet's stable order.
+    /// The delivered `.QWK` file (a STORE-method ZIP of the members), inside
+    /// [`Self::spool_dir`] — what a QWK reader downloads.
+    pub packet_path: PathBuf,
+    /// Every member, in the packet's stable order (also written raw so the
+    /// telnet handoff can link them individually).
     pub members: Vec<QwkMember>,
     /// Messages packed (matches `CONTROL.DAT`'s total).
     pub total_messages: usize,
@@ -298,6 +303,11 @@ pub async fn build_for(shared: &Shared, account: &Account) -> Result<QwkBuild, Q
         });
     }
 
+    // The delivered packet: a STORE-method ZIP of the members, named
+    // `<BBSID>.QWK` per the QWK convention — what a reader downloads.
+    let packet_path = dir.join(format!("{}.QWK", bbs_id(&cfg.name)));
+    std::fs::write(&packet_path, packet.to_zip())?;
+
     // The packet is on disk: advance the shared read pointers.
     for (slug, ms) in &high_water {
         marks.set(account.id, slug, *ms).await?;
@@ -306,6 +316,7 @@ pub async fn build_for(shared: &Shared, account: &Account) -> Result<QwkBuild, Q
     shared.stats.incr("qwk", "packets_built");
     Ok(QwkBuild {
         spool_dir: dir,
+        packet_path,
         members,
         total_messages,
         conferences: confs.into_iter().map(|(n, b)| (n, b.slug)).collect(),

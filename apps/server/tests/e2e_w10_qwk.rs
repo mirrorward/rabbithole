@@ -123,6 +123,30 @@ async fn qwk_build_members_decode_and_pointers_advance() {
         "members in the packet's stable order"
     );
 
+    // The delivered `.QWK` is a real STORE-method ZIP of the members: a valid
+    // envelope whose entries (name + bytes) round-trip against the raw
+    // spooled members.
+    let zip = std::fs::read(data["packet"].as_str().unwrap()).unwrap();
+    assert!(
+        zip.starts_with(&0x0403_4b50u32.to_le_bytes()),
+        "local file header signature"
+    );
+    assert!(
+        zip.windows(4).any(|w| w == 0x0605_4b50u32.to_le_bytes()),
+        "end-of-central-directory record present"
+    );
+    for name in ["MESSAGES.DAT", "CONTROL.DAT", "001.NDX"] {
+        let raw = std::fs::read(member_path(data, name)).unwrap();
+        assert!(
+            zip.windows(name.len()).any(|w| w == name.as_bytes()),
+            "{name} entry present in the ZIP"
+        );
+        assert!(
+            raw.is_empty() || zip.windows(raw.len()).any(|w| w == raw.as_slice()),
+            "{name} bytes stored (uncompressed) in the ZIP"
+        );
+    }
+
     // MESSAGES.DAT decodes back (with the dev-dep codec) to the seeded posts
     // under the right conference numbers, oldest first per conference.
     let bytes = std::fs::read(member_path(data, "MESSAGES.DAT")).unwrap();

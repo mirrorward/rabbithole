@@ -214,6 +214,7 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
                 .collect();
             Ok(json!({
                 "spool_dir": build.spool_dir.display().to_string(),
+                "packet": build.packet_path.display().to_string(),
                 "total_messages": build.total_messages,
                 "conferences": conferences,
                 "members": members,

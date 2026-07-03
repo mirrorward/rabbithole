@@ -63,6 +63,7 @@ pub mod ndx;
 pub mod packet;
 pub mod qwke;
 pub mod reply;
+pub mod zip;
 
 mod text;
 
@@ -76,3 +77,4 @@ pub use qwke::{DoorId, QwkeKludges};
 pub use reply::{
     content_hash, dedupe, validate, ReplyDigest, ReplyMessage, ReplyPacket, ReplyProblem, Validated,
 };
+pub use zip::{crc32, zip_store};
