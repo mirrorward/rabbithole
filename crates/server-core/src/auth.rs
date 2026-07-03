@@ -5,6 +5,7 @@
 //! guest identity synthesis, and a uniform [`AuthError`] that deliberately
 //! does not distinguish "no such user" from "wrong password".
 
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rabbithole_identity::totp::{check_recovery_code, TotpEnrollment};
@@ -84,6 +85,18 @@ pub struct AuthService {
     guest_counter: AtomicU64,
 }
 
+/// One node of an invite tree: an account plus how many invite hops it sits
+/// below the queried root. Ordered breadth-first by [`AuthService::invite_subtree`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InviteNode {
+    /// The account's id.
+    pub account_id: i64,
+    /// The account's login.
+    pub login: String,
+    /// Invite hops from the queried root (`0` = the root itself).
+    pub depth: usize,
+}
+
 impl AuthService {
     pub fn new(pool: SqlitePool, session_ttl_secs: i64) -> Self {
         Self {
@@ -154,6 +167,10 @@ impl AuthService {
         password: &str,
         invite_code: Option<&str>,
     ) -> Result<AuthedUser, AuthError> {
+        // On invite mode, atomically reserve the code before creating the
+        // account, capturing the inviter so we can record the invite-tree edge
+        // once the new account has an id.
+        let mut pending_invite: Option<(String, i64)> = None;
         match mode {
             RegistrationMode::Closed => return Err(AuthError::RegistrationClosed),
             RegistrationMode::Open => {}
@@ -161,15 +178,56 @@ impl AuthService {
                 let Some(code) = invite_code else {
                     return Err(AuthError::BadInvite);
                 };
-                // Reserve the invite before creating the account; marked
-                // with the creator id afterwards (0 = pending).
-                if !InvitesRepo(&self.pool).consume(code, 0).await? {
+                let Some(inviter) = InvitesRepo(&self.pool).reserve(code).await? else {
                     return Err(AuthError::BadInvite);
-                }
+                };
+                pending_invite = Some((code.to_string(), inviter));
             }
         }
-        self.create_account(login, password, Role::User).await?;
+        let account = self.create_account(login, password, Role::User).await?;
+        if let Some((code, inviter)) = pending_invite {
+            // Finalise the invite with the real redeemer + record who invited
+            // this account (the tree edge). Best-effort: a stored-lineage
+            // hiccup must not fail an otherwise-valid registration.
+            let _ = InvitesRepo(&self.pool).finalize(&code, account.id).await;
+            let _ = AccountsRepo(&self.pool)
+                .set_invited_by(account.id, inviter)
+                .await;
+        }
         self.login_password(login, password, None).await
+    }
+
+    /// Walk the invite subtree rooted at `root_login`: the account itself plus
+    /// every account it (transitively) invited, breadth-first and bounded to
+    /// `max_nodes` (a corrupt-data / runaway backstop). Empty when the login is
+    /// unknown. Lets an operator trace — and then act on — a whole downline.
+    pub async fn invite_subtree(
+        &self,
+        root_login: &str,
+        max_nodes: usize,
+    ) -> Result<Vec<InviteNode>, AuthError> {
+        let accounts = AccountsRepo(&self.pool);
+        let Some(root) = accounts.by_login(root_login).await? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        let mut seen: HashSet<i64> = HashSet::new();
+        let mut queue: VecDeque<(i64, String, usize)> = VecDeque::new();
+        queue.push_back((root.id, root.login, 0));
+        while let Some((id, login, depth)) = queue.pop_front() {
+            if out.len() >= max_nodes || !seen.insert(id) {
+                continue;
+            }
+            out.push(InviteNode {
+                account_id: id,
+                login,
+                depth,
+            });
+            for (child_id, child_login) in accounts.invitees(id).await? {
+                queue.push_back((child_id, child_login, depth + 1));
+            }
+        }
+        Ok(out)
     }
 
     /// Password sign-in. Issues a resumable session token. Accounts with
@@ -436,6 +494,74 @@ mod tests {
             svc.login_resume("garbage").await,
             Err(AuthError::SessionExpired)
         ));
+    }
+
+    #[tokio::test]
+    async fn invite_registration_records_the_lineage_tree() {
+        let svc = service().await;
+        let pw = "correct-horse-battery-staple";
+        let alice = svc.create_account("alice", pw, Role::User).await.unwrap();
+
+        // Alice mints invites; Bob and Carol redeem them.
+        let invites = InvitesRepo(&svc.pool);
+        invites.create("code-bob", alice.id, 3600).await.unwrap();
+        invites.create("code-carol", alice.id, 3600).await.unwrap();
+        svc.register(RegistrationMode::Invite, "bob", pw, Some("code-bob"))
+            .await
+            .unwrap();
+        svc.register(RegistrationMode::Invite, "carol", pw, Some("code-carol"))
+            .await
+            .unwrap();
+
+        // Bob invites Dan — a second level of the tree.
+        let bob = AccountsRepo(&svc.pool)
+            .by_login("bob")
+            .await
+            .unwrap()
+            .unwrap();
+        invites.create("code-dan", bob.id, 3600).await.unwrap();
+        svc.register(RegistrationMode::Invite, "dan", pw, Some("code-dan"))
+            .await
+            .unwrap();
+
+        // The invite is finalised to the real redeemer (not the 0 placeholder),
+        // so it can't be consumed again.
+        assert!(
+            !invites.consume("code-bob", 42).await.unwrap(),
+            "a redeemed invite is spent"
+        );
+
+        // Alice's subtree: alice(0) → {bob, carol}(1) → dan(2).
+        let tree = svc.invite_subtree("alice", 100).await.unwrap();
+        let depth: std::collections::HashMap<&str, usize> =
+            tree.iter().map(|n| (n.login.as_str(), n.depth)).collect();
+        assert_eq!(tree.len(), 4);
+        assert_eq!(depth.get("alice"), Some(&0));
+        assert_eq!(depth.get("bob"), Some(&1));
+        assert_eq!(depth.get("carol"), Some(&1));
+        assert_eq!(depth.get("dan"), Some(&2));
+        // Breadth-first: the root is first, level 1 before level 2.
+        assert_eq!(tree[0].login, "alice");
+        assert!(tree.last().unwrap().login == "dan");
+
+        // A leaf's subtree is just itself; an unknown login is empty.
+        assert_eq!(svc.invite_subtree("dan", 100).await.unwrap().len(), 1);
+        assert!(svc.invite_subtree("nobody", 100).await.unwrap().is_empty());
+
+        // The node cap bounds the walk.
+        assert_eq!(svc.invite_subtree("alice", 2).await.unwrap().len(), 2);
+
+        // A bad invite code is refused and creates no account.
+        assert!(matches!(
+            svc.register(RegistrationMode::Invite, "mallory", pw, Some("no-such"))
+                .await,
+            Err(AuthError::BadInvite)
+        ));
+        assert!(AccountsRepo(&svc.pool)
+            .by_login("mallory")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

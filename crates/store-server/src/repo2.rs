@@ -228,6 +228,35 @@ impl InvitesRepo<'_> {
         .rows_affected();
         Ok(affected > 0)
     }
+
+    /// Atomically reserve an unused, unexpired invite (marks `used_by = 0`,
+    /// pending), returning its `created_by` — the inviter — so the caller can
+    /// record the invite-tree edge. `None` = the code is absent, already used,
+    /// or expired.
+    pub async fn reserve(&self, code: &str) -> Result<Option<i64>, StoreError> {
+        Ok(sqlx::query(
+            "UPDATE invites SET used_by = 0
+             WHERE code = ? AND used_by IS NULL AND expires_at > unixepoch()
+             RETURNING created_by",
+        )
+        .bind(code)
+        .fetch_optional(self.0)
+        .await?
+        .map(|r| r.get::<i64, _>("created_by")))
+    }
+
+    /// Finalise a reserved invite with the real redeemer account id (replaces
+    /// the pending `0` from [`reserve`]).
+    ///
+    /// [`reserve`]: Self::reserve
+    pub async fn finalize(&self, code: &str, used_by: i64) -> Result<(), StoreError> {
+        sqlx::query("UPDATE invites SET used_by = ? WHERE code = ?")
+            .bind(used_by)
+            .bind(code)
+            .execute(self.0)
+            .await?;
+        Ok(())
+    }
 }
 
 pub struct TotpRepo<'a>(pub &'a SqlitePool);
@@ -451,6 +480,49 @@ mod tests {
         invites.create("stale", account_id, -5).await.unwrap();
         assert!(!invites.consume("stale", 99).await.unwrap(), "expired");
         assert!(!invites.consume("never-existed", 99).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reserve_captures_inviter_finalizes_and_lists_downline() {
+        let (pool, alice) = pool_with_account().await;
+        let invites = InvitesRepo(&pool);
+        invites.create("code", alice, 3600).await.unwrap();
+
+        // reserve returns the inviter and marks the code pending (id 0).
+        assert_eq!(invites.reserve("code").await.unwrap(), Some(alice));
+        assert_eq!(
+            invites.reserve("code").await.unwrap(),
+            None,
+            "reserved only once"
+        );
+        assert_eq!(invites.reserve("missing").await.unwrap(), None);
+
+        // A fresh account redeems it; finalize records the real id and
+        // set_invited_by draws the tree edge.
+        let bob = AccountsRepo(&pool)
+            .create("bob", None, "bob", 1, None)
+            .await
+            .unwrap();
+        invites.finalize("code", bob.id).await.unwrap();
+        AccountsRepo(&pool)
+            .set_invited_by(bob.id, alice)
+            .await
+            .unwrap();
+
+        // invitees lists the direct downline; a childless account is empty.
+        assert_eq!(
+            AccountsRepo(&pool).invitees(alice).await.unwrap(),
+            vec![(bob.id, "bob".to_string())]
+        );
+        assert!(AccountsRepo(&pool)
+            .invitees(bob.id)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // An expired code cannot be reserved.
+        invites.create("stale", alice, -5).await.unwrap();
+        assert_eq!(invites.reserve("stale").await.unwrap(), None, "expired");
     }
 
     #[tokio::test]

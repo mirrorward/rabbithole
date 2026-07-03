@@ -94,6 +94,30 @@ impl AccountsRepo<'_> {
             .get("n"))
     }
 
+    /// Record which account invited `id` (the invite-tree edge).
+    pub async fn set_invited_by(&self, id: i64, inviter: i64) -> Result<(), StoreError> {
+        sqlx::query("UPDATE accounts SET invited_by = ? WHERE id = ?")
+            .bind(inviter)
+            .bind(id)
+            .execute(self.0)
+            .await?;
+        Ok(())
+    }
+
+    /// The `(id, login)` of every account `inviter` directly invited, oldest
+    /// first — one level of the invite tree.
+    pub async fn invitees(&self, inviter: i64) -> Result<Vec<(i64, String)>, StoreError> {
+        Ok(
+            sqlx::query("SELECT id, login FROM accounts WHERE invited_by = ? ORDER BY id")
+                .bind(inviter)
+                .fetch_all(self.0)
+                .await?
+                .iter()
+                .map(|r| (r.get::<i64, _>("id"), r.get::<String, _>("login")))
+                .collect(),
+        )
+    }
+
     pub async fn list(&self, offset: i64, limit: i64) -> Result<Vec<Account>, StoreError> {
         Ok(
             sqlx::query("SELECT * FROM accounts ORDER BY id LIMIT ? OFFSET ?")

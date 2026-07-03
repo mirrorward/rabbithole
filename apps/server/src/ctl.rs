@@ -94,6 +94,29 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
             audit("account-create", format!("{login} role={role:?}"));
             Ok(json!({"id": account.id, "login": account.login}))
         }
+        "invite-tree" => {
+            let login = str_arg("login")?;
+            // Cap the walk; a downline this deep is already an anomaly worth a
+            // separate look.
+            let max_nodes = req
+                .get("max")
+                .and_then(Value::as_u64)
+                .unwrap_or(1000)
+                .min(10_000) as usize;
+            let nodes = shared
+                .auth
+                .invite_subtree(&login, max_nodes)
+                .await
+                .map_err(|e| e.to_string())?;
+            let tree: Vec<Value> = nodes
+                .iter()
+                .map(|n| json!({"account_id": n.account_id, "login": n.login, "depth": n.depth}))
+                .collect();
+            // The root itself is node 0, so the invitee count is the remainder.
+            Ok(
+                json!({"root": login, "count": tree.len(), "invited": tree.len().saturating_sub(1), "tree": tree}),
+            )
+        }
         "who" => {
             let users: Vec<Value> = shared
                 .presence

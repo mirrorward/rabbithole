@@ -28,7 +28,7 @@ pub mod ratelimit;
 pub mod swarm;
 pub mod theme;
 
-pub use auth::{AuthError, AuthService, AuthedUser, RegistrationMode};
+pub use auth::{AuthError, AuthService, AuthedUser, InviteNode, RegistrationMode};
 pub use boards::{BoardError, BoardService};
 pub use bus::{EventBus, ServerEvent};
 pub use chat::{ChatService, LOBBY};
