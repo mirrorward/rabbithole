@@ -33,8 +33,42 @@
 //!
 //! The [`Packet::decode`] path performs bounds checks at every step and returns
 //! a [`PacketError`] on truncated or malformed input; it never panics.
+//!
+//! # Size caps
+//!
+//! Reticulum fixes the wire MTU at [`MTU`] = 500 bytes. [`Packet::encode`] and
+//! [`Packet::decode`] both enforce it (a longer buffer yields
+//! [`PacketError::TooLarge`]); [`max_data_len`] gives the payload budget for a
+//! header type.
+//!
+//! ```text
+//! header type 1: 1 flags + 1 hops + 16 dest       + 1 context = 19 → 481 data
+//! header type 2: 1 flags + 1 hops + 16 tid + 16 dest + 1 ctx  = 35 → 465 data
+//! ```
+//!
+//! // SPEC-CHECK: upstream RNS advertises a single `Packet.MDU = 464` — it
+//! // budgets the *maximum* header (35 bytes) plus one reserved IFAC byte for
+//! // every packet regardless of header type. This codec does not model IFAC
+//! // bodies, so it caps the encoded packet at MTU and exposes the exact
+//! // per-header budget instead; an interop pass that adds IFAC fields must
+//! // revisit `max_data_len`.
+//!
+//! # Packet hash
+//!
+//! [`Packet::packet_hash`] mirrors `RNS.Packet.get_hash()`: SHA-256 over the
+//! *hashable part* — the flags byte masked to its destination-type and
+//! packet-type bits, then destination hash, context, and payload. Hops, the
+//! transport id, and the IFAC/header-type/context-flag/propagation bits are
+//! all excluded, so the hash is stable while a packet is forwarded across the
+//! mesh. [`Packet::truncated_hash`] (first 16 bytes) is what link
+//! establishment derives its link id from.
+
+use sha2::{Digest, Sha256};
 
 use crate::destination::DESTINATION_HASH_LENGTH;
+
+/// The Reticulum wire MTU: no encoded packet may exceed this many bytes.
+pub const MTU: usize = 500;
 
 const FLAG_IFAC: u8 = 0b1000_0000;
 const FLAG_HEADER_TYPE: u8 = 0b0100_0000;
@@ -55,6 +89,25 @@ pub enum HeaderType {
     Header1,
     /// Two address fields (transport id, then destination hash).
     Header2,
+}
+
+impl HeaderType {
+    /// Encoded size of everything except the payload: flags, hops, the
+    /// address field(s), and the context byte.
+    pub fn encoded_header_len(self) -> usize {
+        let addrs = match self {
+            HeaderType::Header1 => HEADER_1_ADDRS,
+            HeaderType::Header2 => HEADER_2_ADDRS,
+        };
+        2 + addrs * DESTINATION_HASH_LENGTH + 1
+    }
+}
+
+/// Maximum payload length for a packet of the given header type such that the
+/// encoded packet fits in [`MTU`] (481 for HEADER_1, 465 for HEADER_2 — see
+/// the module-level SPEC-CHECK note on upstream's flat `MDU = 464`).
+pub fn max_data_len(header_type: HeaderType) -> usize {
+    MTU - header_type.encoded_header_len()
 }
 
 /// Packet propagation type (the single-bit field in the header).
@@ -134,9 +187,25 @@ impl PacketType {
 
 /// Common context byte values (`RNS.Packet` contexts). The context byte is
 /// otherwise carried verbatim.
+///
+/// // SPEC-CHECK: `NONE`/`LRPROOF` match upstream. The link-lifecycle values
+/// // (`KEEPALIVE`, `LINKIDENTIFY`, `LINKCLOSE`, `LINKPROOF`, `LRRTT`) follow
+/// // the RNS `Packet.py` constants as understood at 0.7/0.8; they are pinned
+/// // in `context_bytes_are_pinned` so an interop pass can adjust them in one
+/// // place.
 pub mod context {
     /// No special context.
     pub const NONE: u8 = 0x00;
+    /// Link keepalive.
+    pub const KEEPALIVE: u8 = 0xFA;
+    /// Link peer identification (identity revealed over an established link).
+    pub const LINKIDENTIFY: u8 = 0xFB;
+    /// Link teardown notice.
+    pub const LINKCLOSE: u8 = 0xFC;
+    /// Proof for a packet sent over an established link.
+    pub const LINKPROOF: u8 = 0xFD;
+    /// Link-request round-trip-time measurement message.
+    pub const LRRTT: u8 = 0xFE;
     /// Link-request proof context.
     pub const LRPROOF: u8 = 0xFF;
 }
@@ -183,6 +252,10 @@ pub enum PacketError {
     /// HEADER_1 packet was given one.
     #[error("header type / transport-id mismatch")]
     HeaderTransportMismatch,
+    /// The encoded packet (or the buffer offered for decoding) exceeds the
+    /// Reticulum [`MTU`].
+    #[error("packet of {size} bytes exceeds the {mtu}-byte Reticulum MTU", size = .0, mtu = MTU)]
+    TooLarge(usize),
 }
 
 impl Packet {
@@ -264,12 +337,17 @@ impl Packet {
     /// Encode the packet to bytes.
     ///
     /// Returns [`PacketError::HeaderTransportMismatch`] if the header type and
-    /// the presence of a transport id disagree.
+    /// the presence of a transport id disagree, and [`PacketError::TooLarge`]
+    /// if the encoded packet would exceed the [`MTU`] (see [`max_data_len`]).
     pub fn encode(&self) -> Result<Vec<u8>, PacketError> {
         let has_transport = self.transport_id.is_some();
         let wants_transport = matches!(self.header_type, HeaderType::Header2);
         if has_transport != wants_transport {
             return Err(PacketError::HeaderTransportMismatch);
+        }
+        let total = self.header_type.encoded_header_len() + self.data.len();
+        if total > MTU {
+            return Err(PacketError::TooLarge(total));
         }
 
         let addr_bytes = self.address_fields() * DESTINATION_HASH_LENGTH;
@@ -286,8 +364,12 @@ impl Packet {
     }
 
     /// Decode a packet from bytes with full bounds checking. Never panics on
-    /// truncated or arbitrary input.
+    /// truncated or arbitrary input. Buffers longer than the [`MTU`] are
+    /// rejected with [`PacketError::TooLarge`] before any parsing.
     pub fn decode(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes.len() > MTU {
+            return Err(PacketError::TooLarge(bytes.len()));
+        }
         // Minimum: flags + hops.
         let mut cursor = 0usize;
         let read = |cursor: &mut usize, n: usize| -> Result<core::ops::Range<usize>, PacketError> {
@@ -364,6 +446,40 @@ impl Packet {
             context,
             data,
         })
+    }
+
+    /// The *hashable part* of the packet, per `RNS.Packet.get_hashable_part`:
+    ///
+    /// ```text
+    /// (flags & 0b0000_1111) || destination_hash || context || data
+    /// ```
+    ///
+    /// The masked flags keep only the destination-type and packet-type bits;
+    /// hops and the HEADER_2 transport id are excluded. Everything a
+    /// transport node rewrites while forwarding is therefore outside the
+    /// hash, which is what makes it usable for de-duplication and link ids.
+    pub fn hashable_part(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(1 + DESTINATION_HASH_LENGTH + 1 + self.data.len());
+        out.push(self.flags() & 0b0000_1111);
+        out.extend_from_slice(&self.destination_hash);
+        out.push(self.context);
+        out.extend_from_slice(&self.data);
+        out
+    }
+
+    /// The full 32-byte packet hash: `SHA-256(hashable_part)`.
+    pub fn packet_hash(&self) -> [u8; 32] {
+        Sha256::digest(self.hashable_part()).into()
+    }
+
+    /// The truncated 16-byte packet hash — the first
+    /// [`DESTINATION_HASH_LENGTH`] bytes of [`packet_hash`](Self::packet_hash).
+    /// Link establishment derives its link id from this value of the link
+    /// request packet.
+    pub fn truncated_hash(&self) -> [u8; DESTINATION_HASH_LENGTH] {
+        let mut out = [0u8; DESTINATION_HASH_LENGTH];
+        out.copy_from_slice(&self.packet_hash()[..DESTINATION_HASH_LENGTH]);
+        out
     }
 }
 
@@ -511,5 +627,176 @@ mod tests {
             Packet::decode(&[]),
             Err(PacketError::Truncated { .. })
         ));
+    }
+
+    #[test]
+    fn pinned_wire_layout_vector() {
+        // Hand-assembled from the header diagram: IFAC=0, HEADER_2 (0x40),
+        // context flag 0, TRANSPORT (0x10), LINK destination (0b11 << 2),
+        // LINKREQUEST (0b10) → flags 0x5E; hops 7; transport id 0x11×16;
+        // destination 0x22×16; context LRPROOF (0xFF); data AA BB.
+        let mut p = Packet::new_header2(
+            DestinationType::Link,
+            PacketType::LinkRequest,
+            addr(0x11),
+            addr(0x22),
+            context::LRPROOF,
+            vec![0xAA, 0xBB],
+        );
+        p.hops = 7;
+        let mut expected = vec![0x5E, 0x07];
+        expected.extend_from_slice(&[0x11; 16]);
+        expected.extend_from_slice(&[0x22; 16]);
+        expected.push(0xFF);
+        expected.extend_from_slice(&[0xAA, 0xBB]);
+        assert_eq!(p.encode().unwrap(), expected);
+    }
+
+    #[test]
+    fn context_bytes_are_pinned() {
+        // SPEC-CHECK anchor: adjust here (and only here) if an interop pass
+        // finds different upstream values.
+        assert_eq!(context::NONE, 0x00);
+        assert_eq!(context::KEEPALIVE, 0xFA);
+        assert_eq!(context::LINKIDENTIFY, 0xFB);
+        assert_eq!(context::LINKCLOSE, 0xFC);
+        assert_eq!(context::LINKPROOF, 0xFD);
+        assert_eq!(context::LRRTT, 0xFE);
+        assert_eq!(context::LRPROOF, 0xFF);
+    }
+
+    #[test]
+    fn max_data_len_budgets() {
+        assert_eq!(HeaderType::Header1.encoded_header_len(), 19);
+        assert_eq!(HeaderType::Header2.encoded_header_len(), 35);
+        assert_eq!(max_data_len(HeaderType::Header1), 481);
+        assert_eq!(max_data_len(HeaderType::Header2), 465);
+    }
+
+    #[test]
+    fn encode_enforces_mtu() {
+        let fits = Packet::new_header1(
+            DestinationType::Single,
+            PacketType::Data,
+            addr(1),
+            context::NONE,
+            vec![0; max_data_len(HeaderType::Header1)],
+        );
+        let encoded = fits.encode().unwrap();
+        assert_eq!(encoded.len(), MTU);
+        assert_eq!(Packet::decode(&encoded).unwrap(), fits);
+
+        let over = Packet::new_header1(
+            DestinationType::Single,
+            PacketType::Data,
+            addr(1),
+            context::NONE,
+            vec![0; max_data_len(HeaderType::Header1) + 1],
+        );
+        assert_eq!(over.encode(), Err(PacketError::TooLarge(MTU + 1)));
+
+        let over2 = Packet::new_header2(
+            DestinationType::Single,
+            PacketType::Data,
+            addr(1),
+            addr(2),
+            context::NONE,
+            vec![0; max_data_len(HeaderType::Header2) + 1],
+        );
+        assert_eq!(over2.encode(), Err(PacketError::TooLarge(MTU + 1)));
+    }
+
+    #[test]
+    fn decode_enforces_mtu() {
+        assert_eq!(
+            Packet::decode(&vec![0u8; MTU + 1]),
+            Err(PacketError::TooLarge(MTU + 1))
+        );
+        // Exactly MTU decodes fine.
+        assert!(Packet::decode(&vec![0u8; MTU]).is_ok());
+    }
+
+    #[test]
+    fn hashable_part_masks_forwarding_fields() {
+        let base = Packet::new_header1(
+            DestinationType::Single,
+            PacketType::LinkRequest,
+            addr(0x42),
+            context::NONE,
+            vec![1, 2, 3],
+        );
+
+        // Hops mutate in transit — hash must be stable.
+        let mut hopped = base.clone();
+        hopped.hops = 99;
+        assert_eq!(base.packet_hash(), hopped.packet_hash());
+
+        // A transport node rewriting to HEADER_2 (inserting a transport id,
+        // switching propagation) must not change the hash either.
+        let mut routed = base.clone();
+        routed.header_type = HeaderType::Header2;
+        routed.transport_id = Some(addr(0x77));
+        routed.propagation_type = PropagationType::Transport;
+        routed.ifac = true;
+        routed.context_flag = true;
+        assert_eq!(base.packet_hash(), routed.packet_hash());
+        assert_eq!(base.truncated_hash(), routed.truncated_hash());
+
+        // The addressed/typed content *is* covered.
+        let mut retyped = base.clone();
+        retyped.packet_type = PacketType::Data;
+        assert_ne!(base.packet_hash(), retyped.packet_hash());
+        let mut readdressed = base.clone();
+        readdressed.destination_hash = addr(0x43);
+        assert_ne!(base.packet_hash(), readdressed.packet_hash());
+        let mut recontexted = base.clone();
+        recontexted.context = context::LRRTT;
+        assert_ne!(base.packet_hash(), recontexted.packet_hash());
+        let mut redata = base;
+        redata.data = vec![1, 2, 4];
+        assert_ne!(redata.packet_hash(), hopped.packet_hash());
+    }
+
+    #[test]
+    fn hash_survives_encode_decode() {
+        let p = Packet::new_header2(
+            DestinationType::Link,
+            PacketType::Proof,
+            addr(9),
+            addr(8),
+            context::LRPROOF,
+            vec![5; 40],
+        );
+        let decoded = Packet::decode(&p.encode().unwrap()).unwrap();
+        assert_eq!(p.packet_hash(), decoded.packet_hash());
+        assert_eq!(p.truncated_hash(), decoded.truncated_hash());
+    }
+
+    #[test]
+    fn pinned_truncated_hash_vector() {
+        // Deterministic packet → pinned truncated hash, so the hashable-part
+        // layout cannot drift silently.
+        let p = Packet::new_header1(
+            DestinationType::Single,
+            PacketType::LinkRequest,
+            addr(0x22),
+            context::NONE,
+            vec![0xAA, 0xBB],
+        );
+        assert_eq!(
+            p.hashable_part(),
+            {
+                let mut v = vec![0x02];
+                v.extend_from_slice(&[0x22; 16]);
+                v.push(0x00);
+                v.extend_from_slice(&[0xAA, 0xBB]);
+                v
+            },
+            "hashable part layout drifted"
+        );
+        assert_eq!(
+            hex::encode(p.truncated_hash()),
+            "5aee627e4891134ad17f4b56e432a70d"
+        );
     }
 }

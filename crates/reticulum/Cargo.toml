@@ -1,6 +1,6 @@
 [package]
 name = "rabbithole-reticulum"
-description = "Reticulum (RNS) interop foundation for RabbitHole — protocol data model and crypto identity (Wave 14): identity keypairs, destination naming/hashes, wire packet codec, and announces. No transport/interfaces yet."
+description = "Reticulum (RNS) interop foundation for RabbitHole — protocol data model and crypto identity (Wave 14): identity keypairs, destination naming/hashes, wire packet codec, announces (+ ingestion cache), and sans-IO link establishment. No transport/interfaces yet."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

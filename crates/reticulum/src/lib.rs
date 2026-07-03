@@ -13,10 +13,19 @@
 //!   `SHA-256(public_identity)` truncated to 16 bytes.
 //! - [`destination`]: destination naming (`app_name` + aspects) and the two
 //!   Reticulum hashes — the 10-byte `NAME_HASH` and the 16-byte truncated
-//!   destination hash.
+//!   destination hash — plus [`DestinationHash`], the hex-printable/parsable
+//!   value type higher layers key on.
 //! - [`packet`]: the Reticulum wire packet header and body, with a
-//!   bounds-checked codec that **never panics on truncated or arbitrary input**.
-//! - [`announce`]: announce payload construction and Ed25519 verification.
+//!   bounds-checked codec that **never panics on truncated or arbitrary
+//!   input**, enforces the 500-byte RNS MTU, and exposes the forwarding-
+//!   stable packet hash that de-duplication and link ids derive from.
+//! - [`announce`]: announce payload construction and Ed25519 verification,
+//!   plus [`AnnounceCache`] — a TTL + rate-limit ingestion helper with an
+//!   injected clock.
+//! - [`link`]: sans-I/O link establishment ([`LinkInitiator`] /
+//!   [`LinkResponder`]): link request → proof → RTT, states
+//!   `Pending → Handshake → Active → Closed` with injected-clock timeouts,
+//!   and the per-direction encrypt/decrypt seam of an established link.
 //! - [`crypto`]: signing/verification and an X25519 + AEAD encrypt/decrypt
 //!   token (see the divergence note below).
 //! - [`lxmf`]: a Lightweight Extensible Message Format (LXMF) message — the
@@ -63,8 +72,24 @@
 //!    (and the stamp/proof-of-work cost field, deferred here) with upstream
 //!    MessagePack before exchanging messages with real LXMF peers. See
 //!    [`lxmf`].
+//! 5. **Link cipher and RTT framing.** Established links reuse divergence 1's
+//!    AEAD substitution: the HKDF salt is the link id (as upstream), but the
+//!    64-byte output is split into **per-direction ChaCha20-Poly1305 keys**
+//!    with counter nonces and replay rejection, instead of upstream's single
+//!    32-byte key + random-IV token; the RTT message is a u64 of
+//!    milliseconds, not a msgpack float of seconds. See [`link`].
 //!
-//! Nothing in this crate performs I/O.
+//! Uncertain spec interpretations are additionally flagged inline with
+//! `// SPEC-CHECK:` comments and pinned by tests, so a later interop pass can
+//! adjust each byte layout in exactly one place.
+//!
+//! Nothing in this crate performs I/O: randomness is injected (or drawn from
+//! the OS CSPRNG only in explicit `generate`/`*_generated` constructors) and
+//! every time-sensitive state machine takes a caller-supplied monotonic
+//! millisecond clock. This is the pure core that the future RNS gateway
+//! sidecar/adapter (PLAN §Wave 14) will drive from its socket loop;
+//! `rabbit://` links gaining RNS destination hashes is a later swarm-crate
+//! slice.
 
 #![forbid(unsafe_code)]
 
@@ -72,11 +97,21 @@ pub mod announce;
 pub mod crypto;
 pub mod destination;
 pub mod identity;
+pub mod link;
 pub mod lxmf;
 pub mod packet;
 
-pub use announce::Announce;
-pub use destination::{Destination, DESTINATION_HASH_LENGTH, NAME_HASH_LENGTH};
+pub use announce::{Announce, AnnounceCache, AnnounceVerdict};
+pub use destination::{
+    Destination, DestinationHash, DestinationHashError, DESTINATION_HASH_LENGTH, NAME_HASH_LENGTH,
+};
 pub use identity::{Identity, PublicIdentity, IDENTITY_HASH_LENGTH, PUBLIC_IDENTITY_LENGTH};
+pub use link::{
+    CloseReason, LinkError, LinkId, LinkInitiator, LinkProof, LinkRequest, LinkResponder, LinkRole,
+    LinkRtt, LinkState,
+};
 pub use lxmf::{LxmfError, LxmfMessage, SignedLxmf, LXMF_HASH_LENGTH};
-pub use packet::{DestinationType, HeaderType, Packet, PacketError, PacketType, PropagationType};
+pub use packet::{
+    max_data_len, DestinationType, HeaderType, Packet, PacketError, PacketType, PropagationType,
+    MTU,
+};

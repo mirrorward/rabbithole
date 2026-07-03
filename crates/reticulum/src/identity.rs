@@ -165,8 +165,10 @@ impl core::fmt::Debug for PublicIdentity {
     }
 }
 
-/// Small internal hex helper (avoids a dependency for `Debug` output).
-fn hex_16(bytes: &[u8; IDENTITY_HASH_LENGTH]) -> String {
+/// Small internal hex helper (avoids a dependency for `Debug`/`Display`
+/// output). Shared with [`destination`](crate::destination) and
+/// [`link`](crate::link) for their 16-byte hash newtypes.
+pub(crate) fn hex_16(bytes: &[u8; IDENTITY_HASH_LENGTH]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
