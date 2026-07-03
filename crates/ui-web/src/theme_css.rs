@@ -301,6 +301,14 @@ pub const STYLESHEET: &str = "\
 .rh-server-uptime{font-size:var(--rh-font-xs);font-weight:600;color:var(--rh-accent);background:color-mix(in srgb,var(--rh-accent) 12%,transparent);padding:.15rem .5rem;border-radius:var(--rh-radius-full);white-space:nowrap}\
 .rh-server-endpoint{flex:1;min-width:6rem;font-size:var(--rh-font-xs);color:var(--rh-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
 .rh-server-foot .rh-btn{margin-left:auto;padding:.35rem .8rem;font-size:var(--rh-font-sm)}\
+.rh-toasts{position:fixed;top:4.2rem;right:var(--rh-space-4);z-index:90;display:flex;flex-direction:column;gap:var(--rh-space-2);width:min(22rem,90vw)}\
+.rh-toast{display:flex;align-items:center;gap:var(--rh-space-2);background:var(--rh-surface);border:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);border-left:3px solid var(--rh-accent);border-radius:var(--rh-radius);box-shadow:var(--rh-shadow-2);padding:.6rem .7rem;font-size:var(--rh-font-sm)}\
+.rh-toast-glyph{flex:none;font-size:var(--rh-font-lg);line-height:1;color:var(--rh-accent)}\
+.rh-toast-text{flex:1;color:var(--rh-text);min-width:0}\
+.rh-toast-close{flex:none;background:transparent;border:0;color:var(--rh-muted);cursor:pointer;font-size:var(--rh-font-lg);line-height:1;padding:0 .2rem;border-radius:var(--rh-radius-sm)}\
+.rh-toast-close:hover{color:var(--rh-text)}\
+.rh-toast.success{border-left-color:#2f9e44}.rh-toast.success .rh-toast-glyph{color:#2f9e44}\
+.rh-toast.warn{border-left-color:#e8890c}.rh-toast.warn .rh-toast-glyph{color:#e8890c}\
 .rh-login{position:relative;max-width:23rem;margin:5rem auto;display:flex;flex-direction:column;gap:var(--rh-space-3);background:var(--rh-surface);padding:var(--rh-space-8);border-radius:var(--rh-radius-xl);border:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent);box-shadow:var(--rh-shadow-3)}\
 .rh-login::before{content:'';position:absolute;inset:-40% 10% auto;height:60%;z-index:-1;background:radial-gradient(60% 100% at 50% 0,color-mix(in srgb,var(--rh-accent) 40%,transparent),transparent 70%);filter:blur(30px)}\
 .rh-login h1{margin:0 0 var(--rh-space-2);text-align:center;font-size:var(--rh-font-2xl);letter-spacing:-.02em;display:flex;flex-direction:column;align-items:center;gap:.7rem;color:var(--rh-text)}\

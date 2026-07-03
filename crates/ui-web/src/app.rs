@@ -16,7 +16,7 @@ use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
     Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby, Login,
-    Radio, ServerBrowser,
+    Radio, ServerBrowser, Toasts,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -50,6 +50,9 @@ pub struct AppState {
     /// An endpoint chosen in the server browser, handed to the login screen to
     /// prefill on its next mount (then cleared).
     pub pending_endpoint: RwSignal<Option<String>>,
+    /// Transient toast notifications — humanized-event moments
+    /// ([`crate::toasts`]).
+    pub toasts: RwSignal<crate::toasts::ToastQueue>,
     /// The user's appearance choice: theme pack (Clean/Retro/HighContrast)
     /// plus mode policy (System/Light/Dark). The effective [`Mode`] is
     /// derived from this plus the OS hint via [`AppState::mode`].
@@ -91,6 +94,7 @@ impl AppState {
             palette_open: create_rw_signal(false),
             servers: create_rw_signal(crate::servers::sample_directory()),
             pending_endpoint: create_rw_signal(None),
+            toasts: create_rw_signal(crate::toasts::ToastQueue::default()),
             theme: create_rw_signal(initial_theme_choice()),
             custom_pack: create_rw_signal(None),
             server_theme: create_rw_signal(None),
@@ -493,6 +497,18 @@ impl AppState {
         }
     }
 
+    /// Raise a toast notification, returning its id (for targeted dismissal).
+    pub fn notify(&self, kind: crate::toasts::ToastKind, text: impl Into<String>) -> u64 {
+        let mut id = 0;
+        self.toasts.update(|q| id = q.push(kind, text));
+        id
+    }
+
+    /// Dismiss a toast by id.
+    pub fn dismiss_toast(&self, id: u64) {
+        self.toasts.update(|q| q.dismiss(id));
+    }
+
     /// Load the mock's seeded radio notices into the radio state (each is a
     /// real `ServerNotice` push routed through the host-tested wire mapping),
     /// so the Radio view and status segment render in dev.
@@ -641,6 +657,7 @@ pub fn App() -> impl IntoView {
                 </a>
                 <RouteFocus/>
                 <CommandPalette/>
+                <Toasts/>
                 <Routes>
                     <Route path="/" view=Login/>
                     <Route path="/lobby" view=Lobby/>

@@ -315,6 +315,48 @@ pub fn CommandPalette() -> impl IntoView {
     }
 }
 
+/// The toast notification region: renders [`AppState`]'s toast queue into an
+/// `aria-live="polite"` stack, each toast dismissible and (in the browser)
+/// auto-expiring after a few seconds.
+#[component]
+pub fn Toasts() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let toasts = app.toasts;
+    view! {
+        <div class="rh-toasts" aria-live="polite" aria-label="Notifications">
+            <For
+                each=move || toasts.with(|q| q.items().to_vec())
+                key=|t| t.id
+                children=move |t| {
+                    let id = t.id;
+                    let cls = format!("rh-toast {}", t.kind.class());
+                    // Auto-dismiss after a few seconds (browser only).
+                    #[cfg(target_arch = "wasm32")]
+                    leptos::set_timeout(
+                        move || app.dismiss_toast(id),
+                        std::time::Duration::from_secs(5),
+                    );
+                    view! {
+                        <div class=cls role="status">
+                            <span class="rh-toast-glyph" aria-hidden="true">
+                                {t.kind.glyph()}
+                            </span>
+                            <span class="rh-toast-text">{t.text.clone()}</span>
+                            <button
+                                class="rh-toast-close"
+                                aria-label="Dismiss notification"
+                                on:click=move |_| app.dismiss_toast(id)
+                            >
+                                "\u{00d7}"
+                            </button>
+                        </div>
+                    }
+                }
+            />
+        </div>
+    }
+}
+
 /// Connect screen: server URL + handle + connect button. A real `<form>`
 /// (Enter submits from either field) with `<label for=…>` on both inputs.
 #[component]
@@ -336,6 +378,7 @@ pub fn Login() -> impl IntoView {
         if who.trim().is_empty() {
             return;
         }
+        let name = who.clone();
         app.dispatch(Command::Connect {
             endpoint: endpoint.get(),
             pinned_fingerprint: None,
@@ -350,11 +393,28 @@ pub fn Login() -> impl IntoView {
         });
         app.set_admin(is_admin);
         app.refresh_who();
+        app.load_dms();
         // Seeded now-playing notices, so the status segment shows on arrival.
         app.load_radio();
         // The server's published theme bundle (welcome frame in the real
         // transport), so the overlay + opt-out are live on arrival.
         app.load_server_theme();
+        // Humanized arrival: a welcome toast, plus a "you've got mail" moment
+        // when the inbox has conversations waiting.
+        app.notify(
+            crate::toasts::ToastKind::Success,
+            format!("Signed in as {name}"),
+        );
+        let waiting = app.state.with(|s| s.dm_threads.len());
+        if waiting > 0 {
+            app.notify(
+                crate::toasts::ToastKind::Mail,
+                format!(
+                    "You\u{2019}ve got mail \u{2014} {waiting} conversation{} waiting",
+                    if waiting == 1 { "" } else { "s" }
+                ),
+            );
+        }
         navigate("/lobby", Default::default());
     };
 
