@@ -315,6 +315,8 @@ pub const STYLESHEET: &str = "\
 .rh-login h1::before{content:'';width:3.25rem;height:3.25rem;border-radius:var(--rh-radius-full);background:radial-gradient(circle at 50% 52%,var(--rh-surface) 0 15%,var(--rh-accent) 15% 27%,var(--rh-surface) 27% 41%,color-mix(in srgb,var(--rh-accent) 62%,var(--rh-surface)) 41% 58%,var(--rh-surface) 58% 73%,color-mix(in srgb,var(--rh-accent) 34%,var(--rh-surface)) 73% 100%);box-shadow:0 0 0 1px color-mix(in srgb,var(--rh-accent) 35%,transparent),0 8px 24px -6px color-mix(in srgb,var(--rh-accent) 70%,transparent)}\
 .rh-login label{font-size:var(--rh-font-xs);font-weight:600;color:var(--rh-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:-.35rem}\
 .rh-login .rh-btn{justify-content:center;margin-top:var(--rh-space-2);padding:.6rem;font-size:var(--rh-font-size)}\
+.rh-live-toggle{display:flex;align-items:center;gap:.5rem;font-size:var(--rh-font-sm);color:var(--rh-muted);cursor:pointer;text-transform:none;letter-spacing:normal;margin-bottom:0}\
+.rh-live-toggle input{accent-color:var(--rh-accent);cursor:pointer}\
 .rh-body{flex:1;display:flex;min-height:0}\
 .rh-chat{flex:1;display:flex;flex-direction:column;min-width:0}\
 .rh-scroll{flex:1;overflow-y:auto;padding:var(--rh-space-5);display:flex;flex-direction:column;gap:.1rem}\

@@ -53,6 +53,14 @@ pub struct AppState {
     /// Transient toast notifications — humanized-event moments
     /// ([`crate::toasts`]).
     pub toasts: RwSignal<crate::toasts::ToastQueue>,
+    /// Whether this session is **live** (a real RHP-over-WebSocket transport)
+    /// rather than the seeded [`MockClient`] demo. Set by
+    /// [`AppState::connect_live`].
+    pub live: RwSignal<bool>,
+    /// The live browser WebSocket transport ([`crate::ws::WsClient`]), used
+    /// when [`Self::live`] is set. wasm-only — the host has no socket.
+    #[cfg(target_arch = "wasm32")]
+    ws: StoredValue<crate::ws::WsClient>,
     /// The user's appearance choice: theme pack (Clean/Retro/HighContrast)
     /// plus mode policy (System/Light/Dark). The effective [`Mode`] is
     /// derived from this plus the OS hint via [`AppState::mode`].
@@ -95,6 +103,9 @@ impl AppState {
             servers: create_rw_signal(crate::servers::sample_directory()),
             pending_endpoint: create_rw_signal(None),
             toasts: create_rw_signal(crate::toasts::ToastQueue::default()),
+            live: create_rw_signal(false),
+            #[cfg(target_arch = "wasm32")]
+            ws: store_value(crate::ws::WsClient::new()),
             theme: create_rw_signal(initial_theme_choice()),
             custom_pack: create_rw_signal(None),
             server_theme: create_rw_signal(None),
@@ -182,6 +193,52 @@ impl AppState {
     fn persist_theme(&self) {
         #[cfg(target_arch = "wasm32")]
         crate::theme_css::storage::save_choice(self.theme.get_untracked());
+    }
+
+    /// Open a **live** RHP session over WebSocket to a real burrow (wasm only),
+    /// folding the transport's events into the reactive state: api events
+    /// through [`UiState::apply`], connection-lifecycle states through
+    /// [`UiState::set_conn`], and routed notices through the radio reducer /
+    /// notice log. The default seeded [`MockClient`] path is untouched.
+    #[cfg(target_arch = "wasm32")]
+    pub fn connect_live(&self, endpoint: String) {
+        use crate::wire::EventClient;
+        use rabbithole_core::api::{Command, Event};
+        let state = self.state;
+        let toasts = self.toasts;
+        let radio = self.radio;
+        self.ws.update_value(|ws| {
+            ws.on_event(std::rc::Rc::new(move |event| {
+                if let Event::Connected { server_name, .. } = &event {
+                    let name = server_name.clone();
+                    toasts.update(|q| {
+                        q.push(
+                            crate::toasts::ToastKind::Success,
+                            format!("Connected to {name}"),
+                        );
+                    });
+                }
+                state.update(|s| s.apply(&event));
+            }));
+            ws.on_conn(std::rc::Rc::new(move |c| state.update(|s| s.set_conn(c))));
+            ws.on_notice(std::rc::Rc::new(move |route| match route {
+                crate::wire::NoticeRoute::Radio(u) => radio.update(|r| r.apply_update(u)),
+                crate::wire::NoticeRoute::Chat { from, text } => {
+                    state.update(|s| s.push_notice(&from, &text))
+                }
+            }));
+            ws.dispatch(Command::Connect {
+                endpoint: endpoint.clone(),
+                pinned_fingerprint: None,
+            });
+        });
+        self.live.set(true);
+    }
+
+    /// Host stub: no socket off-target, so this only flips the live flag.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn connect_live(&self, _endpoint: String) {
+        self.live.set(true);
     }
 
     /// Drive one command through the seam and fold its events into state.

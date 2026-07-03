@@ -371,9 +371,18 @@ pub fn Login() -> impl IntoView {
     );
     app.pending_endpoint.set(None);
     let handle = create_rw_signal(String::new());
+    // Opt in to a real RHP-over-WebSocket session instead of the seeded demo.
+    let go_live = create_rw_signal(false);
 
     let connect = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        if go_live.get() {
+            // Live: open a real socket; state fills from transport events
+            // (the handshake sets the header to Online + the server name).
+            app.connect_live(endpoint.get());
+            navigate("/lobby", Default::default());
+            return;
+        }
         let who = handle.get();
         if who.trim().is_empty() {
             return;
@@ -437,6 +446,14 @@ pub fn Login() -> impl IntoView {
                     prop:value=handle
                     on:input=move |ev| handle.set(event_target_value(&ev))
                 />
+                <label class="rh-live-toggle">
+                    <input
+                        type="checkbox"
+                        prop:checked=go_live
+                        on:change=move |ev| go_live.set(event_target_checked(&ev))
+                    />
+                    "Live connection (connect to a real server)"
+                </label>
                 <button class="rh-btn" type="submit">"Connect"</button>
             </form>
         </main>
