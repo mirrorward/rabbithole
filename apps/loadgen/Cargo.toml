@@ -1,0 +1,31 @@
+[package]
+name = "warren-stampede"
+description = "RabbitHole load generator: drives many concurrent RHP sessions against a burrow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "warren_stampede"
+path = "src/lib.rs"
+
+[[bin]]
+name = "warren-stampede"
+path = "src/main.rs"
+
+[dependencies]
+rabbithole-core = { workspace = true, features = ["native"] }
+rabbithole-proto.workspace = true
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+burrow = { path = "../server" }
+rabbithole-server-core.workspace = true
+tempfile.workspace = true
