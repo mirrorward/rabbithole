@@ -70,6 +70,18 @@
 //! re-fires `BoardPost`, which floods it to the next hop, so a post reaches
 //! every subscribed burrow through the mesh. A per-edge Bloom seen-set makes an
 //! event flood each edge once and never bounce back to its source (loop-safe).
+//!
+//! **Board follow-ups** (Edit/Tombstone) flood the same way: they are signed
+//! events too, served from the `board_followups` table (see
+//! [`crate::Shared`]'s `boards`), advertised/pulled by the same
+//! `IHave`/`PullRequest`, and re-fired as `BoardEvent` (distinct from
+//! `BoardPost` so they don't bump unread). Beyond the origin-signature check,
+//! a follow-up runs an **authorization gate** in
+//! [`rabbithole_server_core::boards::BoardService::ingest_event`] — apply only
+//! if the same author edits their own post, or the post's home server
+//! moderates its own content — so a peer can't forge an edit/retraction of
+//! someone else's post. Out-of-order follow-ups (arriving before their target
+//! post) park pending and reconcile when the post lands.
 //! Post-welcome, subscriptions/offers are exchanged with **approved peers
 //! only**, and every list on the wire is length-bounded.
 
@@ -86,8 +98,9 @@ use rabbithole_net::quic::{QuicListener, QuicTransport};
 use rabbithole_net::tls::{CertFingerprint, ServerAuth, TlsIdentity};
 use rabbithole_net::{Connection, Listener, Transport};
 use rabbithole_proto::{Family, Frame, FrameKind, Payload, RequestId, PROTOCOL_VERSION};
+use rabbithole_server_core::boards::IngestOutcome;
 use rabbithole_server_core::events::{EventBody, SignedEvent};
-use rabbithole_server_core::{SeenKey, ServerEvent};
+use rabbithole_server_core::{BoardError, SeenKey, ServerEvent};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
@@ -554,7 +567,8 @@ async fn run_peer_session(
             ev = bus.recv() => {
                 use tokio::sync::broadcast::error::RecvError;
                 match ev {
-                    Ok(ServerEvent::BoardPost { board, id, .. }) => {
+                    Ok(ServerEvent::BoardPost { board, id, .. })
+                    | Ok(ServerEvent::BoardEvent { board, id }) => {
                         if let Err(e) = maybe_offer(conn.as_mut(), &mut edge, &board, id).await {
                             tracing::debug!(
                                 peer = %PublicKey(peer_key).fingerprint(),
@@ -853,18 +867,29 @@ async fn handle_pull(
     let mut events: Vec<FedEvent> = Vec::new();
     let mut origin_keys: Vec<[u8; 32]> = Vec::new();
     for id in req.event_ids.iter().take(MAX_EVENTS_PER_MSG) {
-        let Some(row) = shared
+        // The requested id is either a post or a board follow-up (both are
+        // signed board events served the same way).
+        let (blob, ev_board) = if let Some(row) = shared
             .boards
             .post_by_id(id)
             .await
             .map_err(anyhow::Error::msg)?
-        else {
+        {
+            (row.event_blob, row.board_slug)
+        } else if let Some(f) = shared
+            .boards
+            .followup_by_id(id)
+            .await
+            .map_err(anyhow::Error::msg)?
+        {
+            (f.event_blob, f.board_slug)
+        } else {
             continue;
         };
-        if row.board_slug != req.board {
+        if ev_board != req.board {
             continue; // don't cross boards
         }
-        let Ok(signed) = postcard::from_bytes::<SignedEvent>(&row.event_blob) else {
+        let Ok(signed) = postcard::from_bytes::<SignedEvent>(&blob) else {
             continue;
         };
         let Some(origin_key) = origin_key_for(shared, &signed) else {
@@ -873,7 +898,7 @@ async fn handle_pull(
         edge.seen.insert(id);
         events.push(FedEvent {
             id: *id,
-            bytes: row.event_blob,
+            bytes: blob,
         });
         origin_keys.push(origin_key);
     }
@@ -951,15 +976,16 @@ async fn ingest_fed_event(
     if signed.id != fe.id {
         bail!("event id does not match its content");
     }
-    // Only Post events flood over this path; and only for the named board.
-    let EventBody::Post {
+    // Posts are board-scoped by their own body; follow-ups (Edit/Tombstone)
+    // target a post by id and are stored under the delivery's named board.
+    let is_post = matches!(signed.body, EventBody::Post { .. });
+    if let EventBody::Post {
         board: ev_board, ..
     } = &signed.body
-    else {
-        bail!("delivered event is not a post");
-    };
-    if ev_board != board {
-        bail!("delivered event board mismatch");
+    {
+        if ev_board != board {
+            bail!("delivered post board mismatch");
+        }
     }
 
     // Resolve the origin server key. Our own echoed-back events verify under
@@ -977,21 +1003,33 @@ async fn ingest_fed_event(
         *carried_origin_key
     };
 
-    // Verify the content id + author signature + origin signature.
+    // Verify the content id + author signature + origin signature. (The
+    // Edit/Tombstone *authorization* gate — author-or-home-server — lives in
+    // `BoardService::ingest_event`, applied consistently on the present-now
+    // and out-of-order paths.)
     signed
         .verify(&origin_key)
         .map_err(|e| anyhow!("signature rejected: {e:?}"))?;
 
-    // Already stored (e.g. our own event, or a prior flood): a no-op replay.
-    // Record it on this edge so the source is never re-offered, then return
-    // without re-firing (loop safety).
-    if shared
-        .boards
-        .post_by_id(&fe.id)
-        .await
-        .map_err(anyhow::Error::msg)?
-        .is_some()
-    {
+    // Already stored (our own event, or a prior flood): a no-op replay. Posts
+    // and follow-ups live in different tables. Record it on this edge so the
+    // source is never re-offered, then return without re-firing (loop safety).
+    let already = if is_post {
+        shared
+            .boards
+            .post_by_id(&fe.id)
+            .await
+            .map_err(anyhow::Error::msg)?
+            .is_some()
+    } else {
+        shared
+            .boards
+            .followup_by_id(&fe.id)
+            .await
+            .map_err(anyhow::Error::msg)?
+            .is_some()
+    };
+    if already {
         edge.seen.insert(&fe.id);
         return Ok(());
     }
@@ -1013,19 +1051,40 @@ async fn ingest_fed_event(
         shared.fed_flood.note(signed.origin.clone(), origin_key);
     }
 
-    // Project without re-signing — the origin author + signed blob are kept.
-    let row = shared
+    // Ingest without re-signing (origin author + signed blob kept). An
+    // unauthorized follow-up is refused and dropped without re-firing.
+    let outcome = match shared
         .boards
-        .ingest(&signed, max_threads)
+        .ingest_event(&signed, board, max_threads)
         .await
-        .map_err(|e| anyhow!("ingest: {e}"))?;
-    // Re-fire on the bus: updates local unread/pushes AND floods to the next
-    // hop through every other edge's session task.
-    shared.bus.publish(ServerEvent::BoardPost {
-        board: row.board_slug.clone(),
-        id: row.event_id,
-        root: row.root_id,
-    });
+    {
+        Ok(o) => o,
+        Err(BoardError::Forbidden) => {
+            tracing::debug!(
+                peer = %PublicKey(edge.peer_key).fingerprint(),
+                origin = %signed.origin,
+                "federation: refused unauthorized board follow-up"
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(anyhow!("ingest: {e}")),
+    };
+    // Re-fire on the bus: floods to the next hop, and for a post also updates
+    // local unread/pushes. A follow-up fires BoardEvent (no unread bump) — even
+    // a pending one, so peers who hold the target apply it.
+    match outcome {
+        IngestOutcome::Posted(row) => shared.bus.publish(ServerEvent::BoardPost {
+            board: row.board_slug.clone(),
+            id: row.event_id,
+            root: row.root_id,
+        }),
+        IngestOutcome::Applied { board: b, .. } | IngestOutcome::Pending { board: b, .. } => {
+            shared.bus.publish(ServerEvent::BoardEvent {
+                board: b,
+                id: fe.id,
+            })
+        }
+    }
     tracing::info!(
         peer = %PublicKey(edge.peer_key).fingerprint(),
         board = %board,

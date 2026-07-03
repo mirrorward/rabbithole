@@ -155,8 +155,13 @@ below is exchanged between servers yet.
 - **Board flood-fill** (`floodfill`) — `Subscription`, `IHave` / `PullRequest`
   / `PushEvents` moving signed board events between peers unchanged, gated
   by a Bloom-filter seen-set (`bloom`) against re-ingest loops.
-- **Redactions** (`redaction`) — server-sovereign tombstone/redact
-  propagation.
+- **Redactions** (`redaction`) — the *cross-community* server-sovereign
+  redaction signal ("I no longer serve this hash"), still model-only. (Board
+  **Edit/Tombstone follow-ups now flood live** over `MT_IHAVE`/`MT_PULL`/
+  `MT_EVENTS` as signed events, served from `board_followups`, gated by the
+  author-or-home-server authorization check in `BoardService::ingest_event`
+  and reconciled when they arrive before their target post — see
+  `docs/design/board-followup-flood.md`.)
 - **Ingest defense** (`policy`) — per-peer token-bucket `RateLimiter` and
   allow/deny `PeerPolicy`.
 - **Search / dedupe / fan-out** (`search`, `dedupe`, `fanout`) — these *run*

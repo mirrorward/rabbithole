@@ -104,6 +104,11 @@ pub enum ServerEvent {
         id: [u8; 32],
         root: Option<[u8; 32]>,
     },
+    /// A board **follow-up** (Edit/Tombstone) landed. Distinct from
+    /// [`ServerEvent::BoardPost`] so it does **not** bump unread counts or
+    /// notify as a new post; its consumer is the federation flood, which
+    /// offers `id` under `board` to subscribed peers.
+    BoardEvent { board: String, id: [u8; 32] },
     /// A wish changed status; pushed to the requester's account. Carries the
     /// full view so push projection stays synchronous (no DB round-trip).
     WishUpdated {

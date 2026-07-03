@@ -30,6 +30,7 @@ use burrow::Burrow;
 use rabbithole_identity::keys::{IdentityKey, Signature};
 use rabbithole_server_core::events::SignedEvent;
 use rabbithole_server_core::{PeerState, ServerConfig, ServerEvent};
+use rabbithole_store_server::repo4::PostRow;
 use serde_json::json;
 use tokio::sync::broadcast;
 
@@ -142,6 +143,171 @@ async fn wait_ingested(
 async fn stored_event(b: &Burrow, id: &[u8; 32]) -> Option<SignedEvent> {
     let row = b.shared.boards.post_by_id(id).await.unwrap()?;
     postcard::from_bytes(&row.event_blob).ok()
+}
+
+/// Edit a post on `origin` (as its original author, so the edit is authorized
+/// everywhere) and fire its `BoardEvent`, mirroring `handlers6`. Returns the
+/// Edit event id.
+async fn edit_and_announce(
+    origin: &Burrow,
+    target: [u8; 32],
+    author: &str,
+    new_body: &str,
+) -> [u8; 32] {
+    let seed = blake3::hash(author.as_bytes());
+    let (row, event_id) = origin
+        .shared
+        .boards
+        .edit(
+            target,
+            author,
+            seed.as_bytes(),
+            "edited",
+            new_body,
+            "text/plain",
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .unwrap();
+    origin.shared.bus.publish(ServerEvent::BoardEvent {
+        board: row.board_slug.clone(),
+        id: event_id,
+    });
+    event_id
+}
+
+/// Retract a post on `origin` (as its author) and fire its `BoardEvent`.
+async fn tombstone_and_announce(origin: &Burrow, target: [u8; 32], actor: &str) -> [u8; 32] {
+    let seed = blake3::hash(actor.as_bytes());
+    let board = origin
+        .shared
+        .boards
+        .post_by_id(&target)
+        .await
+        .unwrap()
+        .unwrap()
+        .board_slug;
+    let event_id = origin
+        .shared
+        .boards
+        .tombstone(
+            target,
+            actor,
+            seed.as_bytes(),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .unwrap();
+    origin.shared.bus.publish(ServerEvent::BoardEvent {
+        board,
+        id: event_id,
+    });
+    event_id
+}
+
+/// Wait until `dest`'s copy of post `target` satisfies `pred` (an edit/tombstone
+/// has been applied), bounded — returns `false` on timeout.
+async fn wait_post<F: Fn(&PostRow) -> bool>(
+    mut rx: broadcast::Receiver<ServerEvent>,
+    dest: &Burrow,
+    target: [u8; 32],
+    pred: F,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(p) = dest.shared.boards.post_by_id(&target).await.unwrap() {
+            if pred(&p) {
+                return true;
+            }
+        }
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(broadcast::error::RecvError::Closed)) => return false,
+            Err(_) => {
+                return dest
+                    .shared
+                    .boards
+                    .post_by_id(&target)
+                    .await
+                    .unwrap()
+                    .map(|p| pred(&p))
+                    .unwrap_or(false)
+            }
+        }
+    }
+}
+
+/// On an A–B–C chain, an Edit and a Tombstone authored on C flood through B to
+/// A: the post's body updates, then it is retracted — end to end, multi-hop,
+/// with the follow-up's origin signature intact (it verifies under C's key).
+#[tokio::test]
+async fn edit_and_tombstone_flood_multi_hop() {
+    let work = tempfile::tempdir().unwrap();
+    let a = start("Warren A", &work.path().join("a"), &["rabbit.general"]).await;
+    let b = start("Warren B", &work.path().join("b"), &["rabbit.general"]).await;
+    let c = start("Warren C", &work.path().join("c"), &["rabbit.general"]).await;
+    let (a_key, b_key, c_key) = (
+        a.shared.server_key,
+        b.shared.server_key,
+        c.shared.server_key,
+    );
+
+    approve(&b, a_key).await;
+    approve(&a, b_key).await;
+    approve(&b, c_key).await;
+    approve(&c, b_key).await;
+    connect(&a, &b).await;
+    connect(&b, &c).await;
+
+    // Post on C reaches A through B.
+    let rx = a.shared.bus.subscribe();
+    let id = post_and_announce(&c, "cottontail@warren-c", "Down the hole", "wake up").await;
+    assert!(wait_ingested(rx, &a, id).await, "post reaches A");
+
+    // C's author edits the post → the edit floods to A and updates the body.
+    let rx = a.shared.bus.subscribe();
+    let edit_id = edit_and_announce(&c, id, "cottontail@warren-c", "wake up NOW").await;
+    assert!(
+        wait_post(rx, &a, id, |p| p.body == "wake up NOW" && p.edited).await,
+        "C's edit floods to A"
+    );
+
+    // The stored follow-up on A is C's signed event — verifies under C's key.
+    let f = a
+        .shared
+        .boards
+        .followup_by_id(&edit_id)
+        .await
+        .unwrap()
+        .expect("A stored the edit follow-up");
+    let ev: SignedEvent = postcard::from_bytes(&f.event_blob).unwrap();
+    assert!(
+        ev.verify(&c_key).is_ok(),
+        "edit verifies under C's origin key"
+    );
+    assert!(ev.verify(&a_key).is_err() && ev.verify(&b_key).is_err());
+
+    // C's author retracts it → the tombstone floods to A (and lands on B too).
+    let rx = a.shared.bus.subscribe();
+    tombstone_and_announce(&c, id, "cottontail@warren-c").await;
+    assert!(
+        wait_post(rx, &a, id, |p| p.tombstoned && p.body.is_empty()).await,
+        "C's tombstone floods to A"
+    );
+    assert!(
+        b.shared
+            .boards
+            .post_by_id(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .tombstoned,
+        "the tombstone reached the relay B as well"
+    );
+
+    a.shutdown().await;
+    b.shutdown().await;
+    c.shutdown().await;
 }
 
 /// A–B–C chain: a post authored on C floods through B to A, origin signature

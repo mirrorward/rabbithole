@@ -293,6 +293,123 @@ impl PostsRepo<'_> {
     }
 }
 
+/// A stored board follow-up: an `Edit` or `Tombstone` signed event, kept so
+/// the federation flood can advertise/serve it and so out-of-order delivery
+/// (a follow-up before its target post) can be reconciled later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowupRow {
+    pub event_id: [u8; 32],
+    pub target_id: [u8; 32],
+    pub root_id: [u8; 32],
+    pub board_slug: String,
+    /// 1 = edit, 2 = tombstone.
+    pub kind: u8,
+    pub origin: String,
+    /// Whether it has been applied to the `posts` projection yet.
+    pub applied: bool,
+    pub created_at: i64,
+    pub event_blob: Vec<u8>,
+}
+
+fn row_to_followup(r: &sqlx::sqlite::SqliteRow) -> FollowupRow {
+    let id = |c| r.get::<Vec<u8>, _>(c).try_into().unwrap_or([0; 32]);
+    FollowupRow {
+        event_id: id("event_id"),
+        target_id: id("target_id"),
+        root_id: id("root_id"),
+        board_slug: r.get("board_slug"),
+        kind: r.get::<i64, _>("kind") as u8,
+        origin: r.get("origin"),
+        applied: r.get::<i64, _>("applied") != 0,
+        created_at: r.get("created_at"),
+        event_blob: r.get("event_blob"),
+    }
+}
+
+pub struct FollowupsRepo<'a>(pub &'a SqlitePool);
+
+impl FollowupsRepo<'_> {
+    /// Insert a follow-up. Idempotent on the content id — a duplicate (same
+    /// event flooded twice) is a no-op returning `false`.
+    pub async fn insert(&self, f: &FollowupRow) -> Result<bool, StoreError> {
+        let affected = sqlx::query(
+            "INSERT INTO board_followups
+                 (event_id, target_id, root_id, board_slug, kind, origin, applied,
+                  created_at, event_blob)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (event_id) DO NOTHING",
+        )
+        .bind(f.event_id.as_slice())
+        .bind(f.target_id.as_slice())
+        .bind(f.root_id.as_slice())
+        .bind(&f.board_slug)
+        .bind(f.kind as i64)
+        .bind(&f.origin)
+        .bind(f.applied as i64)
+        .bind(f.created_at)
+        .bind(&f.event_blob)
+        .execute(self.0)
+        .await?
+        .rows_affected();
+        Ok(affected > 0)
+    }
+
+    pub async fn by_id(&self, id: &[u8; 32]) -> Result<Option<FollowupRow>, StoreError> {
+        Ok(
+            sqlx::query("SELECT * FROM board_followups WHERE event_id = ?")
+                .bind(id.as_slice())
+                .fetch_optional(self.0)
+                .await?
+                .map(|r| row_to_followup(&r)),
+        )
+    }
+
+    /// Not-yet-applied follow-ups for a target post, oldest first — applied in
+    /// order when the target lands (an edit chain resolves latest-wins; a
+    /// tombstone is terminal).
+    pub async fn pending_for(&self, target: &[u8; 32]) -> Result<Vec<FollowupRow>, StoreError> {
+        Ok(sqlx::query(
+            "SELECT * FROM board_followups WHERE target_id = ? AND applied = 0
+             ORDER BY created_at ASC",
+        )
+        .bind(target.as_slice())
+        .fetch_all(self.0)
+        .await?
+        .iter()
+        .map(row_to_followup)
+        .collect())
+    }
+
+    /// Drop a single follow-up (e.g. a pending one whose target, once it
+    /// arrived, refused it at the authorization gate).
+    pub async fn delete_one(&self, id: &[u8; 32]) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM board_followups WHERE event_id = ?")
+            .bind(id.as_slice())
+            .execute(self.0)
+            .await?;
+        Ok(())
+    }
+
+    /// Mark a follow-up applied to the projection.
+    pub async fn mark_applied(&self, id: &[u8; 32]) -> Result<(), StoreError> {
+        sqlx::query("UPDATE board_followups SET applied = 1 WHERE event_id = ?")
+            .bind(id.as_slice())
+            .execute(self.0)
+            .await?;
+        Ok(())
+    }
+
+    /// Drop every follow-up targeting a thread — the retention cascade called
+    /// alongside `PostsRepo::delete_thread`.
+    pub async fn delete_for_root(&self, root: &[u8; 32]) -> Result<u64, StoreError> {
+        Ok(sqlx::query("DELETE FROM board_followups WHERE root_id = ?")
+            .bind(root.as_slice())
+            .execute(self.0)
+            .await?
+            .rows_affected())
+    }
+}
+
 pub struct ReadMarksRepo<'a>(pub &'a SqlitePool);
 
 impl ReadMarksRepo<'_> {
@@ -449,6 +566,66 @@ mod tests {
         assert_eq!(overflow.len(), 2);
         assert!(overflow.contains(&[1; 32]) && overflow.contains(&[2; 32]));
         assert!(posts.overflow_threads("b", 0).await.unwrap().is_empty()); // 0 = unlimited
+    }
+
+    fn followup(id: u8, target: [u8; 32], root: [u8; 32], kind: u8, at: i64) -> FollowupRow {
+        FollowupRow {
+            event_id: [id; 32],
+            target_id: target,
+            root_id: root,
+            board_slug: "b".into(),
+            kind,
+            origin: "home".into(),
+            applied: false,
+            created_at: at,
+            event_blob: vec![id; 8],
+        }
+    }
+
+    #[tokio::test]
+    async fn followups_insert_pending_apply_and_cascade() {
+        let pool = open_in_memory().await.unwrap();
+        let f = FollowupsRepo(&pool);
+
+        // Two follow-ups target post [1;32] (thread root [1;32]).
+        assert!(f
+            .insert(&followup(10, [1; 32], [1; 32], 1, 2000))
+            .await
+            .unwrap());
+        assert!(
+            !f.insert(&followup(10, [1; 32], [1; 32], 1, 2000))
+                .await
+                .unwrap(),
+            "dedup"
+        );
+        f.insert(&followup(11, [1; 32], [1; 32], 2, 3000))
+            .await
+            .unwrap();
+        // One targets a different thread.
+        f.insert(&followup(20, [5; 32], [5; 32], 1, 4000))
+            .await
+            .unwrap();
+
+        // pending_for is oldest-first and scoped to the target.
+        let pending = f.pending_for(&[1; 32]).await.unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].event_id, [10; 32]);
+        assert_eq!(pending[1].event_id, [11; 32]);
+        assert_eq!(f.by_id(&[10; 32]).await.unwrap().unwrap().kind, 1);
+
+        // Applying removes it from the pending set.
+        f.mark_applied(&[10; 32]).await.unwrap();
+        let pending = f.pending_for(&[1; 32]).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(f.by_id(&[10; 32]).await.unwrap().unwrap().applied);
+
+        // Retention cascade drops the whole thread's follow-ups, not others'.
+        assert_eq!(f.delete_for_root(&[1; 32]).await.unwrap(), 2);
+        assert!(f.by_id(&[10; 32]).await.unwrap().is_none());
+        assert!(
+            f.by_id(&[20; 32]).await.unwrap().is_some(),
+            "other thread untouched"
+        );
     }
 
     #[tokio::test]

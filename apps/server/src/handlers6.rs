@@ -222,7 +222,14 @@ pub async fn handle(
             )
             .await
         {
-            Ok(row) => reply!(&pb::PostReply::new(view(&row))),
+            Ok((row, event_id)) => {
+                // Flood the Edit follow-up to subscribed peers (no unread bump).
+                shared.bus.publish(ServerEvent::BoardEvent {
+                    board: existing.board_slug.clone(),
+                    id: event_id,
+                });
+                reply!(&pb::PostReply::new(view(&row)))
+            }
             Err(e) => fail!(map_err(e)),
         }
         return Ok(true);
@@ -246,8 +253,21 @@ pub async fn handle(
         if !is_author && !ctx.allows(shared, "board", Caps::BOARD_MODERATE) {
             fail!(ErrorCode::Forbidden);
         }
-        match shared.boards.tombstone(req.target).await {
-            Ok(()) => conn.send(Frame::ack(frame)).await?,
+        let seed = author_seed(shared, ctx.account_id);
+        let actor = format!("{}@{}", ctx.screen_name, shared.origin_name());
+        let now = chrono::Utc::now().timestamp_millis();
+        match shared
+            .boards
+            .tombstone(req.target, &actor, &seed, now)
+            .await
+        {
+            Ok(event_id) => {
+                shared.bus.publish(ServerEvent::BoardEvent {
+                    board: existing.board_slug.clone(),
+                    id: event_id,
+                });
+                conn.send(Frame::ack(frame)).await?
+            }
             Err(e) => fail!(map_err(e)),
         }
         return Ok(true);

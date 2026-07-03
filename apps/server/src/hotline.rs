@@ -2079,8 +2079,21 @@ async fn del_news_art(shared: &Arc<Shared>, active: &Active, txn: &Transaction) 
     {
         return err_reply(ty, id, "not permitted");
     }
-    match shared.boards.tombstone(post.event_id).await {
-        Ok(()) => Transaction::reply(ty, id, 0, Vec::new()),
+    let seed = author_seed(shared, active.subject.account_id);
+    let actor = format!("{}@{}", active.screen_name, shared.origin_name());
+    let now = chrono::Utc::now().timestamp_millis();
+    match shared
+        .boards
+        .tombstone(post.event_id, &actor, &seed, now)
+        .await
+    {
+        Ok(event_id) => {
+            shared.bus.publish(ServerEvent::BoardEvent {
+                board: post.board_slug.clone(),
+                id: event_id,
+            });
+            Transaction::reply(ty, id, 0, Vec::new())
+        }
         Err(e) => err_reply(ty, id, &format!("delete failed: {e}")),
     }
 }
