@@ -147,3 +147,11 @@ listener on `0.0.0.0:4655` by default (plus HTRK on `5498/tcp` and `5499/udp`):
 ```sh
 ./target/release/looking-glass --status 0.0.0.0:4655
 ```
+
+## Constrained / RF links
+
+For running RabbitHole reachability over Reticulum on LoRa, packet radio, and
+other low-bandwidth, duty-cycle-limited bearers — bandwidth and power budgets,
+governor tuning, and topology patterns — see
+[`deployment-lora.md`](deployment-lora.md). (Forward-looking: the RNS layer is a
+tested pure-Rust model today; the live interface adapter is future work.)
