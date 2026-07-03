@@ -7,3 +7,6 @@ node_modules
 
 # Agent worktrees and local session state
 .claude/
+
+# mdBook rendered output
+docs/book/

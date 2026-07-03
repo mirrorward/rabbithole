@@ -1,0 +1,18 @@
+[book]
+title = "RabbitHole"
+authors = ["RabbitHole contributors"]
+description = "A modern Rust revival of the golden age of online communities — Hotline, KDX, BBSes, and AOL. One server, many doors."
+# The book source root is the docs/ directory this file lives in, so the
+# existing docs are built in place (nothing is moved or duplicated).
+src = "."
+language = "en"
+
+[build]
+build-dir = "book"
+# Fail loudly on a SUMMARY link to a missing file rather than stubbing it,
+# so the table of contents can't silently drift from the docs on disk.
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/mirrorward/rabbithole"
+edit-url-template = "https://github.com/mirrorward/rabbithole/edit/main/docs/{path}"

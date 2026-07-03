@@ -17,6 +17,7 @@ post-1.0 Reticulum mesh. See [`TODO.md`](TODO.md) for the exact per-wave state.
 
 - [`PLAN.md`](PLAN.md) — the full-vision phased roadmap
 - [`TODO.md`](TODO.md) — the authoritative wave-by-wave tracker
+- [`docs/`](docs/) — the documentation site (build with `mdbook build docs`): protocol spec, operator guides, and design records
 - [`docs/protocol/`](docs/protocol/) — the RabbitHole Protocol (RHP) spec
 - [`docs/legacy-surfaces.md`](docs/legacy-surfaces.md) — the operator matrix for every legacy listener
 - [`docs/research/`](docs/research/) — the research briefs behind the design
