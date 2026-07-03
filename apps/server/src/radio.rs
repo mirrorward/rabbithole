@@ -1022,6 +1022,7 @@ where
     let _ = shared.radio.registry.set_enabled(&slug, true);
     let had_program = shared.radio.go_live(&slug, np);
     publish_now_playing(shared, &slug, true);
+    shared.stats.incr("radio", "sources_connected");
 
     wr.write_all(source_ok(req.method).as_bytes()).await?;
     tracing::info!(mount = %slug, dj = %dj_name, "DJ live source connected");

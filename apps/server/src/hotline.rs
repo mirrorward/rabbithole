@@ -994,6 +994,7 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
     let mut bus_rx = shared.bus.subscribe();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     shared.hotline.register(user_id, out_tx, icon, peer_ip);
+    shared.stats.incr("hotline", "logins");
     shared.presence.join(PresenceEntry {
         session_id,
         account_id: authed.account.id,

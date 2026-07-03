@@ -141,6 +141,41 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
             audit("theme-clear", String::new());
             Ok(json!({"cleared": true}))
         }
+        // ---- Gateway/feed activity stats (Wave 10) ---------------------
+        "gateway-stats" => {
+            let snap = crate::handlers13::snapshot(shared);
+            let feeds: Vec<Value> = snap
+                .feeds
+                .iter()
+                .map(|f| {
+                    json!({
+                        "url": f.url,
+                        "last_poll_ms": f.last_poll_ms,
+                        "last_status": f.last_status,
+                        "items_seen": f.items_seen,
+                        "items_posted": f.items_posted,
+                        "dupes_dropped": f.dupes_dropped,
+                    })
+                })
+                .collect();
+            let gateways: Vec<Value> = snap
+                .gateways
+                .iter()
+                .map(|g| {
+                    let counters: serde_json::Map<String, Value> = g
+                        .counters
+                        .iter()
+                        .map(|(k, v)| (k.clone(), json!(v)))
+                        .collect();
+                    json!({"name": g.name, "enabled": g.enabled, "counters": counters})
+                })
+                .collect();
+            Ok(json!({
+                "generated_at_ms": snap.generated_at_ms,
+                "feeds": feeds,
+                "gateways": gateways,
+            }))
+        }
         // ---- QWK offline mail (Wave 10) --------------------------------
         // Admin/testing surfaces over crate::qwk: both are gated on
         // `qwk_enabled` inside the service (same gate as the telnet `qwk`

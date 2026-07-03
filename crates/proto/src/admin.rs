@@ -748,6 +748,61 @@ impl Message for ThemeBundleInfo {
     const MESSAGE_TYPE: u16 = 44;
 }
 
+/// Ask for a live snapshot of the syndication + legacy-gateway counters
+/// (Wave 10). → [`GatewayStatsReply`]. Requires `CONFIG_ADMIN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GatewayStatsRequest;
+
+impl Message for GatewayStatsRequest {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 45;
+}
+
+/// Per-feed syndication statistics: the transient outcome the fetcher
+/// already computes, surfaced so the web/CLI admin can render the feed
+/// monitor.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FeedStat {
+    /// Feed URL (the row key).
+    pub url: String,
+    /// Last poll time, unix millis (0 = never polled this run).
+    pub last_poll_ms: i64,
+    /// `"ok"` | `"not_modified"` | `"error"` | `""` (never polled).
+    pub last_status: String,
+    /// Items encountered across polls (fresh, pre-dedupe).
+    pub items_seen: u64,
+    /// Items actually posted to the mapped board.
+    pub items_posted: u64,
+    /// Items dropped because the shared dedupe gate had already seen them.
+    pub dupes_dropped: u64,
+}
+
+/// One legacy-gateway's counters. `counters` is string-keyed so the set
+/// can grow without a protocol bump — clients render whatever keys arrive.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GatewayStat {
+    /// Gateway name, e.g. `"nntp"`, `"hotline"`, `"radio"`.
+    pub name: String,
+    /// Whether the surface is enabled in config right now.
+    pub enabled: bool,
+    /// `(counter-name, value)` pairs, sorted by name.
+    pub counters: Vec<(String, u64)>,
+}
+
+/// A point-in-time snapshot of all gateway/feed activity counters.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GatewayStatsReply {
+    /// When the snapshot was taken, unix millis.
+    pub generated_at_ms: i64,
+    pub feeds: Vec<FeedStat>,
+    pub gateways: Vec<GatewayStat>,
+}
+
+impl Message for GatewayStatsReply {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 46;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,5 +832,32 @@ mod tests {
             postcard::from_bytes::<ThemeBundleInfo>(&bytes).unwrap(),
             info
         );
+    }
+
+    #[test]
+    fn gateway_stats_reply_roundtrips() {
+        let reply = GatewayStatsReply {
+            generated_at_ms: 1_700_000_000_000,
+            feeds: vec![FeedStat {
+                url: "https://example.org/feed.xml".into(),
+                last_poll_ms: 1_700_000_000_000,
+                last_status: "ok".into(),
+                items_seen: 12,
+                items_posted: 9,
+                dupes_dropped: 3,
+            }],
+            gateways: vec![GatewayStat {
+                name: "nntp".into(),
+                enabled: true,
+                counters: vec![("posts".into(), 4), ("sessions".into(), 7)],
+            }],
+        };
+        let bytes = postcard::to_allocvec(&reply).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<GatewayStatsReply>(&bytes).unwrap(),
+            reply
+        );
+        assert_eq!(GatewayStatsRequest::MESSAGE_TYPE, 45);
+        assert_eq!(GatewayStatsReply::MESSAGE_TYPE, 46);
     }
 }

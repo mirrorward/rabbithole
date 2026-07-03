@@ -12,6 +12,7 @@ pub mod ftn;
 pub mod handlers10;
 pub mod handlers11;
 pub mod handlers12;
+pub mod handlers13;
 pub mod handlers2;
 pub mod handlers3;
 pub mod handlers4;
@@ -29,6 +30,7 @@ pub mod nntp_feed;
 pub mod qwk;
 pub mod radio;
 pub mod session;
+pub mod stats;
 pub mod syndication;
 pub mod telnet;
 pub mod zmodem;
@@ -99,6 +101,9 @@ pub struct Shared {
     /// keyed per (account, area, folder, name) — the HTXF partial-upload
     /// discipline.
     pub zpartials: zmodem::Partials,
+    /// Live syndication/legacy-gateway activity counters (Wave 10),
+    /// surfaced over the admin family and `ctl gateway-stats`.
+    pub stats: stats::GatewayStats,
     next_session: AtomicU64,
 }
 
@@ -307,6 +312,7 @@ impl Burrow {
             ratelimit: RateLimiter::new(),
             moderation,
             zpartials: zmodem::Partials::new(),
+            stats: stats::GatewayStats::new(),
             next_session: AtomicU64::new(1),
         });
 

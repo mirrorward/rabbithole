@@ -106,6 +106,7 @@ where
     let Some(authed) = login(&mut t, shared, peer_ip).await? else {
         return Ok(()); // disconnected or out of attempts
     };
+    shared.stats.incr("telnet", "logins");
     // Retro terminal types get CP437 on the wire (the art-crate tables
     // behind the encoding seam); unknown or modern terminals stay UTF-8.
     if t.terminal().is_some_and(cp437_terminal) {

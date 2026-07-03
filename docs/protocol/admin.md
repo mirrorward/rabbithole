@@ -39,3 +39,21 @@ art size caps (`banner_max_bytes` / `avatar_max_bytes`). Rejections are
 audited with the reason. Users can opt out per account via the session
 family's `ThemePrefSet` (57..59) — their `ThemeGet` then answers
 `NotFound` and the client renders default tokens.
+
+## Gateway/feed statistics (Wave 10): types 45..46
+
+| type | name | direction | requires | payload |
+|------|------|-----------|----------|---------|
+| 45 | GatewayStatsRequest | Request | CONFIG_ADMIN | — → GatewayStatsReply |
+| 46 | GatewayStatsReply | Reply | | `generated_at_ms`, `feeds: [{url, last_poll_ms, last_status, items_seen, items_posted, dupes_dropped}]`, `gateways: [{name, enabled, counters: [(name, u64)]}]` |
+
+A point-in-time snapshot of the in-memory syndication/legacy-gateway
+activity counters (they reset on restart — activity meters, not durable
+accounting). `last_status` is `"ok"` / `"not_modified"` / `"error"` / `""`
+(never polled). Gateway `counters` are string-keyed so the set can grow
+without a protocol bump; known keys today: `nntp.sessions`, `nntp.posts`,
+`nntp_feed.accepted`, `ftn.echomail_posts`, `qwk.packets_built`,
+`qwk.replies_ingested`, `hotline.logins`, `radio.sources_connected`,
+`telnet.logins`. Read-only, not audited. Also exposed as
+`burrow ctl gateway-stats` (JSON). This fills the "live stats" seam the web
+admin's syndication panel documented.

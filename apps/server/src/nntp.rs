@@ -423,8 +423,10 @@ where
     };
 
     // Greeting: posting is offered (the client authenticates before POST).
-    // A STARTTLS upgrade resumes without one (RFC 4642 §2.2.2).
+    // A STARTTLS upgrade resumes without one (RFC 4642 §2.2.2). A fresh
+    // greeting marks a new reader session (a STARTTLS resume does not).
     if security.greets() {
+        shared.stats.incr("nntp", "sessions");
         reader
             .get_mut()
             .write_all(Status::PostingAllowed.response().render().as_bytes())
@@ -1274,6 +1276,7 @@ where
         .await
     {
         Ok(row) => {
+            session.shared.stats.incr("nntp", "posts");
             session.shared.bus.publish(ServerEvent::BoardPost {
                 board: row.board_slug.clone(),
                 id: row.event_id,

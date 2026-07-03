@@ -303,6 +303,7 @@ pub async fn build_for(shared: &Shared, account: &Account) -> Result<QwkBuild, Q
         marks.set(account.id, slug, *ms).await?;
     }
 
+    shared.stats.incr("qwk", "packets_built");
     Ok(QwkBuild {
         spool_dir: dir,
         members,
@@ -395,6 +396,7 @@ pub async fn ingest_rep_for(
                     root: row.root_id,
                 });
                 report.accepted += 1;
+                shared.stats.incr("qwk", "replies_ingested");
             }
             Err(e) => report.rejected.push((reply.subject.clone(), e.to_string())),
         }

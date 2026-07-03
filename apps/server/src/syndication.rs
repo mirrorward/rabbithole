@@ -165,6 +165,11 @@ impl SyndicationService {
                 seen_path,
             });
         }
+        // Seed a stats row per feed so the admin monitor lists configured
+        // feeds before their first poll.
+        for f in &feeds {
+            shared.stats.feed_register(&f.url);
+        }
         Ok(SyndicationService {
             shared,
             poll_cfg,
@@ -233,12 +238,14 @@ impl SyndicationService {
             self.fetch_timeout,
         )
         .await;
+        let stamp = chrono::Utc::now().timestamp_millis();
         let resp = match fetched {
             Ok(resp) => resp,
             Err(e) => {
                 let f = &mut self.feeds[idx];
                 let (next, _) = f.poll.on_transport_error(&self.poll_cfg, None, now);
                 f.poll = next;
+                self.shared.stats.feed_poll(&url, stamp, "error");
                 tracing::warn!(feed = %url, failures = f.poll.failures, "syndication fetch failed: {e:#}");
                 return 0;
             }
@@ -253,12 +260,17 @@ impl SyndicationService {
         );
         self.feeds[idx].poll = next;
         match decision {
-            PollDecision::Modified => self.ingest(idx, &resp.body).await,
+            PollDecision::Modified => {
+                self.shared.stats.feed_poll(&url, stamp, "ok");
+                self.ingest(idx, &resp.body).await
+            }
             PollDecision::NotModified => {
+                self.shared.stats.feed_poll(&url, stamp, "not_modified");
                 tracing::debug!(feed = %url, "syndication: not modified");
                 0
             }
             PollDecision::Failed => {
+                self.shared.stats.feed_poll(&url, stamp, "error");
                 tracing::warn!(feed = %url, status = resp.status, "syndication fetch error status");
                 0
             }
@@ -286,14 +298,17 @@ impl SyndicationService {
             return 0;
         }
         let drafts = syndication::to_post_drafts(&fresh, &self.feeds[idx].mapping);
+        let seen_count = drafts.len() as u64;
         let now_ms = chrono::Utc::now().timestamp_millis();
         let mut posted = 0usize;
+        let mut dupes = 0u64;
         let mut new_ids: Vec<String> = Vec::new();
         for draft in &drafts {
             let key = SeenKey::Syndication(draft.dedup_id.clone());
             if self.shared.dedup.seen(&key) {
                 // Another ingest path already handled this item; remember it
                 // here too so future polls skip the re-parse churn.
+                dupes += 1;
                 new_ids.push(draft.dedup_id.clone());
                 continue;
             }
@@ -318,6 +333,9 @@ impl SyndicationService {
                 tracing::warn!(file = %f.seen_path.display(), "syndication: seen file append failed: {e}");
             }
         }
+        self.shared
+            .stats
+            .feed_ingest(&self.feeds[idx].url, seen_count, posted as u64, dupes);
         posted
     }
 }

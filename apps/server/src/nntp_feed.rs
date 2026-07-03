@@ -282,6 +282,7 @@ async fn ingest_article(shared: &Shared, article: &ParsedArticle) -> Result<bool
         .await
     {
         Ok(row) => {
+            shared.stats.incr("nntp_feed", "accepted");
             shared.bus.publish(ServerEvent::BoardPost {
                 board: row.board_slug.clone(),
                 id: row.event_id,

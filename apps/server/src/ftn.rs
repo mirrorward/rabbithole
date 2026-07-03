@@ -243,6 +243,7 @@ impl FtnGateway {
             .await
         {
             Ok(row) => {
+                self.shared.stats.incr("ftn", "echomail_posts");
                 self.shared.bus.publish(ServerEvent::BoardPost {
                     board: row.board_slug.clone(),
                     id: row.event_id,

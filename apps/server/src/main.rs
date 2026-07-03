@@ -132,6 +132,7 @@ async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<
         }
         ("theme-status", _) => json!({"cmd": "theme-status"}),
         ("theme-clear", _) => json!({"cmd": "theme-clear"}),
+        ("gateway-stats", _) => json!({"cmd": "gateway-stats"}),
         ("fed-catalogs", _) => json!({"cmd": "fed-catalogs"}),
         ("fed-search", terms) if !terms.is_empty() => {
             json!({"cmd": "fed-search", "terms": terms.join(" ")})
@@ -141,7 +142,7 @@ async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<
         // Always refused by the server with the offline procedure.
         ("restore", [dir]) => json!({"cmd": "restore", "path": dir}),
         _ => anyhow::bail!(
-            "usage: burrow ctl <status|who|config-get KEY|config-set KEY VALUE|account-create LOGIN PASSWORD [ROLE]|theme-status|theme-clear|fed-catalogs|fed-search TERMS…|backup DEST-DIR|backup-verify SNAPSHOT-DIR>"
+            "usage: burrow ctl <status|who|config-get KEY|config-set KEY VALUE|account-create LOGIN PASSWORD [ROLE]|theme-status|theme-clear|gateway-stats|fed-catalogs|fed-search TERMS…|backup DEST-DIR|backup-verify SNAPSHOT-DIR>"
         ),
     };
 
