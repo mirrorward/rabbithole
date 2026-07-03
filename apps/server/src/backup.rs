@@ -16,6 +16,8 @@
 //! - `identity/` — the Ed25519 signing seed and TLS material, so the
 //!   restored server keeps its federation identity and pinned fingerprint.
 //! - `federation/approved_peers.json` — admin-approved peer keys.
+//! - `federation/origin_keys.json` — pinned peer origin keys (key-continuity
+//!   for the board flood survives a restore, not just a restart).
 //! - `federation/catalog.bin` — the signed local file catalog (preserves
 //!   the generation chain peers have seen).
 //! - `blobs/` — the content-addressed store. Blobs are immutable once
@@ -243,8 +245,8 @@ fn copy_and_manifest(data_dir: &Path, snap: &Path) -> Result<SnapshotOutcome> {
         }
     }
 
-    // Federation: approved peers + the signed local catalog.
-    for name in ["approved_peers.json", "catalog.bin"] {
+    // Federation: approved peers, pinned origin keys, and the signed catalog.
+    for name in ["approved_peers.json", "origin_keys.json", "catalog.bin"] {
         let path = data_dir.join("federation").join(name);
         if path.is_file() {
             plan.push((path, format!("federation/{name}")));

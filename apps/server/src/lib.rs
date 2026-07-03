@@ -328,7 +328,9 @@ impl Burrow {
             // Reload the last signed local catalog so the generation chain
             // survives restarts (peers must never see a stale "fresh" gen 1).
             catalogs: fed_catalog::CatalogState::load(&data_dir, &identity.signing.public().0),
-            fed_flood: fed_flood::FloodState::new(),
+            // Reload pinned origin keys so key-continuity survives a restart
+            // (a reboot must not reopen the origin to a spoofer's re-pin).
+            fed_flood: fed_flood::FloodState::load(&data_dir),
             ratelimit: RateLimiter::new(),
             moderation,
             zpartials: zmodem::Partials::new(),

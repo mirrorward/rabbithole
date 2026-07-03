@@ -360,8 +360,24 @@ async fn multi_hop_relay_through_b() {
         "origin author preserved, not re-signed as local"
     );
 
-    // A pinned C's origin key by learning it from the relayed event.
+    // A pinned C's origin key by learning it from the relayed event…
     assert_eq!(a.shared.fed_flood.resolve("warren-c"), Some(c_key));
+    // …and persisted it to disk, so the pin survives a restart (a reboot must
+    // not let a spoofer re-pin "warren-c" to a different key).
+    let pins: std::collections::BTreeMap<String, String> = serde_json::from_slice(
+        &std::fs::read(
+            work.path()
+                .join("a")
+                .join("federation")
+                .join("origin_keys.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        pins.get("warren-c").map(String::as_str),
+        Some(hex::encode(c_key).as_str())
+    );
 
     // Exactly one copy — the flood did not duplicate it on A or B.
     assert_eq!(a.shared.boards.thread(&id, 100).await.unwrap().len(), 1);
