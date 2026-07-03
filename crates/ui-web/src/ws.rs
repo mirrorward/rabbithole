@@ -78,6 +78,10 @@ pub type PresenceSink = Rc<dyn Fn(PresenceDelta)>;
 /// A sink the transport pushes the board list into (from a decoded
 /// [`BoardList`](rabbithole_proto::board::BoardList) reply).
 pub type BoardSink = Rc<dyn Fn(Vec<crate::state::Board>)>;
+/// A sink the transport pushes a board's thread list into.
+pub type ThreadSink = Rc<dyn Fn(Vec<crate::state::Thread>)>;
+/// A sink the transport pushes a thread's posts into.
+pub type PostSink = Rc<dyn Fn(Vec<crate::state::Post>)>;
 
 /// A browser WebSocket [`EventClient`] speaking RHP.
 ///
@@ -99,6 +103,8 @@ struct Inner {
     who_sink: Option<WhoSink>,
     presence_sink: Option<PresenceSink>,
     board_sink: Option<BoardSink>,
+    thread_sink: Option<ThreadSink>,
+    post_sink: Option<PostSink>,
     next_id: u64,
     /// While `true`, the keepalive loop keeps pinging; cleared on close.
     alive: bool,
@@ -160,6 +166,18 @@ impl Inner {
         }
     }
 
+    fn emit_threads(&self, threads: Vec<crate::state::Thread>) {
+        if let Some(sink) = &self.thread_sink {
+            sink(threads);
+        }
+    }
+
+    fn emit_posts(&self, posts: Vec<crate::state::Post>) {
+        if let Some(sink) = &self.post_sink {
+            sink(posts);
+        }
+    }
+
     fn next_request_id(&mut self) -> RequestId {
         self.next_id += 1;
         RequestId(self.next_id)
@@ -181,6 +199,8 @@ impl WsClient {
                 who_sink: None,
                 presence_sink: None,
                 board_sink: None,
+                thread_sink: None,
+                post_sink: None,
                 next_id: 0,
                 alive: false,
                 want_connected: false,
@@ -244,6 +264,37 @@ impl WsClient {
         let mut b = self.inner.borrow_mut();
         let id = b.next_request_id();
         if let Ok(bytes) = wire::board_list_request(id).and_then(|f| encode_frame(&f)) {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
+    /// Register the thread-list sink. The most recent registration wins.
+    pub fn on_threads(&mut self, sink: ThreadSink) {
+        self.inner.borrow_mut().thread_sink = Some(sink);
+    }
+
+    /// Register the posts sink. The most recent registration wins.
+    pub fn on_posts(&mut self, sink: PostSink) {
+        self.inner.borrow_mut().post_sink = Some(sink);
+    }
+
+    /// Ask for a board's threads; the reply arrives through the
+    /// [`on_threads`](Self::on_threads) sink.
+    pub fn request_threads(&self, board: &str) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) = wire::thread_list_request(board, 200, id).and_then(|f| encode_frame(&f))
+        {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
+    /// Ask for a thread's posts by root id; the reply arrives through the
+    /// [`on_posts`](Self::on_posts) sink.
+    pub fn request_posts(&self, root: [u8; 32]) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) = wire::thread_request(root, 500, id).and_then(|f| encode_frame(&f)) {
             Self::write(&mut b, &bytes);
         }
     }
@@ -358,6 +409,12 @@ impl WsClient {
                         }
                         if let Some(boards) = wire::frame_to_boards(&frame) {
                             b.emit_boards(boards);
+                        }
+                        if let Some(threads) = wire::frame_to_threads(&frame) {
+                            b.emit_threads(threads);
+                        }
+                        if let Some(posts) = wire::frame_to_posts(&frame) {
+                            b.emit_posts(posts);
                         }
                     }
                     Err(err) => b.emit(Event::CommandFailed {

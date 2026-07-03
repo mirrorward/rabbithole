@@ -58,7 +58,7 @@ pub trait UiClient {
     fn threads(&self, slug: &str) -> Vec<Thread>;
 
     /// Posts belonging to the thread identified by `thread_id`.
-    fn posts(&self, thread_id: u64) -> Vec<Post>;
+    fn posts(&self, thread_id: &str) -> Vec<Post>;
 
     /// Snapshot of the member directory.
     fn members(&self) -> Vec<Member>;
@@ -195,19 +195,19 @@ impl MockClient {
     fn seeded_threads() -> Vec<Thread> {
         vec![
             Thread {
-                id: 1,
+                id: "t1".to_string(),
                 board: "general".to_string(),
                 title: "Warren rules & etiquette".to_string(),
                 author: "rabbit".to_string(),
             },
             Thread {
-                id: 2,
+                id: "t2".to_string(),
                 board: "general".to_string(),
                 title: "Introduce yourself".to_string(),
                 author: "alice".to_string(),
             },
             Thread {
-                id: 3,
+                id: "t3".to_string(),
                 board: "tech".to_string(),
                 title: "Running your own burrow".to_string(),
                 author: "bob".to_string(),
@@ -218,26 +218,26 @@ impl MockClient {
     fn seeded_posts() -> Vec<Post> {
         vec![
             Post {
-                id: 11,
-                thread: 1,
+                id: "p11".to_string(),
+                thread: "t1".to_string(),
                 author: "rabbit".to_string(),
                 body: "Be excellent to each other. No spam.".to_string(),
             },
             Post {
-                id: 12,
-                thread: 1,
+                id: "p12".to_string(),
+                thread: "t1".to_string(),
                 author: "alice".to_string(),
                 body: "Sounds good to me!".to_string(),
             },
             Post {
-                id: 21,
-                thread: 2,
+                id: "p21".to_string(),
+                thread: "t2".to_string(),
                 author: "alice".to_string(),
                 body: "Hi, I'm Alice. Long-time lurker.".to_string(),
             },
             Post {
-                id: 31,
-                thread: 3,
+                id: "p31".to_string(),
+                thread: "t3".to_string(),
                 author: "bob".to_string(),
                 body: "Here's how I set up my burrow behind NAT.".to_string(),
             },
@@ -691,7 +691,7 @@ impl UiClient for MockClient {
             .collect()
     }
 
-    fn posts(&self, thread_id: u64) -> Vec<Post> {
+    fn posts(&self, thread_id: &str) -> Vec<Post> {
         self.posts
             .iter()
             .filter(|p| p.thread == thread_id)
@@ -864,10 +864,10 @@ mod tests {
     #[test]
     fn posts_filter_by_thread_id() {
         let c = MockClient::new();
-        let posts = c.posts(1);
+        let posts = c.posts("t1");
         assert_eq!(posts.len(), 2);
-        assert!(posts.iter().all(|p| p.thread == 1));
-        assert!(c.posts(999).is_empty());
+        assert!(posts.iter().all(|p| p.thread == "t1"));
+        assert!(c.posts("nope").is_empty());
     }
 
     #[test]

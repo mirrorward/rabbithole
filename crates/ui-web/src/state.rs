@@ -41,8 +41,9 @@ pub struct Board {
 /// A discussion thread within a [`Board`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Thread {
-    /// Stable thread identifier.
-    pub id: u64,
+    /// Stable thread identifier: a synthetic `t<n>` in the mock, the root
+    /// post's hex blake3 id over a live transport.
+    pub id: String,
     /// Slug of the [`Board`] this thread belongs to.
     pub board: String,
     /// Thread subject line.
@@ -54,10 +55,10 @@ pub struct Thread {
 /// A single post inside a [`Thread`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Post {
-    /// Stable post identifier.
-    pub id: u64,
-    /// Identifier of the owning [`Thread`].
-    pub thread: u64,
+    /// Stable post identifier (hex blake3 id over a live transport).
+    pub id: String,
+    /// Identifier of the owning [`Thread`] (its root id).
+    pub thread: String,
     /// Handle of the poster.
     pub author: String,
     /// Post body text.
@@ -125,7 +126,7 @@ pub struct UiState {
     /// Slug of the selected board, if any.
     pub selected_board: Option<String>,
     /// Id of the opened thread, if any.
-    pub selected_thread: Option<u64>,
+    pub selected_thread: Option<String>,
     /// Direct-message conversations.
     pub dm_threads: Vec<DmThread>,
     /// Id of the selected DM conversation, if any.
@@ -207,7 +208,7 @@ impl UiState {
     }
 
     /// Open a thread within the selected board and load its posts.
-    pub fn open_thread(&mut self, id: u64, posts: Vec<Post>) {
+    pub fn open_thread(&mut self, id: String, posts: Vec<Post>) {
         self.selected_thread = Some(id);
         self.posts = posts;
     }
@@ -381,10 +382,10 @@ mod tests {
     #[test]
     fn select_board_loads_threads_and_resets_open_thread() {
         let mut s = UiState::default();
-        s.open_thread(7, vec![]);
-        assert_eq!(s.selected_thread, Some(7));
+        s.open_thread("7".into(), vec![]);
+        assert_eq!(s.selected_thread.as_deref(), Some("7"));
         let threads = vec![Thread {
-            id: 1,
+            id: "1".into(),
             board: "general".into(),
             title: "hello".into(),
             author: "rabbit".into(),
@@ -400,13 +401,13 @@ mod tests {
     fn open_thread_loads_posts() {
         let mut s = UiState::default();
         let posts = vec![Post {
-            id: 10,
-            thread: 1,
+            id: "10".into(),
+            thread: "1".into(),
             author: "alice".into(),
             body: "first".into(),
         }];
-        s.open_thread(1, posts.clone());
-        assert_eq!(s.selected_thread, Some(1));
+        s.open_thread("1".into(), posts.clone());
+        assert_eq!(s.selected_thread.as_deref(), Some("1"));
         assert_eq!(s.posts, posts);
     }
 

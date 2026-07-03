@@ -147,6 +147,35 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
             audit("board-create", slug.clone());
             Ok(json!({"slug": board.slug, "title": board.title}))
         }
+        "board-post" => {
+            let board = str_arg("board")?;
+            let author = str_arg("author")?;
+            let subject = str_arg("subject")?;
+            let body = str_arg("body")?;
+            let account = rabbithole_store_server::repo::AccountsRepo(&shared.pool)
+                .by_login(&author)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("no such account: {author}"))?;
+            let seed = crate::handlers6::author_seed(shared, account.id);
+            let now = chrono::Utc::now().timestamp_millis();
+            let post = shared
+                .boards
+                .post(
+                    &board,
+                    None,
+                    &author,
+                    &seed,
+                    &subject,
+                    &body,
+                    "text/plain",
+                    now,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            audit("board-post", format!("{board}: {subject}"));
+            Ok(json!({"board": post.board_slug, "subject": post.subject, "author": post.author}))
+        }
         "invite-tree" => {
             let login = str_arg("login")?;
             // Cap the walk; a downline this deep is already an anomaly worth a

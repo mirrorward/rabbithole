@@ -54,10 +54,12 @@
 //!
 //! - Session resume ([`AuthResume`] is unused here).
 //! - Binary attachments and the blob/transfer families.
-//! - The board (family 4) and DM (family 3) families: their proto messages
-//!   exist, but the api [`Command`]/[`Event`] enums carry no board/DM variants,
-//!   so there is nothing to map yet. When those land, add arms to
-//!   [`command_to_frame`] and [`frame_to_events`] and the transport is done.
+//! - **Board (family 4) read path is wired** through dedicated sinks (like
+//!   who/presence): [`board_list_request`]/[`frame_to_boards`],
+//!   [`thread_list_request`]/[`frame_to_threads`], and
+//!   [`thread_request`]/[`frame_to_posts`] (ids carried as hex via
+//!   [`id_to_hex`]/[`hex_to_id`]). Board *posting* and the DM family (3) still
+//!   have no mapping.
 //! - [`AuthOk`]/[`Welcome`] carry no api [`Event`] counterpart, so a successful
 //!   sign-in emits nothing until the api grows an auth-success event; the
 //!   history back-fill a client would issue after auth is likewise deferred.
@@ -74,7 +76,9 @@ use rabbithole_proto::admin::{
     ClassListRequest, ClassSet, ConfigApplied, ConfigGet, ConfigSet, ConfigValue, InviteCode,
     InviteCreate, Kick,
 };
-use rabbithole_proto::board::{BoardList, BoardListRequest};
+use rabbithole_proto::board::{
+    BoardList, BoardListRequest, ThreadList, ThreadListRequest, ThreadPosts, ThreadRequest,
+};
 use rabbithole_proto::chat::{ChatMessage, ChatSend};
 use rabbithole_proto::filelib::{
     AreaList, AreaListRequest, FileAdded, FileAreaView, FileContent, FileDownloadRequest,
@@ -179,6 +183,79 @@ pub fn frame_to_boards(frame: &Frame) -> Option<Vec<crate::state::Board>> {
                 slug: b.slug,
                 name: b.title,
                 description: b.description,
+            })
+            .collect(),
+    )
+}
+
+/// Lower-hex a 32-byte id.
+pub fn id_to_hex(id: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in id {
+        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
+        s.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
+    }
+    s
+}
+
+/// Parse a 64-char lower-hex id back to 32 bytes. `None` if malformed.
+pub fn hex_to_id(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Build a [`ThreadListRequest`] for a board's threads.
+pub fn thread_list_request(board: &str, limit: u32, id: RequestId) -> Result<Frame, ProtoError> {
+    Frame::request(id, &ThreadListRequest::new(board, limit))
+}
+
+/// Build a [`ThreadRequest`] for a thread's posts, keyed by its root id.
+pub fn thread_request(root: [u8; 32], limit: u32, id: RequestId) -> Result<Frame, ProtoError> {
+    Frame::request(id, &ThreadRequest::new(root, limit))
+}
+
+/// Decode a [`ThreadList`] reply to the [`Thread`](crate::state::Thread) rows
+/// the board view renders (thread id = the root post's hex id).
+pub fn frame_to_threads(frame: &Frame) -> Option<Vec<crate::state::Thread>> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let list = frame.decode::<ThreadList>()?.ok()?;
+    Some(
+        list.threads
+            .into_iter()
+            .map(|t| crate::state::Thread {
+                id: id_to_hex(&t.root.id),
+                board: t.root.board,
+                title: t.root.subject,
+                author: t.root.author,
+            })
+            .collect(),
+    )
+}
+
+/// Decode a [`ThreadPosts`] reply to the [`Post`](crate::state::Post) rows a
+/// thread renders. Each post's `thread` is the owning root's hex id (a root
+/// post is its own thread).
+pub fn frame_to_posts(frame: &Frame) -> Option<Vec<crate::state::Post>> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let list = frame.decode::<ThreadPosts>()?.ok()?;
+    Some(
+        list.posts
+            .into_iter()
+            .map(|p| crate::state::Post {
+                id: id_to_hex(&p.id),
+                thread: id_to_hex(&p.root.unwrap_or(p.id)),
+                author: p.author,
+                body: p.body,
             })
             .collect(),
     )
@@ -925,6 +1002,70 @@ mod tests {
         // A non-board frame yields None.
         let chat = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
         assert_eq!(frame_to_boards(&chat), None);
+    }
+
+    #[test]
+    fn hex_id_round_trips() {
+        let mut id = [0u8; 32];
+        for (i, b) in id.iter_mut().enumerate() {
+            *b = (i * 7 + 3) as u8;
+        }
+        let hex = id_to_hex(&id);
+        assert_eq!(hex.len(), 64);
+        assert_eq!(hex_to_id(&hex), Some(id));
+        assert_eq!(hex_to_id("nope"), None);
+        assert_eq!(hex_to_id(&"z".repeat(64)), None);
+    }
+
+    #[test]
+    fn frame_to_threads_and_posts_map_the_replies() {
+        use rabbithole_proto::board::{PostView, ThreadList, ThreadPosts, ThreadSummary};
+        let root_id = [9u8; 32];
+        let root = PostView::new(
+            root_id,
+            "general",
+            None,
+            None,
+            "alice",
+            "Welcome",
+            "hi all",
+            "text/plain",
+            1,
+            false,
+            false,
+        );
+        let summary = ThreadSummary::new(root.clone(), 2, 100);
+        let tl = ThreadList::new(vec![summary]);
+        let req = thread_list_request("general", 50, RequestId(1)).unwrap();
+        let reply = Frame::reply_to(&req, &tl).unwrap();
+        let threads = frame_to_threads(&reply).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, id_to_hex(&root_id));
+        assert_eq!(threads[0].title, "Welcome");
+        assert_eq!(threads[0].author, "alice");
+
+        // A reply post carries the thread root; the root post is its own thread.
+        let reply_post = PostView::new(
+            [5u8; 32],
+            "general",
+            Some(root_id),
+            Some(root_id),
+            "bob",
+            "re",
+            "+1",
+            "text/plain",
+            2,
+            false,
+            false,
+        );
+        let tp = ThreadPosts::new(vec![root, reply_post]);
+        let req = thread_request(root_id, 50, RequestId(2)).unwrap();
+        let reply = Frame::reply_to(&req, &tp).unwrap();
+        let posts = frame_to_posts(&reply).unwrap();
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[0].thread, id_to_hex(&root_id));
+        assert_eq!(posts[1].thread, id_to_hex(&root_id));
+        assert_eq!(posts[1].body, "+1");
     }
 
     #[test]

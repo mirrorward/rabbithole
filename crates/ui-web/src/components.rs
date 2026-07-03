@@ -621,14 +621,17 @@ pub fn BoardView() -> impl IntoView {
                 <ul class="rh-tree">
                     <For
                         each=move || state.with(|s| s.threads.clone())
-                        key=|t| t.id
+                        key=|t| t.id.clone()
                         children=move |t| {
-                            let id = t.id;
-                            let selected = move || {
-                                state.with(|s| s.selected_thread == Some(id))
-                            };
+                            let id = t.id.clone();
+                            let sel_id = id.clone();
+                            // A Memo (Copy) so both `class` and `aria-current`
+                            // can read the selection.
+                            let selected = create_memo(move |_| {
+                                state.with(|s| s.selected_thread.as_deref() == Some(sel_id.as_str()))
+                            });
                             let class = move || {
-                                if selected() {
+                                if selected.get() {
                                     "rh-thread-link active"
                                 } else {
                                     "rh-thread-link"
@@ -638,8 +641,8 @@ pub fn BoardView() -> impl IntoView {
                                 <li class="rh-tree-item">
                                     <button
                                         class=class
-                                        aria-current=move || selected().then_some("true")
-                                        on:click=move |_| app.open_thread(id)
+                                        aria-current=move || selected.get().then_some("true")
+                                        on:click=move |_| app.open_thread(id.clone())
                                     >
                                         <span class="rh-thread-title">{t.title}</span>
                                         <span class="rh-thread-author">"by "{t.author}</span>
@@ -660,7 +663,7 @@ pub fn BoardView() -> impl IntoView {
                     <div class="rh-posts">
                         <For
                             each=move || state.with(|s| s.posts.clone())
-                            key=|p| p.id
+                            key=|p| p.id.clone()
                             children=move |p| view! {
                                 <article class="rh-post">
                                     <span class="rh-from">{p.author}</span>

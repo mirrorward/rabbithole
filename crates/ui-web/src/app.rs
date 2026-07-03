@@ -251,6 +251,12 @@ impl AppState {
             ws.on_boards(std::rc::Rc::new(move |boards| {
                 state.update(|s| s.set_boards(boards))
             }));
+            ws.on_threads(std::rc::Rc::new(move |threads| {
+                state.update(|s| s.threads = threads)
+            }));
+            ws.on_posts(std::rc::Rc::new(move |posts| {
+                state.update(|s| s.posts = posts)
+            }));
             ws.on_notice(std::rc::Rc::new(move |route| match route {
                 crate::wire::NoticeRoute::Radio(u) => radio.update(|r| r.apply_update(u)),
                 crate::wire::NoticeRoute::Chat { from, text } => {
@@ -322,13 +328,31 @@ impl AppState {
 
     /// Select a board and load its threads into state.
     pub fn select_board(&self, slug: &str) {
+        #[cfg(target_arch = "wasm32")]
+        if self.live.get_untracked() {
+            // Reset the board view; the thread list arrives via the sink.
+            self.state.update(|s| s.select_board(slug, Vec::new()));
+            self.ws.update_value(|c| c.request_threads(slug));
+            return;
+        }
         let threads = self.client.with_value(|c| c.threads(slug));
         self.state.update(|s| s.select_board(slug, threads));
     }
 
     /// Open a thread and load its posts into state.
-    pub fn open_thread(&self, id: u64) {
-        let posts = self.client.with_value(|c| c.posts(id));
+    pub fn open_thread(&self, id: String) {
+        #[cfg(target_arch = "wasm32")]
+        if self.live.get_untracked() {
+            // Open the thread immediately; its posts stream in via the sink.
+            // The live thread id is the root post's hex id.
+            let root = crate::wire::hex_to_id(&id);
+            self.state.update(|s| s.open_thread(id, Vec::new()));
+            if let Some(root) = root {
+                self.ws.update_value(|c| c.request_posts(root));
+            }
+            return;
+        }
+        let posts = self.client.with_value(|c| c.posts(&id));
         self.state.update(|s| s.open_thread(id, posts));
     }
 

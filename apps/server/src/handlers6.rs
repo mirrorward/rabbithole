@@ -43,7 +43,7 @@ fn map_err(e: BoardError) -> ErrorCode {
 /// A stable per-account author signing seed. Wave 3 derives it from the
 /// server key + account id (deterministic, server-held); Wave 9 replaces
 /// this with the account's enrolled Ed25519 identity key.
-fn author_seed(shared: &Shared, account_id: i64) -> [u8; 32] {
+pub(crate) fn author_seed(shared: &Shared, account_id: i64) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"rabbithole-author-seed-v1");
     hasher.update(&shared.server_signing_seed);
