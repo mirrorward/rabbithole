@@ -53,18 +53,41 @@
 //! the per-peer verified store live in [`crate::fed_catalog`]; `fed-search`
 //! in `ctl` runs the cross-server search over them. Client-facing RHP search
 //! over federated catalogs is a follow-up.
+//!
+//! # Board-event flood-fill over the session
+//!
+//! Alongside catalogs, signed **board posts** gossip across the mesh on the
+//! same [`Family::FEDERATION`] frames (`MT_SUBSCRIBE`..`MT_EVENTS` = 8..11).
+//! It is subscription-driven: each side announces the board slugs it wants
+//! ([`crate::Shared`]'s `federation_board_subscribe`, opt-in), and thereafter
+//! whoever holds a matching event offers its ids ([`IHave`]), the subscriber
+//! pulls what it lacks ([`PullRequest`]), and the holder delivers the raw
+//! signed events ([`PushEvents`]/[`FedEvent`]) plus each event's origin server
+//! key. On ingest the origin signature is verified (mirroring
+//! [`crate::fed_catalog::ingest_peer_catalog`]), the id is deduped through the
+//! shared [`rabbithole_server_core::DedupStore`], and the post is projected via
+//! `BoardService` **unchanged** — never re-signed as local. A fresh ingest
+//! re-fires `BoardPost`, which floods it to the next hop, so a post reaches
+//! every subscribed burrow through the mesh. A per-edge Bloom seen-set makes an
+//! event flood each edge once and never bounce back to its source (loop-safe).
+//! Post-welcome, subscriptions/offers are exchanged with **approved peers
+//! only**, and every list on the wire is length-bounded.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
-use rabbithole_federation::{PeerHello, PeerHelloAck};
+use rabbithole_federation::{
+    BloomFilter, FedEvent, IHave, PeerHello, PeerHelloAck, PullRequest, PushEvents, Subscription,
+};
 use rabbithole_identity::{IdentityKey, PublicKey, Signature};
 use rabbithole_net::quic::{QuicListener, QuicTransport};
 use rabbithole_net::tls::{CertFingerprint, ServerAuth, TlsIdentity};
 use rabbithole_net::{Connection, Listener, Transport};
 use rabbithole_proto::{Family, Frame, FrameKind, Payload, RequestId, PROTOCOL_VERSION};
+use rabbithole_server_core::events::{EventBody, SignedEvent};
+use rabbithole_server_core::{SeenKey, ServerEvent};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
@@ -98,6 +121,39 @@ const MT_CATALOG_ANNOUNCE: u16 = 5;
 const MT_CATALOG_GET: u16 = 6;
 /// Full-catalog reply: `SignedCatalog` wire bytes.
 const MT_CATALOG: u16 = 7;
+// ---- board-event flood-fill (Wave 9), post-welcome, both directions --------
+/// Subscription announce: the sender's board interest (`Vec<Subscription>`,
+/// or a single `board_slug == "*"` wildcard). Recorded by the receiver, which
+/// then offers matching events it holds.
+const MT_SUBSCRIBE: u16 = 8;
+/// Offer: `IHave` — event ids the sender holds for a board, gated to the
+/// receiver's declared interest.
+const MT_IHAVE: u16 = 9;
+/// Request: `PullRequest` — specific event ids the requester is missing.
+const MT_PULL: u16 = 10;
+/// Delivery: `EventsMsg` (wraps the model's `PushEvents`) — the requested
+/// signed board events plus a per-event origin server key so a receiver many
+/// hops from the origin can still verify the origin signature.
+const MT_EVENTS: u16 = 11;
+
+// ---- flood-fill bounds (a peer must never be able to blow memory) ----------
+/// Max board slugs accepted in one `MT_SUBSCRIBE`.
+const MAX_SUBSCRIBE_BOARDS: usize = 256;
+/// Max event ids accepted in one `MT_IHAVE` / offered in one catch-up.
+const MAX_IHAVE_IDS: usize = 1024;
+/// Max event ids accepted in one `MT_PULL`.
+const MAX_PULL_IDS: usize = 1024;
+/// Max events packed into one `MT_EVENTS` reply.
+const MAX_EVENTS_PER_MSG: usize = 256;
+/// Largest `MT_EVENTS` payload we will decode (many signed posts, still
+/// bounded — larger than a catalog is unnecessary here).
+const MAX_EVENTS_PAYLOAD: usize = 8 * 1024 * 1024;
+/// Expected distinct event ids per edge for Bloom sizing (the seen-set is a
+/// fixed-footprint filter, so this only tunes the false-positive rate; a false
+/// positive at worst suppresses one redundant offer, never a needed ingest).
+const EDGE_SEEN_CAPACITY: usize = 200_000;
+/// Target false-positive rate for the per-edge seen-set.
+const EDGE_SEEN_FP: f64 = 1e-6;
 
 /// How often the background dialer re-checks configured peers.
 const DIAL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -151,6 +207,68 @@ struct CatalogGetMsg {}
 #[derive(Debug, Serialize, Deserialize)]
 struct CatalogMsg {
     bytes: Vec<u8>,
+}
+
+/// `MT_EVENTS` payload: the model's [`PushEvents`] plus a parallel list of
+/// origin server keys, one per event (same order + length). The origin key is
+/// what verifies each event's origin signature; carrying it lets a burrow that
+/// never peered with the origin still verify a relayed post. Each carried key
+/// is *pinned* per origin on first verification, so a relay can't swap it.
+#[derive(Debug, Serialize, Deserialize)]
+struct EventsMsg {
+    push: PushEvents,
+    origin_keys: Vec<[u8; 32]>,
+}
+
+/// A peer's declared board interest, learned from its `MT_SUBSCRIBE`.
+#[derive(Debug, Default)]
+enum Interest {
+    /// No interest declared yet (the default) — we offer nothing.
+    #[default]
+    None,
+    /// Wildcard: the peer wants every board.
+    All,
+    /// The peer wants exactly this set of board slugs.
+    Boards(std::collections::HashSet<String>),
+}
+
+impl Interest {
+    fn covers(&self, board: &str) -> bool {
+        match self {
+            Interest::None => false,
+            Interest::All => true,
+            Interest::Boards(set) => set.contains(board),
+        }
+    }
+}
+
+/// Per-edge flood-fill state, owned by one peer session task.
+struct FloodEdge {
+    /// The peer's proven Ed25519 server key.
+    peer_key: [u8; 32],
+    /// What the peer wants offered (from its `MT_SUBSCRIBE`).
+    interest: Interest,
+    /// Whether we've already announced our own interest to the peer, so a
+    /// received `MT_SUBSCRIBE` triggers exactly one reply (no ping-pong).
+    sent_subscription: bool,
+    /// Event ids already offered to / exchanged with this peer, so an event
+    /// floods each edge exactly once and never bounces back to its source.
+    /// A Bloom filter: fixed footprint, no false negatives (the loop-safety
+    /// guarantee), salted per edge so ids collide differently on each hop.
+    seen: BloomFilter,
+}
+
+impl FloodEdge {
+    fn new(peer_key: [u8; 32]) -> Self {
+        // Salt from the peer key so independent edges disagree on collisions.
+        let salt = u64::from_le_bytes(peer_key[0..8].try_into().expect("8 bytes"));
+        Self {
+            peer_key,
+            interest: Interest::None,
+            sent_subscription: false,
+            seen: BloomFilter::with_capacity_salted(EDGE_SEEN_CAPACITY, EDGE_SEEN_FP, salt),
+        }
+    }
 }
 
 /// The outcome of a dial attempt.
@@ -376,29 +494,86 @@ async fn serve_peer(mut conn: Box<dyn Connection>, shared: Arc<Shared>) -> Resul
         return Ok(());
     }
 
-    // Serve catalog traffic until the peer drops the session. Unknown
-    // federation message types are ignored (forward compatibility).
-    while let Ok(Some(frame)) = conn.recv().await {
-        if frame.family != Family::FEDERATION {
-            continue;
-        }
-        let served = match frame.message_type {
-            MT_CATALOG_ANNOUNCE => serve_catalog_announce(conn.as_mut(), &shared, &frame).await,
-            MT_CATALOG_GET => serve_catalog_get(conn.as_mut(), &shared, &dialer_key).await,
-            _ => Ok(()),
-        };
-        if let Err(e) = served {
+    // Serve catalog traffic + board-event flood-fill until the peer drops the
+    // session. This listener side also answers catalog announce/get (the
+    // dialer pulls; see `sync_catalogs`).
+    run_peer_session(conn, dialer_key, shared, true).await;
+    Ok(())
+}
+
+/// The post-welcome session loop, shared by both the listener (`serve_peer`)
+/// and the dialer (`hold_dialer`). It drives board-event flood-fill —
+/// announcing our board interest, offering/pulling/delivering signed events —
+/// and, on the listener side, still answers catalog announce/get.
+///
+/// Two branches, one `&mut conn` (like `session.rs`): an inbound federation
+/// frame, or a local `ServerEvent::BoardPost` that we may offer to this peer.
+/// Because `tokio::select!` drops the losing branch's future before running
+/// the winner's body, the bus branch is free to `conn.send` an offer even
+/// though the recv branch borrowed `conn`.
+async fn run_peer_session(
+    mut conn: Box<dyn Connection>,
+    peer_key: [u8; 32],
+    shared: Arc<Shared>,
+    serve_catalog: bool,
+) {
+    let mut edge = FloodEdge::new(peer_key);
+    // The dialer announces its interest first (after its synchronous catalog
+    // pull has completed, so it can't collide with that request/reply). The
+    // listener stays quiet until it receives a subscription, then replies with
+    // its own — this keeps the dialer's catalog exchange frame-ordered.
+    let is_dialer = !serve_catalog;
+    if is_dialer {
+        if let Err(e) = announce_subscription(conn.as_mut(), &shared, &mut edge).await {
             tracing::debug!(
-                peer = %PublicKey(dialer_key).fingerprint(),
-                "federation catalog exchange ended: {e}"
+                peer = %PublicKey(peer_key).fingerprint(),
+                "federation: subscription announce failed: {e}"
             );
-            break;
         }
     }
-    shared.peers.set_disconnected(&dialer_key);
-    tracing::info!(peer = %PublicKey(dialer_key).fingerprint(), "federation peer disconnected");
+    let mut bus = shared.bus.subscribe();
+    loop {
+        tokio::select! {
+            incoming = conn.recv() => {
+                match incoming {
+                    Ok(Some(frame)) => {
+                        if let Err(e) =
+                            handle_peer_frame(conn.as_mut(), &shared, &mut edge, &frame, serve_catalog)
+                                .await
+                        {
+                            tracing::debug!(
+                                peer = %PublicKey(peer_key).fingerprint(),
+                                "federation session exchange ended: {e}"
+                            );
+                            break;
+                        }
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            ev = bus.recv() => {
+                use tokio::sync::broadcast::error::RecvError;
+                match ev {
+                    Ok(ServerEvent::BoardPost { board, id, .. }) => {
+                        if let Err(e) = maybe_offer(conn.as_mut(), &mut edge, &board, id).await {
+                            tracing::debug!(
+                                peer = %PublicKey(peer_key).fingerprint(),
+                                "federation offer failed: {e}"
+                            );
+                            break;
+                        }
+                    }
+                    Ok(ServerEvent::Shutdown) | Err(RecvError::Closed) => break,
+                    // A lagged flood subscriber simply misses some live offers;
+                    // catch-up on the next subscribe (or the next post) recovers.
+                    Ok(_) | Err(RecvError::Lagged(_)) => {}
+                }
+            }
+        }
+    }
+    shared.peers.set_disconnected(&peer_key);
+    tracing::info!(peer = %PublicKey(peer_key).fingerprint(), "federation peer disconnected");
     conn.close().await;
-    Ok(())
 }
 
 /// Answer a peer's catalog announcement with our own id/generation, so the
@@ -445,6 +620,431 @@ async fn serve_catalog_get(
     ))
     .await?;
     Ok(())
+}
+
+// ---- board-event flood-fill ---------------------------------------------
+
+/// Dispatch one inbound federation frame within a live peer session. Unknown
+/// message types are ignored (forward compatibility).
+async fn handle_peer_frame(
+    conn: &mut dyn Connection,
+    shared: &Arc<Shared>,
+    edge: &mut FloodEdge,
+    frame: &Frame,
+    serve_catalog: bool,
+) -> Result<()> {
+    if frame.family != Family::FEDERATION {
+        return Ok(());
+    }
+    match frame.message_type {
+        MT_CATALOG_ANNOUNCE if serve_catalog => serve_catalog_announce(conn, shared, frame).await,
+        MT_CATALOG_GET if serve_catalog => serve_catalog_get(conn, shared, &edge.peer_key).await,
+        MT_SUBSCRIBE => {
+            handle_subscribe(shared, edge, frame)?;
+            // Reply with our own interest if we haven't announced it yet (the
+            // listener side), so the exchange is mutual with no ping-pong.
+            if !edge.sent_subscription {
+                announce_subscription(conn, shared, edge).await?;
+            }
+            // Immediately offer what we already hold for the peer's new
+            // interest, so a post that predates the subscription still floods.
+            catchup_offer(conn, shared, edge).await
+        }
+        MT_IHAVE => handle_ihave(conn, shared, edge, frame).await,
+        MT_PULL => handle_pull(conn, shared, edge, frame).await,
+        MT_EVENTS => handle_events(shared, edge, frame).await,
+        _ => Ok(()),
+    }
+}
+
+/// Announce our own board interest (`federation_board_subscribe`) to the peer
+/// and mark this edge as having sent it. Nothing is sent (and the flag stays
+/// clear) when the operator opted into no boards — flood is opt-in.
+async fn announce_subscription(
+    conn: &mut dyn Connection,
+    shared: &Arc<Shared>,
+    edge: &mut FloodEdge,
+) -> Result<()> {
+    let wanted = shared.config.read().federation_board_subscribe;
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let me = shared.server_key;
+    let wildcard = wanted.iter().any(|s| s == "all" || s == "*");
+    let subs: Vec<Subscription> = if wildcard {
+        vec![Subscription {
+            peer_key: me,
+            board_slug: "*".to_string(),
+        }]
+    } else {
+        wanted
+            .into_iter()
+            .take(MAX_SUBSCRIBE_BOARDS)
+            .map(|board_slug| Subscription {
+                peer_key: me,
+                board_slug,
+            })
+            .collect()
+    };
+    conn.send(fed_frame(FrameKind::Request, MT_SUBSCRIBE, &subs))
+        .await?;
+    edge.sent_subscription = true;
+    Ok(())
+}
+
+/// Record the peer's declared interest from its `MT_SUBSCRIBE`. Only honoured
+/// from an admin-approved peer (subscriptions are exchanged post-welcome with
+/// approved peers only).
+fn handle_subscribe(shared: &Arc<Shared>, edge: &mut FloodEdge, frame: &Frame) -> Result<()> {
+    if !shared.peers.is_approved(&edge.peer_key) {
+        bail!("subscribe from non-approved peer");
+    }
+    let subs: Vec<Subscription> = decode_fed(frame, MT_SUBSCRIBE)?;
+    if subs.len() > MAX_SUBSCRIBE_BOARDS {
+        bail!("subscription list too large");
+    }
+    edge.interest = if subs.iter().any(|s| s.board_slug == "*") {
+        Interest::All
+    } else {
+        Interest::Boards(subs.into_iter().map(|s| s.board_slug).collect())
+    };
+    tracing::debug!(
+        peer = %PublicKey(edge.peer_key).fingerprint(),
+        "federation: recorded peer board subscription"
+    );
+    Ok(())
+}
+
+/// Offer the event ids we already hold for every board the peer now wants —
+/// the catch-up half of the exchange (the live half is `maybe_offer`).
+async fn catchup_offer(
+    conn: &mut dyn Connection,
+    shared: &Arc<Shared>,
+    edge: &mut FloodEdge,
+) -> Result<()> {
+    let boards = shared.boards.boards().await.map_err(anyhow::Error::msg)?;
+    for b in boards {
+        if b.kind != 2 || !edge.interest.covers(&b.slug) {
+            continue;
+        }
+        let posts = crate::nntp::group_articles(shared, &b.slug).await?;
+        let mut ids: Vec<[u8; 32]> = Vec::new();
+        // Newest first, bounded — an offer never grows without limit.
+        for p in posts.iter().rev() {
+            if ids.len() >= MAX_IHAVE_IDS {
+                break;
+            }
+            if edge.seen.contains(&p.event_id) {
+                continue;
+            }
+            edge.seen.insert(&p.event_id);
+            ids.push(p.event_id);
+        }
+        if ids.is_empty() {
+            continue;
+        }
+        conn.send(fed_frame(
+            FrameKind::Push,
+            MT_IHAVE,
+            &IHave {
+                board: b.slug.clone(),
+                event_ids: ids,
+            },
+        ))
+        .await?;
+    }
+    Ok(())
+}
+
+/// The live half of offering: a local `BoardPost` fired (authored here or just
+/// ingested from another peer). Offer it to this peer if its subscription
+/// covers the board and we haven't already touched the id on this edge —
+/// which also skips offering an event straight back to the peer we got it from
+/// (that peer's edge recorded the id on ingest).
+async fn maybe_offer(
+    conn: &mut dyn Connection,
+    edge: &mut FloodEdge,
+    board: &str,
+    id: [u8; 32],
+) -> Result<()> {
+    if !edge.interest.covers(board) || edge.seen.contains(&id) {
+        return Ok(());
+    }
+    edge.seen.insert(&id);
+    conn.send(fed_frame(
+        FrameKind::Push,
+        MT_IHAVE,
+        &IHave {
+            board: board.to_string(),
+            event_ids: vec![id],
+        },
+    ))
+    .await?;
+    Ok(())
+}
+
+/// A peer offered ids for a board; pull the ones we lack (not already stored,
+/// not already processed). Bounded.
+async fn handle_ihave(
+    conn: &mut dyn Connection,
+    shared: &Arc<Shared>,
+    edge: &mut FloodEdge,
+    frame: &Frame,
+) -> Result<()> {
+    let offer: IHave = decode_fed(frame, MT_IHAVE)?;
+    if offer.event_ids.len() > MAX_IHAVE_IDS {
+        bail!("ihave list too large");
+    }
+    let mut want: Vec<[u8; 32]> = Vec::new();
+    for id in offer.event_ids {
+        if want.len() >= MAX_PULL_IDS {
+            break;
+        }
+        // Already seen in the dedupe window, or already durably stored: skip.
+        if shared.dedup.seen(&SeenKey::Event(id)) {
+            continue;
+        }
+        if shared
+            .boards
+            .post_by_id(&id)
+            .await
+            .map_err(anyhow::Error::msg)?
+            .is_some()
+        {
+            continue;
+        }
+        want.push(id);
+    }
+    // Record the offer on this edge so we don't re-offer these ids back.
+    for id in &want {
+        edge.seen.insert(id);
+    }
+    if want.is_empty() {
+        return Ok(());
+    }
+    conn.send(fed_frame(
+        FrameKind::Request,
+        MT_PULL,
+        &PullRequest {
+            board: offer.board,
+            event_ids: want,
+        },
+    ))
+    .await?;
+    Ok(())
+}
+
+/// Serve a peer's pull: deliver the signed events it requested (only for the
+/// named board, and only ones whose origin key we can vouch for). Only an
+/// admin-approved peer is served. Bounded per reply.
+async fn handle_pull(
+    conn: &mut dyn Connection,
+    shared: &Arc<Shared>,
+    edge: &mut FloodEdge,
+    frame: &Frame,
+) -> Result<()> {
+    if !shared.peers.is_approved(&edge.peer_key) {
+        bail!("pull from non-approved peer");
+    }
+    let req: PullRequest = decode_fed(frame, MT_PULL)?;
+    if req.event_ids.len() > MAX_PULL_IDS {
+        bail!("pull list too large");
+    }
+    let mut events: Vec<FedEvent> = Vec::new();
+    let mut origin_keys: Vec<[u8; 32]> = Vec::new();
+    for id in req.event_ids.iter().take(MAX_EVENTS_PER_MSG) {
+        let Some(row) = shared
+            .boards
+            .post_by_id(id)
+            .await
+            .map_err(anyhow::Error::msg)?
+        else {
+            continue;
+        };
+        if row.board_slug != req.board {
+            continue; // don't cross boards
+        }
+        let Ok(signed) = postcard::from_bytes::<SignedEvent>(&row.event_blob) else {
+            continue;
+        };
+        let Some(origin_key) = origin_key_for(shared, &signed) else {
+            continue; // we can't vouch for its origin key — don't relay it
+        };
+        edge.seen.insert(id);
+        events.push(FedEvent {
+            id: *id,
+            bytes: row.event_blob,
+        });
+        origin_keys.push(origin_key);
+    }
+    if events.is_empty() {
+        return Ok(());
+    }
+    conn.send(fed_frame(
+        FrameKind::Reply,
+        MT_EVENTS,
+        &EventsMsg {
+            push: PushEvents {
+                board: req.board,
+                events,
+            },
+            origin_keys,
+        },
+    ))
+    .await?;
+    Ok(())
+}
+
+/// Ingest delivered events: verify each origin signature, dedupe, and project
+/// via `BoardService` (preserving the origin author + signed blob — never
+/// re-signed as local). A newly-ingested post re-fires `BoardPost`, which is
+/// what floods it to the next hop.
+async fn handle_events(shared: &Arc<Shared>, edge: &mut FloodEdge, frame: &Frame) -> Result<()> {
+    let msg: EventsMsg = decode_fed_bounded(frame, MT_EVENTS, MAX_EVENTS_PAYLOAD)?;
+    if msg.push.events.len() > MAX_EVENTS_PER_MSG {
+        bail!("too many events in one delivery");
+    }
+    if msg.origin_keys.len() != msg.push.events.len() {
+        bail!("origin-key / event length mismatch");
+    }
+    let board = msg.push.board.clone();
+    let Some(brow) = shared
+        .boards
+        .board(&board)
+        .await
+        .map_err(anyhow::Error::msg)?
+    else {
+        return Ok(()); // the board must exist locally to accept its events
+    };
+    if brow.kind != 2 {
+        return Ok(()); // not a postable board
+    }
+    for (fe, origin_key) in msg.push.events.iter().zip(msg.origin_keys.iter()) {
+        if let Err(e) =
+            ingest_fed_event(shared, edge, &board, fe, origin_key, brow.max_threads).await
+        {
+            tracing::debug!(
+                peer = %PublicKey(edge.peer_key).fingerprint(),
+                board = %board,
+                "federation: rejected delivered event: {e}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Verify + store one delivered event. Mirrors `ingest_peer_catalog`: the
+/// origin signature must verify under the (pinned) origin key before a byte is
+/// trusted; forgeries and stale/duplicate replays are refused. The board is
+/// verified to exist by the caller.
+async fn ingest_fed_event(
+    shared: &Arc<Shared>,
+    edge: &mut FloodEdge,
+    board: &str,
+    fe: &FedEvent,
+    carried_origin_key: &[u8; 32],
+    max_threads: i64,
+) -> Result<()> {
+    let signed: SignedEvent =
+        postcard::from_bytes(&fe.bytes).map_err(|e| anyhow!("decode event: {e}"))?;
+    // The wire content id must match the signed event's own id.
+    if signed.id != fe.id {
+        bail!("event id does not match its content");
+    }
+    // Only Post events flood over this path; and only for the named board.
+    let EventBody::Post {
+        board: ev_board, ..
+    } = &signed.body
+    else {
+        bail!("delivered event is not a post");
+    };
+    if ev_board != board {
+        bail!("delivered event board mismatch");
+    }
+
+    // Resolve the origin server key. Our own echoed-back events verify under
+    // our key (never a peer-supplied one). For a remote origin we pin the
+    // first verified key; a later conflicting key for the same origin is a
+    // spoof and is refused (key continuity).
+    let origin_key = if signed.origin == shared.origin_name() {
+        shared.server_key
+    } else if let Some(pinned) = shared.fed_flood.resolve(&signed.origin) {
+        if pinned != *carried_origin_key {
+            bail!("origin key conflict for {}", signed.origin);
+        }
+        pinned
+    } else {
+        *carried_origin_key
+    };
+
+    // Verify the content id + author signature + origin signature.
+    signed
+        .verify(&origin_key)
+        .map_err(|e| anyhow!("signature rejected: {e:?}"))?;
+
+    // Already stored (e.g. our own event, or a prior flood): a no-op replay.
+    // Record it on this edge so the source is never re-offered, then return
+    // without re-firing (loop safety).
+    if shared
+        .boards
+        .post_by_id(&fe.id)
+        .await
+        .map_err(anyhow::Error::msg)?
+        .is_some()
+    {
+        edge.seen.insert(&fe.id);
+        return Ok(());
+    }
+    // Cross-edge dedupe window: the first sighting acts; a copy arriving over
+    // another edge drops here without a second projection or re-fire.
+    let now = chrono::Utc::now().timestamp_millis();
+    if !shared
+        .dedup
+        .check_and_record(SeenKey::Event(signed.id), now)
+    {
+        edge.seen.insert(&fe.id);
+        return Ok(());
+    }
+    edge.seen.insert(&fe.id);
+
+    // Pin the (verified) remote origin key so we can relay this event onward
+    // and detect a future key swap for the same origin.
+    if signed.origin != shared.origin_name() {
+        shared.fed_flood.note(signed.origin.clone(), origin_key);
+    }
+
+    // Project without re-signing — the origin author + signed blob are kept.
+    let row = shared
+        .boards
+        .ingest(&signed, max_threads)
+        .await
+        .map_err(|e| anyhow!("ingest: {e}"))?;
+    // Re-fire on the bus: updates local unread/pushes AND floods to the next
+    // hop through every other edge's session task.
+    shared.bus.publish(ServerEvent::BoardPost {
+        board: row.board_slug.clone(),
+        id: row.event_id,
+        root: row.root_id,
+    });
+    tracing::info!(
+        peer = %PublicKey(edge.peer_key).fingerprint(),
+        board = %board,
+        origin = %signed.origin,
+        "federation: ingested peer board event"
+    );
+    Ok(())
+}
+
+/// The origin server key that signs an event's origin signature: our own key
+/// for locally-authored events, else the pinned key learned when we first
+/// verified an event from that origin. `None` = we can't vouch for it (so we
+/// won't relay it).
+fn origin_key_for(shared: &Arc<Shared>, signed: &SignedEvent) -> Option<[u8; 32]> {
+    if signed.origin == shared.origin_name() {
+        Some(shared.server_key)
+    } else {
+        shared.fed_flood.resolve(&signed.origin)
+    }
 }
 
 // ---- dialer --------------------------------------------------------------
@@ -581,13 +1181,12 @@ async fn sync_catalogs(
     Ok(())
 }
 
-/// Keep a dialer-side session alive until the peer drops it.
-async fn hold_dialer(mut conn: Box<dyn Connection>, peer_key: [u8; 32], shared: Arc<Shared>) {
-    // Drain until the peer drops the session (the dialer's catalog sync ran
-    // before the hold; inbound frames here are ignored).
-    while let Ok(Some(_)) = conn.recv().await {}
-    shared.peers.set_disconnected(&peer_key);
-    conn.close().await;
+/// Keep a dialer-side session alive until the peer drops it, running
+/// board-event flood-fill over it. The dialer's catalog sync already ran
+/// before this hold, so catalog serving here is disabled (the listener side
+/// answers those).
+async fn hold_dialer(conn: Box<dyn Connection>, peer_key: [u8; 32], shared: Arc<Shared>) {
+    run_peer_session(conn, peer_key, shared, false).await;
 }
 
 /// Background task: periodically dial configured peers that aren't connected.

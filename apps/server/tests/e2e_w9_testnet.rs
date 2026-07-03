@@ -8,11 +8,12 @@
 //! - **full mesh**: with all six directed edges approved and dialed, every
 //!   burrow's federated-search surface sees all three libraries with correct
 //!   provenance (server name, key, generation, local flag);
-//! - **no transitive relay**: on an A–B–C chain, C's catalog reaches B but
-//!   never A — a burrow serves only its *own* signed catalog over
-//!   `MT_CATALOG_GET`, so catalogs travel exactly one hop. That is the
-//!   current contract, asserted here so a future flood-fill changes this
-//!   test deliberately;
+//! - **catalogs are one-hop**: on an A–B–C chain, C's *file catalog* reaches B
+//!   but never A — a burrow serves only its *own* signed catalog over
+//!   `MT_CATALOG_GET`, so catalogs travel exactly one hop. This is unchanged by
+//!   board-event flood-fill, which relays *board posts* (not file catalogs)
+//!   across the mesh — the multi-hop board relay is proven in
+//!   `e2e_w9_floodfill.rs`;
 //! - **partition + rejoin**: killing the middle node leaves the outer nodes
 //!   serving their retained catalogs without errors (peer catalogs are
 //!   in-memory and are not evicted on disconnect — also the current
@@ -27,11 +28,11 @@
 //!   generation, replaying an older (or equal) generation is refused by each
 //!   of them independently.
 //!
-//! Honest scope note: there is **no board-event flood-fill over S2S yet**,
-//! so a "dupe storm" here targets what exists — catalog re-sync idempotence
-//! (generation staleness in `fed_catalog::ingest_peer_catalog`) — plus the
-//! in-server [`DedupStore`] gate that will back event propagation when it
-//! lands (it is not yet wired into the S2S path).
+//! Scope note: board-event flood-fill over S2S now exists (subscription-driven
+//! `ihave/pull/events`; see `e2e_w9_floodfill.rs`), and it reuses the same
+//! in-server [`DedupStore`] gate exercised below. The catalog "dupe storm" here
+//! still targets catalog re-sync idempotence (generation staleness in
+//! `fed_catalog::ingest_peer_catalog`), a distinct path from event dedupe.
 //!
 //! Determinism is by real readiness signals: `dial_peer` completes the
 //! handshake *and* the catalog sync before returning `Connected`, so there
@@ -261,9 +262,10 @@ async fn partition_rejoin() {
     connect(&c, &b).await;
 
     // The middle node sees everything; the outer nodes see one hop only.
-    // C's catalog reached B but NOT A: a burrow serves only its own signed
-    // catalog, so there is no transitive relay today. This assertion pins
-    // that contract.
+    // C's *file catalog* reached B but NOT A: a burrow serves only its own
+    // signed catalog, so catalogs never transit — distinct from board-event
+    // flood-fill (which does relay posts multi-hop; see `e2e_w9_floodfill.rs`).
+    // This assertion pins the catalog one-hop contract.
     assert_eq!(
         search_names(&b, "pack").await,
         ["alpha-pack.zip", "bravo-pack.zip", "charlie-pack.zip"]
@@ -271,7 +273,7 @@ async fn partition_rejoin() {
     assert_eq!(
         search_names(&a, "pack").await,
         ["alpha-pack.zip", "bravo-pack.zip"],
-        "no transitive relay: C's catalog must not reach A through B"
+        "catalogs are one-hop: C's file catalog must not reach A through B"
     );
     assert_eq!(
         search_names(&c, "pack").await,
@@ -434,9 +436,10 @@ async fn dupe_storm_announce() {
     assert!(err.to_string().contains("stale"), "{err}");
     assert_eq!(fed_search(&b, "storm").await.len(), 2, "no duplicate rows");
 
-    // The in-server dupe gate that will back S2S event flood-fill when it
-    // lands (there is no board-event propagation over S2S yet — catalog sync
-    // dedupes by generation instead): first sighting acts, replays drop.
+    // The in-server dupe gate that backs S2S board-event flood-fill (catalog
+    // sync dedupes by generation instead; the event path dedupes on this same
+    // `SeenKey::Event` id — see `e2e_w9_floodfill.rs`): first sighting acts,
+    // replays drop.
     let key = SeenKey::Event([9u8; 32]);
     assert!(b.shared.dedup.check_and_record(key.clone(), 1_000));
     assert!(!b.shared.dedup.check_and_record(key.clone(), 1_001));

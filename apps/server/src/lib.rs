@@ -7,6 +7,7 @@ pub mod backup;
 pub mod ctl;
 pub mod doors;
 pub mod fed_catalog;
+pub mod fed_flood;
 pub mod federation;
 pub mod ftn;
 pub mod handlers10;
@@ -91,6 +92,9 @@ pub struct Shared {
     pub peers: PeerRegistry,
     /// Local signed file-catalog + verified peer catalogs (Wave 9.x).
     pub catalogs: fed_catalog::CatalogState,
+    /// Board-event flood-fill shared state: the pinned origin-key registry
+    /// (Wave 9). Per-edge subscription/seen state lives in the session tasks.
+    pub fed_flood: fed_flood::FloodState,
     /// Shared token-bucket rate limiter, per IP / account / endpoint class
     /// (Wave 13). Policies are resolved live from config on every check.
     pub ratelimit: RateLimiter,
@@ -309,6 +313,7 @@ impl Burrow {
             // Reload the last signed local catalog so the generation chain
             // survives restarts (peers must never see a stale "fresh" gen 1).
             catalogs: fed_catalog::CatalogState::load(&data_dir, &identity.signing.public().0),
+            fed_flood: fed_flood::FloodState::new(),
             ratelimit: RateLimiter::new(),
             moderation,
             zpartials: zmodem::Partials::new(),

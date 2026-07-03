@@ -257,6 +257,15 @@ pub struct ServerConfig {
     /// Configured peer dial targets. Serialized as an array of tables in TOML;
     /// edited on disk (not via `ctl config set`), like `ftn_areas`.
     pub federation_peers: Vec<FederationPeer>,
+    /// Board slugs whose posts this burrow wants flooded to it from peers
+    /// (Wave 9 board-event flood-fill). We advertise this interest to every
+    /// approved peer via `MT_SUBSCRIBE`; a peer then offers matching events it
+    /// holds. The single entry `"all"` (or `"*"`) is a wildcard for every
+    /// board. **Default empty = opt-in**: with no entries a burrow floods
+    /// nothing outbound and receives nothing inbound. Serialized as a TOML
+    /// array and edited on disk (like `federation_peers`), not via
+    /// `ctl config set`.
+    pub federation_board_subscribe: Vec<String>,
     /// Master switch for token-bucket rate limiting (Wave 13). On by default
     /// with generous per-class budgets; see the `ratelimit_*` knobs below.
     pub ratelimit_enabled: bool,
@@ -407,6 +416,7 @@ impl Default for ServerConfig {
             federation_enabled: false,
             federation_addr: "0.0.0.0:4655".parse().expect("valid"),
             federation_peers: Vec::new(),
+            federation_board_subscribe: Vec::new(),
             ratelimit_enabled: true,
             ratelimit_conn_per_min: 30,
             ratelimit_conn_burst: 10,

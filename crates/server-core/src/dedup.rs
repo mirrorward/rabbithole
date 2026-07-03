@@ -17,7 +17,12 @@ use parking_lot::Mutex;
 /// different networks can never collide.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SeenKey {
-    /// Native content id (blake3 of a signed event).
+    /// Native content id (blake3 of a signed event). This is also the key the
+    /// Wave 9 board-event flood-fill dedupes on: a federated `FedEvent` id *is*
+    /// the blake3 of its signed board event, so no distinct `FedEvent` variant
+    /// is needed — the same id gates local minting and cross-server ingestion
+    /// under one namespace, and an event echoed back over a second edge is a
+    /// no-op replay here.
     Event([u8; 32]),
     /// FidoNet MSGID: origin address + serial.
     Ftn(String),
