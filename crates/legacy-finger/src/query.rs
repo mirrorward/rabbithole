@@ -29,7 +29,15 @@ pub fn parse_query(line: &str) -> Query {
 
     // Tolerate (and ignore) the verbose flag, with or without a following
     // name: "/W", "/W user", and the glued "/Wuser" form some clients emit.
-    if rest.len() >= 2 && rest[..2].eq_ignore_ascii_case("/w") {
+    //
+    // Compare the first two *bytes*, not `rest[..2]`: the query reaches us via
+    // the server's `String::from_utf8_lossy`, so a line starting with an
+    // invalid byte becomes a leading multi-byte U+FFFD and `rest[..2]` would
+    // slice inside it and panic. `/W` is pure ASCII, so byte-level comparison
+    // is exact; and once bytes 0–1 are the ASCII `/w`, byte 2 is guaranteed a
+    // char boundary, so `rest[2..]` is safe.
+    let head = rest.as_bytes();
+    if head.len() >= 2 && head[..2].eq_ignore_ascii_case(b"/w") {
         rest = rest[2..].trim_start();
     }
 
