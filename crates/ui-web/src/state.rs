@@ -172,8 +172,9 @@ impl UiState {
     }
 
     /// Append an operator notice to the chat scrollback as a marked system
-    /// line. Radio bridge notices never reach here — they are split off by
-    /// [`route_notice`](crate::wire::route_notice) before the chat log.
+    /// line. Radio now-playing never reaches here — RADIO-family frames are
+    /// split off by [`frame_to_notice_route`](crate::wire::frame_to_notice_route)
+    /// before the chat log.
     pub fn push_notice(&mut self, from: &str, text: &str) {
         self.messages.push(ChatLine {
             from: format!("! {from}"),

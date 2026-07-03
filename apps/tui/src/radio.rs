@@ -1,24 +1,16 @@
 //! Radio now-playing state for the TUI: a terminal-free reducer plus
 //! render-to-lines helpers, unit-tested without a backend.
 //!
-//! ## Data source, today vs. later
+//! ## Data source
 //!
 //! The server keeps per-station now-playing in its presence registry and
-//! publishes `ServerEvent::RadioNowPlaying { station, title, artist, dj,
-//! listeners }` on its **internal** bus — but no RHP wire message carries it
-//! yet (proto `Family::RADIO` (9) is reserved with no messages, and the push
-//! projector drops the event). Until that proto slice lands, the only push
-//! channel that reaches clients is `session::ServerNotice`, so this module
-//! accepts a machine-parsable notice bridge (see [`parse_notice`]):
-//!
-//! ```text
-//! [radio] <station>|<live|auto>|<listeners>|<dj>|<artist>|<title>
-//! [radio] <station>|off
-//! ```
-//!
-//! When the RADIO proto slice exists, decode it in `apply_push` and call
-//! [`RadioState::apply_radio_status`] with the same struct — everything below
-//! the reducer (status segment, panel) is already wired.
+//! pushes it over the typed **RADIO** family (`Family(9)`): a
+//! [`RadioNowPlaying`](rabbithole_proto::radio::RadioNowPlaying) frame per
+//! change and a [`RadioOff`](rabbithole_proto::radio::RadioOff) on sign-off.
+//! `main::handle_frame` decodes those — `RadioNowPlaying` converts into a
+//! [`RadioStatus`] via [`From`] and feeds [`RadioState::apply_radio_status`],
+//! `RadioOff` calls [`RadioState::clear_station`] — everything below the
+//! reducer (status segment, panel) is already wired.
 //!
 //! Listening itself is a **handoff**: the radio view derives a stream URL
 //! from these station slugs and hands it to an external player — see the
@@ -83,46 +75,17 @@ impl RadioState {
     }
 }
 
-/// Result of routing one `ServerNotice` through the radio bridge.
-#[derive(Debug, PartialEq, Eq)]
-pub enum NoticeUpdate {
-    /// A station's now-playing changed.
-    Playing(RadioStatus),
-    /// A station went off the air.
-    Off(String),
-}
-
-/// Parse the `[radio]` notice bridge (interim wire format until the RADIO
-/// proto slice lands). Returns `None` for anything that is not a well-formed
-/// radio notice, so ordinary operator notices flow through untouched.
-pub fn parse_notice(text: &str) -> Option<NoticeUpdate> {
-    let rest = text.strip_prefix("[radio] ")?;
-    let mut parts = rest.splitn(6, '|');
-    let station = parts.next()?.trim();
-    if station.is_empty() {
-        return None;
+impl From<rabbithole_proto::radio::RadioNowPlaying> for RadioStatus {
+    fn from(np: rabbithole_proto::radio::RadioNowPlaying) -> Self {
+        Self {
+            station: np.station,
+            title: np.title,
+            artist: np.artist,
+            dj: np.dj,
+            listeners: np.listeners as usize,
+            live: np.live,
+        }
     }
-    let source = parts.next()?.trim();
-    if source == "off" {
-        return Some(NoticeUpdate::Off(station.to_string()));
-    }
-    let live = match source {
-        "live" => true,
-        "auto" => false,
-        _ => return None,
-    };
-    let listeners: usize = parts.next()?.trim().parse().ok()?;
-    let dj = parts.next()?.trim();
-    let artist = parts.next()?.trim();
-    let title = parts.next()?.trim();
-    Some(NoticeUpdate::Playing(RadioStatus {
-        station: station.to_string(),
-        title: title.to_string(),
-        artist: artist.to_string(),
-        dj: dj.to_string(),
-        listeners,
-        live,
-    }))
 }
 
 /// Truncate to `max` characters, ending in `…` when anything was cut.
@@ -260,35 +223,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_notice_live_and_auto() {
-        let up = parse_notice("[radio] live|live|12|Robin|The Lagomorphs|Down the Hole").unwrap();
-        assert_eq!(
-            up,
-            NoticeUpdate::Playing(live("live", "Down the Hole", "The Lagomorphs", "Robin", 12))
+    fn radio_now_playing_frame_converts_to_status() {
+        let np = rabbithole_proto::radio::RadioNowPlaying::new(
+            "live",
+            "Down the Hole",
+            "The Lagomorphs",
+            "Robin",
+            12,
+            true,
         );
-        let up = parse_notice("[radio] ambient|auto|0|rotation||Warren Dawn").unwrap();
-        match up {
-            NoticeUpdate::Playing(s) => {
-                assert!(!s.live);
-                assert_eq!(s.artist, "");
-                assert_eq!(s.title, "Warren Dawn");
-                assert_eq!(s.listeners, 0);
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_notice_off_and_rejects_garbage() {
+        let status: RadioStatus = np.into();
         assert_eq!(
-            parse_notice("[radio] live|off"),
-            Some(NoticeUpdate::Off("live".into()))
+            status,
+            live("live", "Down the Hole", "The Lagomorphs", "Robin", 12)
         );
-        assert_eq!(parse_notice("server restarts at midnight"), None);
-        assert_eq!(parse_notice("[radio] "), None);
-        assert_eq!(parse_notice("[radio] live|nonsense|1|a|b|c"), None);
-        assert_eq!(parse_notice("[radio] live|auto|NaN|a|b|c"), None);
-        assert_eq!(parse_notice("[radio] live|auto|1|dj"), None); // too few fields
+        // A title with pipes is no longer a wire hazard (the format is typed).
+        let np =
+            rabbithole_proto::radio::RadioNowPlaying::new("live", "A|B|C", "", "auto", 0, false);
+        let status: RadioStatus = np.into();
+        assert_eq!(status.title, "A|B|C");
+        assert!(!status.live && status.artist.is_empty());
     }
 
     #[test]

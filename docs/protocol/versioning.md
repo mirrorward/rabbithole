@@ -111,10 +111,12 @@ test before it can reach a peer. That is the whole point: the golden turns
 
 ## Reserved families
 
-Family numbers `8` (FEDERATION) and `9` (RADIO) are allocated in
-`Family` but carry no native message types yet — federation runs on its own
-S2S endpoint and radio is a future wave. They are reserved: do not reuse the
-numbers for anything else.
+Family number `8` (FEDERATION) is allocated in `Family` but carries no
+message types in the client registry — federation runs on its own S2S
+endpoint (its frames use the same family number but are not client messages).
+It is reserved on the client wire: do not reuse the number for anything else.
+(Family `9` (RADIO) is now live — `RadioNowPlaying`/`RadioOff` now-playing
+pushes.)
 
 ## Pre-1.0 note
 

@@ -724,55 +724,6 @@ fn now_playing_from_ice(meta: &StationMeta, dj: &str) -> NowPlaying {
     }
 }
 
-// ---------------------------------------------------------------------------
-// `[radio]` ServerNotice bridge (Wave 11)
-// ---------------------------------------------------------------------------
-//
-// No RHP wire message carries `ServerEvent::RadioNowPlaying` yet (proto
-// `Family::RADIO` is reserved with no messages), so now-playing reaches
-// clients as a machine-parsable `ServerNotice`. The format below is the
-// documented bridge contract with `apps/tui/src/radio.rs::parse_notice` —
-// copied here, not imported, so the server never depends on a client crate.
-// Keep the two in sync:
-//
-// ```text
-// [radio] <station>|<live|auto>|<listeners>|<dj>|<artist>|<title>
-// [radio] <station>|off
-// ```
-//
-// The client splits with `splitn(6, '|')` and trims each field, so only the
-// *title* (the final field) may legitimately contain `|`; every earlier field
-// is sanitized here.
-
-/// Escape `|` out of a non-final bridge field.
-fn bridge_field(s: &str) -> String {
-    s.replace('|', "/")
-}
-
-/// Render the now-playing bridge notice text.
-pub fn radio_notice_text(
-    station: &str,
-    live: bool,
-    listeners: usize,
-    dj: &str,
-    artist: &str,
-    title: &str,
-) -> String {
-    let source = if live { "live" } else { "auto" };
-    format!(
-        "[radio] {}|{source}|{listeners}|{}|{}|{}",
-        bridge_field(station),
-        bridge_field(dj),
-        bridge_field(artist),
-        title,
-    )
-}
-
-/// Render the off-the-air bridge notice text.
-pub fn radio_off_text(station: &str) -> String {
-    format!("[radio] {}|off", bridge_field(station))
-}
-
 /// Publishes a station's current now-playing (with the live listener count)
 /// into presence, so status lines pick it up like away/idle status.
 fn publish_now_playing(shared: &Arc<Shared>, slug: &str, live: bool) {
@@ -1051,12 +1002,10 @@ where
         publish_now_playing(shared, &slug, false);
     } else {
         shared.presence.clear_radio_now_playing(&slug);
-        // Off the air: tell status bars via the `[radio]` notice bridge (the
-        // now-playing path rides `ServerEvent::RadioNowPlaying` instead; see
-        // `session::push_for_event`).
-        shared.bus.publish(ServerEvent::Notice {
-            text: radio_off_text(&slug),
-            from: "radio".to_string(),
+        // Off the air: a typed RADIO `RadioOff` push (projected in
+        // `session::push_for_event`), like the now-playing `RadioNowPlaying`.
+        shared.bus.publish(ServerEvent::RadioOff {
+            station: slug.clone(),
         });
         let _ = shared.radio.registry.set_enabled(&slug, false);
     }
@@ -1189,115 +1138,5 @@ mod tests {
         stations.end_live("live");
         assert!(!stations.is_live("live"));
         assert_eq!(stations.now_playing("live").unwrap().title, "auto track");
-    }
-
-    // --- `[radio]` notice bridge round-trips -------------------------------
-    //
-    // A faithful copy of the TUI's `apps/tui/src/radio.rs::parse_notice`
-    // (per the bridge contract we copy the format spec rather than import a
-    // client crate). If these round-trips break, the two sides drifted.
-
-    #[derive(Debug, PartialEq, Eq)]
-    enum ParsedNotice {
-        Playing {
-            station: String,
-            live: bool,
-            listeners: usize,
-            dj: String,
-            artist: String,
-            title: String,
-        },
-        Off(String),
-    }
-
-    fn parse_notice(text: &str) -> Option<ParsedNotice> {
-        let rest = text.strip_prefix("[radio] ")?;
-        let mut parts = rest.splitn(6, '|');
-        let station = parts.next()?.trim();
-        if station.is_empty() {
-            return None;
-        }
-        let source = parts.next()?.trim();
-        if source == "off" {
-            return Some(ParsedNotice::Off(station.to_string()));
-        }
-        let live = match source {
-            "live" => true,
-            "auto" => false,
-            _ => return None,
-        };
-        let listeners: usize = parts.next()?.trim().parse().ok()?;
-        let dj = parts.next()?.trim();
-        let artist = parts.next()?.trim();
-        let title = parts.next()?.trim();
-        Some(ParsedNotice::Playing {
-            station: station.to_string(),
-            live,
-            listeners,
-            dj: dj.to_string(),
-            artist: artist.to_string(),
-            title: title.to_string(),
-        })
-    }
-
-    #[test]
-    fn notice_bridge_live_round_trip() {
-        let text = radio_notice_text("live", true, 12, "Robin", "The Lagomorphs", "Down the Hole");
-        assert_eq!(
-            text,
-            "[radio] live|live|12|Robin|The Lagomorphs|Down the Hole"
-        );
-        assert_eq!(
-            parse_notice(&text),
-            Some(ParsedNotice::Playing {
-                station: "live".into(),
-                live: true,
-                listeners: 12,
-                dj: "Robin".into(),
-                artist: "The Lagomorphs".into(),
-                title: "Down the Hole".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn notice_bridge_auto_round_trip_with_empty_artist() {
-        let text = radio_notice_text("ambient", false, 0, "rotation", "", "Warren Dawn");
-        assert_eq!(text, "[radio] ambient|auto|0|rotation||Warren Dawn");
-        assert_eq!(
-            parse_notice(&text),
-            Some(ParsedNotice::Playing {
-                station: "ambient".into(),
-                live: false,
-                listeners: 0,
-                dj: "rotation".into(),
-                artist: String::new(),
-                title: "Warren Dawn".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn notice_bridge_off_round_trip() {
-        let text = radio_off_text("live");
-        assert_eq!(text, "[radio] live|off");
-        assert_eq!(parse_notice(&text), Some(ParsedNotice::Off("live".into())));
-    }
-
-    #[test]
-    fn notice_bridge_survives_pipes_in_fields() {
-        // `|` in non-final fields is escaped so it cannot shift the columns;
-        // the title is the final `splitn` field, so its pipes survive intact.
-        let text = radio_notice_text("live", true, 3, "DJ|Hop", "A|B", "Title | With Pipes");
-        match parse_notice(&text).expect("still parses") {
-            ParsedNotice::Playing {
-                dj, artist, title, ..
-            } => {
-                assert_eq!(dj, "DJ/Hop");
-                assert_eq!(artist, "A/B");
-                assert_eq!(title, "Title | With Pipes");
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
     }
 }

@@ -110,10 +110,7 @@ pub use conn::{backoff_delay, ConnState};
 pub use files::{FilesState, Transfer, TransferDir, TransferStatus};
 pub use packs::PackTokens;
 pub use pwa::{icon_rgba, MANIFEST_URL, SW_URL};
-pub use radio::{
-    parse_radio_notice, status_segment, stream_url, RadioPrefs, RadioState, RadioUpdate,
-    StationStatus,
-};
+pub use radio::{status_segment, stream_url, RadioPrefs, RadioState, RadioUpdate, StationStatus};
 pub use server_theme::ServerOverlay;
 pub use state::{Board, ChatLine, DmMessage, DmThread, Member, Post, Thread, UiState};
 pub use syndication_admin::{
@@ -124,8 +121,8 @@ pub use theme_editor::{contrast_warnings, ContrastWarning, EditorAction, EditorS
 pub use wire::{
     admin_command_to_frame, command_to_frame, file_command_to_frame, frame_to_admin_events,
     frame_to_events, frame_to_file_events, frame_to_notice_route, hello_request, normalize_ws_url,
-    ping_request, route_notice, who_request, AdminCommand, AdminEvent, EventClient, EventSink,
-    FileCommand, FileEvent, NoticeRoute,
+    ping_request, who_request, AdminCommand, AdminEvent, EventClient, EventSink, FileCommand,
+    FileEvent, NoticeRoute,
 };
 
 #[cfg(target_arch = "wasm32")]

@@ -132,6 +132,9 @@ pub enum ServerEvent {
         /// Listeners currently tuned in.
         listeners: usize,
     },
+    /// A radio station went off the air (mount closed, no playlist took over).
+    /// Projected to a `RADIO` `RadioOff` push, like [`Self::RadioNowPlaying`].
+    RadioOff { station: String },
     /// The server is shutting down; surfaces should drain gracefully.
     Shutdown,
 }

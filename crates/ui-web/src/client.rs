@@ -22,7 +22,7 @@ use rabbithole_proto::admin::{
 use rabbithole_proto::filelib::{
     AreaList, FileAdded, FileAreaView, FileContent, FileNodeView, NodeList, NodeReply,
 };
-use rabbithole_proto::session::ServerNotice;
+use rabbithole_proto::radio::RadioNowPlaying;
 use rabbithole_proto::transfer::{FileChunk, TransferTicket};
 use rabbithole_proto::welcome::ThemeBundle;
 use rabbithole_proto::{Frame, Message, RequestId};
@@ -95,10 +95,10 @@ pub struct MockClient {
     admin_classes: Vec<ClassEntry>,
     admin_accounts: Vec<AccountEntry>,
     admin_config: Vec<(String, String)>,
-    /// Seeded radio-bridge `ServerNotice` texts (see [`crate::radio`] for the
-    /// format), served through [`MockClient::radio_routes`] so the Radio view
-    /// renders in dev without a live server.
-    radio_notices: Vec<String>,
+    /// Seeded RADIO now-playing frames, served through
+    /// [`MockClient::radio_routes`] so the Radio view renders in dev without a
+    /// live server.
+    radio_frames: Vec<Frame>,
     invite_seq: u32,
     /// Sink registered through the async [`EventClient`] seam, if any. Skipped
     /// by [`Debug`] (closures are not `Debug`).
@@ -123,7 +123,7 @@ impl std::fmt::Debug for MockClient {
             .field("admin_classes", &self.admin_classes)
             .field("admin_accounts", &self.admin_accounts)
             .field("admin_config", &self.admin_config)
-            .field("radio_notices", &self.radio_notices)
+            .field("radio_frames", &self.radio_frames)
             .field("invite_seq", &self.invite_seq)
             .field("sink", &self.sink.as_ref().map(|_| "<fn>"))
             .finish()
@@ -156,7 +156,7 @@ impl MockClient {
             admin_classes: Self::seeded_classes(),
             admin_accounts: Self::seeded_accounts(),
             admin_config: Self::seeded_config(),
-            radio_notices: Self::seeded_radio_notices(),
+            radio_frames: Self::seeded_radio_frames(),
             invite_seq: 0,
             sink: None,
         }
@@ -572,21 +572,23 @@ impl MockClient {
     /// The radio-bridge notices a fresh session is seeded with: one live-DJ
     /// station and one automation station, so the Radio view and status-bar
     /// segment render in dev.
-    fn seeded_radio_notices() -> Vec<String> {
-        vec![
-            "[radio] live|live|7|Robin|The Lagomorphs|Down the Hole".to_string(),
-            "[radio] ambient|auto|3|rotation||Warren Dawn".to_string(),
+    fn seeded_radio_frames() -> Vec<Frame> {
+        [
+            RadioNowPlaying::new("live", "Down the Hole", "The Lagomorphs", "Robin", 7, true),
+            RadioNowPlaying::new("ambient", "Warren Dawn", "", "rotation", 3, false),
         ]
+        .iter()
+        .filter_map(|m| Frame::push(m).ok())
+        .collect()
     }
 
-    /// Route the seeded radio notices exactly as the transport would: each is
-    /// framed as a real [`ServerNotice`] push and decoded back through the
-    /// host-tested [`frame_to_notice_route`] — no parallel decode path.
+    /// Route the seeded radio pushes exactly as the transport would: each is a
+    /// real RADIO `RadioNowPlaying` frame decoded through the host-tested
+    /// [`frame_to_notice_route`] — no parallel decode path.
     pub fn radio_routes(&self) -> Vec<NoticeRoute> {
-        self.radio_notices
+        self.radio_frames
             .iter()
-            .filter_map(|text| Frame::push(&ServerNotice::new(text.clone(), "radio")).ok())
-            .filter_map(|frame| frame_to_notice_route(&frame))
+            .filter_map(frame_to_notice_route)
             .collect()
     }
 

@@ -68,6 +68,7 @@ use crate::presence::{
     BlockAdd, BlockRemove, BuddyAdd, BuddyList, BuddyListRequest, BuddyRemove, PresenceSet,
     UserJoined, UserLeft, Who, WhoList,
 };
+use crate::radio::{RadioNowPlaying, RadioOff};
 use crate::session::{
     AgreementAccept, AuthGuest, AuthOk, AuthPassword, AuthResume, Ping, Pong, ServerNotice, Welcome,
 };
@@ -169,8 +170,11 @@ wire_registry! {
     QuarantineClear, DenyHashAdd, DenyHashRemove, DenyHashListRequest, DenyHashList, ThemeBundleSet,
     ThemeBundleClear, ThemeBundleGet, ThemeBundleInfo, GatewayStatsRequest, GatewayStatsReply,
 
-    // Family 8 (FEDERATION) and Family 9 (RADIO) are reserved: no native
-    // message types exist yet. See docs/protocol/README.md.
+    // Family 8 (FEDERATION) is reserved: its S2S traffic rides the
+    // FEDERATION frame family but is not part of the client message registry.
+
+    // ── Family 9: RADIO ──────────────────────────────────────────────────
+    RadioNowPlaying, RadioOff,
 
     // ── Family 10: WISHING_WELL ──────────────────────────────────────────
     WishListRequest, WishList, WishCreate, WishVote, WishSetStatus, WishReply, WishUpdated,
@@ -183,7 +187,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 177;
+pub const EXPECTED: usize = 179;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

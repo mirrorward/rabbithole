@@ -1,30 +1,16 @@
-//! Radio now-playing state, the notice-bridge parser, player preferences,
-//! and the pure stream-URL logic for the web SPA — all DOM-free and
-//! host-tested. The wasm-only `<audio>` element wrapper lives in
-//! [`crate::player`]; the `ServerNotice` routing split lives in
-//! [`crate::wire`] ([`frame_to_notice_route`](crate::wire::frame_to_notice_route)).
+//! Radio now-playing state, player preferences, and the pure stream-URL logic
+//! for the web SPA — all DOM-free and host-tested. The wasm-only `<audio>`
+//! element wrapper lives in [`crate::player`].
 //!
-//! ## The notice bridge (wire format)
+//! ## Wire
 //!
-//! The server keeps per-station now-playing in its presence registry, but no
-//! RHP wire message carries it yet (proto `Family::RADIO` (9) is reserved
-//! with no messages). Until that proto slice lands, the server bridges
-//! now-playing to clients as machine-parsable
-//! [`ServerNotice`](rabbithole_proto::session::ServerNotice) text:
-//!
-//! ```text
-//! [radio] <station>|<live|auto>|<listeners>|<dj>|<artist>|<title>
-//! [radio] <station>|off
-//! ```
-//!
-//! [`parse_radio_notice`] is the total parser for that format: anything that
-//! is not a well-formed radio notice yields `None`, so ordinary operator
-//! notices flow through to the chat log untouched (mirroring the TUI's
-//! routing split). The `<title>` field is last and may itself contain `|`.
-//!
-//! When the RADIO proto slice exists, decode it in the transport and feed
-//! [`RadioState::apply_update`] with the same [`RadioUpdate`] — everything
-//! below the reducer (status segment, Radio view, player) is already wired.
+//! The server keeps per-station now-playing in its presence registry and
+//! pushes it over the typed **RADIO** family (`Family(9)`): a
+//! [`RadioNowPlaying`](rabbithole_proto::radio::RadioNowPlaying) frame per
+//! change and a [`RadioOff`](rabbithole_proto::radio::RadioOff) on sign-off.
+//! [`frame_to_notice_route`](crate::wire::frame_to_notice_route) decodes those
+//! into a [`RadioUpdate`] the reducer ([`RadioState::apply_update`]) folds in —
+//! everything below it (status segment, Radio view, player) is already wired.
 //!
 //! ## Listening
 //!
@@ -108,41 +94,6 @@ impl RadioState {
             .find(|s| s.live)
             .or_else(|| self.stations.values().next())
     }
-}
-
-/// Parse one `[radio]` bridge notice (see the module docs for the format).
-///
-/// Total: returns `None` for anything that is not a well-formed radio notice
-/// — no prefix, an empty station, an unknown source tag, or a non-numeric
-/// listener count — so ordinary operator notices are never swallowed.
-pub fn parse_radio_notice(text: &str) -> Option<RadioUpdate> {
-    let rest = text.strip_prefix("[radio] ")?;
-    let mut parts = rest.splitn(6, '|');
-    let station = parts.next()?.trim();
-    if station.is_empty() {
-        return None;
-    }
-    let source = parts.next()?.trim();
-    if source == "off" {
-        return Some(RadioUpdate::Off(station.to_string()));
-    }
-    let live = match source {
-        "live" => true,
-        "auto" => false,
-        _ => return None,
-    };
-    let listeners: u32 = parts.next()?.trim().parse().ok()?;
-    let dj = parts.next()?.trim();
-    let artist = parts.next()?.trim();
-    let title = parts.next()?.trim();
-    Some(RadioUpdate::Playing(StationStatus {
-        station: station.to_string(),
-        title: title.to_string(),
-        artist: artist.to_string(),
-        dj: dj.to_string(),
-        listeners,
-        live,
-    }))
 }
 
 /// `Title — Artist`, or just the title when the artist is empty.
@@ -320,55 +271,6 @@ mod tests {
             listeners,
             live: true,
         }
-    }
-
-    #[test]
-    fn parse_live_and_auto_notices() {
-        let up =
-            parse_radio_notice("[radio] live|live|12|Robin|The Lagomorphs|Down the Hole").unwrap();
-        assert_eq!(
-            up,
-            RadioUpdate::Playing(live("live", "Down the Hole", "The Lagomorphs", "Robin", 12))
-        );
-        let up = parse_radio_notice("[radio] ambient|auto|0|rotation||Warren Dawn").unwrap();
-        match up {
-            RadioUpdate::Playing(s) => {
-                assert!(!s.live);
-                assert_eq!(s.artist, "");
-                assert_eq!(s.title, "Warren Dawn");
-                assert_eq!(s.listeners, 0);
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_off_notice() {
-        assert_eq!(
-            parse_radio_notice("[radio] live|off"),
-            Some(RadioUpdate::Off("live".into()))
-        );
-    }
-
-    #[test]
-    fn parse_keeps_pipes_in_the_title_field() {
-        // The title is the sixth, final field: splitn keeps its pipes.
-        let up = parse_radio_notice("[radio] live|live|3|Robin|Various|A|B|C").unwrap();
-        match up {
-            RadioUpdate::Playing(s) => assert_eq!(s.title, "A|B|C"),
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_rejects_garbage() {
-        assert_eq!(parse_radio_notice("server restarts at midnight"), None);
-        assert_eq!(parse_radio_notice("[radio] "), None);
-        assert_eq!(parse_radio_notice("[radio] |live|1|a|b|c"), None);
-        assert_eq!(parse_radio_notice("[radio] live|nonsense|1|a|b|c"), None);
-        assert_eq!(parse_radio_notice("[radio] live|auto|NaN|a|b|c"), None);
-        assert_eq!(parse_radio_notice("[radio] live|auto|1|dj"), None); // too few fields
-        assert_eq!(parse_radio_notice(""), None);
     }
 
     #[test]

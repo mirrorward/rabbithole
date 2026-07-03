@@ -35,6 +35,7 @@ pub mod hello;
 pub mod keybundle;
 pub mod persona;
 pub mod presence;
+pub mod radio;
 pub mod registry;
 pub mod session;
 pub mod swarm;

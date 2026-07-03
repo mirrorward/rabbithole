@@ -57,7 +57,7 @@ not a Rust enum, so unknown families still decode.
 | 6 | swarm | the Warren |
 | 7 | admin | remote administration |
 | 8 | federation | Tunnels (S2S) — **server-to-server only**, on a dedicated QUIC endpoint (default port **4655**); never spoken on a client connection. See [`federation.md`](federation.md) |
-| 9 | radio | stations — **reserved**; no messages defined yet (the radio surface today is the legacy ICY listener, see [`../legacy-surfaces.md`](../legacy-surfaces.md)) |
+| 9 | radio | now-playing pushes: `RadioNowPlaying` (1), `RadioOff` (2). Audio itself is the legacy ICY listener (see [`../legacy-surfaces.md`](../legacy-surfaces.md)) |
 | 10 | wishing-well | requests |
 
 ## Error codes

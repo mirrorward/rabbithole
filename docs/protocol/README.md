@@ -22,7 +22,7 @@ that is a bug in one of them.
 | [`swarm.md`](swarm.md) | Wave 5, shipped (NAT traversal pending) | The Warren: advertise (list-without-upload), find-sources, capability tokens, Bao peer wire, multi-source fetch |
 | [`federation.md`](federation.md) | Wave 9, S2S handshake + catalog sync shipped; rest model-only | Tunnels: dedicated QUIC endpoint, nonce-bound Ed25519 handshake, admin approval, signed catalogs, attestation model |
 | [`../legacy-surfaces.md`](../legacy-surfaces.md) | Waves 6-11, shipped | Operator matrix for every legacy listener (telnet, finger, NNTP, Hotline, FTN, QWK, radio, syndication) |
-| radio family doc | future wave | Family 9 is reserved; no native radio messages exist yet |
+| radio family doc | Wave 11, shipped (undocumented page) | Family 9 carries now-playing pushes (`RadioNowPlaying`, `RadioOff`); retired the interim `[radio]` ServerNotice bridge |
 
 ## Families
 
@@ -40,7 +40,7 @@ newtype; unknown families decode and answer `Unsupported`):
 | 6 | SWARM | [`swarm.md`](swarm.md) | the Warren |
 | 7 | ADMIN | [`admin.md`](admin.md) | remote administration |
 | 8 | FEDERATION | [`federation.md`](federation.md) | **S2S-only** — dedicated QUIC endpoint, never on client connections |
-| 9 | RADIO | — | **reserved**, no messages defined yet |
+| 9 | RADIO | — | now-playing pushes: `RadioNowPlaying` (1), `RadioOff` (2) |
 | 10 | WISHING_WELL | [`wish.md`](wish.md) | requests |
 
 ## Ground rules

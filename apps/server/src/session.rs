@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rabbithole_net::Connection;
-use rabbithole_proto::{chat as pchat, presence as ppres, session as psess};
+use rabbithole_proto::{chat as pchat, presence as ppres, radio as pradio, session as psess};
 use rabbithole_proto::{directory as pdir, persona as ppers};
 use rabbithole_proto::{ErrorCode, Frame, FrameKind, ProtocolVersion, PROTOCOL_VERSION};
 use rabbithole_proto::{Hello, HelloAck};
@@ -745,11 +745,10 @@ pub(crate) fn push_for_event(
             }
             Frame::push(&psess::ServerNotice::new(text.clone(), "moderation")).ok()
         }
-        // Radio now-playing rides the documented `[radio]` ServerNotice
-        // bridge until a RADIO proto family lands (the TUI's
-        // `radio::parse_notice` is the counterpart). Ephemeral status is
-        // pointless after the fact, so the offline-replay recorder
-        // (viewer_session 0 — real sessions start at 1) skips it.
+        // Radio now-playing / sign-off ride the typed RADIO family
+        // (`RadioNowPlaying` / `RadioOff`). Ephemeral status is pointless after
+        // the fact, so the offline-replay recorder (viewer_session 0 — real
+        // sessions start at 1) skips both.
         ServerEvent::RadioNowPlaying {
             station,
             title,
@@ -765,9 +764,21 @@ pub(crate) fn push_for_event(
                 .radio_status(station)
                 .map(|s| s.live)
                 .unwrap_or(false);
-            let text =
-                crate::radio::radio_notice_text(station, live, *listeners, dj, artist, title);
-            Frame::push(&psess::ServerNotice::new(text, "radio".to_string())).ok()
+            Frame::push(&pradio::RadioNowPlaying::new(
+                station.clone(),
+                title.clone(),
+                artist.clone(),
+                dj.clone(),
+                *listeners as u32,
+                live,
+            ))
+            .ok()
+        }
+        ServerEvent::RadioOff { station } => {
+            if viewer_session == 0 {
+                return None;
+            }
+            Frame::push(&pradio::RadioOff::new(station.clone())).ok()
         }
         _ => None,
     }

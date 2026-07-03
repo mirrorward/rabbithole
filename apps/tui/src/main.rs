@@ -7,8 +7,8 @@
 //!
 //! Beyond the lobby there are two full-screen views:
 //!
-//! - **Radio** (Ctrl-N): the station list fed by the `[radio]` ServerNotice
-//!   bridge (see `radio` for the reducer), plus the playback **handoff**:
+//! - **Radio** (Ctrl-N): the station list fed by the typed RADIO family
+//!   (see `radio` for the reducer), plus the playback **handoff**:
 //!   Enter/`p` derives a copyable `<base>/<station>` stream URL from a
 //!   session-local "radio base" (`b` to edit — this crate has no settings
 //!   persistence yet, so the base lives for the session only) and `o`
@@ -49,6 +49,7 @@ use rabbithole_core::theme::{self, Mode, Palette, Rgb, ThemePack};
 use rabbithole_core::Client;
 use rabbithole_proto::chat::ChatMessage;
 use rabbithole_proto::presence::{UserJoined, UserLeft};
+use rabbithole_proto::radio::{RadioNowPlaying, RadioOff};
 use rabbithole_proto::session::ServerNotice;
 use rabbithole_proto::welcome::KeywordKind;
 use ratatui::backend::CrosstermBackend;
@@ -278,14 +279,14 @@ fn apply_push(app: &mut App, frame: &rabbithole_proto::Frame) {
         if !l.screen_name.is_empty() {
             app.sys(format!("* {} left", l.screen_name));
         }
+    } else if let Some(Ok(np)) = frame.decode::<RadioNowPlaying>() {
+        // Typed RADIO now-playing / sign-off update the reducer silently.
+        app.radio.apply_radio_status(np.into());
+    } else if let Some(Ok(off)) = frame.decode::<RadioOff>() {
+        app.radio.clear_station(&off.station);
     } else if let Some(Ok(n)) = frame.decode::<ServerNotice>() {
-        // Radio bridge notices update the now-playing state silently;
-        // everything else is an operator notice for the chat log.
-        match radio::parse_notice(&n.text) {
-            Some(radio::NoticeUpdate::Playing(status)) => app.radio.apply_radio_status(status),
-            Some(radio::NoticeUpdate::Off(station)) => app.radio.clear_station(&station),
-            None => app.sys(format!("! {}: {}", n.from, n.text)),
-        }
+        // Everything else is an operator notice for the chat log.
+        app.sys(format!("! {}: {}", n.from, n.text));
     }
 }
 
