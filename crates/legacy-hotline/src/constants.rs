@@ -94,7 +94,8 @@ pub mod field {
     /// `rsvd(2) len(1) name(len)`. The first component is the area slug.
     pub const FILE_PATH: u16 = 202;
 
-    /// File resume data (203), blob — used by resumed transfers (deferred).
+    /// File resume data (203), blob — the `RFLT` fork-offset structure a
+    /// resumed transfer quotes (see [`crate::flatten::FileResumeData`]).
     pub const FILE_RESUME_DATA: u16 = 203;
 
     /// File transfer options (204), integer.
@@ -263,7 +264,7 @@ pub mod transaction {
     /// Negotiate a file download (202); the bulk transfer runs on HTXF.
     pub const DOWNLOAD_FILE: u16 = 202;
 
-    /// Negotiate a file upload (203) — deferred.
+    /// Negotiate a file upload (203); the bulk transfer runs on HTXF.
     pub const UPLOAD_FILE: u16 = 203;
 
     /// Delete a file/folder (204).

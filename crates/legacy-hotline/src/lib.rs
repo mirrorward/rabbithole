@@ -35,6 +35,8 @@
 //!   integer helpers.
 //! - [`reassembly`] — accumulates fragmented bodies by transaction id.
 //! - [`access`] — the 64-bit account access bitmap and 16-bit user flags.
+//! - [`flatten`] — flattened file objects (the HTXF payload) and the `RFLT`
+//!   fork-offset resume structure.
 //! - [`constants`] — well-known field ids and transaction type numbers.
 //! - [`error`] — the total, panic-free [`HotlineError`].
 //!
@@ -49,6 +51,7 @@ pub mod access;
 pub mod constants;
 pub mod error;
 pub mod field;
+pub mod flatten;
 pub mod handshake;
 pub mod reassembly;
 pub mod transaction;
@@ -59,6 +62,7 @@ pub use field::{
     decode_params, deobfuscate, encode_params, min_int_bytes, obfuscate, read_int, Field,
     MAX_FIELD_SIZE,
 };
+pub use flatten::{FileResumeData, FlatHeader, ForkHeader, ForkOffset, InfoFork};
 pub use handshake::{Handshake, HandshakeReply, HANDSHAKE_VERSION, PROTOCOL_ID, SUB_PROTOCOL_HOTL};
 pub use reassembly::Reassembler;
 pub use transaction::{Transaction, TransactionHeader};
