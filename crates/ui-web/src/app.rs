@@ -226,6 +226,8 @@ impl AppState {
                         wasm_bindgen_futures::spawn_local(async move {
                             ws_sv.update_value(|c| {
                                 c.dispatch(Command::SignIn { login, password });
+                                // Pull the initial roster once signed in.
+                                c.request_who();
                             });
                         });
                     }
@@ -233,6 +235,9 @@ impl AppState {
                 state.update(|s| s.apply(&event));
             }));
             ws.on_conn(std::rc::Rc::new(move |c| state.update(|s| s.set_conn(c))));
+            ws.on_who(std::rc::Rc::new(move |roster| {
+                state.update(|s| s.who = roster)
+            }));
             ws.on_notice(std::rc::Rc::new(move |route| match route {
                 crate::wire::NoticeRoute::Radio(u) => radio.update(|r| r.apply_update(u)),
                 crate::wire::NoticeRoute::Chat { from, text } => {

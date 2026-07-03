@@ -66,6 +66,10 @@ pub type FileSink = Rc<dyn Fn(FileEvent)>;
 /// bridge updates vs. operator notices, already split by
 /// [`wire::frame_to_notice_route`]).
 pub type NoticeSink = Rc<dyn Fn(NoticeRoute)>;
+/// A sink the transport pushes the present-user roster into (from a decoded
+/// [`WhoList`](rabbithole_proto::presence::WhoList) reply). The core [`Event`]
+/// enum has no roster variant, so this rides its own sink like FILE/notices.
+pub type WhoSink = Rc<dyn Fn(Vec<String>)>;
 
 /// A browser WebSocket [`EventClient`] speaking RHP.
 ///
@@ -84,6 +88,7 @@ struct Inner {
     conn_sink: Option<ConnSink>,
     file_sink: Option<FileSink>,
     notice_sink: Option<NoticeSink>,
+    who_sink: Option<WhoSink>,
     next_id: u64,
     /// While `true`, the keepalive loop keeps pinging; cleared on close.
     alive: bool,
@@ -127,6 +132,12 @@ impl Inner {
         }
     }
 
+    fn emit_who(&self, roster: Vec<String>) {
+        if let Some(sink) = &self.who_sink {
+            sink(roster);
+        }
+    }
+
     fn next_request_id(&mut self) -> RequestId {
         self.next_id += 1;
         RequestId(self.next_id)
@@ -145,6 +156,7 @@ impl WsClient {
                 conn_sink: None,
                 file_sink: None,
                 notice_sink: None,
+                who_sink: None,
                 next_id: 0,
                 alive: false,
                 want_connected: false,
@@ -173,6 +185,22 @@ impl WsClient {
     /// updates and operator notices). The most recent registration wins.
     pub fn on_notice(&mut self, sink: NoticeSink) {
         self.inner.borrow_mut().notice_sink = Some(sink);
+    }
+
+    /// Register the roster sink (present-user screen names from a `WhoList`
+    /// reply). The most recent registration wins.
+    pub fn on_who(&mut self, sink: WhoSink) {
+        self.inner.borrow_mut().who_sink = Some(sink);
+    }
+
+    /// Ask the server for the current room roster; the reply arrives through
+    /// the [`on_who`](Self::on_who) sink.
+    pub fn request_who(&self) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) = wire::who_request(id).and_then(|f| encode_frame(&f)) {
+            Self::write(&mut b, &bytes);
+        }
     }
 
     /// Drive one [`FileCommand`]: encode it via the host-tested
@@ -276,6 +304,9 @@ impl WsClient {
                         }
                         if let Some(route) = wire::frame_to_notice_route(&frame) {
                             b.emit_notice(route);
+                        }
+                        if let Some(roster) = wire::frame_to_who(&frame) {
+                            b.emit_who(roster);
                         }
                     }
                     Err(err) => b.emit(Event::CommandFailed {

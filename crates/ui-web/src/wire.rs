@@ -80,7 +80,7 @@ use rabbithole_proto::filelib::{
     FileNodeView, FileUpload, FolderListRequest, NodeGet, NodeList, NodeReply,
 };
 use rabbithole_proto::hello::{CapabilitySet, Hello, HelloAck};
-use rabbithole_proto::presence::Who;
+use rabbithole_proto::presence::{Who, WhoList};
 use rabbithole_proto::radio::{RadioNowPlaying, RadioOff};
 use rabbithole_proto::session::{AuthPassword, Ping, ServerNotice};
 use rabbithole_proto::transfer::{
@@ -132,6 +132,18 @@ pub fn ping_request(id: RequestId) -> Result<Frame, ProtoError> {
 /// Build a presence [`Who`] request frame.
 pub fn who_request(id: RequestId) -> Result<Frame, ProtoError> {
     Frame::request(id, &Who)
+}
+
+/// Decode a [`WhoList`] reply frame to the roster of present screen names, in
+/// server order. `None` for any other frame or an error reply. The core
+/// [`Event`] enum has no roster variant, so — like the FILE/notice families —
+/// the transport surfaces this through a dedicated sink rather than an event.
+pub fn frame_to_who(frame: &Frame) -> Option<Vec<String>> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let list = frame.decode::<WhoList>()?.ok()?;
+    Some(list.users.into_iter().map(|u| u.screen_name).collect())
 }
 
 /// Map an outbound [`Command`] to the RHP request [`Frame`] that carries it.
@@ -801,6 +813,23 @@ mod tests {
         // Framed + decodable, but no api::Event variant exists for it yet.
         assert!(reply.decode::<WhoList>().unwrap().is_ok());
         assert!(frame_to_events(&reply).is_empty());
+    }
+
+    #[test]
+    fn frame_to_who_extracts_the_roster() {
+        let who = WhoList::new(vec![
+            UserSummary::new(1, "alice", 1, "websocket", 10),
+            UserSummary::new(2, "bob", 1, "quic", 3),
+        ]);
+        let req = who_request(RequestId(1)).unwrap();
+        let reply = Frame::reply_to(&req, &who).unwrap();
+        assert_eq!(
+            frame_to_who(&reply),
+            Some(vec!["alice".to_string(), "bob".to_string()])
+        );
+        // A non-WhoList frame (a chat push) yields None.
+        let push = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
+        assert_eq!(frame_to_who(&push), None);
     }
 
     #[test]

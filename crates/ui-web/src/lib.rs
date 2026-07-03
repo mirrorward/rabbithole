@@ -125,9 +125,9 @@ pub use syndication_admin::{
 pub use theme_editor::{contrast_warnings, ContrastWarning, EditorAction, EditorState};
 pub use wire::{
     admin_command_to_frame, command_to_frame, file_command_to_frame, frame_to_admin_events,
-    frame_to_events, frame_to_file_events, frame_to_notice_route, hello_request, normalize_ws_url,
-    ping_request, who_request, AdminCommand, AdminEvent, EventClient, EventSink, FileCommand,
-    FileEvent, NoticeRoute,
+    frame_to_events, frame_to_file_events, frame_to_notice_route, frame_to_who, hello_request,
+    normalize_ws_url, ping_request, who_request, AdminCommand, AdminEvent, EventClient, EventSink,
+    FileCommand, FileEvent, NoticeRoute,
 };
 
 #[cfg(target_arch = "wasm32")]
