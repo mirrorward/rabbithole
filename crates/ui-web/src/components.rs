@@ -617,6 +617,16 @@ pub fn BoardView() -> impl IntoView {
         new_body.set(String::new());
     };
 
+    let reply_body = create_rw_signal(String::new());
+    let reply = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        if reply_body.with(|b| b.trim().is_empty()) {
+            return;
+        }
+        app.post_reply(&reply_body.get());
+        reply_body.set(String::new());
+    };
+
     let board_name = move || {
         state.with(|s| {
             let slug = s.selected_board.clone().unwrap_or_default();
@@ -705,6 +715,16 @@ pub fn BoardView() -> impl IntoView {
                             }
                         />
                     </div>
+                    <form class="rh-reply" on:submit=reply>
+                        <textarea
+                            class="rh-input"
+                            placeholder="Write a reply\u{2026}"
+                            aria-label="Reply body"
+                            prop:value=reply_body
+                            on:input=move |ev| reply_body.set(event_target_value(&ev))
+                        ></textarea>
+                        <button class="rh-btn" type="submit">"Reply"</button>
+                    </form>
                 </Show>
             </section>
         </main>

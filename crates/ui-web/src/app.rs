@@ -389,6 +389,42 @@ impl AppState {
         });
     }
 
+    /// Reply to the currently open thread. Live: post the reply (parent = the
+    /// open thread's root id), then re-request the thread's posts so the reply
+    /// appears. Mock: append a local post to the open thread.
+    pub fn post_reply(&self, body: &str) {
+        if body.trim().is_empty() {
+            return;
+        }
+        let Some(thread_id) = self.state.with_untracked(|s| s.selected_thread.clone()) else {
+            return;
+        };
+        #[cfg(target_arch = "wasm32")]
+        if self.live.get_untracked() {
+            let board = self
+                .state
+                .with_untracked(|s| s.selected_board.clone())
+                .unwrap_or_default();
+            if let Some(root) = crate::wire::hex_to_id(&thread_id) {
+                self.ws.update_value(|c| {
+                    c.send_reply(&board, root, body);
+                    c.request_posts(root);
+                });
+            }
+            return;
+        }
+        let body = body.to_string();
+        self.state.update(|s| {
+            let id = format!("pnew{}", s.posts.len());
+            s.posts.push(crate::state::Post {
+                id,
+                thread: thread_id,
+                author: "you".to_string(),
+                body,
+            });
+        });
+    }
+
     /// Whether the mock seed loaders should no-op: they must not fold seeded
     /// [`MockClient`] data into a **live** session (DMs / members / files /
     /// radio are not wired over the socket yet, so the view stays empty rather

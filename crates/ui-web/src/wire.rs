@@ -238,6 +238,19 @@ pub fn post_create(
     Frame::request(id, &PostCreate::new(board, subject, body))
 }
 
+/// Build a [`PostCreate`] frame for a **reply** to the thread rooted at
+/// `parent`. A reply carries no subject of its own.
+pub fn post_reply(
+    board: &str,
+    parent: [u8; 32],
+    body: &str,
+    id: RequestId,
+) -> Result<Frame, ProtoError> {
+    let mut post = PostCreate::new(board, "", body);
+    post.parent = Some(parent);
+    Frame::request(id, &post)
+}
+
 /// Decode a [`ThreadList`] reply to the [`Thread`](crate::state::Thread) rows
 /// the board view renders (thread id = the root post's hex id).
 pub fn frame_to_threads(frame: &Frame) -> Option<Vec<crate::state::Thread>> {

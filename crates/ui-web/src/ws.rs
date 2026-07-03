@@ -316,6 +316,17 @@ impl WsClient {
         }
     }
 
+    /// Reply to the thread rooted at `parent`. A following
+    /// [`request_posts`](Self::request_posts) sees the committed reply.
+    pub fn send_reply(&self, board: &str, parent: [u8; 32], body: &str) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) = wire::post_reply(board, parent, body, id).and_then(|f| encode_frame(&f))
+        {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
     /// Drive one [`FileCommand`]: encode it via the host-tested
     /// [`wire::file_command_to_frame`] and write it to the open socket. Replies
     /// arrive asynchronously through the FILE-family sink.
