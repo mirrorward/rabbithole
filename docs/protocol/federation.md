@@ -127,15 +127,31 @@ From `crates/federation::catalog`, signature domain `rhp-fed-catalog-v1`:
   `a.generation > b.generation`, and `a.prev_id == b.catalog_id()` — a
   higher generation with a broken back-link is not a valid successor.
 
+## Discovery: `.well-known/rabbithole/server`
+
+A burrow with the HTTP surface enabled (`http_enabled`) serves its
+self-certifying **`PeerDescriptor`** as JSON at
+`/.well-known/rabbithole/server` (`apps/server/src/well_known.rs`). The body
+is built from live config — server name, advertised `scheme://host:port`
+endpoints (`quic`, `ws`, and `http`/`fed+quic` when enabled), feature tags per
+enabled surface, and a unix-ms `issued_at` — signed with the burrow's identity
+key over `rhp-fed-descriptor-v1 ‖ postcard(body)`. Anyone can fetch it and
+verify server-key continuity without a round trip: the signature is checked
+against the very key the document names.
+
+The host of each advertised endpoint comes from the TOML-only `advertise_host`
+config; with it unset, a concrete bind IP is used and wildcard (`0.0.0.0`/`::`)
+binds contribute no host-based address (the fetcher already knows the host it
+dialed). JSON is the transport convention here; because the signature covers
+the **postcard** encoding of the body, the same descriptor verifies whether it
+arrives as `.well-known` JSON or postcard over a tracker/S2S relay. Automated
+peer fetch + consumption of the descriptor is the remaining half.
+
 ## Model-only today (implemented in `crates/federation`, not on this wire)
 
 These are pure, tested data models awaiting a transport slice. Nothing
 below is exchanged between servers yet.
 
-- **`PeerDescriptor`** — the self-certifying
-  `.well-known/rabbithole/server` document (identity key, name, addresses,
-  feature tags, `issued_at`), Ed25519-signed over `rhp-fed-descriptor-v1`.
-  Not yet served or fetched.
 - **Board flood-fill** (`floodfill`) — `Subscription`, `IHave` / `PullRequest`
   / `PushEvents` moving signed board events between peers unchanged, gated
   by a Bloom-filter seen-set (`bloom`) against re-ingest loops.

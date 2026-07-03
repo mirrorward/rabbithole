@@ -35,6 +35,7 @@ pub mod session;
 pub mod stats;
 pub mod syndication;
 pub mod telnet;
+pub mod well_known;
 pub mod zmodem;
 
 use std::net::SocketAddr;

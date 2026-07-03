@@ -47,6 +47,13 @@ uploads. Moderators' decisions are final. Have fun.
 # Whether guests may sign in without an account. Public flagship: yes. (live)
 # guest_enabled = true
 
+# Public hostname advertised in the signed /.well-known/rabbithole/server
+# discovery descriptor (served when http_enabled). Set this to your real
+# domain so peers, trackers, and clients get usable scheme://host:port
+# endpoints; empty = derive from concrete bind IPs, and omit host-based
+# addresses for wildcard (0.0.0.0) binds. TOML-only (restart to change).
+advertise_host = "rabbithole.example"
+
 # Registration policy: "open" | "invite" | "closed". A public flagship that
 # wants to keep the doors open runs "open"; switch to "invite" if you get
 # brigaded. (live)

@@ -45,6 +45,12 @@ pub struct ServerConfig {
     pub agreement: String,
     /// Whether guests may sign in.
     pub guest_enabled: bool,
+    /// Public hostname advertised in the signed `.well-known/rabbithole/server`
+    /// descriptor (and later tracker registrations), e.g.
+    /// `"rabbithole.example"`. Empty = derive host-based addresses from
+    /// concrete bind IPs and omit them for wildcard (`0.0.0.0`/`::`) binds.
+    /// TOML-only (edited on disk, not via `ctl config set`), like `ftn_areas`.
+    pub advertise_host: String,
     /// QUIC listener (primary transport).
     pub quic_addr: SocketAddr,
     /// WebSocket listener (fallback transport).
@@ -362,6 +368,7 @@ impl Default for ServerConfig {
             motd: String::new(),
             agreement: String::new(),
             guest_enabled: true,
+            advertise_host: String::new(),
             quic_addr: "0.0.0.0:4653".parse().expect("valid"),
             ws_addr: "0.0.0.0:4654".parse().expect("valid"),
             data_dir: PathBuf::from("./burrow-data"),

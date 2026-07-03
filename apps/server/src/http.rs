@@ -2,7 +2,12 @@
 //! download handoff that telnet's `get` command mints links for.
 //!
 //! Opt-in via config (`http_enabled`, default **off**) on `http_addr`
-//! (default 0.0.0.0:8080). Two surfaces share the one listener:
+//! (default 0.0.0.0:8080). Three surfaces share the one listener:
+//!
+//! - **`/.well-known/rabbithole/server`** — the signed, self-certifying
+//!   discovery descriptor ([`crate::well_known`]): a public JSON statement of
+//!   the server's identity key, addresses, and features that any peer,
+//!   tracker, or client can fetch and verify without a round trip.
 //!
 //! - **`/files/<area>/<percent-encoded-path>`** — the out-of-band transfer
 //!   target for [`crate::telnet`]'s `get` command (whose link format this
@@ -232,15 +237,48 @@ async fn respond(
     };
     let req = Request { method, segments };
 
-    let mut resp = if req.segments.first().map(String::as_str) == Some("files") {
-        serve_file_download(&req, shared).await
-    } else {
-        serve_static(&req, shared, web_root).await
+    let mut resp = match req.segments.first().map(String::as_str) {
+        Some("files") => serve_file_download(&req, shared).await,
+        Some(".well-known") => serve_well_known(&req, shared),
+        _ => serve_static(&req, shared, web_root).await,
     };
     if req.method == Method::Head {
         resp.head_only = true;
     }
     resp
+}
+
+// ---------------------------------------------------------------------------
+// /.well-known/rabbithole/server: the signed discovery descriptor
+// ---------------------------------------------------------------------------
+
+/// Serve the signed [`crate::well_known`] descriptor as JSON. Only the exact
+/// `/.well-known/rabbithole/server` path answers; anything else under
+/// `/.well-known/` is a plain 404. Anonymous and unrate-gated beyond the
+/// per-IP `legacy` request budget already spent in [`respond`] — the document
+/// is public by design.
+fn serve_well_known(req: &Request, shared: &Arc<Shared>) -> Response {
+    if req
+        .segments
+        .iter()
+        .map(String::as_str)
+        .ne([".well-known", "rabbithole", "server"])
+    {
+        return Response::text(404, "Not Found", "not found\n");
+    }
+    match crate::well_known::descriptor_json(shared, now_unix_millis()) {
+        Some(json) => Response::new(200, "OK", "application/json".into(), json.into_bytes()),
+        None => Response::text(500, "Internal Server Error", "descriptor unavailable\n"),
+    }
+}
+
+/// Wall-clock unix milliseconds for the descriptor's `issued_at` (0 before the
+/// epoch, which never happens).
+fn now_unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------

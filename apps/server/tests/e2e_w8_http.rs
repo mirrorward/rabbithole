@@ -15,6 +15,10 @@
 //! - with `http_web_root` configured the SPA shell is served (`/` =
 //!   `index.html`, typed assets, a generated `/manifest.webmanifest`, no
 //!   directory listings);
+//! - `/.well-known/rabbithole/server` returns the signed, self-certifying
+//!   discovery descriptor as JSON (verifies against the key it names, carries
+//!   the server name / advertised endpoints / feature tags), only the exact
+//!   path resolves, and HEAD mirrors GET;
 //! - the surface is off by default.
 //!
 //! Deterministic: every request is a fresh `Connection: close` exchange
@@ -329,6 +333,84 @@ async fn web_root_serves_the_spa_shell_and_generated_manifest() {
     assert_eq!(
         header(&headers, "content-length").unwrap(),
         b"<html>the shell</html>".len().to_string()
+    );
+
+    b.shutdown().await;
+}
+
+#[tokio::test]
+async fn well_known_serves_a_signed_self_certifying_descriptor() {
+    let work = tempfile::tempdir().unwrap();
+    let b = Burrow::start(ServerConfig {
+        advertise_host: "warren.test".into(),
+        ..http_config(work.path())
+    })
+    .await
+    .unwrap();
+    let addr = b.http_addr.expect("http enabled");
+
+    let (status, headers, body) = request(addr, "GET", "/.well-known/rabbithole/server").await;
+    assert_eq!(status, 200);
+    assert_eq!(header(&headers, "content-type"), Some("application/json"));
+
+    let desc: rabbithole_federation::PeerDescriptor =
+        serde_json::from_slice(&body).expect("valid descriptor JSON");
+    // Self-certifying: the signature verifies against the key it names…
+    assert_eq!(desc.verify(), Ok(()), "descriptor signature verifies");
+    // …and that key is this burrow's federation/signing identity.
+    let identity = rabbithole_identity::IdentityKey::from_seed(&b.shared.server_signing_seed)
+        .public()
+        .0;
+    assert_eq!(
+        desc.body.server_key, identity,
+        "names the server identity key"
+    );
+
+    assert_eq!(desc.body.name, "Warren Web");
+    // advertise_host drives the host of every advertised endpoint (the port
+    // is the configured one — here the harness's ephemeral :0, so match on
+    // scheme+host only).
+    for scheme in [
+        "quic://warren.test:",
+        "ws://warren.test:",
+        "http://warren.test:",
+    ] {
+        assert!(
+            desc.body.addresses.iter().any(|a| a.starts_with(scheme)),
+            "{scheme} not advertised: {:?}",
+            desc.body.addresses
+        );
+    }
+    // Core features are always present; guests are on by default.
+    for tag in ["boards", "chat", "dm", "files", "swarm", "guest"] {
+        assert!(
+            desc.body.features.iter().any(|f| f == tag),
+            "missing feature {tag}"
+        );
+    }
+    assert!(desc.body.issued_at > 0, "stamped with an issue time");
+
+    // Only the exact path answers; other `.well-known` subpaths are 404.
+    for path in [
+        "/.well-known/rabbithole/nope",
+        "/.well-known/other",
+        "/.well-known",
+    ] {
+        let (status, _, _) = request(addr, "GET", path).await;
+        assert_eq!(status, 404, "{path} must not resolve to the descriptor");
+    }
+
+    // HEAD mirrors GET: same status/headers, a real Content-Length, no body.
+    let (status, headers, hbody) = request(addr, "HEAD", "/.well-known/rabbithole/server").await;
+    assert_eq!(status, 200);
+    assert!(hbody.is_empty(), "HEAD has no body");
+    assert_eq!(header(&headers, "content-type"), Some("application/json"));
+    assert!(
+        header(&headers, "content-length")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            > 0
     );
 
     b.shutdown().await;
