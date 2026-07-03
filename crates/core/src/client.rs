@@ -37,6 +37,16 @@ pub enum ClientError {
     IntegrityError,
 }
 
+/// Whether a [`ClientError`] is a transient network drop that a
+/// [`Client::reconnect`] can recover from — as opposed to a server refusal,
+/// an unexpected reply, or a decode error, none of which retrying would fix.
+fn is_transient(e: &ClientError) -> bool {
+    matches!(
+        e,
+        ClientError::Net(_) | ClientError::Closed | ClientError::Io(_)
+    )
+}
+
 /// A connected, hello-negotiated session.
 pub struct Client {
     conn: Box<dyn Connection>,
@@ -47,6 +57,17 @@ pub struct Client {
     pub server: HelloAck,
     /// Client-side transfer bandwidth cap in bytes/sec (`None` = unlimited).
     rate_limit: Option<u64>,
+    /// Remembered dial parameters, so [`Client::reconnect`] can re-establish
+    /// the same session after a drop (mobile network change, idle timeout).
+    endpoint: String,
+    server_name: Option<String>,
+    fingerprint: Option<String>,
+    client_name: String,
+    client_version: String,
+    /// The resumable session bearer token from the last successful password
+    /// auth or resume (`None` for a guest session — the server does not let
+    /// guests resume).
+    session_token: Option<String>,
 }
 
 /// Bandwidth cap: sleep to hold the average transfer rate at or under `rate`
@@ -99,6 +120,12 @@ impl Client {
                 "",
                 [0; 32],
             ),
+            endpoint: endpoint.to_string(),
+            server_name: server_name.map(str::to_owned),
+            fingerprint: fingerprint.map(str::to_owned),
+            client_name: client_name.to_string(),
+            client_version: client_version.to_string(),
+            session_token: None,
         };
         let hello = Hello::new(client_name, client_version, CapabilitySet::default());
         let ack: HelloAck = client.request(&hello).await?;
@@ -182,15 +209,20 @@ impl Client {
         login: &str,
         password: &str,
     ) -> Result<psess::AuthOk, ClientError> {
-        self.request(&psess::AuthPassword::new(login, password))
-            .await
+        let ok: psess::AuthOk = self
+            .request(&psess::AuthPassword::new(login, password))
+            .await?;
+        self.remember_token(&ok);
+        Ok(ok)
     }
 
     pub async fn auth_guest(
         &mut self,
         desired_name: Option<String>,
     ) -> Result<psess::AuthOk, ClientError> {
-        self.request(&psess::AuthGuest::new(desired_name)).await
+        let ok: psess::AuthOk = self.request(&psess::AuthGuest::new(desired_name)).await?;
+        self.remember_token(&ok); // guests get an empty token → not resumable
+        Ok(ok)
     }
 
     pub async fn auth_resume(
@@ -198,8 +230,82 @@ impl Client {
         token: &str,
         replay_cursor: u64,
     ) -> Result<psess::AuthOk, ClientError> {
-        self.request(&psess::AuthResume::new(token, replay_cursor))
-            .await
+        let ok: psess::AuthOk = self
+            .request(&psess::AuthResume::new(token, replay_cursor))
+            .await?;
+        self.remember_token(&ok);
+        Ok(ok)
+    }
+
+    /// Remember a non-empty session token so [`Client::reconnect`] can resume.
+    /// An empty token (guest) leaves the session non-resumable.
+    fn remember_token(&mut self, ok: &psess::AuthOk) {
+        if !ok.token.is_empty() {
+            self.session_token = Some(ok.token.clone());
+        }
+    }
+
+    /// Whether this session can be resumed after a drop: a non-guest auth left
+    /// a bearer token. Guest sessions and pre-auth connections cannot resume.
+    pub fn is_resumable(&self) -> bool {
+        self.session_token.is_some()
+    }
+
+    /// Re-establish the session after a connection drop: re-dial the same
+    /// endpoint (fresh transport + Hello), then `AuthResume` with the stored
+    /// token and the replay cursor so the server replays the pushes missed
+    /// since. Buffered-but-unread pushes from before the drop are preserved
+    /// ahead of any replayed ones, and the replay cursor never rewinds.
+    ///
+    /// Errors with [`ClientError::Closed`] if the session is not resumable
+    /// (guest / never authenticated); network and refusal errors from the
+    /// re-dial or resume propagate. On success the live connection is replaced
+    /// and the returned [`psess::AuthOk`] has `resumed == true`.
+    pub async fn reconnect(&mut self) -> Result<psess::AuthOk, ClientError> {
+        let token = self.session_token.clone().ok_or(ClientError::Closed)?;
+        let mut fresh = Client::connect(
+            &self.endpoint,
+            self.server_name.as_deref(),
+            self.fingerprint.as_deref(),
+            &self.client_name,
+            &self.client_version,
+        )
+        .await?;
+        let ok = fresh.auth_resume(&token, self.replay_cursor).await?;
+        // Carry forward session-local state the fresh dial doesn't know about:
+        // the (never-rewound) replay cursor, the bandwidth cap, and any pushes
+        // we buffered but the frontend hadn't read yet — those precede the
+        // server's replayed ones.
+        fresh.replay_cursor = self.replay_cursor.max(fresh.replay_cursor);
+        fresh.rate_limit = self.rate_limit;
+        let mut pending = std::mem::take(&mut self.pushes);
+        pending.extend(std::mem::take(&mut fresh.pushes));
+        fresh.pushes = pending;
+        *self = fresh;
+        Ok(ok)
+    }
+
+    /// Like [`Client::request`], but transparently [`Client::reconnect`]s once
+    /// and retries when the send/await fails on a **transient** network error
+    /// (a dropped connection). Refusals, decode failures, and non-resumable
+    /// (guest) sessions are not retried.
+    ///
+    /// Retry semantics are **at-least-once**: if the original request reached
+    /// the server before the drop, the retry runs it again. Safe for
+    /// idempotent reads (who / history / listings); non-idempotent callers
+    /// (chat/post/transfer starts) should prefer [`Client::request`] and drive
+    /// [`Client::reconnect`] themselves, or tolerate a possible duplicate.
+    pub async fn request_resilient<M: Message, R: Message>(
+        &mut self,
+        msg: &M,
+    ) -> Result<R, ClientError> {
+        match self.request(msg).await {
+            Err(e) if is_transient(&e) && self.is_resumable() => {
+                self.reconnect().await?;
+                self.request(msg).await
+            }
+            other => other,
+        }
     }
 
     /// Await the Welcome push (sent right after auth). Other pushes seen
@@ -1096,5 +1202,27 @@ impl Client {
 
     pub async fn close(&mut self) {
         self.conn.close().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_errors_trigger_reconnect_others_do_not() {
+        // Network drops are recoverable by re-dial + resume.
+        assert!(is_transient(&ClientError::Closed));
+        assert!(is_transient(&ClientError::Net(NetError::Unsupported("ws"))));
+        assert!(is_transient(&ClientError::Io(std::io::Error::from(
+            std::io::ErrorKind::ConnectionReset
+        ))));
+        // Server-level outcomes are not: retrying would just repeat them.
+        assert!(!is_transient(&ClientError::Refused(ErrorCode::RateLimited)));
+        assert!(!is_transient(&ClientError::UnexpectedReply {
+            family: 2,
+            message_type: 3,
+        }));
+        assert!(!is_transient(&ClientError::IntegrityError));
     }
 }
