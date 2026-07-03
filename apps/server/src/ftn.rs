@@ -292,6 +292,7 @@ impl FtnGateway {
                 &[],
                 at,
                 false,
+                None,
             )
             .await?;
         let message = rabbithole_proto::dm::DmMessage::new(

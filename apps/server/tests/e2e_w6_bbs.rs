@@ -138,6 +138,7 @@ async fn login_shows_composed_welcome_screen() {
             &[],
             1000,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -361,6 +362,7 @@ async fn dm_list_read_reply_roundtrip_with_native_user() {
             &[],
             1000,
             false,
+            None,
         )
         .await
         .unwrap();

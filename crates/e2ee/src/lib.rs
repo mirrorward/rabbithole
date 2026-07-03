@@ -60,6 +60,7 @@ pub mod kdf;
 pub mod keys;
 pub mod ratchet;
 pub mod sealed;
+pub mod sig;
 pub mod x3dh;
 
 pub use group::{
@@ -69,6 +70,7 @@ pub use group::{
 pub use keys::{IdentityKeyPair, PreKeyPair, PublicKey};
 pub use ratchet::{Header, Message, Session};
 pub use sealed::{sealed_open, sealed_seal, SealedEnvelope};
+pub use sig::{verify as sig_verify, SigningKeyPair};
 pub use x3dh::{initiator_shared_secret, responder_shared_secret, SharedSecret};
 
 /// Errors produced by the E2EE core.

@@ -408,6 +408,39 @@ impl Client {
             .await
     }
 
+    // ---- Wave 13: E2EE prekey bundles + encrypted DM carriage -------------
+
+    /// Publish this account's E2EE prekey bundle (public keys only).
+    pub async fn key_bundle_publish(
+        &mut self,
+        bundle: &rabbithole_proto::keybundle::KeyBundlePublish,
+    ) -> Result<(), ClientError> {
+        self.request_ack(bundle).await
+    }
+
+    /// Fetch `screen_name`'s prekey bundle (consumes one one-time prekey
+    /// server-side) to establish an encrypted session.
+    pub async fn key_bundle_fetch(
+        &mut self,
+        screen_name: &str,
+    ) -> Result<rabbithole_proto::keybundle::KeyBundle, ClientError> {
+        self.request(&rabbithole_proto::keybundle::KeyBundleRequest::new(
+            screen_name,
+        ))
+        .await
+    }
+
+    /// Send an end-to-end encrypted DM: the server relays `payload` opaquely and
+    /// stores no plaintext.
+    pub async fn dm_send_encrypted(
+        &mut self,
+        to: &str,
+        payload: rabbithole_proto::dm::EncryptedPayload,
+    ) -> Result<rabbithole_proto::dm::DmSent, ClientError> {
+        self.request(&rabbithole_proto::dm::DmSend::new_encrypted(to, payload))
+            .await
+    }
+
     // ---- Wave 2.2b: rooms -------------------------------------------------
 
     pub async fn room_list(&mut self) -> Result<Vec<pchat::RoomInfo>, ClientError> {

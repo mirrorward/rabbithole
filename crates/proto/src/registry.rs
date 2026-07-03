@@ -58,6 +58,7 @@ use crate::filelib::{
     NodeList, NodeReply, RateFile, SearchRequest, SearchResults, SetMetadata,
 };
 use crate::hello::{Hello, HelloAck};
+use crate::keybundle::{KeyBundle, KeyBundlePublish, KeyBundleRequest};
 use crate::persona::{
     KeyEnroll, PersonaCreate, PersonaDelete, PersonaList, PersonaListRequest, PersonaReply,
     PersonaSwitch, PersonaUpdate, RecoveryCodes, Register, TotpDisable, TotpEnrollBegin,
@@ -143,6 +144,7 @@ wire_registry! {
     // ── Family 3: DM ─────────────────────────────────────────────────────
     DmSend, DmSent, DmReceived, DmHistoryRequest, DmHistory, DmThreadsRequest, DmThreads,
     DmMarkRead, DmReadReceipt,
+    KeyBundlePublish, KeyBundleRequest, KeyBundle,
 
     // ── Family 4: BOARD ──────────────────────────────────────────────────
     BoardListRequest, BoardList, ThreadListRequest, ThreadList, ThreadRequest, ThreadPosts,
@@ -181,7 +183,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 174;
+pub const EXPECTED: usize = 177;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

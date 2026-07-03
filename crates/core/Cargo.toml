@@ -9,8 +9,10 @@ publish.workspace = true
 
 [dependencies]
 rabbithole-proto.workspace = true
+rabbithole-e2ee.workspace = true
 postcard.workspace = true
 ed25519-dalek = { version = "2", default-features = false }
+rand_core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
@@ -31,3 +33,4 @@ native = [
 
 [dev-dependencies]
 rabbithole-identity.workspace = true
+rand.workspace = true

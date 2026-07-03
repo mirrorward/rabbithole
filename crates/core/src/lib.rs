@@ -20,6 +20,7 @@
 pub mod api;
 #[cfg(feature = "native")]
 pub mod client;
+pub mod e2ee;
 #[cfg(feature = "native")]
 pub mod queue;
 pub mod theme;
@@ -27,3 +28,4 @@ pub mod theme;
 pub use api::{Command, Event};
 #[cfg(feature = "native")]
 pub use client::{Client, ClientError};
+pub use e2ee::{E2eeError, E2eeIdentity, E2eeSession};

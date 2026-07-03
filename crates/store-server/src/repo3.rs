@@ -131,6 +131,9 @@ pub struct DmRow {
     pub at_ms: i64,
     pub is_auto: bool,
     pub read_at: Option<i64>,
+    /// Opaque E2EE carriage (postcard-encoded `EncryptedPayload`), or `None` for
+    /// a plaintext DM. The server never decodes this.
+    pub encrypted: Option<Vec<u8>>,
 }
 
 fn row_to_dm(r: &sqlx::sqlite::SqliteRow) -> DmRow {
@@ -148,6 +151,7 @@ fn row_to_dm(r: &sqlx::sqlite::SqliteRow) -> DmRow {
         at_ms: r.get("at"),
         is_auto: r.get::<i64, _>("is_auto") != 0,
         read_at: r.get("read_at"),
+        encrypted: r.get("encrypted"),
     }
 }
 
@@ -166,11 +170,12 @@ impl DmsRepo<'_> {
         attachments_hex: &[String],
         at_ms: i64,
         is_auto: bool,
+        encrypted: Option<&[u8]>,
     ) -> Result<i64, StoreError> {
         Ok(sqlx::query(
             "INSERT INTO dms (from_account, from_persona, to_account, to_persona,
-                              text, quote_of, attachments, at, is_auto)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                              text, quote_of, attachments, at, is_auto, encrypted)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(from_account)
         .bind(from_persona)
@@ -181,6 +186,7 @@ impl DmsRepo<'_> {
         .bind(serde_json::to_string(attachments_hex).expect("serializable"))
         .bind(at_ms)
         .bind(is_auto as i64)
+        .bind(encrypted)
         .fetch_one(self.0)
         .await?
         .get("id"))
@@ -371,11 +377,22 @@ mod tests {
         let (pool, a, b) = two_accounts().await;
         let dms = DmsRepo(&pool);
         let id1 = dms
-            .insert(a, "alice", b, "bob", "hi bob", None, &[], 1000, false)
+            .insert(a, "alice", b, "bob", "hi bob", None, &[], 1000, false, None)
             .await
             .unwrap();
         let _id2 = dms
-            .insert(b, "bob", a, "alice", "hi alice", None, &[], 2000, false)
+            .insert(
+                b,
+                "bob",
+                a,
+                "alice",
+                "hi alice",
+                None,
+                &[],
+                2000,
+                false,
+                None,
+            )
             .await
             .unwrap();
         let id3 = dms
@@ -389,6 +406,7 @@ mod tests {
                 &["aabb".into()],
                 3000,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -424,9 +442,20 @@ mod tests {
         let (pool, a, b) = two_accounts().await;
         let dms = DmsRepo(&pool);
         for i in 0..10 {
-            dms.insert(a, "alice", b, "bob", &format!("m{i}"), None, &[], i, false)
-                .await
-                .unwrap();
+            dms.insert(
+                a,
+                "alice",
+                b,
+                "bob",
+                &format!("m{i}"),
+                None,
+                &[],
+                i,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
         }
         let newest = dms.thread(a, b, 0, 4).await.unwrap();
         assert_eq!(newest.len(), 4);

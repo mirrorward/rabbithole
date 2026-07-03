@@ -5,10 +5,10 @@ use std::sync::Arc;
 use rabbithole_blobs::BlobId;
 use rabbithole_net::Connection;
 use rabbithole_proto::presence::PresenceState;
-use rabbithole_proto::{dm as pdm, presence as ppres};
+use rabbithole_proto::{dm as pdm, keybundle as pkb, presence as ppres};
 use rabbithole_proto::{ErrorCode, Frame};
 use rabbithole_server_core::ratelimit::{class as rl, Scope};
-use rabbithole_server_core::{Caps, ServerEvent};
+use rabbithole_server_core::{Caps, KeyBundleService, ServerEvent};
 use rabbithole_store_server::repo2::PersonasRepo;
 use rabbithole_store_server::repo3::{dm_receipts_enabled, BlocksRepo, BuddiesRepo, DmsRepo};
 
@@ -17,6 +17,8 @@ use crate::Shared;
 
 const MAX_STATUS_LEN: usize = 200;
 const MAX_DM_ATTACHMENTS: usize = 8;
+/// Cap on the opaque E2EE payload (header + ciphertext) the server will relay.
+const MAX_ENCRYPTED_LEN: usize = 64 * 1024;
 
 fn state_ordinal(state: PresenceState) -> u8 {
     match state {
@@ -29,7 +31,7 @@ fn state_ordinal(state: PresenceState) -> u8 {
 }
 
 pub(crate) fn dm_row_to_message(row: &rabbithole_store_server::repo3::DmRow) -> pdm::DmMessage {
-    pdm::DmMessage::new(
+    let msg = pdm::DmMessage::new(
         row.id,
         row.from_persona.clone(),
         row.to_persona.clone(),
@@ -41,7 +43,17 @@ pub(crate) fn dm_row_to_message(row: &rabbithole_store_server::repo3::DmRow) -> 
             .collect(),
         row.at_ms,
         row.is_auto,
-    )
+    );
+    // Re-attach opaque E2EE carriage (the server stored it verbatim; it never
+    // decoded the ratchet header or decrypted the ciphertext).
+    match row
+        .encrypted
+        .as_ref()
+        .and_then(|b| postcard::from_bytes::<pdm::EncryptedPayload>(b).ok())
+    {
+        Some(payload) => msg.with_encrypted(payload),
+        None => msg,
+    }
 }
 
 pub async fn handle(
@@ -189,13 +201,26 @@ pub async fn handle(
             fail!(ErrorCode::RateLimited);
         }
         let text = req.text.trim_end();
-        if text.is_empty() && req.attachments.is_empty() {
-            fail!(ErrorCode::BadRequest);
-        }
-        if text.len() > shared.config.read().chat_max_len
-            || req.attachments.len() > MAX_DM_ATTACHMENTS
-        {
-            fail!(ErrorCode::TooLarge);
+        // Opt-in E2EE carriage: when present, the server stores/relays the
+        // ciphertext opaquely and holds NO plaintext (the `text` column is
+        // stored empty and never indexed/searched).
+        if let Some(ref payload) = req.encrypted {
+            let size = payload.header.len() + payload.ciphertext.len();
+            if size == 0 {
+                fail!(ErrorCode::BadRequest);
+            }
+            if size > MAX_ENCRYPTED_LEN {
+                fail!(ErrorCode::TooLarge);
+            }
+        } else {
+            if text.is_empty() && req.attachments.is_empty() {
+                fail!(ErrorCode::BadRequest);
+            }
+            if text.len() > shared.config.read().chat_max_len
+                || req.attachments.len() > MAX_DM_ATTACHMENTS
+            {
+                fail!(ErrorCode::TooLarge);
+            }
         }
         let Some(recipient) = PersonasRepo(&shared.pool).by_screen_name(&req.to).await? else {
             fail!(ErrorCode::NotFound)
@@ -231,45 +256,58 @@ pub async fn handle(
             .iter()
             .map(|a| BlobId(*a).to_hex())
             .collect();
+        // Serialize the opaque carriage for storage; empty the stored plaintext.
+        let encrypted_bytes = req
+            .encrypted
+            .as_ref()
+            .map(|p| postcard::to_allocvec(p).expect("EncryptedPayload serializes"));
+        let stored_text = if req.encrypted.is_some() { "" } else { text };
         let id = DmsRepo(&shared.pool)
             .insert(
                 ctx.account_id,
                 &ctx.screen_name,
                 recipient.account_id,
                 &recipient.screen_name,
-                text,
+                stored_text,
                 req.quote_of,
                 &attachments_hex,
                 at_ms,
                 false,
+                encrypted_bytes.as_deref(),
             )
             .await?;
 
-        let message = pdm::DmMessage::new(
+        let mut message = pdm::DmMessage::new(
             id,
             ctx.screen_name.clone(),
             recipient.screen_name.clone(),
-            text,
+            stored_text,
             req.quote_of,
             req.attachments.clone(),
             at_ms,
             false,
         );
+        if let Some(payload) = req.encrypted.clone() {
+            message = message.with_encrypted(payload);
+        }
         shared.bus.publish(ServerEvent::Dm {
             to_account: recipient.account_id,
             message,
         });
         reply!(&pdm::DmSent::new(id, at_ms));
 
-        // Away auto-response (once per sender→recipient away period).
-        maybe_auto_respond(
-            shared,
-            ctx.account_id,
-            &ctx.screen_name,
-            &recipient.screen_name,
-            recipient.account_id,
-        )
-        .await?;
+        // Away auto-response (plaintext only; once per sender→recipient away
+        // period). An encrypted thread never triggers a server-authored reply.
+        if req.encrypted.is_none() {
+            maybe_auto_respond(
+                shared,
+                ctx.account_id,
+                &ctx.screen_name,
+                &recipient.screen_name,
+                recipient.account_id,
+            )
+            .await?;
+        }
         return Ok(true);
     }
 
@@ -337,6 +375,70 @@ pub async fn handle(
         return Ok(true);
     }
 
+    // ---- E2EE prekey bundles (public keys only; server never sees privates) --
+    if let Some(Ok(req)) = frame.decode::<pkb::KeyBundlePublish>() {
+        if ctx.is_guest {
+            fail!(ErrorCode::Forbidden);
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        match KeyBundleService::publish(
+            &shared.pool,
+            ctx.account_id,
+            &req.identity_key,
+            &req.signing_key,
+            &req.signed_prekey,
+            &req.signed_prekey_sig,
+            &req.one_time_prekeys,
+            now,
+        )
+        .await
+        {
+            Ok(()) => conn.send(Frame::ack(frame)).await?,
+            Err(rabbithole_server_core::KeyBundleError::BadInput) => fail!(ErrorCode::BadRequest),
+            Err(rabbithole_server_core::KeyBundleError::Store(e)) => return Err(e.into()),
+        }
+        return Ok(true);
+    }
+
+    if let Some(Ok(req)) = frame.decode::<pkb::KeyBundleRequest>() {
+        if ctx.is_guest {
+            fail!(ErrorCode::Forbidden);
+        }
+        let Some(persona) = PersonasRepo(&shared.pool)
+            .by_screen_name(&req.screen_name)
+            .await?
+        else {
+            fail!(ErrorCode::NotFound)
+        };
+        let Some(bundle) =
+            KeyBundleService::fetch_consume(&shared.pool, persona.account_id).await?
+        else {
+            fail!(ErrorCode::NotFound)
+        };
+        // Fixed-width public keys; the store guarantees the sizes on publish.
+        let to_key = |v: Vec<u8>| -> Option<[u8; 32]> { v.try_into().ok() };
+        let (Some(identity_key), Some(signing_key), Some(signed_prekey)) = (
+            to_key(bundle.identity_key),
+            to_key(bundle.signing_key),
+            to_key(bundle.signed_prekey),
+        ) else {
+            fail!(ErrorCode::Internal)
+        };
+        let one_time_prekey = match bundle.one_time_prekey.map(to_key) {
+            Some(Some(k)) => Some(k),
+            Some(None) => fail!(ErrorCode::Internal),
+            None => None,
+        };
+        reply!(&pkb::KeyBundle::new(
+            identity_key,
+            signing_key,
+            signed_prekey,
+            bundle.signed_prekey_sig,
+            one_time_prekey,
+        ));
+        return Ok(true);
+    }
+
     Ok(false)
 }
 
@@ -385,6 +487,7 @@ pub(crate) async fn maybe_auto_respond(
             &[],
             at_ms,
             true,
+            None,
         )
         .await?;
     shared.bus.publish(ServerEvent::Dm {

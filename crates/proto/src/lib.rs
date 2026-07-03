@@ -32,6 +32,7 @@ pub mod error;
 pub mod filelib;
 pub mod frame;
 pub mod hello;
+pub mod keybundle;
 pub mod persona;
 pub mod presence;
 pub mod registry;
