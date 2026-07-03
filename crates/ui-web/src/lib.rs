@@ -85,6 +85,7 @@ pub mod components;
 pub mod conn;
 pub mod files;
 pub mod packs;
+pub mod palette;
 pub mod pwa;
 pub mod radio;
 pub mod server_theme;

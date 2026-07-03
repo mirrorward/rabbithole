@@ -163,8 +163,154 @@ pub fn StatusBar() -> impl IntoView {
                 </Show>
             </span>
             <Nav/>
+            <button
+                type="button"
+                class="rh-kbd-jump"
+                on:click=move |_| app.palette_open.set(true)
+                aria-haspopup="dialog"
+                aria-label="Jump to a section (Command-K)"
+                title="Jump to a section (\u{2318}K)"
+            >
+                <span aria-hidden="true">"\u{2318}K"</span>
+            </button>
             <ThemeToggle/>
         </header>
+    }
+}
+
+/// The ⌘K command palette: a modal overlay to jump between sections by
+/// keyboard. This is the SPA's first dialog, so it carries the contract the
+/// [`crate::a11y`] notes reserved for the first overlay: `role="dialog"` +
+/// `aria-modal`, Escape to close, the input autofocused on open, arrow-key
+/// selection, and click-outside to dismiss. Matching is the host-tested
+/// [`crate::palette`]; this only wires it to the DOM and the router.
+#[component]
+pub fn CommandPalette() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let open = app.palette_open;
+    let navigate = use_navigate();
+    let query = create_rw_signal(String::new());
+    let selected = create_rw_signal(0usize);
+    let input_ref = create_node_ref::<leptos::html::Input>();
+
+    let matches = move || crate::palette::palette_matches(&query.get());
+    // Hoisted out of `view!`: the `::<Vec<_>>` turbofish confuses the macro's
+    // tag parser (the `<` reads as an open tag).
+    let items = move || {
+        matches()
+            .into_iter()
+            .enumerate()
+            .collect::<Vec<(usize, crate::palette::Section)>>()
+    };
+
+    // Reset the query + focus the input each time the palette opens.
+    create_effect(move |_| {
+        if open.get() {
+            query.set(String::new());
+            selected.set(0);
+            #[cfg(target_arch = "wasm32")]
+            if let Some(el) = input_ref.get() {
+                let _ = el.focus();
+            }
+        }
+    });
+
+    // Global ⌘K / Ctrl-K toggles the palette from anywhere (wasm only).
+    #[cfg(target_arch = "wasm32")]
+    {
+        let handle = window_event_listener(leptos::ev::keydown, move |ev| {
+            if (ev.meta_key() || ev.ctrl_key()) && ev.key().eq_ignore_ascii_case("k") {
+                ev.prevent_default();
+                open.update(|o| *o = !*o);
+            }
+        });
+        on_cleanup(move || handle.remove());
+    }
+
+    // Navigation as a `Callback` (which is `Copy`), so every handler inside the
+    // re-rendered `<Show>` can use it without move/`Fn` friction.
+    let go = Callback::new(move |route: &'static str| {
+        open.set(false);
+        navigate(route, Default::default());
+    });
+
+    view! {
+        <Show when=move || open.get() fallback=|| ()>
+            <div class="rh-palette-backdrop" on:click=move |_| open.set(false)>
+                <div
+                    class="rh-palette"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="Jump to a section"
+                    on:click=|ev| ev.stop_propagation()
+                >
+                    <input
+                        node_ref=input_ref
+                        class="rh-input rh-palette-input"
+                        type="text"
+                        placeholder="Jump to a section…"
+                        aria-label="Jump to a section"
+                        prop:value=query
+                        on:input=move |ev| {
+                            query.set(event_target_value(&ev));
+                            selected.set(0);
+                        }
+                        on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                            match ev.key().as_str() {
+                                "ArrowDown" => {
+                                    ev.prevent_default();
+                                    let n = matches().len();
+                                    if n > 0 {
+                                        selected.update(|s| *s = (*s + 1) % n);
+                                    }
+                                }
+                                "ArrowUp" => {
+                                    ev.prevent_default();
+                                    let n = matches().len();
+                                    if n > 0 {
+                                        selected.update(|s| *s = (*s + n - 1) % n);
+                                    }
+                                }
+                                "Enter" => {
+                                    ev.prevent_default();
+                                    if let Some(sec) = matches().get(selected.get()).copied() {
+                                        go.call(sec.route);
+                                    }
+                                }
+                                "Escape" => {
+                                    ev.prevent_default();
+                                    open.set(false);
+                                }
+                                _ => {}
+                            }
+                        }
+                    />
+                    <ul class="rh-palette-list" role="listbox" aria-label="Sections">
+                        <For
+                            each=items
+                            key=|(_, s)| s.route
+                            children=move |(i, s)| {
+                                view! {
+                                    <li
+                                        class="rh-palette-item"
+                                        class:selected=move || selected.get() == i
+                                        role="option"
+                                        aria-selected=move || {
+                                            if selected.get() == i { "true" } else { "false" }
+                                        }
+                                        on:click=move |_| go.call(s.route)
+                                        on:mouseenter=move |_| selected.set(i)
+                                    >
+                                        <span class="rh-palette-label">{s.label}</span>
+                                        <span class="rh-palette-hint">{s.hint}</span>
+                                    </li>
+                                }
+                            }
+                        />
+                    </ul>
+                </div>
+            </div>
+        </Show>
     }
 }
 

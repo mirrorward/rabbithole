@@ -15,7 +15,8 @@ use rabbithole_proto::welcome::ThemeBundle;
 use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
-    Admin, ArtGallery, BoardView, Boards, Directory, Dms, Files, Lobby, Login, Radio,
+    Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby, Login,
+    Radio,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -41,6 +42,9 @@ pub struct AppState {
     /// Whether the signed-in session holds an admin capability. Gates the admin
     /// nav entry and routes.
     pub is_admin: RwSignal<bool>,
+    /// Whether the ⌘K command palette overlay is open. Shared so both the
+    /// header affordance and the global key binding drive the one overlay.
+    pub palette_open: RwSignal<bool>,
     /// The user's appearance choice: theme pack (Clean/Retro/HighContrast)
     /// plus mode policy (System/Light/Dark). The effective [`Mode`] is
     /// derived from this plus the OS hint via [`AppState::mode`].
@@ -79,6 +83,7 @@ impl AppState {
             admin: create_rw_signal(AdminState::default()),
             syndication: create_rw_signal(SynAdminState::default()),
             is_admin: create_rw_signal(false),
+            palette_open: create_rw_signal(false),
             theme: create_rw_signal(initial_theme_choice()),
             custom_pack: create_rw_signal(None),
             server_theme: create_rw_signal(None),
@@ -628,6 +633,7 @@ pub fn App() -> impl IntoView {
                     "Skip to main content"
                 </a>
                 <RouteFocus/>
+                <CommandPalette/>
                 <Routes>
                     <Route path="/" view=Login/>
                     <Route path="/lobby" view=Lobby/>
