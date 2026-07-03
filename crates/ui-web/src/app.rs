@@ -201,12 +201,13 @@ impl AppState {
     /// [`UiState::set_conn`], and routed notices through the radio reducer /
     /// notice log. The default seeded [`MockClient`] path is untouched.
     #[cfg(target_arch = "wasm32")]
-    pub fn connect_live(&self, endpoint: String) {
+    pub fn connect_live(&self, endpoint: String, login: String, password: String) {
         use crate::wire::EventClient;
         use rabbithole_core::api::{Command, Event};
         let state = self.state;
         let toasts = self.toasts;
         let radio = self.radio;
+        let ws_sv = self.ws;
         self.ws.update_value(|ws| {
             ws.on_event(std::rc::Rc::new(move |event| {
                 if let Event::Connected { server_name, .. } = &event {
@@ -217,6 +218,17 @@ impl AppState {
                             format!("Connected to {name}"),
                         );
                     });
+                    // Authenticate once the handshake lands. We can't dispatch
+                    // from inside the transport's own borrow, so defer to the
+                    // next microtask.
+                    if !login.is_empty() {
+                        let (login, password) = (login.clone(), password.clone());
+                        wasm_bindgen_futures::spawn_local(async move {
+                            ws_sv.update_value(|c| {
+                                c.dispatch(Command::SignIn { login, password });
+                            });
+                        });
+                    }
                 }
                 state.update(|s| s.apply(&event));
             }));
@@ -237,8 +249,26 @@ impl AppState {
 
     /// Host stub: no socket off-target, so this only flips the live flag.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn connect_live(&self, _endpoint: String) {
+    pub fn connect_live(&self, _endpoint: String, _login: String, _password: String) {
         self.live.set(true);
+    }
+
+    /// Send a lobby chat line — over the live socket when connected, else
+    /// through the seeded mock seam.
+    pub fn send_chat(&self, text: String) {
+        let room = crate::client::LOBBY.to_string();
+        #[cfg(target_arch = "wasm32")]
+        if self.live.get_untracked() {
+            use crate::wire::EventClient;
+            self.ws.update_value(|c| {
+                c.dispatch(rabbithole_core::api::Command::SendChat {
+                    room: room.clone(),
+                    text: text.clone(),
+                });
+            });
+            return;
+        }
+        self.dispatch(rabbithole_core::api::Command::SendChat { room, text });
     }
 
     /// Drive one command through the seam and fold its events into state.

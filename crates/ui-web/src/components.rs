@@ -21,7 +21,6 @@ use rabbithole_core::theme::{Mode, ThemePack};
 
 use crate::a11y;
 use crate::app::AppState;
-use crate::client::LOBBY;
 use crate::files::{human_size, node_kind_label, TransferStatus, KIND_FOLDER};
 use crate::syndication_admin::FeedsStatus;
 use crate::theme_css::{mode_label, pack_label};
@@ -371,15 +370,17 @@ pub fn Login() -> impl IntoView {
     );
     app.pending_endpoint.set(None);
     let handle = create_rw_signal(String::new());
+    let password = create_rw_signal(String::new());
     // Opt in to a real RHP-over-WebSocket session instead of the seeded demo.
     let go_live = create_rw_signal(false);
 
     let connect = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         if go_live.get() {
-            // Live: open a real socket; state fills from transport events
-            // (the handshake sets the header to Online + the server name).
-            app.connect_live(endpoint.get());
+            // Live: open a real socket + authenticate; state fills from
+            // transport events (the handshake sets the header to Online, and
+            // the lobby fills with live chat once signed in).
+            app.connect_live(endpoint.get(), handle.get(), password.get());
             navigate("/lobby", Default::default());
             return;
         }
@@ -454,6 +455,17 @@ pub fn Login() -> impl IntoView {
                     />
                     "Live connection (connect to a real server)"
                 </label>
+                <Show when=move || go_live.get() fallback=|| ()>
+                    <label for="rh-login-password">"Password"</label>
+                    <input
+                        id="rh-login-password"
+                        class="rh-input"
+                        type="password"
+                        placeholder="password"
+                        prop:value=password
+                        on:input=move |ev| password.set(event_target_value(&ev))
+                    />
+                </Show>
                 <button class="rh-btn" type="submit">"Connect"</button>
             </form>
         </main>
@@ -491,10 +503,8 @@ pub fn Lobby() -> impl IntoView {
         if text.trim().is_empty() {
             return;
         }
-        app.dispatch(Command::SendChat {
-            room: LOBBY.to_string(),
-            text,
-        });
+        // Routes over the live socket when connected, else the mock seam.
+        app.send_chat(text);
         draft.set(String::new());
     };
 
