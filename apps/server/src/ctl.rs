@@ -157,11 +157,36 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
                 .await
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no such persona: {screen_name}"))?;
-            repo.update(row.id, location, None, quote, None, None, None, None, None)
-                .await
-                .map_err(|e| e.to_string())?;
+            // Optional avatar seeding: read a file, store the blob, set its id.
+            let avatar_hex = match req.get("avatar_path").and_then(Value::as_str) {
+                Some(path) => {
+                    let bytes = std::fs::read(path).map_err(|e| format!("avatar: {e}"))?;
+                    let blobs = shared.blobs.clone();
+                    let id = tokio::task::spawn_blocking(move || blobs.put(&bytes))
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .map_err(|e| format!("blob: {e}"))?;
+                    Some(id.to_hex())
+                }
+                None => None,
+            };
+            repo.update(
+                row.id,
+                location,
+                None,
+                quote,
+                None,
+                None,
+                avatar_hex.as_deref().map(Some),
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
             audit("persona-set", screen_name.clone());
-            Ok(json!({"screen_name": screen_name, "quote": quote, "location": location}))
+            Ok(
+                json!({"screen_name": screen_name, "quote": quote, "location": location, "avatar": avatar_hex}),
+            )
         }
         "file-area-create" => {
             let slug = str_arg("slug")?;

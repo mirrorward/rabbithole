@@ -145,6 +145,9 @@ async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<
         ("persona-set", [screen_name, quote, location]) => {
             json!({"cmd": "persona-set", "screen_name": screen_name, "quote": quote, "location": location})
         }
+        ("persona-set", [screen_name, quote, location, avatar_path]) => {
+            json!({"cmd": "persona-set", "screen_name": screen_name, "quote": quote, "location": location, "avatar_path": avatar_path})
+        }
         ("file-area-create", [slug, title]) => {
             json!({"cmd": "file-area-create", "slug": slug, "title": title})
         }

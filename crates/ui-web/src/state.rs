@@ -101,6 +101,11 @@ pub struct MemberProfile {
     pub pronouns: Option<String>,
     /// Whether the persona is online right now (from `online_transport`).
     pub online: bool,
+    /// The avatar's blake3 blob id (hex), if the persona has one — fetched
+    /// separately via `BlobGet`.
+    pub avatar_hex: Option<String>,
+    /// A `data:` URL for the avatar once its blob has been fetched.
+    pub avatar_src: Option<String>,
 }
 
 /// A member listed in the directory.
@@ -319,6 +324,13 @@ impl UiState {
     /// Store a fetched live profile card.
     pub fn set_profile(&mut self, profile: MemberProfile) {
         self.selected_profile = Some(profile);
+    }
+
+    /// Attach a fetched avatar `data:` URL to the selected profile card.
+    pub fn set_avatar_src(&mut self, src: String) {
+        if let Some(p) = &mut self.selected_profile {
+            p.avatar_src = Some(src);
+        }
     }
 
     /// The member whose profile card is shown, if any.

@@ -324,6 +324,7 @@ pub const STYLESHEET: &str = "\
 .rh-dm-start .rh-input{width:100%;font-size:var(--rh-font-sm)}\
 .rh-card-field{margin:.35rem 0;font-size:var(--rh-font-sm);color:var(--rh-text)}\
 .rh-card-label{display:inline-block;min-width:5rem;color:var(--rh-muted);font-size:var(--rh-font-xs);text-transform:uppercase;letter-spacing:.05em;margin-right:.5rem}\
+.rh-card-avatar{width:4rem;height:4rem;border-radius:var(--rh-radius-full);object-fit:cover;margin-bottom:var(--rh-space-2);border:2px solid color-mix(in srgb,var(--rh-accent) 40%,transparent)}\
 .rh-login{position:relative;max-width:23rem;margin:5rem auto;display:flex;flex-direction:column;gap:var(--rh-space-3);background:var(--rh-surface);padding:var(--rh-space-8);border-radius:var(--rh-radius-xl);border:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent);box-shadow:var(--rh-shadow-3)}\
 .rh-login::before{content:'';position:absolute;inset:-40% 10% auto;height:60%;z-index:-1;background:radial-gradient(60% 100% at 50% 0,color-mix(in srgb,var(--rh-accent) 40%,transparent),transparent 70%);filter:blur(30px)}\
 .rh-login h1{margin:0 0 var(--rh-space-2);text-align:center;font-size:var(--rh-font-2xl);letter-spacing:-.02em;display:flex;flex-direction:column;align-items:center;gap:.7rem;color:var(--rh-text)}\

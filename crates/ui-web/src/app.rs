@@ -307,7 +307,22 @@ impl AppState {
                 })
             }));
             ws.on_profile(std::rc::Rc::new(move |profile| {
-                state.update(|s| s.set_profile(profile))
+                let avatar_hex = profile.avatar_hex.clone();
+                state.update(|s| s.set_profile(profile));
+                // Fetch the avatar blob if any. Deferred (spawn_local) because
+                // this sink runs inside the transport's own borrow — a sync
+                // request_blob would re-enter the RefCell.
+                #[cfg(target_arch = "wasm32")]
+                if let Some(hex) = avatar_hex {
+                    wasm_bindgen_futures::spawn_local(async move {
+                        ws_sv.update_value(|c| c.request_blob(&hex));
+                    });
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                let _ = avatar_hex;
+            }));
+            ws.on_avatar(std::rc::Rc::new(move |data_url| {
+                state.update(|s| s.set_avatar_src(data_url))
             }));
             ws.on_notice(std::rc::Rc::new(move |route| match route {
                 crate::wire::NoticeRoute::Radio(u) => radio.update(|r| r.apply_update(u)),

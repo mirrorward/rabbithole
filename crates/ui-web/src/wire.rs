@@ -429,7 +429,81 @@ pub fn frame_to_profile(frame: &Frame) -> Option<crate::state::MemberProfile> {
         plan: card.profile.plan,
         pronouns: card.profile.pronouns,
         online: card.online_transport.is_some(),
+        avatar_hex: card.avatar.as_ref().map(id_to_hex),
+        avatar_src: None,
     })
+}
+
+/// Build a [`BlobGet`](rabbithole_proto::blob::BlobGet) frame for an avatar (or
+/// any content-addressed blob), keyed by its 64-char hex id. `None` if the hex
+/// is malformed.
+pub fn blob_get_request(hex: &str, id: RequestId) -> Option<Result<Frame, ProtoError>> {
+    let blob_id = hex_to_id(hex)?;
+    Some(Frame::request(
+        id,
+        &rabbithole_proto::blob::BlobGet::new(blob_id),
+    ))
+}
+
+/// Decode a [`BlobData`](rabbithole_proto::blob::BlobData) reply to its raw
+/// bytes. `None` for any other frame.
+pub fn frame_to_blob(frame: &Frame) -> Option<Vec<u8>> {
+    if frame.error.is_some() {
+        return None;
+    }
+    Some(
+        frame
+            .decode::<rabbithole_proto::blob::BlobData>()?
+            .ok()?
+            .bytes,
+    )
+}
+
+/// Standard base64 alphabet (RFC 4648).
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Encode bytes to base64 (with `=` padding). Small + dependency-free so the
+/// wire seam stays host-testable and DOM-free.
+fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64[(n >> 18) as usize & 63] as char);
+        out.push(B64[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            B64[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Sniff an image MIME from magic bytes; `image/png` fallback (browsers sniff
+/// too). Covers the formats an avatar realistically is.
+fn image_mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "image/png"
+    }
+}
+
+/// Wrap blob bytes as a `data:` image URL an `<img src>` can render.
+pub fn blob_to_data_url(bytes: &[u8]) -> String {
+    format!("data:{};base64,{}", image_mime(bytes), base64_encode(bytes))
 }
 
 /// Decode a presence push to a [`PresenceDelta`]. `None` for any other frame.
@@ -1277,6 +1351,37 @@ mod tests {
         let chat = Frame::push(&ChatMessage::new("lobby", "x", "y", 0)).unwrap();
         assert_eq!(frame_to_members(&chat), None);
         assert_eq!(frame_to_profile(&chat), None);
+    }
+
+    #[test]
+    fn base64_and_data_url_encode_known_vectors() {
+        // Standard RFC 4648 vectors.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        // PNG magic → image/png data URL.
+        let png = [0x89u8, 0x50, 0x4E, 0x47, 1, 2, 3];
+        assert!(blob_to_data_url(&png).starts_with("data:image/png;base64,"));
+        // JPEG magic → image/jpeg.
+        let jpeg = [0xFFu8, 0xD8, 0xFF, 0xE0];
+        assert!(blob_to_data_url(&jpeg).starts_with("data:image/jpeg;base64,"));
+    }
+
+    #[test]
+    fn blob_get_and_frame_to_blob_round_trip() {
+        let hex = id_to_hex(&[7u8; 32]);
+        let req = blob_get_request(&hex, RequestId(1)).unwrap().unwrap();
+        assert_eq!(req.family, Family::FILE);
+        // A malformed hex yields None (no frame).
+        assert!(blob_get_request("nope", RequestId(1)).is_none());
+        // A BlobData reply decodes to its bytes.
+        let reply =
+            Frame::reply_to(&req, &rabbithole_proto::blob::BlobData::new(vec![1, 2, 3])).unwrap();
+        assert_eq!(frame_to_blob(&reply), Some(vec![1, 2, 3]));
+        let chat = Frame::push(&ChatMessage::new("lobby", "x", "y", 0)).unwrap();
+        assert_eq!(frame_to_blob(&chat), None);
     }
 
     #[test]

@@ -968,6 +968,9 @@ pub fn Directory() -> impl IntoView {
                             };
                             return view! {
                                 <div class="rh-card">
+                                    {p.avatar_src.clone().map(|src| view! {
+                                        <img class="rh-card-avatar" src=src alt="" />
+                                    })}
                                     <h2 class="rh-card-name">{p.screen_name.clone()}</h2>
                                     {p.pronouns.clone().filter(|x| !x.is_empty())
                                         .map(|pr| view! { <p class="rh-card-handle">{pr}</p> })}

@@ -92,6 +92,8 @@ pub type DmReceivedSink = Rc<dyn Fn((String, crate::state::DmMessage))>;
 pub type MembersSink = Rc<dyn Fn(Vec<crate::state::Member>)>;
 /// A sink the transport pushes one member's profile card into.
 pub type ProfileSink = Rc<dyn Fn(crate::state::MemberProfile)>;
+/// A sink the transport pushes a fetched avatar `data:` URL into.
+pub type AvatarSink = Rc<dyn Fn(String)>;
 
 /// A browser WebSocket [`EventClient`] speaking RHP.
 ///
@@ -120,6 +122,7 @@ struct Inner {
     dm_received_sink: Option<DmReceivedSink>,
     members_sink: Option<MembersSink>,
     profile_sink: Option<ProfileSink>,
+    avatar_sink: Option<AvatarSink>,
     next_id: u64,
     /// While `true`, the keepalive loop keeps pinging; cleared on close.
     alive: bool,
@@ -227,6 +230,12 @@ impl Inner {
         }
     }
 
+    fn emit_avatar(&self, data_url: String) {
+        if let Some(sink) = &self.avatar_sink {
+            sink(data_url);
+        }
+    }
+
     fn next_request_id(&mut self) -> RequestId {
         self.next_id += 1;
         RequestId(self.next_id)
@@ -255,6 +264,7 @@ impl WsClient {
                 dm_received_sink: None,
                 members_sink: None,
                 profile_sink: None,
+                avatar_sink: None,
                 next_id: 0,
                 alive: false,
                 want_connected: false,
@@ -464,6 +474,22 @@ impl WsClient {
         }
     }
 
+    /// Register the avatar sink (a fetched `data:` URL). Most recent wins.
+    pub fn on_avatar(&mut self, sink: AvatarSink) {
+        self.inner.borrow_mut().avatar_sink = Some(sink);
+    }
+
+    /// Fetch an avatar blob by hex id; the `data:` URL arrives through the
+    /// [`on_avatar`](Self::on_avatar) sink.
+    pub fn request_blob(&self, hex: &str) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        let frame = wire::blob_get_request(hex, id).map(|r| r.and_then(|f| encode_frame(&f)));
+        if let Some(Ok(bytes)) = frame {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
     /// Drive one [`FileCommand`]: encode it via the host-tested
     /// [`wire::file_command_to_frame`] and write it to the open socket. Replies
     /// arrive asynchronously through the FILE-family sink.
@@ -611,6 +637,11 @@ impl WsClient {
                         }
                         if let Some(profile) = wire::frame_to_profile(&frame) {
                             b.emit_profile(profile);
+                        }
+                        // A BlobData reply only follows an avatar BlobGet here;
+                        // wrap it as a data URL for the profile card.
+                        if let Some(bytes) = wire::frame_to_blob(&frame) {
+                            b.emit_avatar(wire::blob_to_data_url(&bytes));
                         }
                     }
                     Err(err) => b.emit(Event::CommandFailed {
