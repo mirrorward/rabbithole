@@ -47,6 +47,11 @@ pub struct UserSummary {
     pub state: PresenceState,
     /// Away/status message, when set.
     pub status: Option<String>,
+    /// The user's portable Ed25519 identity public key, when they registered one
+    /// at handshake — the *verified* de-dup key that lets a client tell two
+    /// same-handle strangers apart. `None` for handle-only sessions. (Additive
+    /// field; appended per the additive-only-within-version policy.)
+    pub pubkey: Option<[u8; 32]>,
 }
 
 impl UserSummary {
@@ -65,12 +70,19 @@ impl UserSummary {
             connected_secs,
             state: PresenceState::Online,
             status: None,
+            pubkey: None,
         }
     }
 
     pub fn with_state(mut self, state: PresenceState, status: Option<String>) -> Self {
         self.state = state;
         self.status = status;
+        self
+    }
+
+    /// Attach the user's portable identity public key.
+    pub fn with_pubkey(mut self, pubkey: Option<[u8; 32]>) -> Self {
+        self.pubkey = pubkey;
         self
     }
 }
@@ -292,4 +304,25 @@ impl UserLeft {
 impl Message for UserLeft {
     const FAMILY: Family = Family::PRESENCE;
     const MESSAGE_TYPE: u16 = 4;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frame::Frame;
+
+    #[test]
+    fn user_summary_carries_optional_pubkey() {
+        // Default (via ::new): no key.
+        let plain = UserSummary::new(1, "rabbit", 0, "quic", 5);
+        assert_eq!(plain.pubkey, None);
+        // With a key, it round-trips through a WhoList frame intact.
+        let keyed = UserSummary::new(1, "rabbit", 0, "quic", 5)
+            .with_state(PresenceState::Online, None)
+            .with_pubkey(Some([7; 32]));
+        let frame = Frame::push(&WhoList::new(vec![keyed.clone()])).unwrap();
+        let decoded = frame.decode::<WhoList>().unwrap().unwrap();
+        assert_eq!(decoded.users[0].pubkey, Some([7; 32]));
+        assert_eq!(decoded.users[0], keyed);
+    }
 }

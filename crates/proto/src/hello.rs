@@ -65,6 +65,11 @@ pub struct Hello {
     pub client_name: String,
     /// Client software version, e.g. "0.1.0".
     pub client_version: String,
+    /// The client's portable Ed25519 identity public key, when it carries one.
+    /// The server pins it to this session and surfaces it in presence so peers
+    /// can verify who's who across burrows. `None` for handle-only clients.
+    /// (Additive field; appended per the additive-only-within-version policy.)
+    pub client_pubkey: Option<[u8; 32]>,
 }
 
 impl Hello {
@@ -80,7 +85,14 @@ impl Hello {
             capabilities,
             client_name: client_name.into(),
             client_version: client_version.into(),
+            client_pubkey: None,
         }
+    }
+
+    /// Attach the client's portable identity public key to the handshake.
+    pub fn with_pubkey(mut self, pubkey: Option<[u8; 32]>) -> Self {
+        self.client_pubkey = pubkey;
+        self
     }
 }
 
@@ -146,6 +158,19 @@ mod tests {
         let frame = Frame::request(RequestId(1), &hello).unwrap();
         let decoded = frame.decode::<Hello>().unwrap().unwrap();
         assert_eq!(decoded, hello);
+    }
+
+    #[test]
+    fn hello_carries_optional_pubkey() {
+        // Default: no key (the additive field is None).
+        let plain = Hello::new("rabbit", "0.1.0", CapabilitySet(vec![]));
+        assert_eq!(plain.client_pubkey, None);
+        // With a key, it round-trips through the frame intact.
+        let keyed = Hello::new("rabbit", "0.1.0", CapabilitySet(vec![])).with_pubkey(Some([9; 32]));
+        let frame = Frame::request(RequestId(1), &keyed).unwrap();
+        let decoded = frame.decode::<Hello>().unwrap().unwrap();
+        assert_eq!(decoded.client_pubkey, Some([9; 32]));
+        assert_eq!(decoded, keyed);
     }
 
     #[test]
