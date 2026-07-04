@@ -12,6 +12,7 @@ use rabbithole_identity::IdentityKey;
 use rabbithole_swarm::cap::CapToken;
 use rabbithole_swarm::peer::{PeerServer, SeedStore};
 use rabbithole_swarm::scheduler::{fetch_swarm_resumable, rhstate_path, SourcePeer};
+use rabbithole_swarm::fetch_swarm_resumable_with_progress;
 
 fn payload(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
@@ -100,4 +101,46 @@ async fn native_core_fetches_multisource() {
     // `.rhstate` file exists only to resume an *interrupted* fetch — that path
     // is covered by crates/swarm's own sim tests).
     assert!(!rhstate_path(&dest).exists(), "resume state cleaned up");
+}
+
+/// The progress hook streams one `UnitDone` per verified unit as it lands, with
+/// `done_units` climbing to `total_units` — the data a live UI roster/chunk map
+/// needs (Slice 4a). Fully headless.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn progress_hook_streams_every_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = IdentityKey::from_seed(&[43; 32]);
+    let body = payload(3 * 1024 * 1024 + 17); // four units
+    let total_bytes = body.len() as u64;
+    let (root, seeders) = honest_swarm(&key, &body, dir.path(), 3).await;
+    let token = CapToken::issue(&key, root, "prog-test", now() + 300)
+        .unwrap()
+        .to_bytes();
+    let sources: Vec<SourcePeer> = seeders.iter().map(source_of).collect();
+    let dest = dir.path().join("out.bin");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let dest2 = dest.clone();
+    let fetch = tokio::spawn(async move {
+        fetch_swarm_resumable_with_progress(&sources, &token, root, total_bytes, &dest2, tx).await
+    });
+
+    // The channel closes when the fetch drops the last sender (i.e. it finished).
+    let mut events = Vec::new();
+    while let Some(u) = rx.recv().await {
+        events.push(u);
+    }
+    let report = fetch.await.unwrap().expect("fetch completes");
+
+    assert_eq!(report.bytes, total_bytes);
+    assert_eq!(std::fs::read(&dest).unwrap(), body, "reassembled exactly");
+    // One event per unit, and the last one reports the file complete.
+    assert_eq!(events.len(), 4, "one progress event per unit: {events:?}");
+    assert!(events.iter().all(|e| e.total_units == 4), "total is stable");
+    assert_eq!(events.last().unwrap().done_units, 4, "done climbs to total");
+    // Every event names a real peer endpoint that served the unit.
+    assert!(
+        events.iter().all(|e| e.endpoint.starts_with("127.0.0.1:")),
+        "events name real source endpoints: {events:?}"
+    );
 }

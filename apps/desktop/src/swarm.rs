@@ -7,8 +7,27 @@ use std::path::Path;
 
 use rabbithole_core::{Client, ClientError};
 use rabbithole_proto::swarm::SourceList;
-use rabbithole_swarm::scheduler::fetch_swarm_resumable;
-use rabbithole_swarm::{FetchReport, SourcePeer};
+use rabbithole_swarm::{fetch_swarm_resumable_with_progress, FetchReport, SourcePeer, UNIT_SIZE};
+
+/// A download's lifecycle, surfaced to the caller (and, in Slice 4, forwarded
+/// over Tauri IPC to the ui-web Transfers manager as the swarm fills).
+#[derive(Debug, Clone)]
+pub enum SwarmEvent {
+    /// Sources resolved; the fetch is starting.
+    Opened { total_units: u64, source_count: usize },
+    /// One verified unit landed from a source.
+    Chunk {
+        endpoint: String,
+        offset: u64,
+        done_units: u64,
+        total_units: u64,
+    },
+    /// The fetch finished; `per_source` is the final (endpoint, units) split.
+    Done {
+        bytes: u64,
+        per_source: Vec<(String, u64)>,
+    },
+}
 
 /// Why a swarm download couldn't proceed.
 #[derive(Debug)]
@@ -77,6 +96,7 @@ pub async fn run_swarm_download(
     root: [u8; 32],
     size: u64,
     dest: &Path,
+    mut emit: impl FnMut(SwarmEvent),
 ) -> Result<FetchReport, SwarmError> {
     let list = client.swarm_find(root).await?;
     let sources = sources_from_list(&list);
@@ -87,9 +107,36 @@ pub async fn run_swarm_download(
     }
     let size = if size > 0 { size } else { size_from_list(&list) };
     let ticket = client.swarm_ticket(root).await?;
-    fetch_swarm_resumable(&sources, &ticket.token, root, size, dest)
+    let total_units = size.div_ceil(UNIT_SIZE);
+    emit(SwarmEvent::Opened {
+        total_units,
+        source_count: sources.len(),
+    });
+
+    // Run the fetch on its own task and drain live progress. The channel closes
+    // (recv -> None) when the fetch drops the last sender, i.e. when it finishes.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (sources, token, dest_owned) = (sources.clone(), ticket.token.clone(), dest.to_path_buf());
+    let fetch = tokio::spawn(async move {
+        fetch_swarm_resumable_with_progress(&sources, &token, root, size, &dest_owned, tx).await
+    });
+    while let Some(u) = rx.recv().await {
+        emit(SwarmEvent::Chunk {
+            endpoint: u.endpoint,
+            offset: u.offset,
+            done_units: u.done_units,
+            total_units: u.total_units,
+        });
+    }
+    let report = fetch
         .await
-        .map_err(SwarmError::Fetch)
+        .map_err(|e| SwarmError::Fetch(rabbithole_swarm::peer::PeerError::Verify(e.to_string())))?
+        .map_err(SwarmError::Fetch)?;
+    emit(SwarmEvent::Done {
+        bytes: report.bytes,
+        per_source: report.per_source.clone(),
+    });
+    Ok(report)
 }
 
 #[cfg(test)]

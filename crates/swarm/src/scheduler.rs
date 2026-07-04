@@ -38,6 +38,24 @@ pub struct FetchReport {
     pub per_source: Vec<(String, u64)>,
 }
 
+/// A live progress event: one verified work unit just landed. Emitted the
+/// moment it's persisted, so a UI can show per-source throughput + a chunk map
+/// as the swarm fills — the streaming counterpart to the terminal [`FetchReport`].
+#[derive(Debug, Clone)]
+pub struct UnitDone {
+    /// The source (peer endpoint) that served this unit.
+    pub endpoint: String,
+    /// Byte offset of the unit that just completed.
+    pub offset: u64,
+    /// Units verified so far (across all sources).
+    pub done_units: u64,
+    /// Total units in the file.
+    pub total_units: u64,
+}
+
+/// A live-progress sink threaded into the swarm workers.
+pub type ProgressSink = tokio::sync::mpsc::UnboundedSender<UnitDone>;
+
 /// Work-unit size: 1 MiB balances distribution granularity against
 /// per-request overhead (and stays under [`PEER_REQUEST_MAX`]).
 pub const UNIT_SIZE: u64 = 1024 * 1024;
@@ -111,7 +129,7 @@ pub async fn fetch_swarm(
     size: u64,
     dest: &Path,
 ) -> Result<FetchReport, PeerError> {
-    fetch_swarm_inner(sources, token, root, size, dest, HashSet::new(), None).await
+    fetch_swarm_inner(sources, token, root, size, dest, HashSet::new(), None, None).await
 }
 
 /// [`fetch_swarm`], but interruption-proof: completed units are recorded in
@@ -126,6 +144,30 @@ pub async fn fetch_swarm_resumable(
     size: u64,
     dest: &Path,
 ) -> Result<FetchReport, PeerError> {
+    resumable(sources, token, root, size, dest, None).await
+}
+
+/// [`fetch_swarm_resumable`] plus a live [`UnitDone`] stream on `progress` —
+/// one event per verified unit as it lands, for a live UI roster + chunk map.
+pub async fn fetch_swarm_resumable_with_progress(
+    sources: &[SourcePeer],
+    token: &[u8],
+    root: [u8; 32],
+    size: u64,
+    dest: &Path,
+    progress: ProgressSink,
+) -> Result<FetchReport, PeerError> {
+    resumable(sources, token, root, size, dest, Some(progress)).await
+}
+
+async fn resumable(
+    sources: &[SourcePeer],
+    token: &[u8],
+    root: [u8; 32],
+    size: u64,
+    dest: &Path,
+    progress: Option<ProgressSink>,
+) -> Result<FetchReport, PeerError> {
     let state_path = rhstate_path(dest);
     let done: HashSet<u64> = load_rhstate(&state_path, &root, size)
         .map(|s| s.done.into_iter().collect())
@@ -138,6 +180,7 @@ pub async fn fetch_swarm_resumable(
         dest,
         done,
         Some(state_path.clone()),
+        progress,
     )
     .await?;
     // The resume trusted prior units from disk; verify the whole file.
@@ -177,7 +220,10 @@ async fn fetch_swarm_inner(
     dest: &Path,
     done: HashSet<u64>,
     state_path: Option<PathBuf>,
+    progress: Option<ProgressSink>,
 ) -> Result<FetchReport, PeerError> {
+    // Total units in the file (for progress denominators).
+    let total_units = size.div_ceil(UNIT_SIZE);
     if sources.is_empty() {
         return Err(PeerError::BadRequest);
     }
@@ -218,8 +264,9 @@ async fn fetch_swarm_inner(
         let state = state.clone();
         let token = token.to_vec();
         let dest = dest.to_path_buf();
+        let progress = progress.clone();
         workers.push(tokio::spawn(async move {
-            worker(source, state, token, root, dest).await
+            worker(source, state, token, root, dest, progress, total_units).await
         }));
     }
 
@@ -245,12 +292,15 @@ async fn fetch_swarm_inner(
 
 /// One source's worker: pull units until none are left (normal or endgame),
 /// or until this source fails one. Returns (endpoint, units it completed).
+#[allow(clippy::too_many_arguments)]
 async fn worker(
     source: SourcePeer,
     state: Arc<Mutex<WorkState>>,
     token: Vec<u8>,
     root: [u8; 32],
     dest: std::path::PathBuf,
+    progress: Option<ProgressSink>,
+    total_units: u64,
 ) -> (String, u64) {
     use std::io::{Seek, SeekFrom, Write};
     let mut completed = 0u64;
@@ -293,6 +343,16 @@ async fn worker(
                     s.done.insert(off);
                     s.in_flight.remove(&off);
                     s.persist();
+                    // Emit the live progress event under the lock, so
+                    // `done_units` is a consistent snapshot.
+                    if let Some(tx) = progress.as_ref() {
+                        let _ = tx.send(UnitDone {
+                            endpoint: source.endpoint.clone(),
+                            offset: off,
+                            done_units: s.done.len() as u64,
+                            total_units,
+                        });
+                    }
                     Ok(true)
                 })();
                 match write {

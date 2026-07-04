@@ -2946,7 +2946,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rabbithole-core"
-version = "0.116.0"
+version = "0.117.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -2980,7 +2980,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-e2ee"
-version = "0.116.0"
+version = "0.117.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -2994,7 +2994,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-identity"
-version = "0.116.0"
+version = "0.117.0"
 dependencies = [
  "argon2",
  "blake3",
@@ -3012,7 +3012,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-net"
-version = "0.116.0"
+version = "0.117.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -3032,7 +3032,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-proto"
-version = "0.116.0"
+version = "0.117.0"
 dependencies = [
  "bytes",
  "postcard",
@@ -3042,7 +3042,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-reticulum"
-version = "0.116.0"
+version = "0.117.0"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -3058,7 +3058,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-store-client"
-version = "0.116.0"
+version = "0.117.0"
 dependencies = [
  "rabbithole-proto",
  "rusqlite",
@@ -3067,7 +3067,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-swarm"
-version = "0.116.0"
+version = "0.117.0"
 dependencies = [
  "bao-tree",
  "blake3",

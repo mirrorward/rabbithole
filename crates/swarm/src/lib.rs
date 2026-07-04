@@ -23,4 +23,7 @@ pub use link::{
 };
 pub use manifest::{Manifest, ManifestError, ManifestFile, CHUNK_SIZE};
 pub use peer::{fetch_file, fetch_range, PeerError, PeerServer, SeedStore};
-pub use scheduler::{fetch_swarm, FetchReport, SourcePeer, UNIT_SIZE};
+pub use scheduler::{
+    fetch_swarm, fetch_swarm_resumable, fetch_swarm_resumable_with_progress, FetchReport,
+    ProgressSink, SourcePeer, UnitDone, UNIT_SIZE,
+};
