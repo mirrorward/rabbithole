@@ -172,6 +172,9 @@ pub fn frame_to_who(frame: &Frame) -> Option<Vec<crate::state::Presence>> {
                 screen_name: u.screen_name,
                 state: u.state,
                 transport: u.transport,
+                // The verified identity key rides here once UserSummary carries
+                // it (the additive proto delta, next slice); handle-only for now.
+                key: None,
             })
             .collect(),
     )
@@ -535,6 +538,7 @@ pub fn frame_to_presence(frame: &Frame) -> Option<PresenceDelta> {
             screen_name: j.user.screen_name,
             state: j.user.state,
             transport: j.user.transport,
+            key: None,
         }));
     }
     if let Some(Ok(l)) = frame.decode::<UserLeft>() {
@@ -1428,6 +1432,7 @@ mod tests {
                 screen_name: "carol".into(),
                 state: rabbithole_proto::presence::PresenceState::Online,
                 transport: "websocket".into(),
+                key: None,
             }))
         );
         let left = Frame::push(&UserLeft::new(3, "carol")).unwrap();

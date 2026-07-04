@@ -66,6 +66,17 @@ pub struct You {
     pub public_hex: String,
 }
 
+/// The short fingerprint for a public key given as hex — the same 8-byte
+/// blake3 digest [`Identity::fingerprint`] shows for the local key, so a remote
+/// person's mark reads identically to your own. Falls back to a truncated copy
+/// of the input if it isn't valid 32-byte hex.
+pub fn short_fingerprint(pubkey_hex: &str) -> String {
+    match hex::decode(pubkey_hex) {
+        Ok(bytes) if bytes.len() == 32 => hex::encode(&blake3::hash(&bytes).as_bytes()[..8]),
+        _ => pubkey_hex.chars().take(16).collect(),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod persist {
     use super::Identity;
@@ -129,6 +140,15 @@ mod tests {
         let c = Identity::from_seed([8; 32]);
         assert_ne!(a.public(), c.public());
         assert_ne!(a.fingerprint(), c.fingerprint());
+    }
+
+    #[test]
+    fn short_fingerprint_matches_the_you_hub() {
+        let id = Identity::from_seed([3; 32]);
+        // Same 8-byte digest whether computed from the Identity or from its hex.
+        assert_eq!(short_fingerprint(&id.public_hex()), id.fingerprint());
+        // Invalid hex degrades gracefully to a truncated echo.
+        assert_eq!(short_fingerprint("nothex"), "nothex");
     }
 
     #[test]

@@ -140,7 +140,7 @@ pub fn People() -> impl IntoView {
                     <ul class="rh-people">
                         <For
                             each=move || app.people()
-                            key=|p| (p.screen_name.clone(), p.state, p.servers.clone())
+                            key=|p| (p.screen_name.clone(), p.key.clone(), p.state, p.servers.clone())
                             children=move |p| {
                                 let dot = match p.state {
                                     PresenceState::Online => "rh-pres on",
@@ -149,10 +149,18 @@ pub fn People() -> impl IntoView {
                                     _ => "rh-pres off",
                                 };
                                 let servers = p.servers.join(" · ");
+                                // A verified person carries an identity key; mark them
+                                // and title it with the short fingerprint (same digest
+                                // the You hub shows for your own key).
+                                let verified = p.key.as_ref().map(|k| {
+                                    let fp = crate::identity::short_fingerprint(k);
+                                    view! { <span class="rh-person-verified" title=format!("verified · {fp}")>"\u{2713}"</span> }
+                                });
                                 view! {
                                     <li class="rh-person">
                                         <span class=dot aria-hidden="true"></span>
                                         <span class="rh-person-name">{p.screen_name}</span>
+                                        {verified}
                                         <span class="rh-person-servers">{servers}</span>
                                     </li>
                                 }

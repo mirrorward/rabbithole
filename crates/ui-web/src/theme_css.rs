@@ -266,6 +266,7 @@ pub const STYLESHEET: &str = "\
 .rh-people{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}\
 .rh-person{display:flex;align-items:center;gap:.6rem;padding:.5rem .3rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\
 .rh-person-name{font-weight:600}\
+.rh-person-verified{color:var(--rh-accent);font-weight:700;cursor:help}\
 .rh-person-servers{margin-left:auto;font-size:var(--rh-font-sm);color:var(--rh-muted)}\
 .rh-xfers{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}\
 .rh-xfer-row{display:flex;align-items:center;gap:.7rem;padding:.5rem .3rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\

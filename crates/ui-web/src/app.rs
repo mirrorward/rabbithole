@@ -572,10 +572,19 @@ impl AppState {
             .client
             .with_value(|client| client.who(LOBBY))
             .into_iter()
-            .map(|screen_name| crate::state::Presence {
-                screen_name,
-                state: rabbithole_proto::presence::PresenceState::Online,
-                transport: "mock".to_string(),
+            .map(|screen_name| {
+                // The demo shows one verified user so the People view's verified
+                // mark is live-visible before the wire carries real keys: "rabbit"
+                // stands in as our own portable identity (you, in the demo).
+                let key = (screen_name == "rabbit")
+                    .then(|| self.you.get_untracked().map(|y| y.public_hex))
+                    .flatten();
+                crate::state::Presence {
+                    screen_name,
+                    state: rabbithole_proto::presence::PresenceState::Online,
+                    transport: "mock".to_string(),
+                    key,
+                }
             })
             .collect();
         self.focused().state.update(|s| s.who = who);
