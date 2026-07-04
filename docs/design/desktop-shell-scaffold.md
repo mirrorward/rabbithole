@@ -78,10 +78,34 @@ pub fn run() {
 ## Run / verify
 
 - Desktop dev: `cd apps/desktop && cargo tauri dev` (spawns `trunk serve`, opens the window on the SPA).
-- Desktop bundle: `cargo tauri build` (runs `trunk build`, bundles `dist`).
-- iOS: `cargo tauri ios init` then `cargo tauri ios dev` (simulator target buildable with Xcode present;
-  a device needs a signing team/provisioning).
+- Desktop bundle: `cargo tauri build` (runs `trunk build`, bundles `dist`). Verified: produces a 25 MB
+  arm64 `RabbitHole.app` that embeds the live wasm SPA via `generate_context!`.
+- iOS: `cargo tauri ios init` (done — `gen/apple`), then `cargo tauri ios build --debug --target aarch64-sim`.
+  Verified the Rust core cross-compiles for iOS (`cargo build --lib --target aarch64-apple-ios-sim` →
+  `librabbithole_desktop_lib.a`). A device build needs a signing team/provisioning.
 - Android: needs `ANDROID_HOME` + `ANDROID_NDK_HOME` first; then `cargo tauri android init`.
+
+## Toolchain gotchas (macOS, this machine) — READ before `tauri ios`
+
+**Always run the `tauri ios` commands with this PATH:**
+
+```bash
+export PATH="$HOME/.cargo/bin:/opt/homebrew/opt/ruby/bin:/opt/homebrew/bin:$PATH"
+```
+
+Two independent traps, both solved by the ordering above:
+
+1. **`pod install` fails: `gem list ... exited with code 126`.** asdf's `ruby` shim has no version
+   selected, so `gem`/`pod` via `~/.asdf/shims` exit 126. Putting `/opt/homebrew/opt/ruby/bin` (a working
+   `gem`) and `/opt/homebrew/bin` (homebrew cocoapods `pod` 1.16.2) ahead of the asdf shims fixes it.
+2. **The frontend `trunk build` then fails `E0463: can't find crate for std` (wasm32).** `/opt/homebrew/bin`
+   also contains a homebrew `rustc`/`cargo` that lists `wasm32-unknown-unknown` but has **no installed std**
+   for it. If it shadows rustup, the wasm frontend won't compile. Keeping `$HOME/.cargo/bin` **first** makes
+   `cargo`/`rustc` resolve to rustup (which has the wasm32 + iOS std), while gem/pod still come from homebrew.
+
+**To actually run on a simulator:** the iOS 26.5 simulator SDK is installed, but only the iOS **26.0
+runtime** is downloaded. Get the matching runtime with `xcodebuild -downloadPlatform iOS` (large, ~GBs),
+then `cargo tauri ios dev`. Building the app does not need the runtime; running/booting a sim does.
 
 ## Native feature layers (subsequent slices, ranked)
 
