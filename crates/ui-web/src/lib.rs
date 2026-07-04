@@ -103,6 +103,10 @@ pub mod wire;
 #[cfg(target_arch = "wasm32")]
 pub mod ws;
 
+/// Native (Tauri desktop) swarm-download bridge (`wasm32-unknown-unknown` only).
+#[cfg(target_arch = "wasm32")]
+pub mod native;
+
 /// Browser `<audio>` playback for the radio (`wasm32-unknown-unknown` only).
 #[cfg(target_arch = "wasm32")]
 pub mod player;

@@ -849,6 +849,32 @@ impl AppState {
 
     /// Download a file inline; the completed transfer lands in the queue.
     pub fn download(&self, id: i64) {
+        // In the native shell, a content-addressed file downloads via the
+        // in-process swarm (many peers at once) instead of the WS inline path.
+        #[cfg(target_arch = "wasm32")]
+        if crate::native::native_available() {
+            let info = self.focused().files.with_untracked(|f| {
+                f.nodes.iter().find(|n| n.id == id).and_then(|n| {
+                    n.blob_id
+                        .map(|b| (crate::wire::id_to_hex(&b), n.size.max(0) as u64, n.name.clone()))
+                })
+            });
+            if let Some((root_hex, size, name)) = info {
+                let transfer_id = id as u64;
+                // Seed the local Transfer so the UI (and the swarm listener, which
+                // reads the size back off it) knows the total up front.
+                self.focused().files.update(|f| {
+                    f.apply(&crate::wire::FileEvent::TransferOpened {
+                        transfer_id,
+                        size,
+                        server_have: 0,
+                    })
+                });
+                crate::native::start_swarm_download(transfer_id, &root_hex, size, &name);
+                return;
+            }
+            // No content hash (e.g. a legacy blob): fall through to the WS path.
+        }
         self.dispatch_file(FileCommand::Download { id });
     }
 
@@ -1188,6 +1214,11 @@ impl Default for AppState {
 pub fn App() -> impl IntoView {
     let app = AppState::new();
     provide_context(app);
+
+    // In the native shell, listen for swarm download progress and fold it into
+    // the Transfers reducer. No-op on the web build.
+    #[cfg(target_arch = "wasm32")]
+    crate::native::install_swarm_listener(app);
 
     let style = move || {
         let (pack, mode) = (app.theme.get().pack, app.mode());

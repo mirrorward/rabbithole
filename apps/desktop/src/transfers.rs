@@ -6,7 +6,7 @@
 //! this layer is Tauri glue (managed state + serialization + event emission),
 //! best exercised end-to-end with `cargo tauri dev` (see the design doc).
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 use rabbithole_core::Client;
@@ -62,8 +62,8 @@ struct TransferEvent {
 }
 
 /// Fetch content `root_hex` (`size` bytes; `0` = derive from the source list)
-/// into `dest` from the swarm, emitting `swarm://event` progress tagged with
-/// `transfer_id` as each unit lands.
+/// from the swarm into the OS downloads directory as `name`, emitting
+/// `swarm://event` progress tagged with `transfer_id` as each unit lands.
 #[tauri::command]
 pub async fn swarm_start_download(
     app: AppHandle,
@@ -71,10 +71,11 @@ pub async fn swarm_start_download(
     transfer_id: u64,
     root_hex: String,
     size: u64,
-    dest: String,
+    name: String,
 ) -> Result<(), String> {
     let root = parse_root(&root_hex)?;
-    let dest = std::path::PathBuf::from(dest);
+    let dir = app.path().download_dir().map_err(|e| e.to_string())?;
+    let dest = dir.join(sanitize_name(&name));
     let mut guard = state.client.lock().await;
     let client = guard.as_mut().ok_or("not connected to a burrow")?;
     run_swarm_download(client, root, size, &dest, move |event| {
@@ -83,6 +84,17 @@ pub async fn swarm_start_download(
     .await
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Reduce a server-supplied filename to a bare, safe basename so it can't escape
+/// the downloads directory (no separators, no `..`, no leading dots/empties).
+fn sanitize_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
+    if base.is_empty() || base == "." || base == ".." || base.starts_with('.') {
+        "download.bin".to_string()
+    } else {
+        base.to_string()
+    }
 }
 
 /// Parse a 64-char lowercase-hex blake3 root into bytes.
@@ -110,5 +122,16 @@ mod tests {
         assert_eq!(&bytes[30..], &[0x21, 0x2b]);
         assert!(parse_root("tooshort").is_err());
         assert!(parse_root(&"zz".repeat(32)).is_err());
+    }
+
+    #[test]
+    fn sanitize_name_strips_traversal() {
+        assert_eq!(sanitize_name("song.mp3"), "song.mp3");
+        assert_eq!(sanitize_name("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_name("a/b/c.txt"), "c.txt");
+        assert_eq!(sanitize_name("..\\..\\win.ini"), "win.ini");
+        assert_eq!(sanitize_name(".."), "download.bin");
+        assert_eq!(sanitize_name(""), "download.bin");
+        assert_eq!(sanitize_name(".hidden"), "download.bin");
     }
 }
