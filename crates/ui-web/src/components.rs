@@ -211,16 +211,32 @@ pub fn Transfers() -> impl IntoView {
                                     TransferDir::Download => "\u{2193}",
                                     TransferDir::Upload => "\u{2191}",
                                 };
+                                // Content id (blake3), the swarm de-dup key, when known.
+                                let hash = t.hash.as_ref().map(|h| {
+                                    if h.len() >= 12 {
+                                        format!("blake3 {}\u{2026}{}", &h[..8], &h[h.len() - 4..])
+                                    } else {
+                                        format!("blake3 {h}")
+                                    }
+                                });
                                 view! {
-                                    <li class="rh-xfer-row">
-                                        <span class="rh-xfer-dir" aria-hidden="true">{arrow}</span>
-                                        <span class="rh-xfer-name">{t.name}</span>
-                                        <span class="rh-xfer-burrow">{burrow}</span>
-                                        <div class="rh-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=pct.to_string()>
-                                            <div class=fill style=format!("width:{pct}%")></div>
+                                    <li class="rh-xfer-item">
+                                        <div class="rh-xfer-row">
+                                            <span class="rh-xfer-dir" aria-hidden="true">{arrow}</span>
+                                            <span class="rh-xfer-name">{t.name}</span>
+                                            <span class="rh-xfer-burrow">{burrow.clone()}</span>
+                                            <div class="rh-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=pct.to_string()>
+                                                <div class=fill style=format!("width:{pct}%")></div>
+                                            </div>
+                                            <span class="rh-xfer-pct">{format!("{pct}%")}</span>
+                                            <span class=status_cls>{status_txt}</span>
                                         </div>
-                                        <span class="rh-xfer-pct">{format!("{pct}%")}</span>
-                                        <span class=status_cls>{status_txt}</span>
+                                        <div class="rh-xfer-detail">
+                                            {hash.map(|h| view! { <span class="rh-xfer-hash">{h}</span> })}
+                                            <span class="rh-swarmpill" title="Multi-source swarming is native-only; this download has one source for now.">
+                                                {format!("1 source \u{00b7} {burrow}")}
+                                            </span>
+                                        </div>
                                     </li>
                                 }
                             }

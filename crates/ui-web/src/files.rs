@@ -60,6 +60,18 @@ pub struct Transfer {
     pub done: u64,
     /// Current status.
     pub status: TransferStatus,
+    /// The content's blake3 hash (hex), when known — the content-addressed id
+    /// the swarm keys on. `None` for the ticketed path until the node is known.
+    pub hash: Option<String>,
+}
+
+/// Format a 32-byte blob id as lowercase hex.
+fn blob_hex(id: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in id {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 impl Transfer {
@@ -120,6 +132,7 @@ impl FilesState {
                     total: *size as u64,
                     done: *size as u64,
                     status: TransferStatus::Done,
+                    hash: node.blob_id.as_ref().map(blob_hex),
                 });
                 self.status = format!("Downloaded {} ({})", node.name, human_size(*size as i64));
             }
@@ -145,6 +158,7 @@ impl FilesState {
                     } else {
                         TransferStatus::Queued
                     },
+                    hash: None,
                 });
             }
             FileEvent::ChunkReceived {
@@ -393,6 +407,7 @@ mod tests {
             total: 0,
             done: 0,
             status: TransferStatus::Active,
+            hash: None,
         };
         assert_eq!(t.progress(), 0.0);
         let done = Transfer {
