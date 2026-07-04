@@ -58,6 +58,9 @@ pub struct Session {
     pub live: RwSignal<bool>,
     /// This server's published theme overlay (PLAN §9.11), if any.
     pub server_theme: RwSignal<Option<ServerOverlay>>,
+    /// The burrow's display name, learned from the `Connected` handshake. `None`
+    /// until connected (the rail tile falls back to the endpoint host).
+    pub name: RwSignal<Option<String>>,
     /// This server's live browser WebSocket transport. wasm-only.
     #[cfg(target_arch = "wasm32")]
     ws: StoredValue<crate::ws::WsClient>,
@@ -122,6 +125,7 @@ impl AppState {
             is_admin: create_rw_signal(false),
             live: create_rw_signal(false),
             server_theme: create_rw_signal(None),
+            name: create_rw_signal(None),
             #[cfg(target_arch = "wasm32")]
             ws: store_value(crate::ws::WsClient::new()),
             client: store_value(MockClient::new()),
@@ -167,9 +171,12 @@ impl AppState {
         self.sessions.with(|list| {
             list.iter()
                 .map(|(id, session)| {
+                    // Prefer the burrow's handshake name, then a published theme
+                    // name, then the endpoint host.
                     let name = session
-                        .server_theme
-                        .with(|t| t.as_ref().map(|o| o.name.clone()))
+                        .name
+                        .get()
+                        .or_else(|| session.server_theme.with(|t| t.as_ref().map(|o| o.name.clone())))
                         .filter(|n| !n.is_empty())
                         .unwrap_or_else(|| server_label(id));
                     (id.clone(), name, *id == focused)
@@ -200,6 +207,7 @@ impl AppState {
                 is_admin: create_rw_signal(false),
                 live: create_rw_signal(false),
                 server_theme: create_rw_signal(None),
+                name: create_rw_signal(None),
                 ws: store_value(crate::ws::WsClient::new()),
                 client: store_value(MockClient::new()),
             };
@@ -304,11 +312,16 @@ impl AppState {
         let toasts = self.toasts;
         let radio = self.radio;
         let files = self.focused().files;
+        let session_name = self.focused().name;
         let ws_sv = self.focused().ws;
         self.focused().ws.update_value(|ws| {
             ws.on_event(std::rc::Rc::new(move |event| {
                 if let Event::Connected { server_name, .. } = &event {
                     let name = server_name.clone();
+                    // Label this session's rail tile with the burrow's name.
+                    if !name.is_empty() {
+                        session_name.set(Some(name.clone()));
+                    }
                     toasts.update(|q| {
                         q.push(
                             crate::toasts::ToastKind::Success,
@@ -1184,7 +1197,7 @@ fn BurrowRail() -> impl IntoView {
             <div class="rh-rail-sep"></div>
             <For
                 each=move || app.burrow_tiles()
-                key=|(id, _, focused)| (id.0.clone(), *focused)
+                key=|(id, name, focused)| (id.0.clone(), name.clone(), *focused)
                 children=move |(id, name, focused)| {
                     let glyph = name.chars().next().unwrap_or('?').to_uppercase().to_string();
                     let cls = if focused {
