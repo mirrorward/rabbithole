@@ -600,7 +600,10 @@ impl WsClient {
                 b.alive = true;
                 b.emit_conn(ConnState::Online);
                 let id = b.next_request_id();
-                match wire::hello_request(id).and_then(|f| encode_frame(&f)) {
+                // Present our portable identity in the handshake so peers can
+                // verify who we are across burrows (the verified ✓ in People).
+                let pubkey = Some(crate::identity::load_or_create().public());
+                match wire::hello_request(id, pubkey).and_then(|f| encode_frame(&f)) {
                     Ok(bytes) => {
                         if let Some(ws) = &b.ws {
                             let _ = ws.send_with_u8_array(&bytes);

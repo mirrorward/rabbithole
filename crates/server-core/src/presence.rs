@@ -26,6 +26,9 @@ pub struct PresenceEntry {
     /// 0 online, 1 away, 2 idle, 3 invisible (Cheshire mode).
     pub state: u8,
     pub status: Option<String>,
+    /// The session's portable identity public key from the handshake, if any —
+    /// surfaced in the who-list so peers can verify identity across burrows.
+    pub pubkey: Option<[u8; 32]>,
 }
 
 impl PresenceEntry {
@@ -208,6 +211,7 @@ mod tests {
             connected_at: Instant::now(),
             state: 0,
             status: None,
+            pubkey: None,
         }
     }
 

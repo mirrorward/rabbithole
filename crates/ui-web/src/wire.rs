@@ -131,8 +131,9 @@ pub trait EventClient {
 }
 
 /// Build the [`Hello`] request frame that opens every RHP session.
-pub fn hello_request(id: RequestId) -> Result<Frame, ProtoError> {
-    let hello = Hello::new(CLIENT_NAME, CLIENT_VERSION, CapabilitySet::default());
+pub fn hello_request(id: RequestId, pubkey: Option<[u8; 32]>) -> Result<Frame, ProtoError> {
+    let hello =
+        Hello::new(CLIENT_NAME, CLIENT_VERSION, CapabilitySet::default()).with_pubkey(pubkey);
     Frame::request(id, &hello)
 }
 
@@ -172,9 +173,8 @@ pub fn frame_to_who(frame: &Frame) -> Option<Vec<crate::state::Presence>> {
                 screen_name: u.screen_name,
                 state: u.state,
                 transport: u.transport,
-                // The verified identity key rides here once UserSummary carries
-                // it (the additive proto delta, next slice); handle-only for now.
-                key: None,
+                // The verified identity key, when the burrow reports one.
+                key: u.pubkey.map(hex::encode),
             })
             .collect(),
     )
@@ -538,7 +538,7 @@ pub fn frame_to_presence(frame: &Frame) -> Option<PresenceDelta> {
             screen_name: j.user.screen_name,
             state: j.user.state,
             transport: j.user.transport,
-            key: None,
+            key: j.user.pubkey.map(hex::encode),
         }));
     }
     if let Some(Ok(l)) = frame.decode::<UserLeft>() {
@@ -1324,10 +1324,22 @@ mod tests {
 
     #[test]
     fn hello_request_carries_client_identity() {
-        let frame = hello_request(RequestId(1)).unwrap();
+        // The handshake carries our portable identity key so peers can verify us.
+        let frame = hello_request(RequestId(1), Some([5; 32])).unwrap();
         assert_eq!(frame.family, Family::SESSION);
         let hello = frame.decode::<Hello>().unwrap().unwrap();
         assert_eq!(hello.client_name, CLIENT_NAME);
+        assert_eq!(hello.client_pubkey, Some([5; 32]));
+        // No-key handshake is still valid (guest / no local identity).
+        assert_eq!(
+            hello_request(RequestId(1), None)
+                .unwrap()
+                .decode::<Hello>()
+                .unwrap()
+                .unwrap()
+                .client_pubkey,
+            None
+        );
         assert_eq!(hello.client_version, CLIENT_VERSION);
     }
 
@@ -1347,7 +1359,7 @@ mod tests {
             "0.9.0",
             [0u8; 32],
         );
-        let req = hello_request(RequestId(1)).unwrap();
+        let req = hello_request(RequestId(1), None).unwrap();
         let reply = Frame::reply_to(&req, &ack).unwrap();
         let events = frame_to_events(&reply);
         assert_eq!(
@@ -1375,7 +1387,7 @@ mod tests {
 
     #[test]
     fn error_reply_maps_to_command_failed() {
-        let req = hello_request(RequestId(1)).unwrap();
+        let req = hello_request(RequestId(1), None).unwrap();
         let reply = Frame::error_reply(&req, ErrorCode::Unauthenticated);
         let events = frame_to_events(&reply);
         assert!(matches!(
@@ -2089,7 +2101,7 @@ mod tests {
         let chat = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
         assert_eq!(frame_to_notice_route(&chat), None);
         // An error reply never decodes as a notice.
-        let req = hello_request(RequestId(1)).unwrap();
+        let req = hello_request(RequestId(1), None).unwrap();
         let err = Frame::error_reply(&req, ErrorCode::Unauthenticated);
         assert_eq!(frame_to_notice_route(&err), None);
     }

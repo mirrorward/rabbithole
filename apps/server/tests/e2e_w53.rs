@@ -224,6 +224,47 @@ async fn full_peer_to_peer_fetch_via_the_coordinator() {
     burrow.shutdown().await;
 }
 
+/// A client that presents a portable identity key in its handshake is surfaced
+/// in the who-list with that key, while a handle-only client shows `None` — the
+/// server half of verified-key People de-dup, end to end over a real Burrow.
+#[tokio::test]
+async fn who_list_carries_the_handshake_pubkey() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    for n in ["keyed", "bare"] {
+        burrow
+            .shared
+            .auth
+            .create_account(n, "pw-pw-pw", Role::User)
+            .await
+            .unwrap();
+    }
+    let url = format!("ws://127.0.0.1:{}", burrow.ws_addr.port());
+
+    // "keyed" connects presenting a portable identity key.
+    let mut keyed = Client::connect_with_identity(&url, None, None, "e2e", "0", Some([42; 32]))
+        .await
+        .unwrap();
+    keyed.auth_password("keyed", "pw-pw-pw").await.unwrap();
+    keyed.expect_welcome().await.unwrap();
+
+    // "bare" connects the ordinary way (no key).
+    let mut bare = Client::connect(&url, None, None, "e2e", "0").await.unwrap();
+    bare.auth_password("bare", "pw-pw-pw").await.unwrap();
+    bare.expect_welcome().await.unwrap();
+
+    // The who-list echoes each session's key (or None).
+    let who = keyed.who().await.unwrap();
+    let keyed_row = who.iter().find(|u| u.screen_name == "keyed").unwrap();
+    let bare_row = who.iter().find(|u| u.screen_name == "bare").unwrap();
+    assert_eq!(keyed_row.pubkey, Some([42; 32]), "keyed session carries its handshake key");
+    assert_eq!(bare_row.pubkey, None, "handle-only session has no key");
+
+    burrow.shutdown().await;
+}
+
 /// The native desktop download recipe end-to-end against a real coordinator:
 /// three peers seed one file, the fetcher discovers all of them via `swarm_find`,
 /// filters to dialable `SourcePeer`s, gets one ticket, and pulls the file

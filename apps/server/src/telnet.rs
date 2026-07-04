@@ -126,6 +126,8 @@ where
         connected_at: Instant::now(),
         state: 0,
         status: None,
+        // Legacy telnet clients carry no portable identity key.
+        pubkey: None,
     });
     shared
         .chat

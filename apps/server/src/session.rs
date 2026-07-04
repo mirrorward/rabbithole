@@ -39,6 +39,8 @@ pub struct SessionCtx {
     pub screen_name: String,
     pub agreed: bool,
     pub is_guest: bool,
+    /// The client's portable identity public key from the handshake, if any.
+    pub pubkey: Option<[u8; 32]>,
 }
 
 impl SessionCtx {
@@ -71,6 +73,9 @@ pub async fn run_session(
 
     // ---- AwaitHello / AwaitAuth ----------------------------------------
     let mut negotiated: Option<ProtocolVersion> = None;
+    // The client's portable identity key, from the handshake — surfaced in
+    // presence so peers can verify who's who across burrows.
+    let mut client_pubkey: Option<[u8; 32]> = None;
     let authed: AuthedUser;
     let mut replay_cursor: u64 = 0;
     let mut resumed = false;
@@ -92,6 +97,7 @@ pub async fn run_session(
             match ProtocolVersion::negotiate(PROTOCOL_VERSION, hello.version) {
                 Some(v) => {
                     negotiated = Some(v);
+                    client_pubkey = hello.client_pubkey;
                     let cfg = shared.config.read();
                     let ack = HelloAck::new(
                         v,
@@ -216,6 +222,7 @@ pub async fn run_session(
         screen_name: authed.persona.screen_name.clone(),
         agreed: agreement.is_none(),
         is_guest: authed.token.is_none(),
+        pubkey: client_pubkey,
     };
     let motd = cfg.motd.clone();
     drop(cfg);
@@ -229,6 +236,7 @@ pub async fn run_session(
         connected_at: Instant::now(),
         state: 0,
         status: None,
+        pubkey: ctx.pubkey,
     });
     shared.chat.join_lobby(session_id, &ctx.screen_name);
     // Subscribe BEFORE welcome/replay so no event falls in a gap.
@@ -388,6 +396,7 @@ async fn handle_request(
                     e.connected_at.elapsed().as_secs(),
                 )
                 .with_state(state, status)
+                .with_pubkey(e.pubkey)
             })
             .collect();
         conn.send(Frame::reply_to(frame, &ppres::WhoList::new(users))?)
@@ -578,13 +587,16 @@ pub(crate) fn push_for_event(
             if entry.is_invisible() && !viewer_is_mod {
                 return None;
             }
-            Frame::push(&ppres::UserJoined::new(ppres::UserSummary::new(
-                entry.session_id,
-                entry.screen_name,
-                entry.role as u8,
-                entry.transport,
-                0,
-            )))
+            Frame::push(&ppres::UserJoined::new(
+                ppres::UserSummary::new(
+                    entry.session_id,
+                    entry.screen_name,
+                    entry.role as u8,
+                    entry.transport,
+                    0,
+                )
+                .with_pubkey(entry.pubkey),
+            ))
             .ok()
         }
         ServerEvent::SessionClosed {
@@ -633,7 +645,8 @@ pub(crate) fn push_for_event(
                             entry.transport,
                             entry.connected_at.elapsed().as_secs(),
                         )
-                        .with_state(ppres::PresenceState::from_ordinal(*state), status.clone()),
+                        .with_state(ppres::PresenceState::from_ordinal(*state), status.clone())
+                        .with_pubkey(entry.pubkey),
                     ))
                     .ok()
                 }

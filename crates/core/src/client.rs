@@ -92,6 +92,28 @@ impl Client {
         client_name: &str,
         client_version: &str,
     ) -> Result<Client, ClientError> {
+        Self::connect_with_identity(
+            endpoint,
+            server_name,
+            fingerprint,
+            client_name,
+            client_version,
+            None,
+        )
+        .await
+    }
+
+    /// [`connect`](Self::connect), presenting a portable identity public key in
+    /// the handshake so the server surfaces it in presence — the *verified* key
+    /// peers use to tell same-handle strangers apart across burrows.
+    pub async fn connect_with_identity(
+        endpoint: &str,
+        server_name: Option<&str>,
+        fingerprint: Option<&str>,
+        client_name: &str,
+        client_version: &str,
+        pubkey: Option<[u8; 32]>,
+    ) -> Result<Client, ClientError> {
         let transport: Box<dyn Transport> =
             if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
                 Box::new(WsTransport)
@@ -127,7 +149,8 @@ impl Client {
             client_version: client_version.to_string(),
             session_token: None,
         };
-        let hello = Hello::new(client_name, client_version, CapabilitySet::default());
+        let hello =
+            Hello::new(client_name, client_version, CapabilitySet::default()).with_pubkey(pubkey);
         let ack: HelloAck = client.request(&hello).await?;
         client.server = ack;
         Ok(client)

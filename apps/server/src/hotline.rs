@@ -1004,6 +1004,8 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
         connected_at: Instant::now(),
         state: 0,
         status: None,
+        // Legacy Hotline clients carry no portable identity key.
+        pubkey: None,
     });
     shared.chat.join_lobby(session_id, &screen_name);
     tracing::info!(user_id, name = %screen_name, "hotline client logged in");
