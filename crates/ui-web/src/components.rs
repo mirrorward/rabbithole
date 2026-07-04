@@ -118,6 +118,53 @@ pub fn Nav() -> impl IntoView {
     }
 }
 
+/// The unified **People** view: everyone present across *all* your connected
+/// burrows, coalesced into one list. Each row shows their presence and which
+/// burrows they're on — the warren layer's answer to "where are my people?".
+#[component]
+pub fn People() -> impl IntoView {
+    use rabbithole_proto::presence::PresenceState;
+    let app = expect_context::<AppState>();
+    view! {
+        <StatusBar/>
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
+            <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"People"</h1>
+            <section class="rh-panel">
+                <h2 class="rh-panel-title">"People · across your burrows"</h2>
+                <Show
+                    when=move || !app.people().is_empty()
+                    fallback=|| view! {
+                        <p class="rh-empty">"No one's around yet. Connect to a burrow to see who's here."</p>
+                    }
+                >
+                    <ul class="rh-people">
+                        <For
+                            each=move || app.people()
+                            key=|p| (p.screen_name.clone(), p.state, p.servers.clone())
+                            children=move |p| {
+                                let dot = match p.state {
+                                    PresenceState::Online => "rh-pres on",
+                                    PresenceState::Away => "rh-pres away",
+                                    PresenceState::Idle => "rh-pres idle",
+                                    _ => "rh-pres off",
+                                };
+                                let servers = p.servers.join(" · ");
+                                view! {
+                                    <li class="rh-person">
+                                        <span class=dot aria-hidden="true"></span>
+                                        <span class="rh-person-name">{p.screen_name}</span>
+                                        <span class="rh-person-servers">{servers}</span>
+                                    </li>
+                                }
+                            }
+                        />
+                    </ul>
+                </Show>
+            </section>
+        </main>
+    }
+}
+
 /// The user's presence status — a single control that fans the chosen status
 /// (Online / Away / Invisible) to **every** connected burrow via
 /// [`AppState::set_presence`]. Invisible is Cheshire mode.

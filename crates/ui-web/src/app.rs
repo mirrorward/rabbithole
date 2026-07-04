@@ -16,7 +16,7 @@ use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
     Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby, Login,
-    Radio, ServerBrowser, Toasts,
+    People, Radio, ServerBrowser, Toasts,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -189,6 +189,25 @@ impl AppState {
                 })
                 .collect()
         })
+    }
+
+    /// The aggregated cross-server People list: everyone present on any
+    /// connected burrow, coalesced by screen name (reactive over every session's
+    /// roster).
+    pub fn people(&self) -> Vec<crate::state::Person> {
+        let rosters: Vec<(String, Vec<crate::state::Presence>)> = self.sessions.with(|list| {
+            list.iter()
+                .map(|(id, session)| {
+                    let name = session
+                        .name
+                        .get()
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| server_label(id));
+                    (name, session.state.with(|s| s.who.clone()))
+                })
+                .collect()
+        });
+        crate::state::merge_people(&rosters)
     }
 
     /// Focus a connected burrow (switch which place is in the main pane).
@@ -1183,6 +1202,7 @@ pub fn App() -> impl IntoView {
                             view! {
                                 <Routes>
                                     <Route path="/" view=Login/>
+                                    <Route path="/people" view=People/>
                                     <Route path="/lobby" view=Lobby/>
                                     <Route path="/boards" view=Boards/>
                                     <Route path="/boards/:slug" view=BoardView/>
@@ -1221,6 +1241,10 @@ fn BurrowRail() -> impl IntoView {
         let navigate = navigate.clone();
         move |_| navigate("/lobby", Default::default())
     };
+    let go_people = {
+        let navigate = navigate.clone();
+        move |_| navigate("/people", Default::default())
+    };
     let go_add = {
         let navigate = navigate.clone();
         move |_| navigate("/servers", Default::default())
@@ -1230,6 +1254,9 @@ fn BurrowRail() -> impl IntoView {
         <nav class="rh-rail" class:rh-rail-hidden=hidden aria-label="Burrows">
             <button class="rh-rail-tile rh-rail-home" title="Home" aria-label="Home" on:click=go_home>
                 <span class="rh-rail-hole" aria-hidden="true"></span>
+            </button>
+            <button class="rh-rail-tile rh-rail-unified" title="People" aria-label="People" on:click=go_people>
+                "\u{263a}"
             </button>
             <div class="rh-rail-sep"></div>
             <For

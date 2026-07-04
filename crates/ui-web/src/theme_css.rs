@@ -262,6 +262,11 @@ pub const STYLESHEET: &str = "\
 .rh-pres.away{background:#e8b84b}\
 .rh-pres.idle{background:var(--rh-muted)}\
 .rh-pres.off{background:var(--rh-muted);opacity:.5}\
+.rh-rail-unified{border-radius:var(--rh-radius-full);color:var(--rh-accent);background:color-mix(in srgb,var(--rh-accent) 12%,transparent);font-size:1.05rem}\
+.rh-people{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}\
+.rh-person{display:flex;align-items:center;gap:.6rem;padding:.5rem .3rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\
+.rh-person-name{font-weight:600}\
+.rh-person-servers{margin-left:auto;font-size:var(--rh-font-sm);color:var(--rh-muted)}\
 .rh-rail-tile{width:40px;height:40px;display:grid;place-items:center;border:0;padding:0;cursor:pointer;border-radius:12px;background:color-mix(in srgb,var(--rh-text) 5%,transparent);color:var(--rh-muted);font-family:var(--rh-font-sans);font-weight:700;font-size:.95rem;position:relative}\
 .rh-rail-tile:hover{color:var(--rh-text)}\
 .rh-rail-home,.rh-rail-add{border-radius:var(--rh-radius-full)}\

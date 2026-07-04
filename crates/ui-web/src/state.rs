@@ -120,6 +120,47 @@ pub struct Presence {
     pub transport: String,
 }
 
+/// One person in the aggregated cross-server **People** view — the same screen
+/// name seen across every connected burrow, coalesced into one row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Person {
+    /// Screen name (the de-dup key for now; a verified identity key later).
+    pub screen_name: String,
+    /// Best-known presence state across the burrows they're on.
+    pub state: rabbithole_proto::presence::PresenceState,
+    /// The burrows (by display name) they're currently present on.
+    pub servers: Vec<String>,
+}
+
+/// Coalesce the rosters of every connected burrow into one People list, de-duped
+/// by screen name. Each person lists the burrows they're on. Insertion order is
+/// preserved (first burrow to show them wins their slot). Verified-identity
+/// de-dup arrives with the `Option<PublicKey>` proto delta (see the design doc).
+pub fn merge_people(rosters: &[(String, Vec<Presence>)]) -> Vec<Person> {
+    let mut people: Vec<Person> = Vec::new();
+    for (server, who) in rosters {
+        for p in who {
+            match people.iter_mut().find(|x| x.screen_name == p.screen_name) {
+                Some(person) => {
+                    if !person.servers.iter().any(|s| s == server) {
+                        person.servers.push(server.clone());
+                    }
+                    // Prefer the "most present" state: an Online sighting wins.
+                    if p.state == rabbithole_proto::presence::PresenceState::Online {
+                        person.state = p.state;
+                    }
+                }
+                None => people.push(Person {
+                    screen_name: p.screen_name.clone(),
+                    state: p.state,
+                    servers: vec![server.clone()],
+                }),
+            }
+        }
+    }
+    people
+}
+
 /// A member listed in the directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
@@ -496,6 +537,35 @@ mod tests {
         s.open_thread("1".into(), posts.clone());
         assert_eq!(s.selected_thread.as_deref(), Some("1"));
         assert_eq!(s.posts, posts);
+    }
+
+    #[test]
+    fn merge_people_coalesces_across_burrows() {
+        use rabbithole_proto::presence::PresenceState;
+        let pres = |name: &str, state| Presence {
+            screen_name: name.to_string(),
+            state,
+            transport: "websocket".to_string(),
+        };
+        let rosters = vec![
+            (
+                "The Warren".to_string(),
+                vec![pres("alice", PresenceState::Away), pres("bob", PresenceState::Online)],
+            ),
+            (
+                "Briar Patch".to_string(),
+                vec![pres("alice", PresenceState::Online), pres("carol", PresenceState::Idle)],
+            ),
+        ];
+        let people = merge_people(&rosters);
+        assert_eq!(people.len(), 3, "alice de-duped across two burrows");
+        let alice = &people[0];
+        assert_eq!(alice.screen_name, "alice");
+        assert_eq!(alice.servers, vec!["The Warren", "Briar Patch"]);
+        // An Online sighting on Briar wins over Away on the Warren.
+        assert_eq!(alice.state, PresenceState::Online);
+        assert_eq!(people[1].servers, vec!["The Warren"]); // bob
+        assert_eq!(people[2].servers, vec!["Briar Patch"]); // carol
     }
 
     #[test]
