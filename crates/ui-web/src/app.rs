@@ -16,7 +16,7 @@ use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
     Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby, Login,
-    People, Radio, ServerBrowser, Toasts,
+    People, Radio, ServerBrowser, Toasts, Transfers,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -208,6 +208,28 @@ impl AppState {
                 .collect()
         });
         crate::state::merge_people(&rosters)
+    }
+
+    /// Every transfer across every connected burrow, tagged with the burrow it
+    /// belongs to — the unified Transfers manager's list (reactive).
+    pub fn all_transfers(&self) -> Vec<(String, crate::files::Transfer)> {
+        self.sessions.with(|list| {
+            list.iter()
+                .flat_map(|(id, session)| {
+                    let name = session
+                        .name
+                        .get()
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| server_label(id));
+                    session.files.with(|f| {
+                        f.transfers
+                            .iter()
+                            .map(|t| (name.clone(), t.clone()))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect()
+        })
     }
 
     /// Focus a connected burrow (switch which place is in the main pane).
@@ -1203,6 +1225,7 @@ pub fn App() -> impl IntoView {
                                 <Routes>
                                     <Route path="/" view=Login/>
                                     <Route path="/people" view=People/>
+                                    <Route path="/transfers" view=Transfers/>
                                     <Route path="/lobby" view=Lobby/>
                                     <Route path="/boards" view=Boards/>
                                     <Route path="/boards/:slug" view=BoardView/>
@@ -1245,6 +1268,10 @@ fn BurrowRail() -> impl IntoView {
         let navigate = navigate.clone();
         move |_| navigate("/people", Default::default())
     };
+    let go_transfers = {
+        let navigate = navigate.clone();
+        move |_| navigate("/transfers", Default::default())
+    };
     let go_add = {
         let navigate = navigate.clone();
         move |_| navigate("/servers", Default::default())
@@ -1257,6 +1284,9 @@ fn BurrowRail() -> impl IntoView {
             </button>
             <button class="rh-rail-tile rh-rail-unified" title="People" aria-label="People" on:click=go_people>
                 "\u{263a}"
+            </button>
+            <button class="rh-rail-tile rh-rail-unified" title="Transfers" aria-label="Transfers" on:click=go_transfers>
+                "\u{2913}"
             </button>
             <div class="rh-rail-sep"></div>
             <For

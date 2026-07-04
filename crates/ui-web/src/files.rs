@@ -33,7 +33,7 @@ pub enum TransferDir {
 }
 
 /// Lifecycle of a queued [`Transfer`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransferStatus {
     /// Authorised but no bytes moved yet.
     Queued,

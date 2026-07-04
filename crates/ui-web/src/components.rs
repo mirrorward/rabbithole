@@ -165,6 +165,73 @@ pub fn People() -> impl IntoView {
     }
 }
 
+/// The unified **Transfers** manager: every download and upload across *all*
+/// your connected burrows in one place. (The content-addressed swarming source
+/// roster is a later slice; this is the aggregated list.)
+#[component]
+pub fn Transfers() -> impl IntoView {
+    use crate::files::{TransferDir, TransferStatus};
+    let app = expect_context::<AppState>();
+    view! {
+        <StatusBar/>
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
+            <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Transfers"</h1>
+            <section class="rh-panel">
+                <h2 class="rh-panel-title">"Transfers · across your burrows"</h2>
+                <Show
+                    when=move || !app.all_transfers().is_empty()
+                    fallback=|| view! {
+                        <p class="rh-empty">"No transfers yet. Download a file from any burrow's Files."</p>
+                    }
+                >
+                    <ul class="rh-xfers">
+                        <For
+                            each=move || app.all_transfers()
+                            key=|(burrow, t)| (burrow.clone(), t.id, t.done, t.status)
+                            children=move |(burrow, t)| {
+                                let pct = if t.total > 0 {
+                                    ((t.done.min(t.total) * 100) / t.total) as u32
+                                } else if matches!(t.status, TransferStatus::Done) {
+                                    100
+                                } else {
+                                    0
+                                };
+                                let (status_cls, status_txt) = match t.status {
+                                    TransferStatus::Queued => ("rh-badge", "Queued"),
+                                    TransferStatus::Active => ("rh-badge active", "Active"),
+                                    TransferStatus::Done => ("rh-badge done", "Done"),
+                                    TransferStatus::Failed => ("rh-badge failed", "Failed"),
+                                };
+                                let fill = if matches!(t.status, TransferStatus::Failed) {
+                                    "rh-bar-fill failed"
+                                } else {
+                                    "rh-bar-fill"
+                                };
+                                let arrow = match t.dir {
+                                    TransferDir::Download => "\u{2193}",
+                                    TransferDir::Upload => "\u{2191}",
+                                };
+                                view! {
+                                    <li class="rh-xfer-row">
+                                        <span class="rh-xfer-dir" aria-hidden="true">{arrow}</span>
+                                        <span class="rh-xfer-name">{t.name}</span>
+                                        <span class="rh-xfer-burrow">{burrow}</span>
+                                        <div class="rh-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=pct.to_string()>
+                                            <div class=fill style=format!("width:{pct}%")></div>
+                                        </div>
+                                        <span class="rh-xfer-pct">{format!("{pct}%")}</span>
+                                        <span class=status_cls>{status_txt}</span>
+                                    </li>
+                                }
+                            }
+                        />
+                    </ul>
+                </Show>
+            </section>
+        </main>
+    }
+}
+
 /// The user's presence status — a single control that fans the chosen status
 /// (Online / Away / Invisible) to **every** connected burrow via
 /// [`AppState::set_presence`]. Invisible is Cheshire mode.

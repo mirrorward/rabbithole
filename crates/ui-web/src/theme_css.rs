@@ -267,6 +267,13 @@ pub const STYLESHEET: &str = "\
 .rh-person{display:flex;align-items:center;gap:.6rem;padding:.5rem .3rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\
 .rh-person-name{font-weight:600}\
 .rh-person-servers{margin-left:auto;font-size:var(--rh-font-sm);color:var(--rh-muted)}\
+.rh-xfers{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}\
+.rh-xfer-row{display:flex;align-items:center;gap:.7rem;padding:.5rem .3rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\
+.rh-xfer-dir{color:var(--rh-accent);font-family:var(--rh-font-mono,monospace)}\
+.rh-xfer-name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 14rem}\
+.rh-xfer-burrow{font-size:var(--rh-font-sm);color:var(--rh-muted);flex:0 0 auto}\
+.rh-xfer-row .rh-bar{flex:1;min-width:4rem}\
+.rh-xfer-pct{font-size:var(--rh-font-sm);color:var(--rh-muted);width:3ch;text-align:right}\
 .rh-rail-tile{width:40px;height:40px;display:grid;place-items:center;border:0;padding:0;cursor:pointer;border-radius:12px;background:color-mix(in srgb,var(--rh-text) 5%,transparent);color:var(--rh-muted);font-family:var(--rh-font-sans);font-weight:700;font-size:.95rem;position:relative}\
 .rh-rail-tile:hover{color:var(--rh-text)}\
 .rh-rail-home,.rh-rail-add{border-radius:var(--rh-radius-full)}\
