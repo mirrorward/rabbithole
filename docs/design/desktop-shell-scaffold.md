@@ -22,7 +22,12 @@ iOS is fully buildable.
   `../../crates/ui-web/dist` produced by `trunk build`. No frontend fork.
 - **The load-bearing config is the `beforeDevCommand`/`beforeBuildCommand` `cwd`** — trunk lives in
   `crates/ui-web`, not next to `tauri.conf.json`, so both use the object form with `cwd: "../../crates/ui-web"`.
-- **`csp: null`** so the SPA's outbound `ws://` `WsClient` isn't blocked.
+- **An explicit CSP** (not `null`) that fits the SPA: `style-src 'unsafe-inline'` (the inline
+  `<style>{STYLESHEET}</style>`), `script-src 'wasm-unsafe-eval'` (wasm), `connect-src ws: wss:` (the
+  `WsClient` transport), `img-src data:` (data-URL avatars), `media-src http: https:` (Icecast radio). Tighten
+  `connect-src`/drop `'unsafe-inline'` as the app hardens.
+- **`withGlobalTauri: false`** — the SPA is a pure web client that calls no Tauri JS APIs yet, so
+  `window.__TAURI__` stays off the page global. Revisit in Wave F when native features need an IPC bridge.
 - **v2 lib+bin split** (`src/lib.rs` with `#[cfg_attr(mobile, tauri::mobile_entry_point)] pub fn run()`, a thin
   `src/main.rs`) so the *same* crate is mobile-ready for `cargo tauri ios/android init`.
 
@@ -55,9 +60,9 @@ apps/desktop/
     "frontendDist": "../../crates/ui-web/dist"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [{ "label": "main", "title": "RabbitHole", "width": 1100, "height": 760, "minWidth": 720, "minHeight": 480 }],
-    "security": { "csp": null }
+    "security": { "csp": "default-src 'self'; connect-src 'self' ws: wss: https:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; media-src 'self' http: https: blob:; font-src 'self'" }
   },
   "bundle": { "active": true, "targets": "all", "icon": ["icons/32x32.png","icons/128x128.png","icons/128x128@2x.png","icons/icon.icns","icons/icon.ico"] }
 }
