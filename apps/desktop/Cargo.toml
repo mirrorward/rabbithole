@@ -1,0 +1,41 @@
+[package]
+name = "rabbithole-desktop"
+description = "RabbitHole — Tauri v2 desktop + mobile shell wrapping the ui-web Leptos SPA"
+version = "0.105.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["RabbitHole contributors"]
+repository = "https://github.com/mirrorward/rabbithole"
+publish = false
+
+# Isolate this crate from the root workspace: its own workspace root + Cargo.lock
+# so `cargo build --workspace` at the repo root stays lean (no wry/webkit pulled
+# in) and CI Linux jobs don't need libwebkit2gtk.
+[workspace]
+
+# The Tauri library: compiled to a lib on mobile (loaded by the platform
+# framework) and linked by the desktop bin. Custom name -> main.rs references it.
+[lib]
+name = "rabbithole_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Desktop entry point. On mobile this bin is unused; the lib's
+# mobile_entry_point is the entry instead.
+[[bin]]
+name = "rabbithole-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = true
+strip = true
+incremental = false
+codegen-units = 1
+panic = "abort"
