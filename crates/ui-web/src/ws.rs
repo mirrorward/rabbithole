@@ -504,6 +504,12 @@ impl WsClient {
                         for event in wire::frame_to_file_events(&frame) {
                             b.emit_file(event);
                         }
+                        // A FileContent reply only arrives in response to a user
+                        // Download; deliver its bytes to the browser as a file
+                        // save. Touches no Inner state, so it's borrow-safe here.
+                        if let Some(dl) = wire::frame_to_file_content(&frame) {
+                            Self::save_download(&dl.name, &dl.mime, &dl.bytes);
+                        }
                         if let Some(route) = wire::frame_to_notice_route(&frame) {
                             b.emit_notice(route);
                         }
@@ -615,6 +621,36 @@ impl WsClient {
                 Self::connect(&inner);
             }
         });
+    }
+
+    /// Deliver downloaded bytes to the browser as a file save: wrap them in a
+    /// `Blob`, mint an object URL, and click a detached `<a download>`. No DOM
+    /// element is left behind; the object URL is revoked immediately.
+    fn save_download(name: &str, mime: &str, bytes: &[u8]) {
+        let array = js_sys::Array::new();
+        array.push(&Uint8Array::from(bytes));
+        let opts = web_sys::BlobPropertyBag::new();
+        opts.set_type(if mime.is_empty() {
+            "application/octet-stream"
+        } else {
+            mime
+        });
+        let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(&array, &opts) else {
+            return;
+        };
+        let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else {
+            return;
+        };
+        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+            if let Ok(el) = doc.create_element("a") {
+                if let Ok(a) = el.dyn_into::<web_sys::HtmlAnchorElement>() {
+                    a.set_href(&url);
+                    a.set_download(name);
+                    a.click();
+                }
+            }
+        }
+        let _ = web_sys::Url::revoke_object_url(&url);
     }
 
     /// Drive a periodic keepalive ping until the socket closes.

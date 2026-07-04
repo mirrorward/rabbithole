@@ -52,6 +52,13 @@ web-sys = { workspace = true, features = [
     "Document",
     "Element",
     "HtmlElement",
+    # File download save (`src/ws.rs::save_download`): a FileContent reply's
+    # bytes are wrapped in a Blob + object URL and clicked via a detached
+    # <a download>.
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
+    "HtmlAnchorElement",
 ] }
 gloo-timers.workspace = true
 

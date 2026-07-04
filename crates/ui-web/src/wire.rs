@@ -728,6 +728,31 @@ pub fn frame_to_file_events(frame: &Frame) -> Vec<FileEvent> {
     Vec::new()
 }
 
+/// A downloaded file's savable payload, decoded from a [`FileContent`] reply.
+/// Kept separate from [`FileEvent::FileDownloaded`] (which carries only the size
+/// so the pure `files` reducer never clones bytes) — the transport delivers
+/// these bytes straight to the browser as a file save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadedFile {
+    pub name: String,
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Decode a [`FileContent`] reply to its savable bytes. `None` for any other
+/// frame or an error reply.
+pub fn frame_to_file_content(frame: &Frame) -> Option<DownloadedFile> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let m = frame.decode::<FileContent>()?.ok()?;
+    Some(DownloadedFile {
+        name: m.node.name,
+        mime: m.node.mime,
+        bytes: m.bytes,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // ADMIN family (family 7): classes, accounts, invites, config, moderation.
 //
@@ -1347,6 +1372,20 @@ mod tests {
             frame_to_file_events(&frame),
             vec![FileEvent::FileDownloaded { node, size: 42 }]
         );
+    }
+
+    #[test]
+    fn file_content_decodes_bytes_for_saving() {
+        let mut node = FileNodeView::new(7, "warez", 1, "a.lha", "a.lha");
+        node.mime = "application/x-lha".into();
+        let frame = Frame::push(&FileContent::new(node, vec![1, 2, 3, 4])).unwrap();
+        let dl = frame_to_file_content(&frame).unwrap();
+        assert_eq!(dl.name, "a.lha");
+        assert_eq!(dl.mime, "application/x-lha");
+        assert_eq!(dl.bytes, vec![1, 2, 3, 4]);
+        // A non-content frame yields None.
+        let chat = Frame::push(&ChatMessage::new("lobby", "x", "y", 0)).unwrap();
+        assert_eq!(frame_to_file_content(&chat), None);
     }
 
     #[test]
