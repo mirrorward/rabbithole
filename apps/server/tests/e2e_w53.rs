@@ -224,6 +224,100 @@ async fn full_peer_to_peer_fetch_via_the_coordinator() {
     burrow.shutdown().await;
 }
 
+/// The native desktop download recipe end-to-end against a real coordinator:
+/// three peers seed one file, the fetcher discovers all of them via `swarm_find`,
+/// filters to dialable `SourcePeer`s, gets one ticket, and pulls the file
+/// **multi-source** with `fetch_swarm_resumable` — byte-exact, every unit served
+/// exactly once across the swarm. This is the Rust half of `run_swarm_download`
+/// (apps/desktop), exercised against a live Burrow rather than composed pieces.
+#[tokio::test]
+async fn multi_source_swarm_fetch_via_coordinator() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    for n in ["alice", "carol", "dave", "bob"] {
+        burrow
+            .shared
+            .auth
+            .create_account(n, "pw-pw-pw", Role::User)
+            .await
+            .unwrap();
+    }
+
+    // ~3 MiB + tail → four 1 MiB work units, seeded on THREE peers.
+    let body: Vec<u8> = (0..3 * 1024 * 1024 + 17).map(|i| (i % 251) as u8).collect();
+    let src = work.path().join("seed.bin");
+    std::fs::write(&src, &body).unwrap();
+    let root = *blake3::hash(&body).as_bytes();
+
+    // Each seeder logs in, stands up a peer-wire endpoint, advertises the root,
+    // and registers its contact card. Sessions are kept alive (a contact card
+    // dies with its session) until after the fetch.
+    let mut peers = Vec::new();
+    let mut sessions = Vec::new();
+    for name in ["alice", "carol", "dave"] {
+        let mut s = login(&burrow, name).await;
+        let seeds = std::sync::Arc::new(rabbithole_swarm::SeedStore::new());
+        seeds.add(root, &src).unwrap();
+        let peer = rabbithole_swarm::PeerServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            s.server.server_key,
+            seeds,
+        )
+        .await
+        .unwrap();
+        s.swarm_advertise(
+            vec![AdvertEntry::new(
+                root,
+                body.len() as u64,
+                "seed.bin",
+                "application/octet-stream",
+            )],
+            0,
+        )
+        .await
+        .unwrap();
+        s.swarm_contact(peer.addr.port(), peer.fingerprint.0)
+            .await
+            .unwrap();
+        peers.push(peer);
+        sessions.push(s);
+    }
+
+    // Bob runs the recipe: find → filter to dialable SourcePeers → ticket → fetch.
+    let mut bob = login(&burrow, "bob").await;
+    let list = bob.swarm_find(root).await.unwrap();
+    let sources: Vec<rabbithole_swarm::SourcePeer> = list
+        .sources
+        .iter()
+        .filter_map(|s| {
+            Some(rabbithole_swarm::SourcePeer {
+                endpoint: s.endpoint.clone()?,
+                cert_fp: s.cert_fp?,
+            })
+        })
+        .collect();
+    assert_eq!(sources.len(), 3, "the coordinator returned all three dialable peers");
+    let ticket = bob.swarm_ticket(root).await.unwrap();
+
+    let dest = work.path().join("fetched.bin");
+    let report =
+        rabbithole_swarm::fetch_swarm_resumable(&sources, &ticket.token, root, body.len() as u64, &dest)
+            .await
+            .unwrap();
+    assert_eq!(report.bytes, body.len() as u64);
+    assert_eq!(std::fs::read(&dest).unwrap(), body, "multi-source bytes verified");
+    // Every one of the four units was served exactly once across the swarm.
+    let total: u64 = report.per_source.iter().map(|(_, n)| n).sum();
+    assert_eq!(total, 4, "each unit served once: {:?}", report.per_source);
+
+    for p in peers {
+        p.stop();
+    }
+    burrow.shutdown().await;
+}
+
 #[tokio::test]
 async fn contact_card_dies_with_the_session() {
     let work = tempfile::tempdir().unwrap();
