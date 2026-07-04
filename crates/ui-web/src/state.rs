@@ -108,6 +108,18 @@ pub struct MemberProfile {
     pub avatar_src: Option<String>,
 }
 
+/// A user present in a room's live roster, richer than a bare handle: carries
+/// their presence state (for the status dot) and the door they came in through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Presence {
+    /// Screen name (`name@origin`).
+    pub screen_name: String,
+    /// Online / Away / Idle / Invisible.
+    pub state: rabbithole_proto::presence::PresenceState,
+    /// Transport: "websocket", "quic", "telnet", "hotline", …
+    pub transport: String,
+}
+
 /// A member listed in the directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
@@ -134,8 +146,8 @@ pub struct UiState {
     pub status: String,
     /// Chat scrollback for the lobby, oldest first.
     pub messages: Vec<ChatLine>,
-    /// Handles currently present in the room.
-    pub who: Vec<String>,
+    /// Users currently present in the room, with their presence state.
+    pub who: Vec<Presence>,
     /// The board tree.
     pub boards: Vec<Board>,
     /// Threads of the currently selected board.
@@ -312,7 +324,7 @@ impl UiState {
                     || m.display_name.to_lowercase().contains(&q)
             })
             .map(|m| Member {
-                online: self.who.iter().any(|h| h == &m.handle),
+                online: self.who.iter().any(|p| p.screen_name == m.handle),
                 ..m.clone()
             })
             .collect()

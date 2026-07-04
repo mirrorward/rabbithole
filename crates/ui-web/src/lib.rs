@@ -118,7 +118,7 @@ pub use pwa::{icon_rgba, MANIFEST_URL, SW_URL};
 pub use radio::{status_segment, stream_url, RadioPrefs, RadioState, RadioUpdate, StationStatus};
 pub use server_theme::ServerOverlay;
 pub use state::{
-    Board, ChatLine, DmMessage, DmThread, Member, MemberProfile, Post, Thread, UiState,
+    Board, ChatLine, DmMessage, DmThread, Member, MemberProfile, Post, Presence, Thread, UiState,
 };
 pub use syndication_admin::{
     expected_applies_live, parse_feeds_value, validate_poll_secs, FeedRow, FeedsStatus, GatewayRow,

@@ -390,12 +390,14 @@ impl AppState {
             }));
             ws.on_presence(std::rc::Rc::new(move |delta| {
                 state.update(|s| match delta {
-                    crate::wire::PresenceDelta::Joined(name) => {
-                        if !s.who.contains(&name) {
-                            s.who.push(name);
+                    crate::wire::PresenceDelta::Joined(p) => {
+                        if !s.who.iter().any(|x| x.screen_name == p.screen_name) {
+                            s.who.push(p);
                         }
                     }
-                    crate::wire::PresenceDelta::Left(name) => s.who.retain(|h| h != &name),
+                    crate::wire::PresenceDelta::Left(name) => {
+                        s.who.retain(|p| p.screen_name != name)
+                    }
                 })
             }));
             ws.on_boards(std::rc::Rc::new(move |boards| {
@@ -517,9 +519,20 @@ impl AppState {
         });
     }
 
-    /// Refresh the who-list snapshot from the client.
+    /// Refresh the who-list snapshot from the client. The mock reports bare
+    /// handles; present them all as Online over the mock "transport".
     pub fn refresh_who(&self) {
-        let who = self.focused().client.with_value(|client| client.who(LOBBY));
+        let who: Vec<crate::state::Presence> = self
+            .focused()
+            .client
+            .with_value(|client| client.who(LOBBY))
+            .into_iter()
+            .map(|screen_name| crate::state::Presence {
+                screen_name,
+                state: rabbithole_proto::presence::PresenceState::Online,
+                transport: "mock".to_string(),
+            })
+            .collect();
         self.focused().state.update(|s| s.who = who);
     }
 

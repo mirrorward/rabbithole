@@ -10,7 +10,7 @@ use crate::frame::{Family, Message};
 /// Presence states. `Invisible` is **Cheshire mode**: connected but shown
 /// as offline to everyone below moderator.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PresenceState {
     Online,
     /// Away, optionally with a status message (the beloved AOL ritual).

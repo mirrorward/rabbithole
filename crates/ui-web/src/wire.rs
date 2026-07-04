@@ -160,12 +160,21 @@ pub fn presence_set_request(
 /// server order. `None` for any other frame or an error reply. The core
 /// [`Event`] enum has no roster variant, so — like the FILE/notice families —
 /// the transport surfaces this through a dedicated sink rather than an event.
-pub fn frame_to_who(frame: &Frame) -> Option<Vec<String>> {
+pub fn frame_to_who(frame: &Frame) -> Option<Vec<crate::state::Presence>> {
     if frame.error.is_some() {
         return None;
     }
     let list = frame.decode::<WhoList>()?.ok()?;
-    Some(list.users.into_iter().map(|u| u.screen_name).collect())
+    Some(
+        list.users
+            .into_iter()
+            .map(|u| crate::state::Presence {
+                screen_name: u.screen_name,
+                state: u.state,
+                transport: u.transport,
+            })
+            .collect(),
+    )
 }
 
 /// A live roster change decoded from a `UserJoined` / `UserLeft` push, so the
@@ -173,8 +182,8 @@ pub fn frame_to_who(frame: &Frame) -> Option<Vec<String>> {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PresenceDelta {
-    /// A user joined the room (their screen name).
-    Joined(String),
+    /// A user joined the room, with their presence.
+    Joined(crate::state::Presence),
     /// A user left the room (their screen name).
     Left(String),
 }
@@ -522,7 +531,11 @@ pub fn frame_to_presence(frame: &Frame) -> Option<PresenceDelta> {
         return None;
     }
     if let Some(Ok(j)) = frame.decode::<UserJoined>() {
-        return Some(PresenceDelta::Joined(j.user.screen_name));
+        return Some(PresenceDelta::Joined(crate::state::Presence {
+            screen_name: j.user.screen_name,
+            state: j.user.state,
+            transport: j.user.transport,
+        }));
     }
     if let Some(Ok(l)) = frame.decode::<UserLeft>() {
         return Some(PresenceDelta::Left(l.screen_name));
@@ -1239,10 +1252,14 @@ mod tests {
         ]);
         let req = who_request(RequestId(1)).unwrap();
         let reply = Frame::reply_to(&req, &who).unwrap();
-        assert_eq!(
-            frame_to_who(&reply),
-            Some(vec!["alice".to_string(), "bob".to_string()])
-        );
+        use rabbithole_proto::presence::PresenceState;
+        let roster = frame_to_who(&reply).unwrap();
+        assert_eq!(roster.len(), 2);
+        assert_eq!(roster[0].screen_name, "alice");
+        assert_eq!(roster[0].state, PresenceState::Online);
+        assert_eq!(roster[0].transport, "websocket");
+        assert_eq!(roster[1].screen_name, "bob");
+        assert_eq!(roster[1].transport, "quic");
         // A non-WhoList frame (a chat push) yields None.
         let push = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
         assert_eq!(frame_to_who(&push), None);
@@ -1261,7 +1278,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             frame_to_presence(&joined),
-            Some(PresenceDelta::Joined("carol".into()))
+            Some(PresenceDelta::Joined(crate::state::Presence {
+                screen_name: "carol".into(),
+                state: rabbithole_proto::presence::PresenceState::Online,
+                transport: "websocket".into(),
+            }))
         );
         let left = Frame::push(&UserLeft::new(3, "carol")).unwrap();
         assert_eq!(

@@ -72,7 +72,7 @@ pub type NoticeSink = Rc<dyn Fn(NoticeRoute)>;
 /// A sink the transport pushes the present-user roster into (from a decoded
 /// [`WhoList`](rabbithole_proto::presence::WhoList) reply). The core [`Event`]
 /// enum has no roster variant, so this rides its own sink like FILE/notices.
-pub type WhoSink = Rc<dyn Fn(Vec<String>)>;
+pub type WhoSink = Rc<dyn Fn(Vec<crate::state::Presence>)>;
 /// A sink the transport pushes live roster deltas into (join/leave), keeping
 /// the presence list fresh between full [`WhoSink`] snapshots.
 pub type PresenceSink = Rc<dyn Fn(PresenceDelta)>;
@@ -181,7 +181,7 @@ impl Inner {
         }
     }
 
-    fn emit_who(&self, roster: Vec<String>) {
+    fn emit_who(&self, roster: Vec<crate::state::Presence>) {
         if let Some(sink) = &self.who_sink {
             sink(roster);
         }

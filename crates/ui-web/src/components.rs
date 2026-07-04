@@ -538,8 +538,22 @@ pub fn WhoList() -> impl IntoView {
             <ul>
                 <For
                     each=move || state.with(|s| s.who.clone())
-                    key=|handle| handle.clone()
-                    children=move |handle| view! { <li>{handle}</li> }
+                    key=|p| (p.screen_name.clone(), p.state)
+                    children=move |p| {
+                        use rabbithole_proto::presence::PresenceState;
+                        let dot = match p.state {
+                            PresenceState::Online => "rh-pres on",
+                            PresenceState::Away => "rh-pres away",
+                            PresenceState::Idle => "rh-pres idle",
+                            _ => "rh-pres off",
+                        };
+                        view! {
+                            <li class="rh-who-row">
+                                <span class=dot aria-hidden="true"></span>
+                                {p.screen_name}
+                            </li>
+                        }
+                    }
                 />
             </ul>
         </aside>
