@@ -257,6 +257,22 @@ impl AppState {
             ws.on_posts(std::rc::Rc::new(move |posts| {
                 state.update(|s| s.posts = posts)
             }));
+            ws.on_dm_threads(std::rc::Rc::new(move |threads| {
+                state.update(|s| s.set_dm_threads(threads))
+            }));
+            ws.on_dm_history(std::rc::Rc::new(move |msgs| {
+                // Apply to the currently-selected conversation (the reply
+                // doesn't name its peer; the single ordered socket keeps this
+                // matched to the history we just requested).
+                state.update(|s| {
+                    if let Some(id) = s.selected_dm.clone() {
+                        s.set_dm_messages(&id, msgs);
+                    }
+                })
+            }));
+            ws.on_dm_received(std::rc::Rc::new(move |(peer, msg)| {
+                state.update(|s| s.receive_dm(&peer, msg))
+            }));
             ws.on_notice(std::rc::Rc::new(move |route| match route {
                 crate::wire::NoticeRoute::Radio(u) => radio.update(|r| r.apply_update(u)),
                 crate::wire::NoticeRoute::Chat { from, text } => {
@@ -440,21 +456,46 @@ impl AppState {
         }
     }
 
-    /// Load the DM conversation snapshots into state.
+    /// Load the DM conversation snapshots into state. Live: request the
+    /// conversation list over the socket (the reply folds through the sink).
     pub fn load_dms(&self) {
-        if self.skip_mock_load() {
+        #[cfg(target_arch = "wasm32")]
+        if self.live.get_untracked() {
+            self.ws.update_value(|c| c.request_dm_threads());
             return;
         }
         let threads = self.client.with_value(|c| c.dm_threads());
         self.state.update(|s| s.set_dm_threads(threads));
     }
 
-    /// Send a DM into the selected conversation, appending it locally. The
-    /// real transport will echo a server event instead.
+    /// Select a DM conversation with `peer`. Live: request its history (the
+    /// reply folds into the selected thread via the sink).
+    pub fn select_dm(&self, peer: &str) {
+        self.state.update(|s| s.select_dm(peer));
+        #[cfg(target_arch = "wasm32")]
+        if self.live.get_untracked() {
+            self.ws.update_value(|c| c.request_dm_history(peer));
+        }
+    }
+
+    /// Send a DM into the selected conversation. Live: send over the socket,
+    /// then re-request the history so the sent message appears. Mock: append it
+    /// locally.
     pub fn send_dm(&self, text: &str) {
-        let Some(id) = self.state.with(|s| s.selected_dm.clone()) else {
+        if text.trim().is_empty() {
+            return;
+        }
+        let Some(id) = self.state.with_untracked(|s| s.selected_dm.clone()) else {
             return;
         };
+        #[cfg(target_arch = "wasm32")]
+        if self.live.get_untracked() {
+            self.ws.update_value(|c| {
+                c.send_dm(&id, text);
+                c.request_dm_history(&id);
+            });
+            return;
+        }
         let state = self.state;
         self.client.update_value(|c| {
             if let Some(msg) = c.send_dm(&id, text) {

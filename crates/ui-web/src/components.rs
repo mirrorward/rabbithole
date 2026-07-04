@@ -749,6 +749,17 @@ pub fn Dms() -> impl IntoView {
         draft.set(String::new());
     };
 
+    let new_peer = create_rw_signal(String::new());
+    let start = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        let peer = new_peer.get();
+        if peer.trim().is_empty() {
+            return;
+        }
+        app.select_dm(peer.trim());
+        new_peer.set(String::new());
+    };
+
     view! {
         <StatusBar/>
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
@@ -757,6 +768,15 @@ pub fn Dms() -> impl IntoView {
             </h1>
             <aside class="rh-who">
                 <h2>"Conversations"</h2>
+                <form class="rh-dm-start" on:submit=start>
+                    <input
+                        class="rh-input"
+                        placeholder="Message a handle\u{2026}"
+                        aria-label="Start a conversation with a handle"
+                        prop:value=new_peer
+                        on:input=move |ev| new_peer.set(event_target_value(&ev))
+                    />
+                </form>
                 <ul>
                     <For
                         each=move || state.with(|s| s.dm_threads.clone())
@@ -780,7 +800,7 @@ pub fn Dms() -> impl IntoView {
                                     <button
                                         class=class
                                         aria-current=move || current().then_some("true")
-                                        on:click=move |_| state.update(|s| s.select_dm(&id))
+                                        on:click=move |_| app.select_dm(&id)
                                     >
                                         {t.peer}
                                     </button>

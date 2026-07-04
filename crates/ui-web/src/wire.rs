@@ -83,6 +83,9 @@ use rabbithole_proto::board::{
     ThreadRequest,
 };
 use rabbithole_proto::chat::{ChatMessage, ChatSend};
+use rabbithole_proto::dm::{
+    DmHistory, DmHistoryRequest, DmReceived, DmSend, DmThreads, DmThreadsRequest,
+};
 use rabbithole_proto::filelib::{
     AreaList, AreaListRequest, FileAdded, FileAreaView, FileContent, FileDownloadRequest,
     FileNodeView, FileUpload, FolderListRequest, NodeGet, NodeList, NodeReply,
@@ -290,6 +293,82 @@ pub fn frame_to_posts(frame: &Frame) -> Option<Vec<crate::state::Post>> {
             })
             .collect(),
     )
+}
+
+// ── DM family (3), plaintext path ────────────────────────────────────────
+// The web client uses the opt-in-off (plaintext) DM carriage: `encrypted` is
+// left `None`, so the server relays `text` directly. E2EE (prekeys + ratchet)
+// is a later slice. Each family reply rides its own transport sink, like the
+// board/who families.
+
+/// Build a [`DmThreadsRequest`] frame (the conversation list).
+pub fn dm_threads_request(id: RequestId) -> Result<Frame, ProtoError> {
+    Frame::request(id, &DmThreadsRequest)
+}
+
+/// Decode a [`DmThreads`] reply to conversation rows (peer + last snippet). The
+/// messages are loaded lazily per-conversation via [`dm_history_request`].
+pub fn frame_to_dm_threads(frame: &Frame) -> Option<Vec<crate::state::DmThread>> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let list = frame.decode::<DmThreads>()?.ok()?;
+    Some(
+        list.threads
+            .into_iter()
+            .map(|t| crate::state::DmThread {
+                id: t.with.clone(),
+                peer: t.with,
+                messages: Vec::new(),
+            })
+            .collect(),
+    )
+}
+
+/// Build a [`DmHistoryRequest`] for the conversation with `peer` (newest page).
+pub fn dm_history_request(peer: &str, id: RequestId) -> Result<Frame, ProtoError> {
+    Frame::request(id, &DmHistoryRequest::new(peer, 0, 200))
+}
+
+/// Decode a [`DmHistory`] reply to the conversation's messages, oldest first.
+/// The peer is not in the reply, so the caller applies these to the currently
+/// selected conversation (the single ordered socket keeps that correct).
+pub fn frame_to_dm_history(frame: &Frame) -> Option<Vec<crate::state::DmMessage>> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let hist = frame.decode::<DmHistory>()?.ok()?;
+    let mut msgs: Vec<_> = hist.messages;
+    msgs.sort_by_key(|m| m.id);
+    Some(
+        msgs.into_iter()
+            .map(|m| crate::state::DmMessage {
+                from: m.from,
+                text: m.text,
+            })
+            .collect(),
+    )
+}
+
+/// Build a [`DmSend`] frame (plaintext) to `to`.
+pub fn dm_send(to: &str, text: &str, id: RequestId) -> Result<Frame, ProtoError> {
+    Frame::request(id, &DmSend::new(to, text))
+}
+
+/// Decode a [`DmReceived`] push to `(peer, message)` — the peer is the sender.
+pub fn frame_to_dm_received(frame: &Frame) -> Option<(String, crate::state::DmMessage)> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let recv = frame.decode::<DmReceived>()?.ok()?;
+    let m = recv.message;
+    Some((
+        m.from.clone(),
+        crate::state::DmMessage {
+            from: m.from,
+            text: m.text,
+        },
+    ))
 }
 
 /// Decode a presence push to a [`PresenceDelta`]. `None` for any other frame.
@@ -1035,6 +1114,49 @@ mod tests {
         // A non-board frame yields None.
         let chat = Frame::push(&ChatMessage::new("lobby", "bob", "hi", 0)).unwrap();
         assert_eq!(frame_to_boards(&chat), None);
+    }
+
+    #[test]
+    fn frame_to_dm_threads_and_history_map_the_replies() {
+        use rabbithole_proto::dm::{DmHistory, DmMessage as PDm, DmThreadSummary, DmThreads};
+        let threads = DmThreads::new(vec![
+            DmThreadSummary::new("bob", "yo", 100, 2),
+            DmThreadSummary::new("carol", "hi", 50, 0),
+        ]);
+        let req = dm_threads_request(RequestId(1)).unwrap();
+        let reply = Frame::reply_to(&req, &threads).unwrap();
+        let rows = frame_to_dm_threads(&reply).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].peer, "bob");
+        assert_eq!(rows[0].id, "bob");
+        assert!(rows[0].messages.is_empty(), "history loaded lazily");
+
+        // History arrives unordered by id; the decoder sorts oldest-first.
+        let dm = |id, from: &str, to: &str, text: &str, at| {
+            PDm::new(id, from, to, text, None, Vec::new(), at, false)
+        };
+        let hist = DmHistory::new(vec![
+            dm(9, "bob", "alice", "second", 200),
+            dm(4, "alice", "bob", "first", 100),
+        ]);
+        let req = dm_history_request("bob", RequestId(2)).unwrap();
+        let reply = Frame::reply_to(&req, &hist).unwrap();
+        let msgs = frame_to_dm_history(&reply).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].text, "first");
+        assert_eq!(msgs[1].text, "second");
+
+        // A received push carries the sender as the peer.
+        let recv = rabbithole_proto::dm::DmReceived::new(dm(11, "bob", "alice", "hey", 300));
+        let push = Frame::push(&recv).unwrap();
+        let (peer, m) = frame_to_dm_received(&push).unwrap();
+        assert_eq!(peer, "bob");
+        assert_eq!(m.from, "bob");
+        assert_eq!(m.text, "hey");
+        // Unrelated frames yield None.
+        let chat = Frame::push(&ChatMessage::new("lobby", "x", "y", 0)).unwrap();
+        assert_eq!(frame_to_dm_threads(&chat), None);
+        assert_eq!(frame_to_dm_received(&chat), None);
     }
 
     #[test]

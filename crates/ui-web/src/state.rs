@@ -218,8 +218,16 @@ impl UiState {
         self.dm_threads = threads;
     }
 
-    /// Select a DM conversation by id.
+    /// Select a DM conversation by id, creating an empty one if the peer isn't
+    /// in the list yet (so a fresh conversation can be started).
     pub fn select_dm(&mut self, id: &str) {
+        if !self.dm_threads.iter().any(|t| t.id == id) {
+            self.dm_threads.push(DmThread {
+                id: id.to_string(),
+                peer: id.to_string(),
+                messages: Vec::new(),
+            });
+        }
         self.selected_dm = Some(id.to_string());
     }
 
@@ -228,6 +236,27 @@ impl UiState {
     pub fn append_dm(&mut self, id: &str, msg: DmMessage) {
         if let Some(t) = self.dm_threads.iter_mut().find(|t| t.id == id) {
             t.messages.push(msg);
+        }
+    }
+
+    /// Replace the identified conversation's messages (from a live history
+    /// reply). No-op if the id is unknown.
+    pub fn set_dm_messages(&mut self, id: &str, messages: Vec<DmMessage>) {
+        if let Some(t) = self.dm_threads.iter_mut().find(|t| t.id == id) {
+            t.messages = messages;
+        }
+    }
+
+    /// Fold a live-received DM from `peer`: append to the existing conversation,
+    /// or start one (so a first-contact message surfaces immediately).
+    pub fn receive_dm(&mut self, peer: &str, msg: DmMessage) {
+        match self.dm_threads.iter_mut().find(|t| t.peer == peer) {
+            Some(t) => t.messages.push(msg),
+            None => self.dm_threads.push(DmThread {
+                id: peer.to_string(),
+                peer: peer.to_string(),
+                messages: vec![msg],
+            }),
         }
     }
 

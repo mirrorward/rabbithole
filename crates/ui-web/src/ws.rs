@@ -82,6 +82,12 @@ pub type BoardSink = Rc<dyn Fn(Vec<crate::state::Board>)>;
 pub type ThreadSink = Rc<dyn Fn(Vec<crate::state::Thread>)>;
 /// A sink the transport pushes a thread's posts into.
 pub type PostSink = Rc<dyn Fn(Vec<crate::state::Post>)>;
+/// A sink the transport pushes the DM conversation list into.
+pub type DmThreadSink = Rc<dyn Fn(Vec<crate::state::DmThread>)>;
+/// A sink the transport pushes one conversation's message history into.
+pub type DmHistorySink = Rc<dyn Fn(Vec<crate::state::DmMessage>)>;
+/// A sink the transport pushes a live `(peer, message)` DM into.
+pub type DmReceivedSink = Rc<dyn Fn((String, crate::state::DmMessage))>;
 
 /// A browser WebSocket [`EventClient`] speaking RHP.
 ///
@@ -105,6 +111,9 @@ struct Inner {
     board_sink: Option<BoardSink>,
     thread_sink: Option<ThreadSink>,
     post_sink: Option<PostSink>,
+    dm_thread_sink: Option<DmThreadSink>,
+    dm_history_sink: Option<DmHistorySink>,
+    dm_received_sink: Option<DmReceivedSink>,
     next_id: u64,
     /// While `true`, the keepalive loop keeps pinging; cleared on close.
     alive: bool,
@@ -182,6 +191,24 @@ impl Inner {
         }
     }
 
+    fn emit_dm_threads(&self, threads: Vec<crate::state::DmThread>) {
+        if let Some(sink) = &self.dm_thread_sink {
+            sink(threads);
+        }
+    }
+
+    fn emit_dm_history(&self, msgs: Vec<crate::state::DmMessage>) {
+        if let Some(sink) = &self.dm_history_sink {
+            sink(msgs);
+        }
+    }
+
+    fn emit_dm_received(&self, msg: (String, crate::state::DmMessage)) {
+        if let Some(sink) = &self.dm_received_sink {
+            sink(msg);
+        }
+    }
+
     fn next_request_id(&mut self) -> RequestId {
         self.next_id += 1;
         RequestId(self.next_id)
@@ -205,6 +232,9 @@ impl WsClient {
                 board_sink: None,
                 thread_sink: None,
                 post_sink: None,
+                dm_thread_sink: None,
+                dm_history_sink: None,
+                dm_received_sink: None,
                 next_id: 0,
                 alive: false,
                 want_connected: false,
@@ -323,6 +353,49 @@ impl WsClient {
         let id = b.next_request_id();
         if let Ok(bytes) = wire::post_reply(board, parent, body, id).and_then(|f| encode_frame(&f))
         {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
+    /// Register the DM conversation-list sink. Most recent registration wins.
+    pub fn on_dm_threads(&mut self, sink: DmThreadSink) {
+        self.inner.borrow_mut().dm_thread_sink = Some(sink);
+    }
+
+    /// Register the DM history sink. Most recent registration wins.
+    pub fn on_dm_history(&mut self, sink: DmHistorySink) {
+        self.inner.borrow_mut().dm_history_sink = Some(sink);
+    }
+
+    /// Register the live DM-received sink. Most recent registration wins.
+    pub fn on_dm_received(&mut self, sink: DmReceivedSink) {
+        self.inner.borrow_mut().dm_received_sink = Some(sink);
+    }
+
+    /// Ask for the DM conversation list ([`on_dm_threads`](Self::on_dm_threads)).
+    pub fn request_dm_threads(&self) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) = wire::dm_threads_request(id).and_then(|f| encode_frame(&f)) {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
+    /// Ask for the message history with `peer` ([`on_dm_history`](Self::on_dm_history)).
+    pub fn request_dm_history(&self, peer: &str) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) = wire::dm_history_request(peer, id).and_then(|f| encode_frame(&f)) {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
+    /// Send a plaintext DM to `to`. A following
+    /// [`request_dm_history`](Self::request_dm_history) sees the sent message.
+    pub fn send_dm(&self, to: &str, text: &str) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) = wire::dm_send(to, text, id).and_then(|f| encode_frame(&f)) {
             Self::write(&mut b, &bytes);
         }
     }
@@ -448,6 +521,15 @@ impl WsClient {
                         }
                         if let Some(posts) = wire::frame_to_posts(&frame) {
                             b.emit_posts(posts);
+                        }
+                        if let Some(threads) = wire::frame_to_dm_threads(&frame) {
+                            b.emit_dm_threads(threads);
+                        }
+                        if let Some(msgs) = wire::frame_to_dm_history(&frame) {
+                            b.emit_dm_history(msgs);
+                        }
+                        if let Some(dm) = wire::frame_to_dm_received(&frame) {
+                            b.emit_dm_received(dm);
                         }
                     }
                     Err(err) => b.emit(Event::CommandFailed {
