@@ -586,7 +586,7 @@ impl AppState {
             .with_value(|client| client.who(LOBBY))
             .into_iter()
             .map(|screen_name| {
-                // The demo shows one verified user so the People view's verified
+                // The demo seeds one user with a portable identity key so the People
                 // mark is live-visible before the wire carries real keys: "rabbit"
                 // stands in as our own portable identity (you, in the demo).
                 let key = (screen_name == "rabbit")

@@ -136,7 +136,7 @@ pub struct Presence {
     /// Transport: "websocket", "quic", "telnet", "hotline", …
     pub transport: String,
     /// The user's portable identity public key (hex), when the burrow reports
-    /// one — the *verified* de-dup key. `None` for handle-only (unverified) users.
+    /// one — the self-asserted identity de-dup key. `None` for handle-only (unverified) users.
     pub key: Option<String>,
 }
 
@@ -145,11 +145,11 @@ pub struct Presence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Person {
     /// Display screen name (the handle from their first — preferably Online —
-    /// sighting; a verified person can appear under different handles per burrow).
+    /// sighting; a person with a portable key can appear under different handles per burrow).
     pub screen_name: String,
     /// The verified identity key (hex) this person coalesced on, when they carry
     /// one. `None` for handle-only people. When present, the People view can show
-    /// a "verified" mark and two same-handle strangers stay distinct.
+    /// an identity-key hint and two same-handle strangers stay distinct.
     pub key: Option<String>,
     /// Best-known presence state across the burrows they're on.
     pub state: rabbithole_proto::presence::PresenceState,
@@ -164,7 +164,7 @@ pub struct Person {
 pub fn merge_people(rosters: &[(String, Vec<Presence>)]) -> Vec<Person> {
     use rabbithole_proto::presence::PresenceState;
 
-    // The identity two sightings coalesce on: a *verified* key when the burrow
+    // The identity two sightings coalesce on: a self-asserted identity key when the burrow
     // reports one (so the same human under different handles merges, and two
     // strangers who both picked "rabbit" stay distinct), else the bare handle.
     fn coalesce_id(p: &Presence) -> (bool, String) {
