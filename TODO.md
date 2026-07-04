@@ -5,6 +5,28 @@
 > dependency edges shown in PLAN.md §15. ⛔ = do not start until PLAN.md is
 > reviewed and approved by the project owner.
 
+**Adversarial review pass (0.130.0–0.133.0)**: a 50-agent workflow (5 risk-dimension
+finders × 3 skeptic verifiers each, majority-vote) reviewed the ~3500 lines of this
+session's work (native swarm backend + verified-key wire path + identity/welcome/
+persistence). It surfaced **13 confirmed bugs** (all 3/3 consensus) and correctly
+**dismissed** 2 false alarms (incl. "plaintext seed in localStorage" — fine for a
+browser identity). All 13 fixed:
+- **Honesty (HIGH)**: the People "verified ✓" overclaimed auth for a server-*echoed*,
+  unsigned, spoofable pubkey → relabeled to a neutral self-asserted identity-key hint
+  (⚿, "not verified"); You-hub copy reframed. Real verification (Ed25519 challenge/
+  response, the existing KEY_AUTH cap) is the honest follow-up.
+- **Swarm (HIGH/MED)**: `.rhstate` poison → self-heal (remove state+dest on verify-fail);
+  `size==0` wiped partials → guard before `set_len` + at the caller; stalled-peer hang →
+  `PEER_READ_TIMEOUT` on header+body reads.
+- **Native routing (HIGH/MED/LOW)**: progress folded into the *focused* session → route
+  by `transfer_id` (`AppState::transfer_session_files`); fully-resumed download never
+  Done → `Done`→terminal `TransferOpened`; failed invoke hung at 0% → mark Failed.
+- **UI/security (HIGH/LOW)**: stale Directory dot (`<For>` key += `online`); presence
+  ranking (Online>Idle>Away>Invisible); `sanitize_name` rejects `:` (Windows drive/ADS);
+  postcard additive-field forward-compat caveat documented.
+Regression tests added at each layer. The most valuable follow-up the review implies:
+implement the **Ed25519 challenge/response** so the identity key can honestly be "verified".
+
 **Status: Waves 0–5 complete (swarm coordinator, Bao-verified peer wire, multi-source scheduler, resumable fetches, blob cache policy; NAT traversal + WebRTC deferred to their proper environments). Wave 6 (legacy surfaces) underway — the `art` (CP437/ANSI/SAUCE), `legacy-telnet` (negotiation + login shell), and `legacy-finger` (RFC 1288) crates have landed as standalone libraries; Wave 10 gained an RSS/Atom parsing crate. Next: wire these surfaces into `burrow`.**
 
 > W4.2: transfers are resumable + integrity-checked, folder-pipelined, and
