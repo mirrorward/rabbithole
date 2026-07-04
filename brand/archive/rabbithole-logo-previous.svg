@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">RabbitHole logo</title>
+  <desc id="desc">A deep circular tunnel with a bright winding path descending into the center.</desc>
+  <defs>
+    <linearGradient id="sky" x1="116" x2="884" y1="104" y2="906" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9bd7ff"/>
+      <stop offset="0.45" stop-color="#6c9cff"/>
+      <stop offset="1" stop-color="#38d6bf"/>
+    </linearGradient>
+    <radialGradient id="hole" cx="50%" cy="47%" r="56%">
+      <stop offset="0" stop-color="#02040b"/>
+      <stop offset="0.46" stop-color="#070b16"/>
+      <stop offset="0.72" stop-color="#111827"/>
+      <stop offset="1" stop-color="#050713"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="231" x2="793" y1="231" y2="793" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fef7d3"/>
+      <stop offset="0.42" stop-color="#7ee7ff"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+    <linearGradient id="trail" x1="336" x2="690" y1="312" y2="700" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff7d6"/>
+      <stop offset="0.52" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#89f7df"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="30" stdDeviation="34" flood-color="#020617" flood-opacity="0.36"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="210" fill="url(#sky)"/>
+  <g filter="url(#shadow)">
+    <circle cx="512" cy="512" r="340" fill="#050713"/>
+    <circle cx="512" cy="512" r="306" fill="url(#rim)"/>
+    <circle cx="512" cy="512" r="266" fill="url(#hole)"/>
+    <circle cx="512" cy="512" r="206" fill="none" stroke="#1f2937" stroke-width="34" opacity="0.74"/>
+    <circle cx="512" cy="512" r="134" fill="none" stroke="#0f172a" stroke-width="30" opacity="0.95"/>
+    <path d="M340 375c82-122 285-106 352 24 76 146-75 298-224 249-113-37-142-171-52-240 67-51 165-13 169 68 3 57-45 92-99 76" fill="none" stroke="#020617" stroke-width="92" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
+    <path d="M340 375c82-122 285-106 352 24 76 146-75 298-224 249-113-37-142-171-52-240 67-51 165-13 169 68 3 57-45 92-99 76" fill="none" stroke="url(#trail)" stroke-width="58" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="486" cy="552" r="25" fill="#050713"/>
+    <path d="M303 290c58-51 130-78 209-78 76 0 147 25 204 72" fill="none" stroke="#ffffff" stroke-width="24" stroke-linecap="round" opacity="0.24"/>
+    <path d="M727 729c-58 49-132 77-215 77-56 0-109-13-156-37" fill="none" stroke="#07101f" stroke-width="22" stroke-linecap="round" opacity="0.3"/>
+  </g>
+</svg>

@@ -1,3 +1,5 @@
+![RabbitHole banner](brand/rabbithole-readme-banner.svg)
+
 # RabbitHole
 
 > Down the rabbit hole: a modern Rust revival of the golden age of online

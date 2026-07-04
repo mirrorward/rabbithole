@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" role="img" aria-labelledby="title desc">
+  <title id="title">RabbitHole</title>
+  <desc id="desc">A banner for RabbitHole, a modern Rust BBS for chat, boards, files, radio, and classic clients.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" x2="1280" y1="0" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#08111f"/>
+      <stop offset="0.54" stop-color="#111827"/>
+      <stop offset="1" stop-color="#151026"/>
+    </linearGradient>
+    <linearGradient id="mesh" x1="0" x2="1280" y1="60" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38d6bf" stop-opacity="0.26"/>
+      <stop offset="0.52" stop-color="#6c9cff" stop-opacity="0.13"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0.22"/>
+    </linearGradient>
+    <linearGradient id="tile" x1="92" x2="332" y1="62" y2="302" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9bd7ff"/>
+      <stop offset="0.48" stop-color="#6c9cff"/>
+      <stop offset="1" stop-color="#38d6bf"/>
+    </linearGradient>
+    <radialGradient id="hole" cx="50%" cy="47%" r="56%">
+      <stop offset="0" stop-color="#02040b"/>
+      <stop offset="0.46" stop-color="#070b16"/>
+      <stop offset="0.72" stop-color="#111827"/>
+      <stop offset="1" stop-color="#050713"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="125" x2="299" y1="95" y2="269" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fef7d3"/>
+      <stop offset="0.42" stop-color="#7ee7ff"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+    <linearGradient id="trail" x1="158" x2="268" y1="120" y2="241" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff7d6"/>
+      <stop offset="0.52" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#89f7df"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="428" x2="989" y1="116" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7ee7ff"/>
+      <stop offset="0.54" stop-color="#dbeafe"/>
+      <stop offset="1" stop-color="#c4b5fd"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#020617" flood-opacity="0.38"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="360" rx="38" fill="url(#background)"/>
+  <path d="M0 272c126-39 238-36 339 9 124 55 245 57 362 6 126-55 233-56 355-6 82 33 154 36 224 8v71H0z" fill="url(#mesh)"/>
+  <path d="M458 0h822v360H817c-82-25-142-67-182-126-51-75-110-112-177-111z" fill="#0f172a" opacity="0.34"/>
+  <path d="M943 0 812 360h468V0z" fill="#38d6bf" opacity="0.05"/>
+  <path d="M1112 0 966 360h314V0z" fill="#a78bfa" opacity="0.06"/>
+
+  <g filter="url(#shadow)">
+    <rect x="72" y="52" width="280" height="256" rx="58" fill="url(#tile)"/>
+    <circle cx="212" cy="180" r="86" fill="#050713"/>
+    <circle cx="212" cy="180" r="77" fill="url(#rim)"/>
+    <circle cx="212" cy="180" r="67" fill="url(#hole)"/>
+    <circle cx="212" cy="180" r="52" fill="none" stroke="#1f2937" stroke-width="9" opacity="0.74"/>
+    <circle cx="212" cy="180" r="34" fill="none" stroke="#0f172a" stroke-width="8" opacity="0.95"/>
+    <path d="M169 145c21-31 72-27 89 6 19 37-19 75-57 63-28-9-36-43-13-60 17-13 42-4 43 17 1 14-11 23-25 19" fill="none" stroke="#020617" stroke-width="23" stroke-linecap="round" stroke-linejoin="round" opacity="0.56"/>
+    <path d="M169 145c21-31 72-27 89 6 19 37-19 75-57 63-28-9-36-43-13-60 17-13 42-4 43 17 1 14-11 23-25 19" fill="none" stroke="url(#trail)" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="206" cy="190" r="6" fill="#050713"/>
+  </g>
+
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="426" y="139" fill="#f8fafc" font-size="72" font-weight="820">RabbitHole</text>
+    <text x="430" y="186" fill="url(#accent)" font-size="24" font-weight="760" letter-spacing="3">MODERN RUST BBS</text>
+    <text x="430" y="232" fill="#d6e3f5" font-size="28" font-weight="500">Chat, boards, DMs, files, radio, and classic clients.</text>
+    <g font-size="17" font-weight="700">
+      <rect x="430" y="258" width="77" height="32" rx="16" fill="#38d6bf" opacity="0.14"/>
+      <text x="453" y="280" fill="#9af7e7">QUIC</text>
+      <rect x="521" y="258" width="77" height="32" rx="16" fill="#6c9cff" opacity="0.16"/>
+      <text x="541" y="280" fill="#b8d2ff">BBS</text>
+      <rect x="612" y="258" width="102" height="32" rx="16" fill="#a78bfa" opacity="0.16"/>
+      <text x="633" y="280" fill="#d8c8ff">Hotline</text>
+      <rect x="728" y="258" width="85" height="32" rx="16" fill="#fef7d3" opacity="0.13"/>
+      <text x="750" y="280" fill="#fff1b8">Radio</text>
+    </g>
+  </g>
+</svg>

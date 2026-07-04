@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Mirrorward logo</title>
+  <desc id="desc">A bold mirrored M monogram in cyan, white, and violet on a dark rounded square.</desc>
+  <defs>
+    <linearGradient id="bg" x1="96" x2="928" y1="80" y2="944" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#07111f"/>
+      <stop offset="0.58" stop-color="#101827"/>
+      <stop offset="1" stop-color="#171124"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="50%" cy="50%" r="48%">
+      <stop offset="0" stop-color="#6c9cff" stop-opacity="0.24"/>
+      <stop offset="0.45" stop-color="#38d6bf" stop-opacity="0.1"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="mark" x1="222" x2="802" y1="514" y2="514" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#78e7ff"/>
+      <stop offset="0.48" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#b58cff"/>
+    </linearGradient>
+    <linearGradient id="facet" x1="258" x2="766" y1="302" y2="722" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.44"/>
+      <stop offset="0.46" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="lift" x="-18%" y="-18%" width="136%" height="136%">
+      <feDropShadow dx="0" dy="28" stdDeviation="30" flood-color="#020617" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <circle cx="512" cy="512" r="410" fill="url(#halo)"/>
+  <g filter="url(#lift)">
+    <path d="M236 716 338 308 512 574 686 308 788 716" fill="none" stroke="#020617" stroke-width="158" stroke-linecap="round" stroke-linejoin="round" opacity="0.7"/>
+    <path d="M236 716 338 308 512 574 686 308 788 716" fill="none" stroke="url(#mark)" stroke-width="112" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M338 308 512 574 686 308" fill="none" stroke="url(#facet)" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M286 708 354 436" fill="none" stroke="#d8fbff" stroke-width="18" stroke-linecap="round" opacity="0.42"/>
+    <path d="M738 708 670 436" fill="none" stroke="#efe3ff" stroke-width="18" stroke-linecap="round" opacity="0.28"/>
+  </g>
+</svg>

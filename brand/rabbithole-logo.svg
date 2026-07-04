@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">RabbitHole logo</title>
+  <desc id="desc">A compact spiral tunnel mark on a blue and teal rounded-square app icon.</desc>
+  <defs>
+    <linearGradient id="tile" x1="116" x2="908" y1="94" y2="930" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9bd7ff"/>
+      <stop offset="0.48" stop-color="#6c9cff"/>
+      <stop offset="1" stop-color="#38d6bf"/>
+    </linearGradient>
+    <radialGradient id="hole" cx="50%" cy="47%" r="56%">
+      <stop offset="0" stop-color="#02040b"/>
+      <stop offset="0.46" stop-color="#070b16"/>
+      <stop offset="0.72" stop-color="#111827"/>
+      <stop offset="1" stop-color="#050713"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="194" x2="830" y1="194" y2="830" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fef7d3"/>
+      <stop offset="0.42" stop-color="#7ee7ff"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+    <linearGradient id="trail" x1="314" x2="710" y1="286" y2="726" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff7d6"/>
+      <stop offset="0.52" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#89f7df"/>
+    </linearGradient>
+    <filter id="shadow" x="-22%" y="-22%" width="144%" height="144%">
+      <feDropShadow dx="0" dy="30" stdDeviation="34" flood-color="#020617" flood-opacity="0.34"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="210" fill="url(#tile)"/>
+  <g filter="url(#shadow)">
+    <circle cx="512" cy="512" r="315" fill="#050713"/>
+    <circle cx="512" cy="512" r="282" fill="url(#rim)"/>
+    <circle cx="512" cy="512" r="245" fill="url(#hole)"/>
+    <circle cx="512" cy="512" r="190" fill="none" stroke="#1f2937" stroke-width="33" opacity="0.74"/>
+    <circle cx="512" cy="512" r="124" fill="none" stroke="#0f172a" stroke-width="29" opacity="0.95"/>
+    <path d="M355 384c77-113 264-99 326 22 70 135-70 275-209 230-102-33-132-157-48-220 62-48 153-15 157 62 4 52-40 84-91 70" fill="none" stroke="#020617" stroke-width="84" stroke-linecap="round" stroke-linejoin="round" opacity="0.56"/>
+    <path d="M355 384c77-113 264-99 326 22 70 135-70 275-209 230-102-33-132-157-48-220 62-48 153-15 157 62 4 52-40 84-91 70" fill="none" stroke="url(#trail)" stroke-width="51" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="490" cy="548" r="22" fill="#050713"/>
+  </g>
+</svg>

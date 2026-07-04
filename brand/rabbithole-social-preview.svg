@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">RabbitHole GitHub social preview</title>
+  <desc id="desc">RabbitHole logo and project name on a dark branded background.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" x2="1280" y1="0" y2="640" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#08111f"/>
+      <stop offset="0.55" stop-color="#111827"/>
+      <stop offset="1" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="132" x2="442" y1="168" y2="478" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9bd7ff"/>
+      <stop offset="0.45" stop-color="#6c9cff"/>
+      <stop offset="1" stop-color="#38d6bf"/>
+    </linearGradient>
+    <radialGradient id="hole" cx="50%" cy="47%" r="56%">
+      <stop offset="0" stop-color="#02040b"/>
+      <stop offset="0.46" stop-color="#070b16"/>
+      <stop offset="0.72" stop-color="#111827"/>
+      <stop offset="1" stop-color="#050713"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="160" x2="414" y1="195" y2="449" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fef7d3"/>
+      <stop offset="0.42" stop-color="#7ee7ff"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+    <linearGradient id="trail" x1="209" x2="370" y1="231" y2="408" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff7d6"/>
+      <stop offset="0.52" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#89f7df"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" rx="0" fill="url(#background)"/>
+  <path d="M0 515c148-47 264-31 406 29 190 81 351 74 539-19 126-62 231-73 335-37v152H0z" fill="#38d6bf" opacity="0.08"/>
+  <g transform="translate(96 64)">
+    <rect width="448" height="448" rx="94" fill="url(#sky)"/>
+    <circle cx="224" cy="224" r="149" fill="#050713"/>
+    <circle cx="224" cy="224" r="134" fill="url(#rim)"/>
+    <circle cx="224" cy="224" r="116" fill="url(#hole)"/>
+    <circle cx="224" cy="224" r="90" fill="none" stroke="#1f2937" stroke-width="15" opacity="0.74"/>
+    <circle cx="224" cy="224" r="59" fill="none" stroke="#0f172a" stroke-width="13" opacity="0.95"/>
+    <path d="M149 164c36-54 125-47 154 11 33 64-33 130-98 109-49-16-62-75-23-105 29-22 72-6 74 30 1 25-20 40-44 33" fill="none" stroke="#020617" stroke-width="40" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
+    <path d="M149 164c36-54 125-47 154 11 33 64-33 130-98 109-49-16-62-75-23-105 29-22 72-6 74 30 1 25-20 40-44 33" fill="none" stroke="url(#trail)" stroke-width="25" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="213" cy="242" r="11" fill="#050713"/>
+  </g>
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="610" y="271" fill="#f8fafc" font-size="92" font-weight="800">RabbitHole</text>
+    <text x="616" y="342" fill="#b8d2ff" font-size="29" font-weight="650" letter-spacing="3">MIRRORWARD / RABBITHOLE</text>
+    <text x="616" y="405" fill="#d6e3f5" font-size="32" font-weight="500">A modern Rust BBS for chat, boards, files,</text>
+    <text x="616" y="455" fill="#d6e3f5" font-size="32" font-weight="500">radio, and classic clients.</text>
+  </g>
+</svg>
