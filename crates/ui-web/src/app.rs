@@ -235,7 +235,23 @@ impl AppState {
                 }
                 state.update(|s| s.apply(&event));
             }));
-            ws.on_conn(std::rc::Rc::new(move |c| state.update(|s| s.set_conn(c))));
+            ws.on_conn(std::rc::Rc::new(move |c| {
+                // Toast the drop edge exactly once (Online → Reconnecting);
+                // every backoff attempt re-emits Reconnecting, so guard on the
+                // transition to avoid spamming.
+                let prev = state.with_untracked(|s| s.conn);
+                if prev == crate::conn::ConnState::Online
+                    && c == crate::conn::ConnState::Reconnecting
+                {
+                    toasts.update(|q| {
+                        q.push(
+                            crate::toasts::ToastKind::Warn,
+                            "Connection lost \u{2014} reconnecting\u{2026}",
+                        );
+                    });
+                }
+                state.update(|s| s.set_conn(c));
+            }));
             ws.on_who(std::rc::Rc::new(move |roster| {
                 state.update(|s| s.who = roster)
             }));
@@ -311,6 +327,20 @@ impl AppState {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn connect_live(&self, _endpoint: String, _login: String, _password: String) {
         self.live.set(true);
+    }
+
+    /// Manually redial the live socket now (the reconnect banner's button).
+    pub fn reconnect(&self) {
+        #[cfg(target_arch = "wasm32")]
+        if self.live.get_untracked() {
+            self.ws.update_value(|c| c.redial());
+        }
+    }
+
+    /// Whether the session is currently live-connected. Reactive (reads the
+    /// conn signal), so views can gate composers on it.
+    pub fn online(&self) -> bool {
+        self.state.with(|s| s.conn.is_live())
     }
 
     /// Send a lobby chat line — over the live socket when connected, else

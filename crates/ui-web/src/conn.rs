@@ -58,6 +58,44 @@ impl ConnState {
     }
 }
 
+/// A prominent connection banner shown above the app when a **live** session is
+/// not healthy. `None` when nothing needs surfacing (mock sessions, or Online).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnBanner {
+    /// The message to show.
+    pub text: &'static str,
+    /// A user affordance label (e.g. "Retry now"), when one applies.
+    pub action: Option<&'static str>,
+    /// A CSS tone modifier (`"pending"` or `"offline"`).
+    pub tone: &'static str,
+}
+
+/// The banner for a connection state, or `None` when nothing should show.
+/// Only live sessions surface a banner; the mock demo never does.
+pub fn conn_banner(conn: ConnState, live: bool) -> Option<ConnBanner> {
+    if !live {
+        return None;
+    }
+    match conn {
+        ConnState::Online => None,
+        ConnState::Connecting => Some(ConnBanner {
+            text: "Connecting\u{2026}",
+            action: None,
+            tone: "pending",
+        }),
+        ConnState::Reconnecting => Some(ConnBanner {
+            text: "Connection lost. Reconnecting\u{2026}",
+            action: Some("Retry now"),
+            tone: "pending",
+        }),
+        ConnState::Offline => Some(ConnBanner {
+            text: "Disconnected.",
+            action: Some("Reconnect"),
+            tone: "offline",
+        }),
+    }
+}
+
 /// Base delay before the first reconnect attempt, in milliseconds.
 pub const BACKOFF_BASE_MS: u64 = 500;
 /// Ceiling the backoff delay never exceeds, in milliseconds.
@@ -106,6 +144,33 @@ mod tests {
         assert!(!ConnState::Online.is_pending());
         assert_eq!(ConnState::Offline.label(), "Offline");
         assert!(ConnState::Reconnecting.label().starts_with("Reconnecting"));
+    }
+
+    #[test]
+    fn conn_banner_only_surfaces_unhealthy_live_states() {
+        // Mock sessions never show a banner.
+        for c in [
+            ConnState::Offline,
+            ConnState::Connecting,
+            ConnState::Online,
+            ConnState::Reconnecting,
+        ] {
+            assert_eq!(conn_banner(c, false), None, "mock never banners");
+        }
+        // Live + Online is healthy: no banner.
+        assert_eq!(conn_banner(ConnState::Online, true), None);
+        // Reconnecting offers a "Retry now"; Offline offers "Reconnect".
+        let re = conn_banner(ConnState::Reconnecting, true).unwrap();
+        assert_eq!(re.action, Some("Retry now"));
+        assert_eq!(re.tone, "pending");
+        let off = conn_banner(ConnState::Offline, true).unwrap();
+        assert_eq!(off.action, Some("Reconnect"));
+        assert_eq!(off.tone, "offline");
+        // Connecting shows a message but no action.
+        assert_eq!(
+            conn_banner(ConnState::Connecting, true).unwrap().action,
+            None
+        );
     }
 
     #[test]

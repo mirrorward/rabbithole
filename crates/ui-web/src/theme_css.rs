@@ -309,6 +309,11 @@ pub const STYLESHEET: &str = "\
 .rh-toast-close:hover{color:var(--rh-text)}\
 .rh-toast.success{border-left-color:#2f9e44}.rh-toast.success .rh-toast-glyph{color:#2f9e44}\
 .rh-toast.warn{border-left-color:#e8890c}.rh-toast.warn .rh-toast-glyph{color:#e8890c}\
+.rh-banner{display:flex;align-items:center;gap:var(--rh-space-3);padding:.5rem var(--rh-space-5);font-size:var(--rh-font-sm);border-bottom:1px solid color-mix(in srgb,var(--rh-text) 10%,transparent)}\
+.rh-banner-text{flex:1;min-width:0}\
+.rh-banner.pending{background:color-mix(in srgb,var(--rh-accent) 14%,var(--rh-surface));color:var(--rh-text)}\
+.rh-banner.offline{background:color-mix(in srgb,#e8890c 18%,var(--rh-surface));color:var(--rh-text)}\
+.rh-banner .rh-btn{padding:.3rem .7rem;font-size:var(--rh-font-sm)}\
 .rh-newthread{display:flex;flex-direction:column;gap:var(--rh-space-2);margin-top:var(--rh-space-4);padding-top:var(--rh-space-4);border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
 .rh-newthread textarea{font:inherit;min-height:4rem;resize:vertical}\
 .rh-newthread .rh-btn{align-self:flex-start}\

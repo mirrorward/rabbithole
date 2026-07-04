@@ -144,6 +144,8 @@ pub fn StatusBar() -> impl IntoView {
     };
     let radio = app.radio;
     let now_playing = move || radio.with(crate::radio::status_segment).unwrap_or_default();
+    // A prominent connection banner when a live session isn't healthy.
+    let banner = move || crate::conn::conn_banner(state.with(|s| s.conn), app.live.get());
     // The connection label and status line are polite live regions so
     // transient states ("Connecting…", "Reconnecting…", command errors)
     // announce without stealing focus; the now-playing segment sits in an
@@ -175,6 +177,22 @@ pub fn StatusBar() -> impl IntoView {
             </button>
             <ThemeToggle/>
         </header>
+        <Show when=move || banner().is_some() fallback=|| ()>
+            {move || banner().map(|b| view! {
+                <div class=move || format!("rh-banner {}", b.tone) role="status">
+                    <span class="rh-banner-text">{b.text}</span>
+                    {b.action.map(|label| view! {
+                        <button
+                            type="button"
+                            class="rh-btn ghost"
+                            on:click=move |_| app.reconnect()
+                        >
+                            {label}
+                        </button>
+                    })}
+                </div>
+            })}
+        </Show>
     }
 }
 
@@ -549,9 +567,16 @@ pub fn Lobby() -> impl IntoView {
                         aria-label="Message the lobby"
                         placeholder="Message the lobby\u{2026}"
                         prop:value=draft
+                        prop:disabled=move || !app.online()
                         on:input=move |ev| draft.set(event_target_value(&ev))
                     />
-                    <button class="rh-btn" type="submit">"Send"</button>
+                    <button
+                        class="rh-btn"
+                        type="submit"
+                        prop:disabled=move || !app.online()
+                    >
+                        "Send"
+                    </button>
                 </form>
             </section>
             <WhoList/>
@@ -852,9 +877,16 @@ pub fn Dms() -> impl IntoView {
                             aria-label="Write a direct message"
                             placeholder="Write a message\u{2026}"
                             prop:value=draft
+                            prop:disabled=move || !app.online()
                             on:input=move |ev| draft.set(event_target_value(&ev))
                         />
-                        <button class="rh-btn" type="submit">"Send"</button>
+                        <button
+                            class="rh-btn"
+                            type="submit"
+                            prop:disabled=move || !app.online()
+                        >
+                            "Send"
+                        </button>
                     </form>
                 </Show>
             </section>

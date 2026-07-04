@@ -275,6 +275,19 @@ impl WsClient {
         self.inner.borrow_mut().conn_sink = Some(sink);
     }
 
+    /// Manually redial the last endpoint now (a "Reconnect"/"Retry now" button):
+    /// reset the backoff and open immediately, reusing the stored endpoint + the
+    /// registered sinks (so the `open` callback re-sends Hello + re-auths). A
+    /// no-op if a socket is already open (the [`connect`](Self::connect) guard).
+    pub fn redial(&self) {
+        {
+            let mut b = self.inner.borrow_mut();
+            b.want_connected = true;
+            b.reconnect_attempt = 0;
+        }
+        Self::connect(&self.inner);
+    }
+
     /// Register the FILE-family event sink. The most recent registration wins.
     pub fn on_file_event(&mut self, sink: FileSink) {
         self.inner.borrow_mut().file_sink = Some(sink);
@@ -490,6 +503,11 @@ impl WsClient {
 
     /// Open the socket to the latched endpoint and wire up its callbacks.
     fn connect(inner: &Rc<RefCell<Inner>>) {
+        // A socket already exists: a manual redial raced the pending backoff
+        // timer; whichever opened first wins, the other bails (no double dial).
+        if inner.borrow().ws.is_some() {
+            return;
+        }
         let (url, attempt) = {
             let b = inner.borrow();
             (wire::normalize_ws_url(&b.endpoint), b.reconnect_attempt)
