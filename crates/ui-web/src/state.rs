@@ -298,18 +298,23 @@ impl UiState {
     }
 
     /// Members matching the current, case-insensitive directory query on
-    /// either handle or display name. An empty query matches everyone.
+    /// either handle or display name. An empty query matches everyone. The
+    /// `online` badge is recomputed from the **live roster** ([`Self::who`]) at
+    /// call time, so presence join/leave deltas keep it fresh (the directory
+    /// list itself carries no presence flag, and may load before the roster).
     pub fn matching_members(&self) -> Vec<Member> {
         let q = self.directory_query.trim().to_lowercase();
-        if q.is_empty() {
-            return self.members.clone();
-        }
         self.members
             .iter()
             .filter(|m| {
-                m.handle.to_lowercase().contains(&q) || m.display_name.to_lowercase().contains(&q)
+                q.is_empty()
+                    || m.handle.to_lowercase().contains(&q)
+                    || m.display_name.to_lowercase().contains(&q)
             })
-            .cloned()
+            .map(|m| Member {
+                online: self.who.iter().any(|h| h == &m.handle),
+                ..m.clone()
+            })
             .collect()
     }
 
@@ -326,10 +331,15 @@ impl UiState {
         self.selected_profile = Some(profile);
     }
 
-    /// Attach a fetched avatar `data:` URL to the selected profile card.
-    pub fn set_avatar_src(&mut self, src: String) {
+    /// Attach a fetched avatar `data:` URL to the selected profile card, but
+    /// only if the blob's `hex` id still matches the selected profile's avatar
+    /// (a late reply from a previously-selected member is dropped — otherwise it
+    /// would paint the wrong face, persistently if the new member has none).
+    pub fn set_avatar_src(&mut self, hex: &str, src: String) {
         if let Some(p) = &mut self.selected_profile {
-            p.avatar_src = Some(src);
+            if p.avatar_hex.as_deref() == Some(hex) {
+                p.avatar_src = Some(src);
+            }
         }
     }
 
@@ -474,6 +484,34 @@ mod tests {
         s.open_thread("1".into(), posts.clone());
         assert_eq!(s.selected_thread.as_deref(), Some("1"));
         assert_eq!(s.posts, posts);
+    }
+
+    #[test]
+    fn set_avatar_src_only_attaches_to_the_matching_profile() {
+        let mut s = UiState::default();
+        // A profile whose avatar hex is "aa".
+        s.set_profile(MemberProfile {
+            screen_name: "alice".into(),
+            avatar_hex: Some("aa".into()),
+            ..Default::default()
+        });
+        // A late blob reply for a *different* hex is dropped.
+        s.set_avatar_src("bb", "data:img-b".into());
+        assert_eq!(s.selected_profile.as_ref().unwrap().avatar_src, None);
+        // The matching one attaches.
+        s.set_avatar_src("aa", "data:img-a".into());
+        assert_eq!(
+            s.selected_profile.as_ref().unwrap().avatar_src.as_deref(),
+            Some("data:img-a")
+        );
+        // A profile with no avatar never gets one painted on.
+        s.set_profile(MemberProfile {
+            screen_name: "bob".into(),
+            avatar_hex: None,
+            ..Default::default()
+        });
+        s.set_avatar_src("aa", "data:img-a".into());
+        assert_eq!(s.selected_profile.as_ref().unwrap().avatar_src, None);
     }
 
     #[test]

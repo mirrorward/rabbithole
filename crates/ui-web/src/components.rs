@@ -709,6 +709,7 @@ pub fn BoardView() -> impl IntoView {
                         placeholder="New thread subject\u{2026}"
                         aria-label="New thread subject"
                         prop:value=new_subject
+                        prop:disabled=move || !app.online()
                         on:input=move |ev| new_subject.set(event_target_value(&ev))
                     />
                     <textarea
@@ -716,9 +717,12 @@ pub fn BoardView() -> impl IntoView {
                         placeholder="Write the first post\u{2026}"
                         aria-label="First post body"
                         prop:value=new_body
+                        prop:disabled=move || !app.online()
                         on:input=move |ev| new_body.set(event_target_value(&ev))
                     ></textarea>
-                    <button class="rh-btn" type="submit">"Post thread"</button>
+                    <button class="rh-btn" type="submit" prop:disabled=move || !app.online()>
+                        "Post thread"
+                    </button>
                 </form>
             </section>
             <section class="rh-panel rh-reader" aria-label="Thread posts">
@@ -746,9 +750,12 @@ pub fn BoardView() -> impl IntoView {
                             placeholder="Write a reply\u{2026}"
                             aria-label="Reply body"
                             prop:value=reply_body
+                            prop:disabled=move || !app.online()
                             on:input=move |ev| reply_body.set(event_target_value(&ev))
                         ></textarea>
-                        <button class="rh-btn" type="submit">"Reply"</button>
+                        <button class="rh-btn" type="submit" prop:disabled=move || !app.online()>
+                            "Reply"
+                        </button>
                     </form>
                 </Show>
             </section>

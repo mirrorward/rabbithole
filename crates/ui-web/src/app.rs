@@ -277,13 +277,13 @@ impl AppState {
             ws.on_dm_threads(std::rc::Rc::new(move |threads| {
                 state.update(|s| s.set_dm_threads(threads))
             }));
-            ws.on_dm_history(std::rc::Rc::new(move |msgs| {
-                // Apply to the currently-selected conversation (the reply
-                // doesn't name its peer; the single ordered socket keeps this
-                // matched to the history we just requested).
+            ws.on_dm_history(std::rc::Rc::new(move |(peer, msgs)| {
+                // Apply only if this history is still for the open conversation
+                // — a late reply from a previous selection is dropped (it would
+                // otherwise briefly render another peer's private messages).
                 state.update(|s| {
-                    if let Some(id) = s.selected_dm.clone() {
-                        s.set_dm_messages(&id, msgs);
+                    if s.selected_dm.as_deref() == Some(peer.as_str()) {
+                        s.set_dm_messages(&peer, msgs);
                     }
                 })
             }));
@@ -294,17 +294,10 @@ impl AppState {
                 files.update(|f| f.apply(&event))
             }));
             ws.on_members(std::rc::Rc::new(move |members| {
-                // The directory list has no presence flag; fill `online` from
-                // the live roster.
-                state.update(|s| {
-                    let present: std::collections::HashSet<String> =
-                        s.who.iter().cloned().collect();
-                    let mut members = members;
-                    for m in &mut members {
-                        m.online = present.contains(&m.handle);
-                    }
-                    s.set_members(members);
-                })
+                // `online` is recomputed from the live roster at render time
+                // (UiState::matching_members), so presence deltas keep the
+                // directory badges fresh — no need to bake it in here.
+                state.update(|s| s.set_members(members))
             }));
             ws.on_profile(std::rc::Rc::new(move |profile| {
                 let avatar_hex = profile.avatar_hex.clone();
@@ -321,8 +314,10 @@ impl AppState {
                 #[cfg(not(target_arch = "wasm32"))]
                 let _ = avatar_hex;
             }));
-            ws.on_avatar(std::rc::Rc::new(move |data_url| {
-                state.update(|s| s.set_avatar_src(data_url))
+            ws.on_avatar(std::rc::Rc::new(move |(hex, data_url)| {
+                // Only attach if the fetched blob still belongs to the selected
+                // profile — a late reply from a previous selection is dropped.
+                state.update(|s| s.set_avatar_src(&hex, data_url))
             }));
             ws.on_notice(std::rc::Rc::new(move |route| match route {
                 crate::wire::NoticeRoute::Radio(u) => radio.update(|r| r.apply_update(u)),

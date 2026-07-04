@@ -160,7 +160,9 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
             // Optional avatar seeding: read a file, store the blob, set its id.
             let avatar_hex = match req.get("avatar_path").and_then(Value::as_str) {
                 Some(path) => {
-                    let bytes = std::fs::read(path).map_err(|e| format!("avatar: {e}"))?;
+                    let bytes = tokio::fs::read(path)
+                        .await
+                        .map_err(|e| format!("avatar: {e}"))?;
                     let blobs = shared.blobs.clone();
                     let id = tokio::task::spawn_blocking(move || blobs.put(&bytes))
                         .await

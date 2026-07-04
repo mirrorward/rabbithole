@@ -38,6 +38,7 @@
 //! for the full deferred list.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use gloo_timers::future::TimeoutFuture;
@@ -85,15 +86,17 @@ pub type PostSink = Rc<dyn Fn(Vec<crate::state::Post>)>;
 /// A sink the transport pushes the DM conversation list into.
 pub type DmThreadSink = Rc<dyn Fn(Vec<crate::state::DmThread>)>;
 /// A sink the transport pushes one conversation's message history into.
-pub type DmHistorySink = Rc<dyn Fn(Vec<crate::state::DmMessage>)>;
+pub type DmHistorySink = Rc<dyn Fn((String, Vec<crate::state::DmMessage>))>;
 /// A sink the transport pushes a live `(peer, message)` DM into.
 pub type DmReceivedSink = Rc<dyn Fn((String, crate::state::DmMessage))>;
 /// A sink the transport pushes the directory member list into.
 pub type MembersSink = Rc<dyn Fn(Vec<crate::state::Member>)>;
 /// A sink the transport pushes one member's profile card into.
 pub type ProfileSink = Rc<dyn Fn(crate::state::MemberProfile)>;
-/// A sink the transport pushes a fetched avatar `data:` URL into.
-pub type AvatarSink = Rc<dyn Fn(String)>;
+/// A sink the transport pushes a fetched avatar `(hex_id, data_url)` into. The
+/// hex lets the app confirm the blob still belongs to the selected profile
+/// (a `BlobData` reply is otherwise id-less).
+pub type AvatarSink = Rc<dyn Fn((String, String))>;
 
 /// A browser WebSocket [`EventClient`] speaking RHP.
 ///
@@ -119,10 +122,18 @@ struct Inner {
     post_sink: Option<PostSink>,
     dm_thread_sink: Option<DmThreadSink>,
     dm_history_sink: Option<DmHistorySink>,
+    /// Peers of in-flight DM-history requests, FIFO (a `DmHistory` reply is
+    /// id-less; the ordered socket answers in request order).
+    pending_dm_history: RefCell<VecDeque<String>>,
     dm_received_sink: Option<DmReceivedSink>,
     members_sink: Option<MembersSink>,
     profile_sink: Option<ProfileSink>,
     avatar_sink: Option<AvatarSink>,
+    /// Hex ids of in-flight avatar `BlobGet`s, FIFO. A `BlobData` reply carries
+    /// no id, but the single ordered socket answers in request order, so the
+    /// front hex identifies the next reply's content. `RefCell` so the onmessage
+    /// handler (which holds a shared `Inner` borrow) can pop without escalating.
+    pending_avatars: RefCell<VecDeque<String>>,
     next_id: u64,
     /// While `true`, the keepalive loop keeps pinging; cleared on close.
     alive: bool,
@@ -206,7 +217,7 @@ impl Inner {
         }
     }
 
-    fn emit_dm_history(&self, msgs: Vec<crate::state::DmMessage>) {
+    fn emit_dm_history(&self, msgs: (String, Vec<crate::state::DmMessage>)) {
         if let Some(sink) = &self.dm_history_sink {
             sink(msgs);
         }
@@ -230,9 +241,9 @@ impl Inner {
         }
     }
 
-    fn emit_avatar(&self, data_url: String) {
+    fn emit_avatar(&self, avatar: (String, String)) {
         if let Some(sink) = &self.avatar_sink {
-            sink(data_url);
+            sink(avatar);
         }
     }
 
@@ -261,10 +272,12 @@ impl WsClient {
                 post_sink: None,
                 dm_thread_sink: None,
                 dm_history_sink: None,
+                pending_dm_history: RefCell::new(VecDeque::new()),
                 dm_received_sink: None,
                 members_sink: None,
                 profile_sink: None,
                 avatar_sink: None,
+                pending_avatars: RefCell::new(VecDeque::new()),
                 next_id: 0,
                 alive: false,
                 want_connected: false,
@@ -429,6 +442,9 @@ impl WsClient {
         let mut b = self.inner.borrow_mut();
         let id = b.next_request_id();
         if let Ok(bytes) = wire::dm_history_request(peer, id).and_then(|f| encode_frame(&f)) {
+            b.pending_dm_history
+                .borrow_mut()
+                .push_back(peer.to_string());
             Self::write(&mut b, &bytes);
         }
     }
@@ -486,6 +502,9 @@ impl WsClient {
         let id = b.next_request_id();
         let frame = wire::blob_get_request(hex, id).map(|r| r.and_then(|f| encode_frame(&f)));
         if let Some(Ok(bytes)) = frame {
+            // Remember which blob this reply will carry (FIFO on the ordered
+            // socket), so the sink can confirm it still matches the selection.
+            b.pending_avatars.borrow_mut().push_back(hex.to_string());
             Self::write(&mut b, &bytes);
         }
     }
@@ -627,7 +646,12 @@ impl WsClient {
                             b.emit_dm_threads(threads);
                         }
                         if let Some(msgs) = wire::frame_to_dm_history(&frame) {
-                            b.emit_dm_history(msgs);
+                            // Pair (FIFO) with the peer it was requested for so
+                            // the app applies it only to that conversation.
+                            let peer = b.pending_dm_history.borrow_mut().pop_front();
+                            if let Some(peer) = peer {
+                                b.emit_dm_history((peer, msgs));
+                            }
                         }
                         if let Some(dm) = wire::frame_to_dm_received(&frame) {
                             b.emit_dm_received(dm);
@@ -638,10 +662,14 @@ impl WsClient {
                         if let Some(profile) = wire::frame_to_profile(&frame) {
                             b.emit_profile(profile);
                         }
-                        // A BlobData reply only follows an avatar BlobGet here;
-                        // wrap it as a data URL for the profile card.
+                        // A BlobData reply only follows an avatar BlobGet here.
+                        // Pair it (FIFO) with the hex it was requested for so the
+                        // app can confirm it still matches the selected profile.
                         if let Some(bytes) = wire::frame_to_blob(&frame) {
-                            b.emit_avatar(wire::blob_to_data_url(&bytes));
+                            let hex = b.pending_avatars.borrow_mut().pop_front();
+                            if let Some(hex) = hex {
+                                b.emit_avatar((hex, wire::blob_to_data_url(&bytes)));
+                            }
                         }
                     }
                     Err(err) => b.emit(Event::CommandFailed {

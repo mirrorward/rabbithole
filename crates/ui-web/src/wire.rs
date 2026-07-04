@@ -821,8 +821,15 @@ pub fn file_command_to_frame(
 /// message type, produce an empty vector — matching the "tolerate unknown
 /// messages" contract.
 pub fn frame_to_file_events(frame: &Frame) -> Vec<FileEvent> {
+    // An error reply preserves its request's family, so only surface FILE-family
+    // errors here — otherwise an error to any other request (directory, board,
+    // …) would also pollute the file panel (the generic api-event sink already
+    // reports it as `CommandFailed`).
     if let Some(code) = frame.error {
-        return vec![FileEvent::Failed(format!("server error: {code:?}"))];
+        if frame.family == rabbithole_proto::Family::FILE {
+            return vec![FileEvent::Failed(format!("server error: {code:?}"))];
+        }
+        return Vec::new();
     }
     if let Some(Ok(m)) = frame.decode::<AreaList>() {
         return vec![FileEvent::AreasListed(m.areas)];
