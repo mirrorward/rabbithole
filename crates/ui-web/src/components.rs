@@ -26,6 +26,15 @@ use crate::syndication_admin::FeedsStatus;
 use crate::theme_css::{mode_label, pack_label};
 use crate::theme_editor::{contrast_warnings, EditorAction, EditorState};
 
+/// Strip a `ws://`/`wss://` endpoint down to a readable `host:port` for chips.
+fn endpoint_host(endpoint: &str) -> String {
+    endpoint
+        .trim_start_matches("wss://")
+        .trim_start_matches("ws://")
+        .trim_end_matches('/')
+        .to_string()
+}
+
 /// Appearance picker: a pack button cycling Clean → Retro → High Contrast and
 /// a mode button cycling System → Light → Dark. Together they cover the full
 /// pack × mode grid; the combined choice is persisted to `localStorage` and
@@ -646,17 +655,27 @@ pub fn Toasts() -> impl IntoView {
 pub fn Login() -> impl IntoView {
     let app = expect_context::<AppState>();
     let navigate = use_navigate();
-    // Prefill the endpoint if the server browser picked one, then clear it.
+    // Reconnect-on-launch: the burrows you've signed into before (endpoint +
+    // handle only). The most recent seeds the form; all appear as quick chips.
+    #[cfg(target_arch = "wasm32")]
+    let recent = crate::recent::load();
+    #[cfg(not(target_arch = "wasm32"))]
+    let recent: Vec<crate::recent::RecentBurrow> = Vec::new();
+    let last = recent.first().cloned();
+    // Prefill the endpoint: the server browser's pick wins, else the last burrow,
+    // else the local default.
     let endpoint = create_rw_signal(
         app.pending_endpoint
             .get_untracked()
+            .or_else(|| last.as_ref().map(|b| b.endpoint.clone()))
             .unwrap_or_else(|| "ws://localhost:9000".to_string()),
     );
     app.pending_endpoint.set(None);
-    let handle = create_rw_signal(String::new());
+    let handle = create_rw_signal(last.as_ref().map(|b| b.handle.clone()).unwrap_or_default());
     let password = create_rw_signal(String::new());
     // Opt in to a real RHP-over-WebSocket session instead of the seeded demo.
-    let go_live = create_rw_signal(false);
+    // Default to live when we have a burrow to reconnect to.
+    let go_live = create_rw_signal(last.is_some());
 
     let connect = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
@@ -722,6 +741,26 @@ pub fn Login() -> impl IntoView {
         <main id=a11y::MAIN_ID tabindex="-1">
             <form class="rh-login" on:submit=connect>
                 <h1 id=a11y::VIEW_TITLE_ID tabindex="-1">"RabbitHole"</h1>
+                {(!recent.is_empty()).then(|| view! {
+                    <div class="rh-recent" role="group" aria-label="Recent burrows">
+                        <span class="rh-recent-label">"Recent"</span>
+                        {recent.into_iter().map(|b| {
+                            let (ep, h) = (b.endpoint.clone(), b.handle.clone());
+                            let label = format!("{} @ {}", b.handle, endpoint_host(&b.endpoint));
+                            view! {
+                                <button
+                                    type="button"
+                                    class="rh-recent-chip"
+                                    on:click=move |_| {
+                                        endpoint.set(ep.clone());
+                                        handle.set(h.clone());
+                                        go_live.set(true);
+                                    }
+                                >{label}</button>
+                            }
+                        }).collect_view()}
+                    </div>
+                })}
                 <label for=a11y::LOGIN_SERVER_ID>"Server"</label>
                 <input
                     id=a11y::LOGIN_SERVER_ID

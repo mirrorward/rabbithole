@@ -389,6 +389,10 @@ impl AppState {
         let session_name = self.focused().name;
         let presence = self.presence;
         let ws_sv = self.focused().ws;
+        // Remembered on a *successful* connect so the login screen can offer
+        // one-tap reconnect next launch (endpoint + handle only; never the pw).
+        let remember_endpoint = endpoint.clone();
+        let remember_login = login.clone();
         self.focused().ws.update_value(|ws| {
             ws.on_event(std::rc::Rc::new(move |event| {
                 if let Event::Connected { server_name, .. } = &event {
@@ -397,6 +401,7 @@ impl AppState {
                     if !name.is_empty() {
                         session_name.set(Some(name.clone()));
                     }
+                    crate::recent::remember(&remember_endpoint, &remember_login);
                     toasts.update(|q| {
                         q.push(
                             crate::toasts::ToastKind::Success,

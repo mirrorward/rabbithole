@@ -266,6 +266,10 @@ pub const STYLESHEET: &str = "\
 .rh-people{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}\
 .rh-person{display:flex;align-items:center;gap:.6rem;padding:.5rem .3rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\
 .rh-person-name{font-weight:600}\
+.rh-recent{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin:.2rem 0 .4rem}\
+.rh-recent-label{font-size:var(--rh-font-xs,.72rem);text-transform:uppercase;letter-spacing:.04em;color:var(--rh-muted)}\
+.rh-recent-chip{border:1px solid color-mix(in srgb,var(--rh-accent) 30%,transparent);background:color-mix(in srgb,var(--rh-accent) 8%,transparent);color:var(--rh-text);border-radius:999px;padding:.15rem .6rem;font-size:var(--rh-font-sm);cursor:pointer;font-family:inherit}\
+.rh-recent-chip:hover{background:color-mix(in srgb,var(--rh-accent) 16%,transparent)}\
 .rh-welcome{margin:.75rem;padding:.85rem 1rem;border:1px solid color-mix(in srgb,var(--rh-accent) 35%,transparent);border-left:3px solid var(--rh-accent);border-radius:var(--rh-radius,8px);background:color-mix(in srgb,var(--rh-accent) 7%,var(--rh-bg));box-shadow:0 1px 3px rgba(0,0,0,.06)}\
 .rh-welcome-head{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem}\
 .rh-welcome-title{font-weight:700;letter-spacing:.01em}\
