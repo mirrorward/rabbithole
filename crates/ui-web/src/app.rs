@@ -183,6 +183,31 @@ impl AppState {
         self.focused_id.set(id.clone());
     }
 
+    /// Ensure a distinct session exists for the live server at `endpoint` and
+    /// focus it, keeping the offline "local" demo session (and any other
+    /// burrows) intact. The rail then shows a tile for it; the reactive remount
+    /// in [`App`] swaps the place to this session's signals.
+    #[cfg(target_arch = "wasm32")]
+    fn ensure_session(&self, endpoint: &str) {
+        let id = ServerId(endpoint.to_string());
+        let exists = self
+            .sessions
+            .with_untracked(|list| list.iter().any(|(sid, _)| *sid == id));
+        if !exists {
+            let session = Session {
+                state: create_rw_signal(UiState::default()),
+                files: create_rw_signal(FilesState::default()),
+                is_admin: create_rw_signal(false),
+                live: create_rw_signal(false),
+                server_theme: create_rw_signal(None),
+                ws: store_value(crate::ws::WsClient::new()),
+                client: store_value(MockClient::new()),
+            };
+            self.sessions.update(|list| list.push((id.clone(), session)));
+        }
+        self.focused_id.set(id);
+    }
+
     /// The effective appearance [`Mode`], resolved from the user's
     /// [`ThemeChoice`] and the OS `prefers-color-scheme` hint. Reactive on the
     /// theme signal.
@@ -271,6 +296,10 @@ impl AppState {
     pub fn connect_live(&self, endpoint: String, login: String, password: String) {
         use crate::wire::EventClient;
         use rabbithole_core::api::{Command, Event};
+        // Give this live server its own session (keyed by endpoint) + focus it,
+        // so the offline demo and any other burrows stay put. Everything below
+        // then binds to the new session via `self.focused()`.
+        self.ensure_session(&endpoint);
         let state = self.focused().state;
         let toasts = self.toasts;
         let radio = self.radio;
@@ -1095,19 +1124,28 @@ pub fn App() -> impl IntoView {
                 <div class="rh-shell">
                     <BurrowRail/>
                     <div class="rh-shell-main">
-                <Routes>
-                    <Route path="/" view=Login/>
-                    <Route path="/lobby" view=Lobby/>
-                    <Route path="/boards" view=Boards/>
-                    <Route path="/boards/:slug" view=BoardView/>
-                    <Route path="/dms" view=Dms/>
-                    <Route path="/directory" view=Directory/>
-                    <Route path="/files" view=Files/>
-                    <Route path="/radio" view=Radio/>
-                    <Route path="/servers" view=ServerBrowser/>
-                    <Route path="/art" view=ArtGallery/>
-                    <Route path="/admin" view=Admin/>
-                </Routes>
+                        {move || {
+                            // Remount the place when the focused burrow changes,
+                            // so each view re-binds the newly-focused session's
+                            // signals. The URL is unchanged (it lives on <Router>),
+                            // so the same route re-renders against the new session.
+                            let _ = app.focused_id.get();
+                            view! {
+                                <Routes>
+                                    <Route path="/" view=Login/>
+                                    <Route path="/lobby" view=Lobby/>
+                                    <Route path="/boards" view=Boards/>
+                                    <Route path="/boards/:slug" view=BoardView/>
+                                    <Route path="/dms" view=Dms/>
+                                    <Route path="/directory" view=Directory/>
+                                    <Route path="/files" view=Files/>
+                                    <Route path="/radio" view=Radio/>
+                                    <Route path="/servers" view=ServerBrowser/>
+                                    <Route path="/art" view=ArtGallery/>
+                                    <Route path="/admin" view=Admin/>
+                                </Routes>
+                            }
+                        }}
                     </div>
                 </div>
             </div>
