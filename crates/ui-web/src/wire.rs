@@ -796,6 +796,71 @@ pub enum FileEvent {
     Failed(String),
 }
 
+/// The swarm work-unit size, mirroring `rabbithole_swarm::UNIT_SIZE` (1 MiB).
+/// Used to turn a per-unit progress event into a byte-ranged [`FileEvent`].
+const SWARM_UNIT_SIZE: u64 = 1024 * 1024;
+
+/// The native swarm progress event, as it arrives over the Tauri `swarm://event`
+/// bridge — the wasm mirror of `rabbithole-desktop`'s `SwarmEvent` (flattened with
+/// its `transfer_id`). Kept in lockstep with that crate's `serializes_to_the_wire_contract`
+/// test; if the tag/fields change there, they change here.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SwarmWireEvent {
+    /// Sources resolved; the fetch is starting.
+    Opened {
+        transfer_id: u64,
+        total_units: u64,
+        source_count: u64,
+    },
+    /// One verified unit landed from a source.
+    Chunk {
+        transfer_id: u64,
+        offset: u64,
+        done_units: u64,
+        total_units: u64,
+    },
+    /// The fetch finished.
+    Done {
+        transfer_id: u64,
+        bytes: u64,
+        per_source: Vec<(String, u64)>,
+    },
+}
+
+/// Translate a native [`SwarmWireEvent`] into the [`FileEvent`]s that drive the
+/// same `FilesState` reducer the WebSocket path uses — so the Transfers UI is
+/// identical whether bytes arrive over WS or the in-process swarm. `size` is the
+/// file's byte length (known when the download starts). Pure — host-tested.
+pub fn swarm_event_to_file_events(ev: &SwarmWireEvent, size: u64) -> Vec<FileEvent> {
+    match ev {
+        SwarmWireEvent::Opened { transfer_id, .. } => vec![FileEvent::TransferOpened {
+            transfer_id: *transfer_id,
+            size,
+            server_have: 0,
+        }],
+        SwarmWireEvent::Chunk {
+            transfer_id,
+            offset,
+            done_units,
+            total_units,
+        } => {
+            // Each unit is SWARM_UNIT_SIZE except a short final one; its byte
+            // offset comes straight through, so the reducer dedups + accumulates
+            // exactly as for a ranged WS transfer.
+            let len = SWARM_UNIT_SIZE.min(size.saturating_sub(*offset)) as usize;
+            vec![FileEvent::ChunkReceived {
+                transfer_id: *transfer_id,
+                offset: *offset,
+                last: done_units >= total_units,
+                len,
+            }]
+        }
+        // Completion already rode in on the final Chunk's `last` flag.
+        SwarmWireEvent::Done { .. } => Vec::new(),
+    }
+}
+
 /// Map a [`FileCommand`] to the FILE-family request [`Frame`] that carries it.
 pub fn file_command_to_frame(
     command: &FileCommand,
@@ -1119,6 +1184,87 @@ mod tests {
     use rabbithole_proto::frame::{Family, FrameKind};
     use rabbithole_proto::presence::{UserSummary, WhoList};
     use rabbithole_proto::{encode_frame, ErrorCode};
+
+    #[test]
+    fn swarm_events_deserialize_and_map_to_file_events() {
+        // Deserialize the exact JSON the native bridge emits (transfer_id flattened
+        // in with the tag), then map to the reducer's FileEvents.
+        let size = 3 * 1024 * 1024 + 17; // four units
+
+        let opened: SwarmWireEvent = serde_json::from_str(
+            r#"{"kind":"opened","transfer_id":7,"total_units":4,"source_count":3}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            swarm_event_to_file_events(&opened, size),
+            vec![FileEvent::TransferOpened {
+                transfer_id: 7,
+                size,
+                server_have: 0
+            }]
+        );
+
+        // A middle unit: full 1 MiB, not the last.
+        let chunk: SwarmWireEvent = serde_json::from_str(
+            r#"{"kind":"chunk","transfer_id":7,"offset":1048576,"done_units":2,"total_units":4}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            swarm_event_to_file_events(&chunk, size),
+            vec![FileEvent::ChunkReceived {
+                transfer_id: 7,
+                offset: 1048576,
+                last: false,
+                len: 1024 * 1024,
+            }]
+        );
+
+        // The final unit: short remainder, and `last` set.
+        let tail_offset = 3 * 1024 * 1024;
+        let last: SwarmWireEvent = serde_json::from_str(&format!(
+            r#"{{"kind":"chunk","transfer_id":7,"offset":{tail_offset},"done_units":4,"total_units":4}}"#
+        ))
+        .unwrap();
+        let mapped = swarm_event_to_file_events(&last, size);
+        assert_eq!(
+            mapped,
+            vec![FileEvent::ChunkReceived {
+                transfer_id: 7,
+                offset: tail_offset,
+                last: true,
+                len: 17,
+            }]
+        );
+
+        // Done carries no further progress (the last Chunk completed it).
+        let done: SwarmWireEvent = serde_json::from_str(
+            r#"{"kind":"done","transfer_id":7,"bytes":3145745,"per_source":[["127.0.0.1:9000",3]]}"#,
+        )
+        .unwrap();
+        assert!(swarm_event_to_file_events(&done, size).is_empty());
+
+        // The whole sequence — Opened then every unit — drives a Transfer to
+        // 100% through the real reducer, exactly as a WS ranged transfer would.
+        let mut st = crate::files::FilesState::default();
+        for fe in swarm_event_to_file_events(&opened, size) {
+            st.apply(&fe);
+        }
+        for i in 0..4u64 {
+            let offset = i * 1024 * 1024;
+            let unit = SwarmWireEvent::Chunk {
+                transfer_id: 7,
+                offset,
+                done_units: i + 1,
+                total_units: 4,
+            };
+            for fe in swarm_event_to_file_events(&unit, size) {
+                st.apply(&fe);
+            }
+        }
+        let t = st.transfers.iter().find(|t| t.id == 7).expect("transfer created");
+        assert_eq!(t.done, size, "reassembled progress reaches full size");
+        assert_eq!(t.status, crate::files::TransferStatus::Done);
+    }
 
     #[test]
     fn connect_and_disconnect_have_no_frame() {
