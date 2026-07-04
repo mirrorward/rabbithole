@@ -68,10 +68,10 @@ pub struct Session {
 /// Reactive, `Copy` handle bundle shared through context.
 #[derive(Clone, Copy)]
 pub struct AppState {
-    /// Every connected burrow, insertion-ordered, keyed by [`ServerId`]. For
-    /// Wave A there is exactly one, so the single-server experience is unchanged;
-    /// the rail (Wave B) renders this list.
-    sessions: StoredValue<Vec<(ServerId, Session)>>,
+    /// Every connected burrow, insertion-ordered, keyed by [`ServerId`]. The
+    /// burrow rail renders this list; a reactive signal so adding/removing a
+    /// session re-renders the rail.
+    sessions: RwSignal<Vec<(ServerId, Session)>>,
     /// Which session's "place" is currently in the main pane.
     focused_id: RwSignal<ServerId>,
     /// The web-admin model, folded from admin events.
@@ -127,7 +127,7 @@ impl AppState {
             client: store_value(MockClient::new()),
         };
         Self {
-            sessions: store_value(vec![(ServerId::local(), session)]),
+            sessions: create_rw_signal(vec![(ServerId::local(), session)]),
             focused_id: create_rw_signal(ServerId::local()),
             admin: create_rw_signal(AdminState::default()),
             syndication: create_rw_signal(SynAdminState::default()),
@@ -151,12 +151,36 @@ impl AppState {
     /// session and focus never changes; Wave B makes focus reactive + switchable.
     pub fn focused(&self) -> Session {
         let id = self.focused_id.get_untracked();
-        self.sessions.with_value(|list| {
+        self.sessions.with_untracked(|list| {
             list.iter()
                 .find(|(sid, _)| *sid == id)
                 .map(|(_, session)| *session)
                 .expect("the focused session is always present")
         })
+    }
+
+    /// The connected burrows for the rail: `(id, label, is_focused)`, reactive
+    /// over the session list + the focus. The label is the server's display
+    /// name once known, else a short form of its id.
+    pub fn burrow_tiles(&self) -> Vec<(ServerId, String, bool)> {
+        let focused = self.focused_id.get();
+        self.sessions.with(|list| {
+            list.iter()
+                .map(|(id, session)| {
+                    let name = session
+                        .server_theme
+                        .with(|t| t.as_ref().map(|o| o.name.clone()))
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| server_label(id));
+                    (id.clone(), name, *id == focused)
+                })
+                .collect()
+        })
+    }
+
+    /// Focus a connected burrow (switch which place is in the main pane).
+    pub fn focus(&self, id: &ServerId) {
+        self.focused_id.set(id.clone());
     }
 
     /// The effective appearance [`Mode`], resolved from the user's
@@ -962,6 +986,20 @@ impl AppState {
 
 /// The theme choice a fresh session starts with: the persisted choice on the
 /// browser, else the default (follow-OS).
+/// A short human label for a burrow rail tile before its server name is known.
+/// The offline demo session reads as "Demo"; a live session falls back to the
+/// host of its dial endpoint.
+fn server_label(id: &ServerId) -> String {
+    if id.0 == "local" {
+        return "Demo".to_string();
+    }
+    let host = id
+        .0
+        .trim_start_matches("ws://")
+        .trim_start_matches("wss://");
+    host.split(['/', ':']).next().unwrap_or(host).to_string()
+}
+
 fn initial_theme_choice() -> ThemeChoice {
     #[cfg(target_arch = "wasm32")]
     {
@@ -1054,6 +1092,9 @@ pub fn App() -> impl IntoView {
                 <RouteFocus/>
                 <CommandPalette/>
                 <Toasts/>
+                <div class="rh-shell">
+                    <BurrowRail/>
+                    <div class="rh-shell-main">
                 <Routes>
                     <Route path="/" view=Login/>
                     <Route path="/lobby" view=Lobby/>
@@ -1067,8 +1108,79 @@ pub fn App() -> impl IntoView {
                     <Route path="/art" view=ArtGallery/>
                     <Route path="/admin" view=Admin/>
                 </Routes>
+                    </div>
+                </div>
             </div>
         </Router>
+    }
+}
+
+/// The persistent left **burrow rail** — the warren-layer switcher. Renders the
+/// unified home mark, the connected burrow tiles (accent-tinted squircles), and
+/// an "add a burrow" affordance into the Looking Glass. Hidden on the login /
+/// connect screen (route `/`), which is a full-bleed form. This is the shell's
+/// server-switcher; Wave B slice 2 makes focus reactive so switching a tile
+/// swaps the place in the main pane.
+#[component]
+fn BurrowRail() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let location = leptos_router::use_location();
+    let navigate = leptos_router::use_navigate();
+    // Hidden on the login/connect screen (route `/`), a full-bleed form.
+    let hidden = move || location.pathname.get() == "/";
+
+    let go_home = {
+        let navigate = navigate.clone();
+        move |_| navigate("/lobby", Default::default())
+    };
+    let go_add = {
+        let navigate = navigate.clone();
+        move |_| navigate("/servers", Default::default())
+    };
+
+    view! {
+        <nav class="rh-rail" class:rh-rail-hidden=hidden aria-label="Burrows">
+            <button class="rh-rail-tile rh-rail-home" title="Home" aria-label="Home" on:click=go_home>
+                <span class="rh-rail-hole" aria-hidden="true"></span>
+            </button>
+            <div class="rh-rail-sep"></div>
+            <For
+                each=move || app.burrow_tiles()
+                key=|(id, _, focused)| (id.0.clone(), *focused)
+                children=move |(id, name, focused)| {
+                    let glyph = name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                    let cls = if focused {
+                        "rh-rail-tile rh-rail-server active"
+                    } else {
+                        "rh-rail-tile rh-rail-server"
+                    };
+                    let nav = navigate.clone();
+                    let click_id = id.clone();
+                    view! {
+                        <button
+                            class=cls
+                            title=name.clone()
+                            aria-label=name
+                            aria-current=move || focused.then_some("true")
+                            on:click=move |_| {
+                                app.focus(&click_id);
+                                nav("/lobby", Default::default());
+                            }
+                        >
+                            {glyph}
+                        </button>
+                    }
+                }
+            />
+            <button
+                class="rh-rail-tile rh-rail-add"
+                title="Add a burrow"
+                aria-label="Add a burrow"
+                on:click=go_add
+            >
+                "+"
+            </button>
+        </nav>
     }
 }
 

@@ -246,6 +246,18 @@ pub mod storage {
 pub const STYLESHEET: &str = "\
 *{box-sizing:border-box}\
 .rh-app{font-family:var(--rh-font-sans);font-size:var(--rh-font-size);line-height:1.5;color:var(--rh-text);background-color:var(--rh-bg);background-image:var(--rh-bg-image);min-height:100vh;display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}\
+.rh-shell{flex:1;display:flex;min-height:0}\
+.rh-shell-main{flex:1;min-width:0;display:flex;flex-direction:column}\
+.rh-rail{flex:none;width:3.4rem;display:flex;flex-direction:column;align-items:center;gap:var(--rh-space-2);padding:var(--rh-space-3) 0;background:color-mix(in srgb,var(--rh-accent) 6%,var(--rh-surface));border-right:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
+.rh-rail-hidden{display:none}\
+.rh-rail-tile{width:40px;height:40px;display:grid;place-items:center;border:0;padding:0;cursor:pointer;border-radius:12px;background:color-mix(in srgb,var(--rh-text) 5%,transparent);color:var(--rh-muted);font-family:var(--rh-font-sans);font-weight:700;font-size:.95rem;position:relative}\
+.rh-rail-tile:hover{color:var(--rh-text)}\
+.rh-rail-home,.rh-rail-add{border-radius:var(--rh-radius-full)}\
+.rh-rail-server{color:var(--rh-text);background:color-mix(in srgb,var(--rh-accent) 16%,var(--rh-surface));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--rh-accent) 30%,transparent)}\
+.rh-rail-server.active::before{content:\"\";position:absolute;left:-9px;top:8px;bottom:8px;width:3px;border-radius:3px;background:var(--rh-accent)}\
+.rh-rail-add{color:var(--rh-muted);background:transparent;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--rh-text) 12%,transparent);font-size:1.15rem}\
+.rh-rail-sep{width:22px;height:1px;background:color-mix(in srgb,var(--rh-text) 10%,transparent)}\
+.rh-rail-hole{width:22px;height:22px;border-radius:50%;background:radial-gradient(circle at 50% 52%,var(--rh-surface) 0 16%,var(--rh-accent) 16% 30%,var(--rh-surface) 30% 46%,color-mix(in srgb,var(--rh-accent) 55%,var(--rh-surface)) 46% 64%,var(--rh-surface) 64% 100%);box-shadow:0 0 0 1px color-mix(in srgb,var(--rh-accent) 35%,transparent)}\
 :focus-visible{outline:2px solid var(--rh-focus);outline-offset:2px}\
 .rh-visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}\
 .rh-skip{position:fixed;left:-999rem;top:var(--rh-space-2);z-index:99;background:var(--rh-accent);color:var(--rh-bg);padding:var(--rh-space-2) var(--rh-space-3);border-radius:var(--rh-radius);text-decoration:none;font-weight:600;box-shadow:var(--rh-shadow-2)}\
