@@ -9,9 +9,12 @@ use rabbithole_core::{Client, ClientError};
 use rabbithole_proto::swarm::SourceList;
 use rabbithole_swarm::{fetch_swarm_resumable_with_progress, FetchReport, SourcePeer, UNIT_SIZE};
 
-/// A download's lifecycle, surfaced to the caller (and, in Slice 4, forwarded
-/// over Tauri IPC to the ui-web Transfers manager as the swarm fills).
-#[derive(Debug, Clone)]
+/// A download's lifecycle, surfaced to the caller and forwarded over Tauri IPC
+/// to the ui-web Transfers manager as the swarm fills. The JSON shape (an
+/// internally-tagged `kind` + snake_case fields) is the wire contract the wasm
+/// SPA deserializes; it's locked by a host test (`serializes_to_the_wire_contract`).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SwarmEvent {
     /// Sources resolved; the fetch is starting.
     Opened { total_units: u64, source_count: usize },
@@ -178,6 +181,39 @@ mod tests {
     fn no_dialable_peers_yields_empty_sources() {
         let list = SourceList::new([7; 32], true, 4096, vec![coordinator_only("bob", 4096)]);
         assert!(sources_from_list(&list).is_empty(), "coordinator-only -> origin fallback");
+    }
+
+    #[test]
+    fn serializes_to_the_wire_contract() {
+        // The exact JSON the ui-web SPA deserializes. If this changes, the
+        // wasm-side `SwarmEvent` mirror + `swarm_event_to_file_events` must too.
+        let chunk = SwarmEvent::Chunk {
+            endpoint: "127.0.0.1:9000".into(),
+            offset: 1048576,
+            done_units: 2,
+            total_units: 4,
+        };
+        let v: serde_json::Value = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(v["kind"], "chunk");
+        assert_eq!(v["endpoint"], "127.0.0.1:9000");
+        assert_eq!(v["offset"], 1048576);
+        assert_eq!(v["done_units"], 2);
+        assert_eq!(v["total_units"], 4);
+
+        let opened = SwarmEvent::Opened {
+            total_units: 4,
+            source_count: 3,
+        };
+        assert_eq!(serde_json::to_value(&opened).unwrap()["kind"], "opened");
+
+        let done = SwarmEvent::Done {
+            bytes: 4_000_000,
+            per_source: vec![("127.0.0.1:9000".into(), 3), ("127.0.0.1:9001".into(), 1)],
+        };
+        let dv = serde_json::to_value(&done).unwrap();
+        assert_eq!(dv["kind"], "done");
+        assert_eq!(dv["bytes"], 4_000_000);
+        assert_eq!(dv["per_source"][0][1], 3);
     }
 
     #[test]

@@ -23,6 +23,8 @@
 
 /// Source discovery + multi-source swarm download orchestration (Tauri-free).
 pub mod swarm;
+/// The Tauri command + event surface wrapping the swarm core.
+pub mod transfers;
 
 /// Injected before the SPA loads: expose a minimal native bridge over Tauri's
 /// low-level internals (present regardless of `withGlobalTauri`), then self-test
@@ -65,7 +67,13 @@ pub fn run() {
     use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ping])
+        .manage(transfers::TransfersManager::default())
+        .invoke_handler(tauri::generate_handler![
+            ping,
+            transfers::native_available,
+            transfers::connect_native,
+            transfers::swarm_start_download,
+        ])
         .setup(|app| {
             // Build the main window in Rust so it carries the native-bridge init
             // script (config `app.windows` is empty so this is the only window).
