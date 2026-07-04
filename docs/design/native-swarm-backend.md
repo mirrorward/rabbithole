@@ -78,6 +78,31 @@ UNIT_SIZE = 1 MiB · PEER_REQUEST_MAX = 4 MiB · Bao block = 16 KiB
   `AppState::download` on the runtime `native_available()`. The native listener reuses the existing
   `files.update(|f| f.apply(&event))` closure verbatim — **zero view/reducer forks.**
 
+## Verifying Slice 3 (the IPC spike) — needs a GUI
+
+Slice 3 is the one piece that can't be verified headlessly. To confirm the round-trip:
+
+```
+cd apps/desktop
+cargo tauri dev            # opens the RabbitHole window on your screen
+```
+
+Then open the webview devtools (right-click → Inspect, or the app menu) and watch the
+**console**. The `NATIVE_SHIM` init script self-tests both directions; you should see:
+
+```
+[rh-native] invoke ping -> pong: slice-3        # JS -> Rust command works
+[rh-native] listening for test://tick
+[rh-native] event test://tick -> hello from the native core   # Rust -> JS event works (~1s after launch)
+```
+
+Also confirm `window.__RH_IS_NATIVE__ === true` and `window.__TAURI__ === undefined` (the
+global stayed off; only the low-level internals bridge is used). If `listen` errors, the
+`plugin:event|listen` payload shape or the `core:event` capability needs adjustment — the
+`invoke` line proves the core IPC regardless, and the fix is localized to the shim.
+Once both lines print, the last non-headless unknown is retired and Slices 4b/5 (the real
+swarm command surface + ui-web `TransferBackend`) proceed on proven ground.
+
 ## Deferred (explicitly)
 
 Per-unit Bao verify-error surfacing (roster health column); per-`SourcePeer` token scheduler

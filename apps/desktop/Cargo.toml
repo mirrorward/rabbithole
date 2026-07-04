@@ -38,7 +38,7 @@ rabbithole-swarm = { path = "../../crates/swarm" }
 # The native RHP client (connect + swarm_find/swarm_ticket): source discovery.
 rabbithole-core = { path = "../../crates/core", features = ["native"] }
 rabbithole-proto = { path = "../../crates/proto" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]
 rabbithole-identity = { path = "../../crates/identity" }
