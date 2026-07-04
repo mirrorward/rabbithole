@@ -27,21 +27,58 @@ use crate::syndication_admin::SynAdminState;
 use crate::theme_css::{next_mode, next_pack, resolve_root_style, ThemeChoice, STYLESHEET};
 use crate::wire::{AdminCommand, AdminEvent, FileCommand, FileEvent, NoticeRoute};
 
+/// Identifies one connected burrow (a live server session). For now the initial
+/// session is [`ServerId::local`]; live sessions will key on their normalized
+/// dial endpoint (see `docs/design/client-experience.md`, the WarrenState refactor).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ServerId(pub String);
+
+impl ServerId {
+    /// The id of the initial (offline/mock, or first-connected) session.
+    pub fn local() -> Self {
+        ServerId("local".to_string())
+    }
+}
+
+/// One server session's per-connection reactive state. `Copy` (a bundle of
+/// signal handles), so [`AppState::focused`] can hand it out by value. The
+/// warren shell (identity, People, Transfers, toasts, palette, theme choice)
+/// lives above this on [`AppState`]; each burrow you're connected to is a
+/// `Session`.
+#[derive(Clone, Copy)]
+pub struct Session {
+    /// The flat UI model for this server, folded from its events.
+    pub state: RwSignal<UiState>,
+    /// This server's file-library model.
+    pub files: RwSignal<FilesState>,
+    /// Whether this session holds an admin capability on its server.
+    pub is_admin: RwSignal<bool>,
+    /// Whether this session is **live** (a real RHP-over-WebSocket transport)
+    /// rather than the seeded [`MockClient`] demo.
+    pub live: RwSignal<bool>,
+    /// This server's published theme overlay (PLAN §9.11), if any.
+    pub server_theme: RwSignal<Option<ServerOverlay>>,
+    /// This server's live browser WebSocket transport. wasm-only.
+    #[cfg(target_arch = "wasm32")]
+    ws: StoredValue<crate::ws::WsClient>,
+    /// This session's command seam. `MockClient` today; a real transport later.
+    client: StoredValue<MockClient>,
+}
+
 /// Reactive, `Copy` handle bundle shared through context.
 #[derive(Clone, Copy)]
 pub struct AppState {
-    /// The flat UI model, folded from events.
-    pub state: RwSignal<UiState>,
-    /// The file-library model, folded from file events.
-    pub files: RwSignal<FilesState>,
+    /// Every connected burrow, insertion-ordered, keyed by [`ServerId`]. For
+    /// Wave A there is exactly one, so the single-server experience is unchanged;
+    /// the rail (Wave B) renders this list.
+    sessions: StoredValue<Vec<(ServerId, Session)>>,
+    /// Which session's "place" is currently in the main pane.
+    focused_id: RwSignal<ServerId>,
     /// The web-admin model, folded from admin events.
     pub admin: RwSignal<AdminState>,
     /// The Syndication & Gateways panel model, folded from paired config
     /// get/set replies ([`crate::syndication_admin`]).
     pub syndication: RwSignal<SynAdminState>,
-    /// Whether the signed-in session holds an admin capability. Gates the admin
-    /// nav entry and routes.
-    pub is_admin: RwSignal<bool>,
     /// Whether the ⌘K command palette overlay is open. Shared so both the
     /// header affordance and the global key binding drive the one overlay.
     pub palette_open: RwSignal<bool>,
@@ -53,14 +90,6 @@ pub struct AppState {
     /// Transient toast notifications — humanized-event moments
     /// ([`crate::toasts`]).
     pub toasts: RwSignal<crate::toasts::ToastQueue>,
-    /// Whether this session is **live** (a real RHP-over-WebSocket transport)
-    /// rather than the seeded [`MockClient`] demo. Set by
-    /// [`AppState::connect_live`].
-    pub live: RwSignal<bool>,
-    /// The live browser WebSocket transport ([`crate::ws::WsClient`]), used
-    /// when [`Self::live`] is set. wasm-only — the host has no socket.
-    #[cfg(target_arch = "wasm32")]
-    ws: StoredValue<crate::ws::WsClient>,
     /// The user's appearance choice: theme pack (Clean/Retro/HighContrast)
     /// plus mode policy (System/Light/Dark). The effective [`Mode`] is
     /// derived from this plus the OS hint via [`AppState::mode`].
@@ -70,10 +99,6 @@ pub struct AppState {
     /// still applies). Session-local and unpersisted — Apply is a preview,
     /// not a save.
     pub custom_pack: RwSignal<Option<PackTokens>>,
-    /// The server-published theme overlay (PLAN §9.11), when the connected
-    /// burrow ships one. Layered on top of the chosen pack (below the editor's
-    /// custom slot) unless the user has disabled server theming.
-    pub server_theme: RwSignal<Option<ServerOverlay>>,
     /// The user's opt-out of server theming (persisted). `true` = ignore any
     /// server overlay and render the user's own pack/mode choice only.
     pub server_theme_disabled: RwSignal<bool>,
@@ -82,8 +107,6 @@ pub struct AppState {
     /// The user's radio player preferences (enable/volume/mute/station plus
     /// the Icecast delivery address), persisted to `localStorage`.
     pub radio_prefs: RwSignal<RadioPrefs>,
-    /// The command seam. `MockClient` today; a real transport later.
-    pub client: StoredValue<MockClient>,
     /// The wasm-only `<audio>` element wrapper the preference setters keep in
     /// sync ([`crate::player`]). Absent on the host, where there is no DOM.
     #[cfg(target_arch = "wasm32")]
@@ -93,29 +116,47 @@ pub struct AppState {
 impl AppState {
     /// Create the shared state for a fresh session.
     pub fn new() -> Self {
-        Self {
+        let session = Session {
             state: create_rw_signal(UiState::default()),
             files: create_rw_signal(FilesState::default()),
+            is_admin: create_rw_signal(false),
+            live: create_rw_signal(false),
+            server_theme: create_rw_signal(None),
+            #[cfg(target_arch = "wasm32")]
+            ws: store_value(crate::ws::WsClient::new()),
+            client: store_value(MockClient::new()),
+        };
+        Self {
+            sessions: store_value(vec![(ServerId::local(), session)]),
+            focused_id: create_rw_signal(ServerId::local()),
             admin: create_rw_signal(AdminState::default()),
             syndication: create_rw_signal(SynAdminState::default()),
-            is_admin: create_rw_signal(false),
             palette_open: create_rw_signal(false),
             servers: create_rw_signal(crate::servers::sample_directory()),
             pending_endpoint: create_rw_signal(None),
             toasts: create_rw_signal(crate::toasts::ToastQueue::default()),
-            live: create_rw_signal(false),
-            #[cfg(target_arch = "wasm32")]
-            ws: store_value(crate::ws::WsClient::new()),
             theme: create_rw_signal(initial_theme_choice()),
             custom_pack: create_rw_signal(None),
-            server_theme: create_rw_signal(None),
             server_theme_disabled: create_rw_signal(initial_server_theme_disabled()),
             radio: create_rw_signal(RadioState::default()),
             radio_prefs: create_rw_signal(initial_radio_prefs()),
-            client: store_value(MockClient::new()),
             #[cfg(target_arch = "wasm32")]
             player: store_value(crate::player::RadioPlayer::new()),
         }
+    }
+
+    /// The session whose "place" is currently in the main pane. `Copy`, so
+    /// callers use `app.focused().state`, `.files`, `.live`, etc. exactly where
+    /// they used the old flat `app.state` fields. For Wave A there is one
+    /// session and focus never changes; Wave B makes focus reactive + switchable.
+    pub fn focused(&self) -> Session {
+        let id = self.focused_id.get_untracked();
+        self.sessions.with_value(|list| {
+            list.iter()
+                .find(|(sid, _)| *sid == id)
+                .map(|(_, session)| *session)
+                .expect("the focused session is always present")
+        })
     }
 
     /// The effective appearance [`Mode`], resolved from the user's
@@ -154,19 +195,21 @@ impl AppState {
     /// frame / `ThemeGet`). An all-empty bundle clears any prior server theme.
     pub fn apply_server_theme(&self, bundle: &ThemeBundle) {
         let overlay = ServerOverlay::from_bundle(bundle);
-        self.server_theme
+        self.focused()
+            .server_theme
             .set((!overlay.is_empty()).then_some(overlay));
     }
 
     /// Drop the current server theme (e.g. on disconnect).
     pub fn clear_server_theme(&self) {
-        self.server_theme.set(None);
+        self.focused().server_theme.set(None);
     }
 
     /// The connected server's theme name, if it ships one — labels the opt-out
     /// control in [`crate::components::ThemeToggle`].
     pub fn server_theme_name(&self) -> Option<String> {
-        self.server_theme
+        self.focused()
+            .server_theme
             .with(|s| s.as_ref().map(|o| o.name.clone()))
     }
 
@@ -182,7 +225,7 @@ impl AppState {
     /// demonstrable in dev (the real transport delivers this in the welcome
     /// frame). Mirrors [`AppState::load_radio`].
     pub fn load_server_theme(&self) {
-        let bundle = self.client.with_value(|c| c.server_theme_bundle());
+        let bundle = self.focused().client.with_value(|c| c.server_theme_bundle());
         match bundle {
             Some(b) => self.apply_server_theme(&b),
             None => self.clear_server_theme(),
@@ -204,12 +247,12 @@ impl AppState {
     pub fn connect_live(&self, endpoint: String, login: String, password: String) {
         use crate::wire::EventClient;
         use rabbithole_core::api::{Command, Event};
-        let state = self.state;
+        let state = self.focused().state;
         let toasts = self.toasts;
         let radio = self.radio;
-        let files = self.files;
-        let ws_sv = self.ws;
-        self.ws.update_value(|ws| {
+        let files = self.focused().files;
+        let ws_sv = self.focused().ws;
+        self.focused().ws.update_value(|ws| {
             ws.on_event(std::rc::Rc::new(move |event| {
                 if let Event::Connected { server_name, .. } = &event {
                     let name = server_name.clone();
@@ -330,27 +373,27 @@ impl AppState {
                 pinned_fingerprint: None,
             });
         });
-        self.live.set(true);
+        self.focused().live.set(true);
     }
 
     /// Host stub: no socket off-target, so this only flips the live flag.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn connect_live(&self, _endpoint: String, _login: String, _password: String) {
-        self.live.set(true);
+        self.focused().live.set(true);
     }
 
     /// Manually redial the live socket now (the reconnect banner's button).
     pub fn reconnect(&self) {
         #[cfg(target_arch = "wasm32")]
-        if self.live.get_untracked() {
-            self.ws.update_value(|c| c.redial());
+        if self.focused().live.get_untracked() {
+            self.focused().ws.update_value(|c| c.redial());
         }
     }
 
     /// Whether the session is currently live-connected. Reactive (reads the
     /// conn signal), so views can gate composers on it.
     pub fn online(&self) -> bool {
-        self.state.with(|s| s.conn.is_live())
+        self.focused().state.with(|s| s.conn.is_live())
     }
 
     /// Send a lobby chat line — over the live socket when connected, else
@@ -358,9 +401,9 @@ impl AppState {
     pub fn send_chat(&self, text: String) {
         let room = crate::client::LOBBY.to_string();
         #[cfg(target_arch = "wasm32")]
-        if self.live.get_untracked() {
+        if self.focused().live.get_untracked() {
             use crate::wire::EventClient;
-            self.ws.update_value(|c| {
+            self.focused().ws.update_value(|c| {
                 c.dispatch(rabbithole_core::api::Command::SendChat {
                     room: room.clone(),
                     text: text.clone(),
@@ -373,8 +416,8 @@ impl AppState {
 
     /// Drive one command through the seam and fold its events into state.
     pub fn dispatch(&self, command: Command) {
-        let state = self.state;
-        self.client.update_value(|client| {
+        let state = self.focused().state;
+        self.focused().client.update_value(|client| {
             let events = client.send(command);
             state.update(|s| {
                 for event in &events {
@@ -386,50 +429,50 @@ impl AppState {
 
     /// Refresh the who-list snapshot from the client.
     pub fn refresh_who(&self) {
-        let who = self.client.with_value(|client| client.who(LOBBY));
-        self.state.update(|s| s.who = who);
+        let who = self.focused().client.with_value(|client| client.who(LOBBY));
+        self.focused().state.update(|s| s.who = who);
     }
 
     /// Load the board tree snapshot into state.
     pub fn load_boards(&self) {
         #[cfg(target_arch = "wasm32")]
-        if self.live.get_untracked() {
+        if self.focused().live.get_untracked() {
             // Live: request over the socket; the reply folds through the sink.
-            self.ws.update_value(|c| c.request_boards());
+            self.focused().ws.update_value(|c| c.request_boards());
             return;
         }
-        let boards = self.client.with_value(|c| c.boards());
-        self.state.update(|s| s.set_boards(boards));
+        let boards = self.focused().client.with_value(|c| c.boards());
+        self.focused().state.update(|s| s.set_boards(boards));
     }
 
     /// Select a board and load its threads into state.
     pub fn select_board(&self, slug: &str) {
         #[cfg(target_arch = "wasm32")]
-        if self.live.get_untracked() {
+        if self.focused().live.get_untracked() {
             // Reset the board view; the thread list arrives via the sink.
-            self.state.update(|s| s.select_board(slug, Vec::new()));
-            self.ws.update_value(|c| c.request_threads(slug));
+            self.focused().state.update(|s| s.select_board(slug, Vec::new()));
+            self.focused().ws.update_value(|c| c.request_threads(slug));
             return;
         }
-        let threads = self.client.with_value(|c| c.threads(slug));
-        self.state.update(|s| s.select_board(slug, threads));
+        let threads = self.focused().client.with_value(|c| c.threads(slug));
+        self.focused().state.update(|s| s.select_board(slug, threads));
     }
 
     /// Open a thread and load its posts into state.
     pub fn open_thread(&self, id: String) {
         #[cfg(target_arch = "wasm32")]
-        if self.live.get_untracked() {
+        if self.focused().live.get_untracked() {
             // Open the thread immediately; its posts stream in via the sink.
             // The live thread id is the root post's hex id.
             let root = crate::wire::hex_to_id(&id);
-            self.state.update(|s| s.open_thread(id, Vec::new()));
+            self.focused().state.update(|s| s.open_thread(id, Vec::new()));
             if let Some(root) = root {
-                self.ws.update_value(|c| c.request_posts(root));
+                self.focused().ws.update_value(|c| c.request_posts(root));
             }
             return;
         }
-        let posts = self.client.with_value(|c| c.posts(&id));
-        self.state.update(|s| s.open_thread(id, posts));
+        let posts = self.focused().client.with_value(|c| c.posts(&id));
+        self.focused().state.update(|s| s.open_thread(id, posts));
     }
 
     /// Start a new thread on `board`. Live: post it, then re-request the thread
@@ -440,8 +483,8 @@ impl AppState {
             return;
         }
         #[cfg(target_arch = "wasm32")]
-        if self.live.get_untracked() {
-            self.ws.update_value(|c| {
+        if self.focused().live.get_untracked() {
+            self.focused().ws.update_value(|c| {
                 c.send_post(board, subject, body);
                 c.request_threads(board);
             });
@@ -451,7 +494,7 @@ impl AppState {
         // sent over a live transport.
         let _ = body;
         let (board, subject) = (board.to_string(), subject.to_string());
-        self.state.update(|s| {
+        self.focused().state.update(|s| {
             let id = format!("tnew{}", s.threads.len());
             s.threads.insert(
                 0,
@@ -472,17 +515,18 @@ impl AppState {
         if body.trim().is_empty() {
             return;
         }
-        let Some(thread_id) = self.state.with_untracked(|s| s.selected_thread.clone()) else {
+        let Some(thread_id) = self.focused().state.with_untracked(|s| s.selected_thread.clone()) else {
             return;
         };
         #[cfg(target_arch = "wasm32")]
-        if self.live.get_untracked() {
+        if self.focused().live.get_untracked() {
             let board = self
+                .focused()
                 .state
                 .with_untracked(|s| s.selected_board.clone())
                 .unwrap_or_default();
             if let Some(root) = crate::wire::hex_to_id(&thread_id) {
-                self.ws.update_value(|c| {
+                self.focused().ws.update_value(|c| {
                     c.send_reply(&board, root, body);
                     c.request_posts(root);
                 });
@@ -490,7 +534,7 @@ impl AppState {
             return;
         }
         let body = body.to_string();
-        self.state.update(|s| {
+        self.focused().state.update(|s| {
             let id = format!("pnew{}", s.posts.len());
             s.posts.push(crate::state::Post {
                 id,
@@ -508,7 +552,7 @@ impl AppState {
     fn skip_mock_load(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
-            self.live.get_untracked()
+            self.focused().live.get_untracked()
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -520,21 +564,21 @@ impl AppState {
     /// conversation list over the socket (the reply folds through the sink).
     pub fn load_dms(&self) {
         #[cfg(target_arch = "wasm32")]
-        if self.live.get_untracked() {
-            self.ws.update_value(|c| c.request_dm_threads());
+        if self.focused().live.get_untracked() {
+            self.focused().ws.update_value(|c| c.request_dm_threads());
             return;
         }
-        let threads = self.client.with_value(|c| c.dm_threads());
-        self.state.update(|s| s.set_dm_threads(threads));
+        let threads = self.focused().client.with_value(|c| c.dm_threads());
+        self.focused().state.update(|s| s.set_dm_threads(threads));
     }
 
     /// Select a DM conversation with `peer`. Live: request its history (the
     /// reply folds into the selected thread via the sink).
     pub fn select_dm(&self, peer: &str) {
-        self.state.update(|s| s.select_dm(peer));
+        self.focused().state.update(|s| s.select_dm(peer));
         #[cfg(target_arch = "wasm32")]
-        if self.live.get_untracked() {
-            self.ws.update_value(|c| c.request_dm_history(peer));
+        if self.focused().live.get_untracked() {
+            self.focused().ws.update_value(|c| c.request_dm_history(peer));
         }
     }
 
@@ -545,19 +589,19 @@ impl AppState {
         if text.trim().is_empty() {
             return;
         }
-        let Some(id) = self.state.with_untracked(|s| s.selected_dm.clone()) else {
+        let Some(id) = self.focused().state.with_untracked(|s| s.selected_dm.clone()) else {
             return;
         };
         #[cfg(target_arch = "wasm32")]
-        if self.live.get_untracked() {
-            self.ws.update_value(|c| {
+        if self.focused().live.get_untracked() {
+            self.focused().ws.update_value(|c| {
                 c.send_dm(&id, text);
                 c.request_dm_history(&id);
             });
             return;
         }
-        let state = self.state;
-        self.client.update_value(|c| {
+        let state = self.focused().state;
+        self.focused().client.update_value(|c| {
             if let Some(msg) = c.send_dm(&id, text) {
                 state.update(|s| s.append_dm(&id, msg));
             }
@@ -568,20 +612,20 @@ impl AppState {
     /// directory over the socket (empty query = list all; reply folds via sink).
     pub fn load_members(&self) {
         #[cfg(target_arch = "wasm32")]
-        if self.live.get_untracked() {
-            self.ws.update_value(|c| c.request_directory(""));
+        if self.focused().live.get_untracked() {
+            self.focused().ws.update_value(|c| c.request_directory(""));
             return;
         }
-        let members = self.client.with_value(|c| c.members());
-        self.state.update(|s| s.set_members(members));
+        let members = self.focused().client.with_value(|c| c.members());
+        self.focused().state.update(|s| s.set_members(members));
     }
 
     /// Select a member and (live) fetch their full profile card.
     pub fn select_member(&self, handle: &str) {
-        self.state.update(|s| s.select_member(handle));
+        self.focused().state.update(|s| s.select_member(handle));
         #[cfg(target_arch = "wasm32")]
-        if self.live.get_untracked() {
-            self.ws.update_value(|c| c.request_profile(handle));
+        if self.focused().live.get_untracked() {
+            self.focused().ws.update_value(|c| c.request_profile(handle));
         }
     }
 
@@ -591,12 +635,12 @@ impl AppState {
         // Live: send over the socket; replies fold in through the file sink
         // registered in `connect_live`. Mock: drive the seam synchronously.
         #[cfg(target_arch = "wasm32")]
-        if self.live.get_untracked() {
-            self.ws.update_value(|c| c.dispatch_file(&command));
+        if self.focused().live.get_untracked() {
+            self.focused().ws.update_value(|c| c.dispatch_file(&command));
             return;
         }
-        let files = self.files;
-        self.client.update_value(|client| {
+        let files = self.focused().files;
+        self.focused().client.update_value(|client| {
             let events: Vec<FileEvent> = client.dispatch_file(command);
             files.update(|f| {
                 for event in &events {
@@ -613,7 +657,7 @@ impl AppState {
 
     /// Open an area at its root and list it.
     pub fn open_area(&self, slug: &str) {
-        self.files.update(|f| {
+        self.focused().files.update(|f| {
             f.current_area = Some(slug.to_string());
             f.path.clear();
             f.selected = None;
@@ -623,7 +667,7 @@ impl AppState {
 
     /// Descend into a child folder of the current location and list it.
     pub fn open_subfolder(&self, name: &str) {
-        self.files.update(|f| {
+        self.focused().files.update(|f| {
             f.path.push(name.to_string());
             f.selected = None;
         });
@@ -632,7 +676,7 @@ impl AppState {
 
     /// Jump to a breadcrumb path (`None` = area root) and list it.
     pub fn go_to_path(&self, path: Option<String>) {
-        self.files.update(|f| {
+        self.focused().files.update(|f| {
             f.path = match &path {
                 Some(p) if !p.is_empty() => p.split('/').map(str::to_string).collect(),
                 _ => Vec::new(),
@@ -645,6 +689,7 @@ impl AppState {
     /// List the current area + folder.
     pub fn refresh_files(&self) {
         let (area, path) = self
+            .focused()
             .files
             .with(|f| (f.current_area.clone(), join_path(&f.path)));
         let Some(area) = area else {
@@ -655,7 +700,7 @@ impl AppState {
 
     /// Show a node's metadata card.
     pub fn select_file(&self, id: i64) {
-        self.files.update(|f| f.selected = Some(id));
+        self.focused().files.update(|f| f.selected = Some(id));
     }
 
     /// Download a file inline; the completed transfer lands in the queue.
@@ -667,6 +712,7 @@ impl AppState {
     /// listing so the new node appears.
     pub fn upload(&self, name: &str, bytes: Vec<u8>) {
         let (area, parent) = self
+            .focused()
             .files
             .with(|f| (f.current_area.clone(), join_path(&f.path)));
         let Some(area) = area else {
@@ -685,14 +731,14 @@ impl AppState {
     /// Grant or revoke the admin capability for the current session. Gates the
     /// admin nav and routes.
     pub fn set_admin(&self, is_admin: bool) {
-        self.is_admin.set(is_admin);
+        self.focused().is_admin.set(is_admin);
     }
 
     /// Drive one [`AdminCommand`] through the seam and fold its admin events
     /// into the [`AdminState`].
     fn dispatch_admin(&self, command: AdminCommand) {
         let admin = self.admin;
-        self.client.update_value(|client| {
+        self.focused().client.update_value(|client| {
             let events: Vec<AdminEvent> = client.dispatch_admin(command);
             admin.update(|a| {
                 for event in &events {
@@ -779,7 +825,7 @@ impl AppState {
     /// which read failed (the wire's `Failed` carries no key).
     fn dispatch_syn_get(&self, key: &str) {
         let syndication = self.syndication;
-        self.client.update_value(|client| {
+        self.focused().client.update_value(|client| {
             let events = client.dispatch_admin(AdminCommand::GetConfig {
                 key: key.to_string(),
             });
@@ -791,7 +837,7 @@ impl AppState {
     /// re-read the key so the panel shows the authoritative stored value.
     fn dispatch_syn_set(&self, key: &str, command: AdminCommand) {
         let syndication = self.syndication;
-        self.client.update_value(|client| {
+        self.focused().client.update_value(|client| {
             let events = client.dispatch_admin(command);
             syndication.update(|s| s.apply_set_reply(key, &events));
         });
@@ -837,7 +883,7 @@ impl AppState {
         match route {
             NoticeRoute::Radio(update) => self.radio.update(|r| r.apply_update(update)),
             NoticeRoute::Chat { from, text } => {
-                self.state.update(|s| s.push_notice(&from, &text));
+                self.focused().state.update(|s| s.push_notice(&from, &text));
             }
         }
     }
@@ -863,7 +909,7 @@ impl AppState {
         if self.skip_mock_load() {
             return;
         }
-        for route in self.client.with_value(|c| c.radio_routes()) {
+        for route in self.focused().client.with_value(|c| c.radio_routes()) {
             self.apply_notice(route);
         }
     }
@@ -991,7 +1037,7 @@ pub fn App() -> impl IntoView {
         // the user hasn't switched it off.
         let show_server = !app.server_theme_disabled.get();
         app.custom_pack.with(|custom| {
-            app.server_theme.with(|server| {
+            app.focused().server_theme.with(|server| {
                 let server = show_server.then_some(server.as_ref()).flatten();
                 resolve_root_style(custom.as_ref(), server, pack, mode)
             })

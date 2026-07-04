@@ -38,7 +38,8 @@ pub fn ThemeToggle() -> impl IntoView {
     // The server-theming opt-out only appears when the connected burrow ships
     // a theme (PLAN §9.11: server theming is on by default, user can disable).
     let server_name = move || {
-        app.server_theme
+        app.focused()
+            .server_theme
             .with(|s| s.as_ref().map(|o| o.name.clone()))
     };
     let disabled = move || app.server_theme_disabled.get();
@@ -99,7 +100,7 @@ pub fn ThemeToggle() -> impl IntoView {
 #[component]
 pub fn Nav() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let is_admin = app.is_admin;
+    let is_admin = app.focused().is_admin;
     view! {
         <nav class="rh-nav" aria-label="Primary">
             <A href="/lobby">"Lobby"</A>
@@ -122,7 +123,7 @@ pub fn Nav() -> impl IntoView {
 #[component]
 pub fn StatusBar() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let state = app.state;
+    let state = app.focused().state;
     let title = move || {
         let name = state.with(|s| s.server_name.clone());
         if name.is_empty() {
@@ -145,7 +146,7 @@ pub fn StatusBar() -> impl IntoView {
     let radio = app.radio;
     let now_playing = move || radio.with(crate::radio::status_segment).unwrap_or_default();
     // A prominent connection banner when a live session isn't healthy.
-    let banner = move || crate::conn::conn_banner(state.with(|s| s.conn), app.live.get());
+    let banner = move || crate::conn::conn_banner(state.with(|s| s.conn), app.focused().live.get());
     // The connection label and status line are polite live regions so
     // transient states ("Connecting…", "Reconnecting…", command errors)
     // announce without stealing focus; the now-playing segment sits in an
@@ -439,7 +440,7 @@ pub fn Login() -> impl IntoView {
             crate::toasts::ToastKind::Success,
             format!("Signed in as {name}"),
         );
-        let waiting = app.state.with(|s| s.dm_threads.len());
+        let waiting = app.focused().state.with(|s| s.dm_threads.len());
         if waiting > 0 {
             app.notify(
                 crate::toasts::ToastKind::Mail,
@@ -500,7 +501,7 @@ pub fn Login() -> impl IntoView {
 #[component]
 pub fn WhoList() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let state = app.state;
+    let state = app.focused().state;
     view! {
         <aside class="rh-who">
             <h2>"Present"</h2>
@@ -519,7 +520,7 @@ pub fn WhoList() -> impl IntoView {
 #[component]
 pub fn Lobby() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let state = app.state;
+    let state = app.focused().state;
     let draft = create_rw_signal(String::new());
 
     let send = move || {
@@ -588,7 +589,7 @@ pub fn Lobby() -> impl IntoView {
 #[component]
 pub fn Boards() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let state = app.state;
+    let state = app.focused().state;
     app.load_boards();
 
     view! {
@@ -622,7 +623,7 @@ pub fn Boards() -> impl IntoView {
 #[component]
 pub fn BoardView() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let state = app.state;
+    let state = app.focused().state;
     let params = use_params_map();
 
     // Re-select the board whenever the `:slug` route param changes.
@@ -768,7 +769,7 @@ pub fn BoardView() -> impl IntoView {
 #[component]
 pub fn Dms() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let state = app.state;
+    let state = app.focused().state;
     let draft = create_rw_signal(String::new());
     app.load_dms();
 
@@ -906,7 +907,7 @@ pub fn Dms() -> impl IntoView {
 #[component]
 pub fn Directory() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let state = app.state;
+    let state = app.focused().state;
     app.load_members();
 
     view! {
@@ -1088,7 +1089,7 @@ const SAMPLE_ANSI: &[u8] =
 #[component]
 pub fn Files() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let files = app.files;
+    let files = app.focused().files;
     app.load_areas();
 
     view! {
@@ -1115,7 +1116,7 @@ pub fn Files() -> impl IntoView {
 #[component]
 fn AreaList() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let files = app.files;
+    let files = app.focused().files;
     view! {
         <h2 class="rh-panel-title">"File areas"</h2>
         <ul class="rh-tree">
@@ -1146,7 +1147,7 @@ fn AreaList() -> impl IntoView {
 #[component]
 fn FolderBrowser() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let files = app.files;
+    let files = app.focused().files;
 
     let leave = move |_| {
         files.update(|f| {
@@ -1243,7 +1244,7 @@ fn FolderBrowser() -> impl IntoView {
 #[component]
 fn FileDetail() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let files = app.files;
+    let files = app.focused().files;
     view! {
         <Show
             when=move || files.with(|f| f.selected_node().is_some())
@@ -1284,7 +1285,7 @@ fn FileDetail() -> impl IntoView {
 #[component]
 fn TransferQueue() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let files = app.files;
+    let files = app.focused().files;
     view! {
         <Show when=move || files.with(|f| !f.transfers.is_empty()) fallback=|| ()>
             <h2 class="rh-panel-title">"Transfers"</h2>
@@ -1548,7 +1549,7 @@ pub fn ArtCanvas(
 #[component]
 pub fn Admin() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let is_admin = app.is_admin;
+    let is_admin = app.focused().is_admin;
     let admin = app.admin;
     // Load the seeded console data whenever the capability is present.
     create_effect(move |_| {
