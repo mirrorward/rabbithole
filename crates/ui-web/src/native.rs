@@ -47,7 +47,7 @@ pub fn native_available() -> bool {
 /// Invoke the native `swarm_start_download` command: fetch content `root_hex`
 /// (`size` bytes) named `name` from the swarm. Fire-and-forget — progress is
 /// delivered to the [`install_swarm_listener`] callback.
-pub fn start_swarm_download(transfer_id: u64, root_hex: &str, size: u64, name: &str) {
+pub fn start_swarm_download(app: AppState, transfer_id: u64, root_hex: &str, size: u64, name: &str) {
     let Some(b) = bridge() else { return };
     let Some(invoke) = method(&b, "invoke") else {
         return;
@@ -68,9 +68,19 @@ pub fn start_swarm_download(transfer_id: u64, root_hex: &str, size: u64, name: &
     let _ = js_sys::Reflect::set(&args, &JsValue::from_str("name"), &JsValue::from_str(name));
     if let Ok(ret) = invoke.call2(&b, &JsValue::from_str("swarm_start_download"), &args) {
         if let Ok(promise) = ret.dyn_into::<js_sys::Promise>() {
-            // Await so a rejected command settles rather than dangling.
+            // Await the command; if it rejects (undeterminable size, no source,
+            // connect failure) mark the seeded Transfer Failed so it doesn't hang
+            // at 0% — routing to the session that owns it, not the focused one.
             spawn_local(async move {
-                let _ = JsFuture::from(promise).await;
+                if JsFuture::from(promise).await.is_err() {
+                    if let Some(files) = app.transfer_session_files(transfer_id) {
+                        files.update(|f| {
+                            f.apply(&crate::wire::FileEvent::Failed(
+                                "swarm download failed".into(),
+                            ))
+                        });
+                    }
+                }
             });
         }
     }
@@ -106,16 +116,22 @@ pub fn install_swarm_listener(app: AppState) {
     cb.forget();
 }
 
-/// Fold one native event into the focused session's Transfers. The byte `size`
-/// comes from the Transfer created when the download started (native events carry
-/// units, not bytes).
+/// Fold one native event into the Transfers of the session that *started* this
+/// download — resolved by transfer id, NOT the focused session (the user may
+/// have switched burrows mid-transfer). The byte `size` comes from the Transfer
+/// seeded when the download started (native events carry units, not bytes).
 fn apply_swarm_event(app: AppState, ev: &SwarmWireEvent) {
     let tid = match ev {
         SwarmWireEvent::Opened { transfer_id, .. }
         | SwarmWireEvent::Chunk { transfer_id, .. }
         | SwarmWireEvent::Done { transfer_id, .. } => *transfer_id,
     };
-    let files = app.focused().files;
+    // The download's own session (seeded the Transfer at start). If it's gone
+    // (session closed), drop the event rather than leak a phantom into whatever
+    // burrow happens to be focused.
+    let Some(files) = app.transfer_session_files(tid) else {
+        return;
+    };
     let size = files
         .with_untracked(|f| f.transfers.iter().find(|t| t.id == tid).map(|t| t.total))
         .unwrap_or(0);

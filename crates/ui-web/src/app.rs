@@ -169,6 +169,22 @@ impl AppState {
         self.focused()
     }
 
+    /// The `files` signal of the session whose Transfers currently hold
+    /// `transfer_id`, if any. Native swarm-progress events must route to the
+    /// session that *started* the download — which may not be the focused one if
+    /// the user switched burrows mid-transfer — so we resolve by transfer id, not
+    /// by focus.
+    pub fn transfer_session_files(&self, transfer_id: u64) -> Option<RwSignal<FilesState>> {
+        self.sessions.with_untracked(|list| {
+            list.iter()
+                .find(|(_, s)| {
+                    s.files
+                        .with_untracked(|fs| fs.transfers.iter().any(|t| t.id == transfer_id))
+                })
+                .map(|(_, s)| s.files)
+        })
+    }
+
     pub fn focused(&self) -> Session {
         let id = self.focused_id.get_untracked();
         self.sessions.with_untracked(|list| {
@@ -896,7 +912,7 @@ impl AppState {
                         server_have: 0,
                     })
                 });
-                crate::native::start_swarm_download(transfer_id, &root_hex, size, &name);
+                crate::native::start_swarm_download(*self, transfer_id, &root_hex, size, &name);
                 return;
             }
             // No content hash (e.g. a legacy blob): fall through to the WS path.

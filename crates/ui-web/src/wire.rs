@@ -868,8 +868,17 @@ pub fn swarm_event_to_file_events(ev: &SwarmWireEvent, size: u64) -> Vec<FileEve
                 len,
             }]
         }
-        // Completion already rode in on the final Chunk's `last` flag.
-        SwarmWireEvent::Done { .. } => Vec::new(),
+        // Mark the transfer complete. Usually the final Chunk's `last` flag
+        // already did this — but a *fully resumed* download fetches zero units
+        // this run (every unit was already on disk), so no Chunk ever fires and
+        // Done is the only completion signal. A TransferOpened with
+        // server_have == size is the reducer's "done" shape, and record_transfer
+        // upserts by id, so this is idempotent with a prior last-Chunk.
+        SwarmWireEvent::Done { transfer_id, bytes, .. } => vec![FileEvent::TransferOpened {
+            transfer_id: *transfer_id,
+            size: *bytes,
+            server_have: *bytes,
+        }],
     }
 }
 
@@ -1248,12 +1257,30 @@ mod tests {
             }]
         );
 
-        // Done carries no further progress (the last Chunk completed it).
+        // Done marks the transfer complete (its own TransferOpened with
+        // server_have == size) — the ONLY completion signal for a fully-resumed
+        // download that fetched zero units this run and emitted no Chunk.
         let done: SwarmWireEvent = serde_json::from_str(
             r#"{"kind":"done","transfer_id":7,"bytes":3145745,"per_source":[["127.0.0.1:9000",3]]}"#,
         )
         .unwrap();
-        assert!(swarm_event_to_file_events(&done, size).is_empty());
+        assert_eq!(
+            swarm_event_to_file_events(&done, size),
+            vec![FileEvent::TransferOpened {
+                transfer_id: 7,
+                size: 3145745,
+                server_have: 3145745,
+            }]
+        );
+        // A fully-resumed download (only Opened + Done, no Chunk) still reaches Done.
+        let mut resumed = crate::files::FilesState::default();
+        for e in [&opened, &done] {
+            for fe in swarm_event_to_file_events(e, size) {
+                resumed.apply(&fe);
+            }
+        }
+        let t = resumed.transfers.iter().find(|t| t.id == 7).expect("transfer exists");
+        assert_eq!(t.status, crate::files::TransferStatus::Done, "resume-only path completes");
 
         // The whole sequence — Opened then every unit — drives a Transfer to
         // 100% through the real reducer, exactly as a WS ranged transfer would.
