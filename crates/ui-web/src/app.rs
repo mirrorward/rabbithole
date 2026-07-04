@@ -16,7 +16,7 @@ use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
     Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby, Login,
-    People, Radio, ServerBrowser, Toasts, Transfers,
+    People, Radio, ServerBrowser, Toasts, Transfers, You,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -80,6 +80,9 @@ pub struct AppState {
     /// The user's presence status, a warren-layer choice fanned to **every**
     /// connected burrow (set once, applies everywhere).
     pub presence: RwSignal<rabbithole_proto::presence::PresenceState>,
+    /// The portable identity (public face), set once at launch. `None` until
+    /// loaded (and always `None` in host tests, which have no browser storage).
+    pub you: RwSignal<Option<crate::identity::You>>,
     /// The web-admin model, folded from admin events.
     pub admin: RwSignal<AdminState>,
     /// The Syndication & Gateways panel model, folded from paired config
@@ -137,6 +140,7 @@ impl AppState {
             sessions: create_rw_signal(vec![(ServerId::local(), session)]),
             focused_id: create_rw_signal(ServerId::local()),
             presence: create_rw_signal(rabbithole_proto::presence::PresenceState::Online),
+            you: create_rw_signal(None),
             admin: create_rw_signal(AdminState::default()),
             syndication: create_rw_signal(SynAdminState::default()),
             palette_open: create_rw_signal(false),
@@ -1220,6 +1224,10 @@ pub fn App() -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     crate::native::install_swarm_listener(app);
 
+    // Load (or mint) the portable identity that names you across every burrow.
+    #[cfg(target_arch = "wasm32")]
+    app.you.set(Some(crate::identity::load_or_create().you()));
+
     let style = move || {
         let (pack, mode) = (app.theme.get().pack, app.mode());
         // Server theming layers below the editor's live preview and only when
@@ -1257,6 +1265,7 @@ pub fn App() -> impl IntoView {
                                     <Route path="/" view=Login/>
                                     <Route path="/people" view=People/>
                                     <Route path="/transfers" view=Transfers/>
+                                    <Route path="/you" view=You/>
                                     <Route path="/lobby" view=Lobby/>
                                     <Route path="/boards" view=Boards/>
                                     <Route path="/boards/:slug" view=BoardView/>
@@ -1303,6 +1312,10 @@ fn BurrowRail() -> impl IntoView {
         let navigate = navigate.clone();
         move |_| navigate("/transfers", Default::default())
     };
+    let go_you = {
+        let navigate = navigate.clone();
+        move |_| navigate("/you", Default::default())
+    };
     let go_add = {
         let navigate = navigate.clone();
         move |_| navigate("/servers", Default::default())
@@ -1318,6 +1331,9 @@ fn BurrowRail() -> impl IntoView {
             </button>
             <button class="rh-rail-tile rh-rail-unified" title="Transfers" aria-label="Transfers" on:click=go_transfers>
                 "\u{2913}"
+            </button>
+            <button class="rh-rail-tile rh-rail-unified rh-rail-you" title="You" aria-label="You" on:click=go_you>
+                "\u{2726}"
             </button>
             <div class="rh-rail-sep"></div>
             <For

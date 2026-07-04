@@ -248,6 +248,52 @@ pub fn Transfers() -> impl IntoView {
     }
 }
 
+/// The **You** hub: your portable Ed25519 identity — the key that names you
+/// across every burrow, independent of your per-server handle.
+#[component]
+pub fn You() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    view! {
+        <StatusBar/>
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
+            <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"You"</h1>
+            <section class="rh-panel">
+                <h2 class="rh-panel-title">"You · your portable identity"</h2>
+                <Show
+                    when=move || app.you.get().is_some()
+                    fallback=|| view! {
+                        <p class="rh-empty">"No local identity yet (browser storage unavailable)."</p>
+                    }
+                >
+                    {move || app.you.get().map(|you| {
+                        let initials = you.fingerprint.chars().take(2).collect::<String>();
+                        view! {
+                            <div class="rh-you">
+                                <div class="rh-you-badge" aria-hidden="true">{initials}</div>
+                                <div class="rh-you-fields">
+                                    <div class="rh-you-row">
+                                        <span class="rh-you-label">"Fingerprint"</span>
+                                        <code class="rh-you-fp">{you.fingerprint.clone()}</code>
+                                    </div>
+                                    <div class="rh-you-row">
+                                        <span class="rh-you-label">"Public key"</span>
+                                        <code class="rh-you-pub">{you.public_hex.clone()}</code>
+                                    </div>
+                                </div>
+                            </div>
+                            <p class="rh-you-note">
+                                "This Ed25519 key names you across every burrow. Your handle can differ \
+                                 from server to server; this key does not — it's how your people find \
+                                 the real you, and how the People view will tell two \"rabbit\"s apart."
+                            </p>
+                        }
+                    })}
+                </Show>
+            </section>
+        </main>
+    }
+}
+
 /// The user's presence status — a single control that fans the chosen status
 /// (Online / Away / Invisible) to **every** connected burrow via
 /// [`AppState::set_presence`]. Invisible is Cheshire mode.

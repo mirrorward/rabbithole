@@ -274,6 +274,14 @@ pub const STYLESHEET: &str = "\
 .rh-xfer-burrow{font-size:var(--rh-font-sm);color:var(--rh-muted);flex:0 0 auto}\
 .rh-xfer-row .rh-bar{flex:1;min-width:4rem}\
 .rh-xfer-pct{font-size:var(--rh-font-sm);color:var(--rh-muted);width:3ch;text-align:right}\
+.rh-you{display:flex;gap:1rem;align-items:center;margin-bottom:.9rem}\
+.rh-you-badge{width:3.2rem;height:3.2rem;flex:0 0 auto;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:var(--rh-font-mono,ui-monospace,monospace);font-weight:700;text-transform:uppercase;color:#fff;background:linear-gradient(135deg,var(--rh-accent),color-mix(in srgb,var(--rh-accent) 55%,#000))}\
+.rh-you-fields{display:flex;flex-direction:column;gap:.35rem;min-width:0}\
+.rh-you-row{display:flex;gap:.6rem;align-items:baseline}\
+.rh-you-label{font-size:var(--rh-font-xs,.72rem);text-transform:uppercase;letter-spacing:.04em;color:var(--rh-muted);width:6.5rem;flex:0 0 auto}\
+.rh-you-fp{font-family:var(--rh-font-mono,ui-monospace,monospace);font-weight:600}\
+.rh-you-pub{font-family:var(--rh-font-mono,ui-monospace,monospace);font-size:var(--rh-font-sm);color:var(--rh-muted);overflow-wrap:anywhere}\
+.rh-you-note{color:var(--rh-muted);max-width:60ch;line-height:1.5}\
 .rh-xfer-item{border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent);padding:.5rem .3rem}\
 .rh-xfer-item .rh-xfer-row{border-bottom:0;padding:0}\
 .rh-xfer-detail{display:flex;gap:.7rem;align-items:center;margin-top:.25rem;padding-left:1.4rem}\

@@ -97,6 +97,7 @@ pub mod syndication_admin;
 pub mod theme_css;
 pub mod theme_editor;
 pub mod toasts;
+pub mod identity;
 pub mod wire;
 
 /// Browser WebSocket transport (`wasm32-unknown-unknown` only).

@@ -22,6 +22,12 @@ rabbithole-art.workspace = true
 # a future server theme bundle plugs into. Both wasm-clean.
 serde.workspace = true
 serde_json.workspace = true
+# Portable identity (`src/identity.rs`): a persisted Ed25519 keypair that names
+# "you" across burrows. Just the curve + a blake3/hex fingerprint — no argon2 or
+# totp (so we don't pull rabbithole-identity's heavier tree into wasm).
+ed25519-dalek.workspace = true
+blake3.workspace = true
+hex.workspace = true
 
 # The browser WebSocket transport (`src/ws.rs`) plus the wasm-only DOM glue in
 # `src/art.rs` (canvas) and `src/theme.rs` (localStorage / matchMedia). These
@@ -59,8 +65,15 @@ web-sys = { workspace = true, features = [
     "BlobPropertyBag",
     "Url",
     "HtmlAnchorElement",
+    # Portable identity seed generation (`src/identity.rs`):
+    # crypto.getRandomValues into a 32-byte buffer.
+    "Crypto",
 ] }
 gloo-timers.workspace = true
+# The Ed25519 seed comes from the browser CSPRNG (web-sys Crypto), so the curve
+# never needs an RNG; getrandom's js backend satisfies any transitive wasm
+# requirement at compile time.
+getrandom = { version = "0.2", features = ["js"] }
 
 # Host-only: the `#[ignore]`d icon regenerator and the icons-match-generator
 # test in `src/pwa.rs` encode/decode the checked-in PNGs. Pure Rust, and a
