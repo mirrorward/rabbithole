@@ -10,6 +10,9 @@
 //! notifications, `rabbit://` deep links, auto-update, and eventually the
 //! in-process Rust core — behind `.plugin()` / `.setup()`.
 
+/// Source discovery + multi-source swarm download orchestration (Tauri-free).
+pub mod swarm;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()

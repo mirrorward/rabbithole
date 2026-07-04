@@ -35,6 +35,9 @@ serde_json = "1"
 # The in-process swarm core: multi-source, Bao-verified downloads over QUIC.
 # Path deps (this crate has its own [workspace], so no `.workspace`).
 rabbithole-swarm = { path = "../../crates/swarm" }
+# The native RHP client (connect + swarm_find/swarm_ticket): source discovery.
+rabbithole-core = { path = "../../crates/core", features = ["native"] }
+rabbithole-proto = { path = "../../crates/proto" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 
 [dev-dependencies]
