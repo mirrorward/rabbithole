@@ -47,6 +47,13 @@ pub const PEER_REQUEST_MAX: u64 = 4 * 1024 * 1024;
 /// sources fail fast so the multi-source scheduler can route around them.
 pub const PEER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How long to wait for a peer's response header or body before giving up. A
+/// peer that connects and then stalls mid-stream must not park a worker forever
+/// (the module promises "a stalled peer can't hold the tail hostage") — on
+/// timeout the fetch errors and the scheduler retires the source. Generous
+/// enough for a 4 MiB unit over a slow-but-live link.
+pub const PEER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Response status codes.
 pub const STATUS_OK: u8 = 0;
 pub const STATUS_DENIED: u8 = 1;
@@ -345,7 +352,10 @@ pub async fn fetch_range(
     write_framed(&mut send, &postcard::to_allocvec(&req).expect("serializes")).await?;
     send.shutdown().await?;
 
-    let header = read_framed(&mut recv, 64).await?;
+    let header = match tokio::time::timeout(PEER_READ_TIMEOUT, read_framed(&mut recv, 64)).await {
+        Ok(r) => r?,
+        Err(_) => return Err(PeerError::Refused(STATUS_BAD_REQUEST)),
+    };
     let header: PeerResponseHeader =
         postcard::from_bytes(&header).map_err(|e| PeerError::Verify(e.to_string()))?;
     if header.status != STATUS_OK {
@@ -355,8 +365,16 @@ pub async fn fetch_range(
     if len == 0 {
         return Ok(Vec::new());
     }
+    // Bound the body read: a peer that sent a valid header then stalls mid-stream
+    // must fail (freeing the worker + the scheduler's join/progress-drain) rather
+    // than park here until the QUIC idle timeout — or forever.
     let mut stream = Vec::new();
-    recv.read_to_end(&mut stream).await?;
+    match tokio::time::timeout(PEER_READ_TIMEOUT, recv.read_to_end(&mut stream)).await {
+        Ok(r) => {
+            r?;
+        }
+        Err(_) => return Err(PeerError::Refused(STATUS_BAD_REQUEST)),
+    }
     drop(conn);
 
     // Verify the Bao stream against the root; only verified leaves land.

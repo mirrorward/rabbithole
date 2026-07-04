@@ -109,6 +109,15 @@ pub async fn run_swarm_download(
         });
     }
     let size = if size > 0 { size } else { size_from_list(&list) };
+    // A resolved size of 0 means we couldn't determine the file's length (the
+    // origin doesn't hold it and every advert reports 0). Proceeding would let
+    // the scheduler treat it as an empty transfer — and, worse, historically
+    // wipe any partial — so fail loudly rather than destroy data or hang the UI.
+    if size == 0 {
+        return Err(SwarmError::NoPeerSources {
+            server_has: list.server_has,
+        });
+    }
     let ticket = client.swarm_ticket(root).await?;
     let total_units = size.div_ceil(UNIT_SIZE);
     emit(SwarmEvent::Opened {

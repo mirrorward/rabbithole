@@ -202,9 +202,15 @@ async fn resumable(
     .await
     .map_err(|e| PeerError::Verify(e.to_string()))??;
     if !ok {
-        // A prior partial lied; the caller should remove dest and restart.
+        // A prior partial lied (a completed unit's on-disk bytes are corrupt, or
+        // a stale `.rhstate` for a since-changed file). Remove BOTH the state and
+        // the destination so the next call starts clean — otherwise the state
+        // keeps marking the corrupt unit "done", it's skipped forever, and every
+        // retry re-hashes to the same failure. Self-healing beats a permanent poison.
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(dest);
         return Err(PeerError::Verify(
-            "assembled file does not hash to the root (stale partial?)".into(),
+            "assembled file does not hash to the root (stale partial removed; retry)".into(),
         ));
     }
     let _ = std::fs::remove_file(&state_path);
@@ -227,6 +233,12 @@ async fn fetch_swarm_inner(
     if sources.is_empty() {
         return Err(PeerError::BadRequest);
     }
+    // Nothing to fetch — return BEFORE touching `dest`, so a `size == 0` (e.g. a
+    // caller whose size derivation failed) can never `set_len(0)` and wipe an
+    // existing partial. An empty transfer has no bytes to move.
+    if size == 0 {
+        return Ok(FetchReport::default());
+    }
     // Pre-size the destination so workers can write units at any offset —
     // without truncating an existing partial when resuming.
     let file = std::fs::OpenOptions::new()
@@ -236,9 +248,6 @@ async fn fetch_swarm_inner(
         .open(dest)?;
     file.set_len(size)?;
     drop(file);
-    if size == 0 {
-        return Ok(FetchReport::default());
-    }
 
     // Units back-to-front so `pop()` hands them out front-to-back; already-
     // done units (a resume) never enter the queue.
@@ -453,6 +462,61 @@ mod tests {
             "work spread across sources: {:?}",
             report.per_source
         );
+    }
+
+    #[tokio::test]
+    async fn corrupt_partial_self_heals_on_next_resume() {
+        // A completed unit's on-disk bytes get corrupted while `.rhstate` still
+        // lists that offset as done. The verify-fail must remove BOTH the state
+        // and the destination so the *next* resume starts clean and succeeds —
+        // otherwise the poison is permanent (the corrupt unit is skipped forever).
+        let dir = tempfile::tempdir().unwrap();
+        let key = IdentityKey::from_seed(&[9; 32]);
+        let body = payload(2 * 1024 * 1024 + 5); // three units
+        let src = dir.path().join("seed.bin");
+        std::fs::write(&src, &body).unwrap();
+        let root = *blake3::hash(&body).as_bytes();
+        let peer = seeding_peer(&key, root, &src).await;
+        let sources = vec![peer_source(&peer)];
+        let token = CapToken::issue(&key, root, "tester", now() + 60)
+            .unwrap()
+            .to_bytes();
+        let dest = dir.path().join("out.bin");
+
+        // First fetch completes cleanly.
+        fetch_swarm_resumable(&sources, &token, root, body.len() as u64, &dest)
+            .await
+            .unwrap();
+        assert!(!rhstate_path(&dest).exists());
+
+        // Simulate a corrupted first unit + a stale state file that still trusts it.
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new().write(true).open(&dest).unwrap();
+            f.seek(SeekFrom::Start(0)).unwrap();
+            f.write_all(&[0xFF; 4096]).unwrap();
+        }
+        let state = RhState {
+            root,
+            size: body.len() as u64,
+            done: vec![0, UNIT_SIZE, 2 * UNIT_SIZE],
+        };
+        std::fs::write(
+            rhstate_path(&dest),
+            postcard::to_allocvec(&state).unwrap(),
+        )
+        .unwrap();
+
+        // The poisoned resume fails its whole-file verify, but self-heals: state
+        // + dest are removed, so a follow-up fetch re-downloads and succeeds.
+        assert!(fetch_swarm_resumable(&sources, &token, root, body.len() as u64, &dest)
+            .await
+            .is_err());
+        assert!(!rhstate_path(&dest).exists(), "poisoned state removed");
+        fetch_swarm_resumable(&sources, &token, root, body.len() as u64, &dest)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body, "recovered byte-exact");
     }
 
     #[tokio::test]
