@@ -344,6 +344,20 @@ impl WsClient {
         }
     }
 
+    /// Broadcast the user's presence status to this server.
+    pub fn set_presence(
+        &self,
+        state: rabbithole_proto::presence::PresenceState,
+        status: Option<String>,
+    ) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) = wire::presence_set_request(state, status, id).and_then(|f| encode_frame(&f))
+        {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
     /// Register the board-list sink. The most recent registration wins.
     pub fn on_boards(&mut self, sink: BoardSink) {
         self.inner.borrow_mut().board_sink = Some(sink);

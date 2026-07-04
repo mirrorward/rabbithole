@@ -92,7 +92,7 @@ use rabbithole_proto::filelib::{
     FileNodeView, FileUpload, FolderListRequest, NodeGet, NodeList, NodeReply,
 };
 use rabbithole_proto::hello::{CapabilitySet, Hello, HelloAck};
-use rabbithole_proto::presence::{UserJoined, UserLeft, Who, WhoList};
+use rabbithole_proto::presence::{PresenceSet, PresenceState, UserJoined, UserLeft, Who, WhoList};
 use rabbithole_proto::radio::{RadioNowPlaying, RadioOff};
 use rabbithole_proto::session::{AuthPassword, Ping, ServerNotice};
 use rabbithole_proto::transfer::{
@@ -144,6 +144,16 @@ pub fn ping_request(id: RequestId) -> Result<Frame, ProtoError> {
 /// Build a presence [`Who`] request frame.
 pub fn who_request(id: RequestId) -> Result<Frame, ProtoError> {
     Frame::request(id, &Who)
+}
+
+/// Build a [`PresenceSet`] frame — the user's presence status, broadcast to a
+/// connected server (the "you're Away/Invisible everywhere" verb).
+pub fn presence_set_request(
+    state: PresenceState,
+    status: Option<String>,
+    id: RequestId,
+) -> Result<Frame, ProtoError> {
+    Frame::request(id, &PresenceSet::new(state, status))
 }
 
 /// Decode a [`WhoList`] reply frame to the roster of present screen names, in
@@ -1389,6 +1399,14 @@ mod tests {
         assert_eq!(frame_to_blob(&reply), Some(vec![1, 2, 3]));
         let chat = Frame::push(&ChatMessage::new("lobby", "x", "y", 0)).unwrap();
         assert_eq!(frame_to_blob(&chat), None);
+    }
+
+    #[test]
+    fn presence_set_request_builds_a_decodable_frame() {
+        let frame = presence_set_request(PresenceState::Away, Some("brb".into()), RequestId(1)).unwrap();
+        let msg = frame.decode::<PresenceSet>().unwrap().unwrap();
+        assert_eq!(msg.state, PresenceState::Away);
+        assert_eq!(msg.status.as_deref(), Some("brb"));
     }
 
     #[test]

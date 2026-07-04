@@ -118,6 +118,35 @@ pub fn Nav() -> impl IntoView {
     }
 }
 
+/// The user's presence status — a single control that fans the chosen status
+/// (Online / Away / Invisible) to **every** connected burrow via
+/// [`AppState::set_presence`]. Invisible is Cheshire mode.
+#[component]
+fn PresenceControl() -> impl IntoView {
+    use rabbithole_proto::presence::PresenceState;
+    let app = expect_context::<AppState>();
+    let value = move || match app.presence.get() {
+        PresenceState::Away => "away",
+        PresenceState::Invisible => "invisible",
+        _ => "online",
+    };
+    let on_change = move |ev: leptos::ev::Event| {
+        let state = match event_target_value(&ev).as_str() {
+            "away" => PresenceState::Away,
+            "invisible" => PresenceState::Invisible,
+            _ => PresenceState::Online,
+        };
+        app.set_presence(state);
+    };
+    view! {
+        <select class="rh-presence" aria-label="Your status" prop:value=value on:change=on_change>
+            <option value="online">"Online"</option>
+            <option value="away">"Away"</option>
+            <option value="invisible">"Invisible"</option>
+        </select>
+    }
+}
+
 /// The header/status bar: server name, connection state, nav links, theme
 /// toggle.
 #[component]
@@ -176,6 +205,7 @@ pub fn StatusBar() -> impl IntoView {
             >
                 <span aria-hidden="true">"\u{2318}K"</span>
             </button>
+            <PresenceControl/>
             <ThemeToggle/>
         </header>
         <Show when=move || banner().is_some() fallback=|| ()>

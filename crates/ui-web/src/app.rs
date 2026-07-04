@@ -77,6 +77,9 @@ pub struct AppState {
     sessions: RwSignal<Vec<(ServerId, Session)>>,
     /// Which session's "place" is currently in the main pane.
     focused_id: RwSignal<ServerId>,
+    /// The user's presence status, a warren-layer choice fanned to **every**
+    /// connected burrow (set once, applies everywhere).
+    pub presence: RwSignal<rabbithole_proto::presence::PresenceState>,
     /// The web-admin model, folded from admin events.
     pub admin: RwSignal<AdminState>,
     /// The Syndication & Gateways panel model, folded from paired config
@@ -133,6 +136,7 @@ impl AppState {
         Self {
             sessions: create_rw_signal(vec![(ServerId::local(), session)]),
             focused_id: create_rw_signal(ServerId::local()),
+            presence: create_rw_signal(rabbithole_proto::presence::PresenceState::Online),
             admin: create_rw_signal(AdminState::default()),
             syndication: create_rw_signal(SynAdminState::default()),
             palette_open: create_rw_signal(false),
@@ -190,6 +194,21 @@ impl AppState {
     /// Focus a connected burrow (switch which place is in the main pane).
     pub fn focus(&self, id: &ServerId) {
         self.focused_id.set(id.clone());
+    }
+
+    /// Set the user's presence status and **fan it to every connected burrow** —
+    /// one control, applied everywhere. A newly-joined burrow inherits the
+    /// current status from [`connect_live`].
+    pub fn set_presence(&self, state: rabbithole_proto::presence::PresenceState) {
+        self.presence.set(state);
+        #[cfg(target_arch = "wasm32")]
+        self.sessions.with_untracked(|list| {
+            for (_, session) in list {
+                if session.live.get_untracked() {
+                    session.ws.update_value(|c| c.set_presence(state, None));
+                }
+            }
+        });
     }
 
     /// Ensure a distinct session exists for the live server at `endpoint` and
@@ -315,6 +334,7 @@ impl AppState {
         let radio = self.radio;
         let files = self.focused().files;
         let session_name = self.focused().name;
+        let presence = self.presence;
         let ws_sv = self.focused().ws;
         self.focused().ws.update_value(|ws| {
             ws.on_event(std::rc::Rc::new(move |event| {
@@ -340,6 +360,8 @@ impl AppState {
                                 c.dispatch(Command::SignIn { login, password });
                                 // Pull the initial roster once signed in.
                                 c.request_who();
+                                // This burrow inherits the user's current status.
+                                c.set_presence(presence.get_untracked(), None);
                             });
                         });
                     }
