@@ -266,6 +266,14 @@ pub const STYLESHEET: &str = "\
 .rh-people{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}\
 .rh-person{display:flex;align-items:center;gap:.6rem;padding:.5rem .3rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\
 .rh-person-name{font-weight:600}\
+.rh-welcome{margin:.75rem;padding:.85rem 1rem;border:1px solid color-mix(in srgb,var(--rh-accent) 35%,transparent);border-left:3px solid var(--rh-accent);border-radius:var(--rh-radius,8px);background:color-mix(in srgb,var(--rh-accent) 7%,var(--rh-bg));box-shadow:0 1px 3px rgba(0,0,0,.06)}\
+.rh-welcome-head{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem}\
+.rh-welcome-title{font-weight:700;letter-spacing:.01em}\
+.rh-welcome-x{margin-left:auto;border:0;background:transparent;color:var(--rh-muted);font-size:1.2rem;line-height:1;cursor:pointer;padding:.1rem .3rem;border-radius:4px}\
+.rh-welcome-x:hover{background:color-mix(in srgb,var(--rh-text) 8%,transparent);color:var(--rh-text)}\
+.rh-welcome-motd{color:var(--rh-muted);margin:0 0 .5rem;font-style:italic}\
+.rh-welcome-body{margin:0 0 .7rem;white-space:pre-wrap;max-width:70ch;line-height:1.5}\
+.rh-welcome-actions{display:flex;justify-content:flex-end}\
 .rh-person-verified{color:var(--rh-accent);font-weight:700;cursor:help}\
 .rh-person-servers{margin-left:auto;font-size:var(--rh-font-sm);color:var(--rh-muted)}\
 .rh-xfers{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}\

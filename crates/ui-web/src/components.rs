@@ -256,6 +256,57 @@ pub fn Transfers() -> impl IntoView {
     }
 }
 
+/// A non-modal **welcome sheet**: the focused burrow's message of the day and,
+/// when the server gates participation, its agreement to accept. Slides in on
+/// connect and dismisses without blocking the rest of the app.
+#[component]
+pub fn WelcomeSheet() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    // Reactive over the focused session so switching burrows shows that burrow's
+    // welcome (or nothing).
+    let welcome = move || app.focused_tracked().state.with(|s| s.welcome.clone());
+    let dismiss = move |_| {
+        app.focused().state.update(|s| s.dismiss_welcome());
+    };
+    view! {
+        <Show when=move || welcome().is_some() fallback=|| ()>
+            {move || welcome().map(|w| {
+                let has_agreement = w.agreement.is_some();
+                let body = w.agreement.clone().unwrap_or_else(|| w.motd.clone());
+                let name = app.focused().name.get().unwrap_or_else(|| "this burrow".into());
+                view! {
+                    <aside class="rh-welcome" role="region" aria-label="Welcome">
+                        <div class="rh-welcome-head">
+                            <span class="rh-welcome-title">
+                                {if has_agreement { "Before you enter".to_string() }
+                                 else { format!("Welcome to {name}") }}
+                            </span>
+                            <button
+                                class="rh-welcome-x"
+                                aria-label="Dismiss"
+                                on:click=dismiss
+                            >"\u{00d7}"</button>
+                        </div>
+                        // Agreement servers show the MOTD above the agreement text.
+                        {has_agreement.then(|| {
+                            let motd = w.motd.clone();
+                            (!motd.trim().is_empty()).then(|| view! {
+                                <p class="rh-welcome-motd">{motd}</p>
+                            })
+                        })}
+                        <p class="rh-welcome-body">{body}</p>
+                        <div class="rh-welcome-actions">
+                            <button class="rh-btn" on:click=dismiss>
+                                {if has_agreement { "Accept & enter" } else { "Got it" }}
+                            </button>
+                        </div>
+                    </aside>
+                }
+            })}
+        </Show>
+    }
+}
+
 /// The **You** hub: your portable Ed25519 identity — the key that names you
 /// across every burrow, independent of your per-server handle.
 #[component]

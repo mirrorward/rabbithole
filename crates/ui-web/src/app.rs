@@ -16,7 +16,7 @@ use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
     Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby, Login,
-    People, Radio, ServerBrowser, Toasts, Transfers, You,
+    People, Radio, ServerBrowser, Toasts, Transfers, WelcomeSheet, You,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -161,6 +161,14 @@ impl AppState {
     /// callers use `app.focused().state`, `.files`, `.live`, etc. exactly where
     /// they used the old flat `app.state` fields. For Wave A there is one
     /// session and focus never changes; Wave B makes focus reactive + switchable.
+    /// The focused session, but as a **reactive** read — re-runs the calling
+    /// reactive scope when focus changes (unlike [`focused`](Self::focused),
+    /// which reads untracked). Use in views that must follow the focused burrow.
+    pub fn focused_tracked(&self) -> Session {
+        let _ = self.focused_id.get();
+        self.focused()
+    }
+
     pub fn focused(&self) -> Session {
         let id = self.focused_id.get_untracked();
         self.sessions.with_untracked(|list| {
@@ -1263,6 +1271,7 @@ pub fn App() -> impl IntoView {
                 <div class="rh-shell">
                     <BurrowRail/>
                     <div class="rh-shell-main">
+                        <WelcomeSheet/>
                         {move || {
                             // Remount the place when the focused burrow changes,
                             // so each view re-binds the newly-focused session's

@@ -611,6 +611,14 @@ pub fn frame_to_events(frame: &Frame) -> Vec<Event> {
         }];
     }
 
+    // Session: the post-auth welcome (message of the day + optional agreement).
+    if let Some(Ok(w)) = frame.decode::<rabbithole_proto::session::Welcome>() {
+        return vec![Event::Welcome {
+            motd: w.motd,
+            agreement: w.agreement,
+        }];
+    }
+
     // Presence rosters, auth acks, welcomes, pongs and not-yet-mapped families
     // decode fine but have no api::Event counterpart — see module docs.
     // ServerNotice pushes surface through the local notice vocabulary instead

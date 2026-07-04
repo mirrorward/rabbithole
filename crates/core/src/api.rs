@@ -45,4 +45,10 @@ pub enum Event {
         from: String,
         text: String,
     },
+    /// The post-auth welcome: message of the day + an optional agreement the
+    /// user must accept. Surfaced as a non-modal sheet on connect.
+    Welcome {
+        motd: String,
+        agreement: Option<String>,
+    },
 }

@@ -108,6 +108,23 @@ pub struct MemberProfile {
     pub avatar_src: Option<String>,
 }
 
+/// A burrow's post-auth welcome: the message of the day and, when the server
+/// gates participation, an agreement to accept. Surfaced as a non-modal sheet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Welcome {
+    /// Message of the day (may be empty).
+    pub motd: String,
+    /// Agreement text the user must accept, when the server requires one.
+    pub agreement: Option<String>,
+}
+
+impl Welcome {
+    /// Is there anything worth showing? (An empty MOTD with no agreement is not.)
+    pub fn has_content(&self) -> bool {
+        !self.motd.trim().is_empty() || self.agreement.is_some()
+    }
+}
+
 /// A user present in a room's live roster, richer than a bare handle: carries
 /// their presence state (for the status dot) and the door they came in through.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +229,9 @@ pub struct UiState {
     pub server_name: String,
     /// One-line status shown in the header bar.
     pub status: String,
+    /// The burrow's post-auth welcome (message of the day + optional agreement),
+    /// shown as a non-modal sheet until dismissed/accepted. `None` once handled.
+    pub welcome: Option<Welcome>,
     /// Chat scrollback for the lobby, oldest first.
     pub messages: Vec<ChatLine>,
     /// Users currently present in the room, with their presence state.
@@ -269,8 +289,21 @@ impl UiState {
                     text: text.clone(),
                 });
             }
+            Event::Welcome { motd, agreement } => {
+                let w = Welcome {
+                    motd: motd.clone(),
+                    agreement: agreement.clone(),
+                };
+                // Only raise the sheet when there's something to show.
+                self.welcome = w.has_content().then_some(w);
+            }
             _ => {}
         }
+    }
+
+    /// Dismiss the welcome sheet (MOTD read, or agreement accepted).
+    pub fn dismiss_welcome(&mut self) {
+        self.welcome = None;
     }
 
     /// Append an operator notice to the chat scrollback as a marked system
@@ -564,6 +597,35 @@ mod tests {
         s.open_thread("1".into(), posts.clone());
         assert_eq!(s.selected_thread.as_deref(), Some("1"));
         assert_eq!(s.posts, posts);
+    }
+
+    #[test]
+    fn welcome_event_raises_and_dismisses_the_sheet() {
+        use rabbithole_core::api::Event;
+        let mut s = UiState::default();
+        // A welcome with content raises the sheet.
+        s.apply(&Event::Welcome {
+            motd: "Be excellent to each other.".into(),
+            agreement: None,
+        });
+        assert!(s.welcome.is_some());
+        assert_eq!(s.welcome.as_ref().unwrap().motd, "Be excellent to each other.");
+        // Dismissing clears it.
+        s.dismiss_welcome();
+        assert!(s.welcome.is_none());
+        // An empty welcome (no motd, no agreement) never raises the sheet.
+        s.apply(&Event::Welcome {
+            motd: "   ".into(),
+            agreement: None,
+        });
+        assert!(s.welcome.is_none(), "blank welcome stays silent");
+        // An agreement-only welcome raises it even with an empty motd.
+        s.apply(&Event::Welcome {
+            motd: String::new(),
+            agreement: Some("Rule 1: no wire fraud.".into()),
+        });
+        assert!(s.welcome.is_some());
+        assert!(s.welcome.as_ref().unwrap().agreement.is_some());
     }
 
     #[test]
