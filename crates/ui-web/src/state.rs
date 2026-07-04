@@ -174,6 +174,17 @@ pub fn merge_people(rosters: &[(String, Vec<Presence>)]) -> Vec<Person> {
         }
     }
 
+    // "Most present" ordering: Online > Idle > Away > Invisible. The merged
+    // Person shows the best state seen across burrows (not just first-sighting).
+    fn presence_rank(s: PresenceState) -> u8 {
+        match s {
+            PresenceState::Online => 3,
+            PresenceState::Idle => 2,
+            PresenceState::Away => 1,
+            _ => 0,
+        }
+    }
+
     let mut people: Vec<Person> = Vec::new();
     for (server, who) in rosters {
         for p in who {
@@ -186,9 +197,9 @@ pub fn merge_people(rosters: &[(String, Vec<Presence>)]) -> Vec<Person> {
                     if !person.servers.iter().any(|s| s == server) {
                         person.servers.push(server.clone());
                     }
-                    // Prefer the "most present" state — and adopt the handle from
-                    // an Online sighting, so a verified person shows their live name.
-                    if p.state == PresenceState::Online {
+                    // Adopt the more-present state (and its handle, so the shown
+                    // name matches the burrow where they're most active).
+                    if presence_rank(p.state) > presence_rank(person.state) {
                         person.state = p.state;
                         person.screen_name = p.screen_name.clone();
                     }
@@ -656,6 +667,32 @@ mod tests {
         assert_eq!(alice.state, PresenceState::Online);
         assert_eq!(people[1].servers, vec!["The Warren"]); // bob
         assert_eq!(people[2].servers, vec!["Briar Patch"]); // carol
+    }
+
+    #[test]
+    fn merge_people_ranks_most_present_state() {
+        use rabbithole_proto::presence::PresenceState;
+        let pres = |name: &str, state| Presence {
+            screen_name: name.to_string(),
+            state,
+            transport: "quic".to_string(),
+            key: None,
+        };
+        // Same handle seen Away on A then Idle on B: Idle outranks Away, so the
+        // merged person shows Idle (not first-sighting Away).
+        let rosters = vec![
+            ("A".to_string(), vec![pres("mo", PresenceState::Away)]),
+            ("B".to_string(), vec![pres("mo", PresenceState::Idle)]),
+        ];
+        let people = merge_people(&rosters);
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].state, PresenceState::Idle, "Idle > Away");
+        // And an Away sighting never downgrades a prior Online.
+        let rosters2 = vec![
+            ("A".to_string(), vec![pres("mo", PresenceState::Online)]),
+            ("B".to_string(), vec![pres("mo", PresenceState::Away)]),
+        ];
+        assert_eq!(merge_people(&rosters2)[0].state, PresenceState::Online, "Online stays");
     }
 
     #[test]

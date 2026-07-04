@@ -31,6 +31,16 @@ bump it:
   stream, because the payload is opaque to the frame's own serde tree.
 - **New optional fields on a `#[non_exhaustive]` payload struct**, appended at
   the end, deserializing to a sensible default when absent.
+  - ⚠️ **Forward-compatible only under postcard.** postcard is positional and
+    not self-describing: a decoder built *with* the new trailing field, reading a
+    payload written *without* it, runs out of bytes reading the field and
+    **errors** (it cannot synthesize the default). So old-reads-new is safe
+    (trailing bytes ignored) but **new-reads-old is not**. This is fine when
+    reader and writer upgrade together (the common single-deployment case), but a
+    newer client against an older server — or federation across versions — will
+    fail to decode. When that skew is possible, gate the field's *use* behind a
+    negotiated capability (so a party only sends/expects it when both advertise
+    support) rather than relying on the appended-field convention alone.
 - **New enum variants on a `#[non_exhaustive]` enum** (e.g. a new
   [`ErrorCode`]) — unknown variants degrade rather than fail, via the explicit
   `Other(u16)` escape hatch where one exists.

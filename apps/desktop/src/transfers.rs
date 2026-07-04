@@ -87,10 +87,18 @@ pub async fn swarm_start_download(
 }
 
 /// Reduce a server-supplied filename to a bare, safe basename so it can't escape
-/// the downloads directory (no separators, no `..`, no leading dots/empties).
+/// the downloads directory. Strips path separators and rejects `..`, leading
+/// dots, and — for Windows — any name containing a `:` (drive-relative prefixes
+/// like `C:evil.exe` PATH-resolve off the target dir, and `report.txt:stream`
+/// opens an NTFS alternate data stream), falling back to a fixed safe name.
 fn sanitize_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
-    if base.is_empty() || base == "." || base == ".." || base.starts_with('.') {
+    let unsafe_name = base.is_empty()
+        || base == "."
+        || base == ".."
+        || base.starts_with('.')
+        || base.contains(':');
+    if unsafe_name {
         "download.bin".to_string()
     } else {
         base.to_string()
@@ -133,5 +141,8 @@ mod tests {
         assert_eq!(sanitize_name(".."), "download.bin");
         assert_eq!(sanitize_name(""), "download.bin");
         assert_eq!(sanitize_name(".hidden"), "download.bin");
+        // Windows drive-relative prefix + NTFS alternate data stream: reject the ':'.
+        assert_eq!(sanitize_name("C:evil.exe"), "download.bin");
+        assert_eq!(sanitize_name("report.txt:hidden"), "download.bin");
     }
 }

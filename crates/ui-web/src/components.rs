@@ -1257,7 +1257,10 @@ pub fn Directory() -> impl IntoView {
                 <ul class="rh-tree">
                     <For
                         each=move || state.with(|s| s.matching_members())
-                        key=|m| m.handle.clone()
+                        // Key on presence too, so a member's dot/label re-renders
+                        // when they go online/offline (a handle-only key would
+                        // reuse the stale row — see the security review).
+                        key=|m| (m.handle.clone(), m.online)
                         children=move |m| {
                             let handle = m.handle.clone();
                             let dot = if m.online { "rh-dot on" } else { "rh-dot off" };
