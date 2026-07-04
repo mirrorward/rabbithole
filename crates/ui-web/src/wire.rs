@@ -83,6 +83,7 @@ use rabbithole_proto::board::{
     ThreadRequest,
 };
 use rabbithole_proto::chat::{ChatMessage, ChatSend};
+use rabbithole_proto::directory::{DirectoryResults, DirectorySearch, ProfileCard, ProfileGet};
 use rabbithole_proto::dm::{
     DmHistory, DmHistoryRequest, DmReceived, DmSend, DmThreads, DmThreadsRequest,
 };
@@ -369,6 +370,66 @@ pub fn frame_to_dm_received(frame: &Frame) -> Option<(String, crate::state::DmMe
             text: m.text,
         },
     ))
+}
+
+// ── Directory family (presence): member list + profile card ──────────────
+
+/// Build a [`DirectorySearch`] frame. An empty query lists all visible members.
+pub fn directory_search_request(
+    query: &str,
+    limit: u32,
+    id: RequestId,
+) -> Result<Frame, ProtoError> {
+    Frame::request(id, &DirectorySearch::new(query, limit))
+}
+
+/// Decode a [`DirectoryResults`] reply to [`Member`](crate::state::Member) rows.
+/// `online` is left false here (the list has no presence flag; the app fills it
+/// from the live roster). The bio is the first non-empty profile blurb.
+pub fn frame_to_members(frame: &Frame) -> Option<Vec<crate::state::Member>> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let results = frame.decode::<DirectoryResults>()?.ok()?;
+    Some(
+        results
+            .personas
+            .into_iter()
+            .map(|p| crate::state::Member {
+                handle: p.screen_name.clone(),
+                display_name: p.screen_name,
+                bio: p
+                    .profile
+                    .quote
+                    .or(p.profile.interests)
+                    .or(p.profile.location)
+                    .unwrap_or_default(),
+                online: false,
+            })
+            .collect(),
+    )
+}
+
+/// Build a [`ProfileGet`] frame for one member's full card.
+pub fn profile_get_request(screen_name: &str, id: RequestId) -> Result<Frame, ProtoError> {
+    Frame::request(id, &ProfileGet::new(screen_name))
+}
+
+/// Decode a [`ProfileCard`] reply to a [`MemberProfile`](crate::state::MemberProfile).
+pub fn frame_to_profile(frame: &Frame) -> Option<crate::state::MemberProfile> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let card = frame.decode::<ProfileCard>()?.ok()?;
+    Some(crate::state::MemberProfile {
+        screen_name: card.screen_name,
+        location: card.profile.location,
+        interests: card.profile.interests,
+        quote: card.profile.quote,
+        plan: card.profile.plan,
+        pronouns: card.profile.pronouns,
+        online: card.online_transport.is_some(),
+    })
 }
 
 /// Decode a presence push to a [`PresenceDelta`]. `None` for any other frame.
@@ -1182,6 +1243,40 @@ mod tests {
         let chat = Frame::push(&ChatMessage::new("lobby", "x", "y", 0)).unwrap();
         assert_eq!(frame_to_dm_threads(&chat), None);
         assert_eq!(frame_to_dm_received(&chat), None);
+    }
+
+    #[test]
+    fn frame_to_members_and_profile_map_the_directory() {
+        use rabbithole_proto::directory::{DirectoryResults, ProfileCard};
+        use rabbithole_proto::persona::{PersonaInfo, Profile};
+        let mut profile = Profile::default();
+        profile.quote = Some("Curious about everything.".into());
+        profile.location = Some("Wonderland".into());
+        let mut info = PersonaInfo::new(1, "Alice");
+        info.profile = profile.clone();
+        let results = DirectoryResults::new(vec![info]);
+        let req = directory_search_request("", 100, RequestId(1)).unwrap();
+        let reply = Frame::reply_to(&req, &results).unwrap();
+        let members = frame_to_members(&reply).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].handle, "Alice");
+        assert_eq!(members[0].bio, "Curious about everything.");
+        assert!(!members[0].online);
+
+        // A profile card maps its fields + derives online from online_transport.
+        let mut card = ProfileCard::new("Alice", profile);
+        card.online_transport = Some("websocket".into());
+        let req = profile_get_request("Alice", RequestId(2)).unwrap();
+        let reply = Frame::reply_to(&req, &card).unwrap();
+        let p = frame_to_profile(&reply).unwrap();
+        assert_eq!(p.screen_name, "Alice");
+        assert_eq!(p.quote.as_deref(), Some("Curious about everything."));
+        assert_eq!(p.location.as_deref(), Some("Wonderland"));
+        assert!(p.online);
+        // Unrelated frames yield None.
+        let chat = Frame::push(&ChatMessage::new("lobby", "x", "y", 0)).unwrap();
+        assert_eq!(frame_to_members(&chat), None);
+        assert_eq!(frame_to_profile(&chat), None);
     }
 
     #[test]

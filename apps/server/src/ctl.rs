@@ -147,6 +147,22 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
             audit("board-create", slug.clone());
             Ok(json!({"slug": board.slug, "title": board.title}))
         }
+        "persona-set" => {
+            let screen_name = str_arg("screen_name")?;
+            let quote = req.get("quote").and_then(Value::as_str);
+            let location = req.get("location").and_then(Value::as_str);
+            let repo = rabbithole_store_server::repo2::PersonasRepo(&shared.pool);
+            let row = repo
+                .by_screen_name(&screen_name)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("no such persona: {screen_name}"))?;
+            repo.update(row.id, location, None, quote, None, None, None, None, None)
+                .await
+                .map_err(|e| e.to_string())?;
+            audit("persona-set", screen_name.clone());
+            Ok(json!({"screen_name": screen_name, "quote": quote, "location": location}))
+        }
         "file-area-create" => {
             let slug = str_arg("slug")?;
             let title = str_arg("title")?;

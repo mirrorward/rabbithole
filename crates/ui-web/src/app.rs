@@ -277,6 +277,22 @@ impl AppState {
             ws.on_file_event(std::rc::Rc::new(move |event| {
                 files.update(|f| f.apply(&event))
             }));
+            ws.on_members(std::rc::Rc::new(move |members| {
+                // The directory list has no presence flag; fill `online` from
+                // the live roster.
+                state.update(|s| {
+                    let present: std::collections::HashSet<String> =
+                        s.who.iter().cloned().collect();
+                    let mut members = members;
+                    for m in &mut members {
+                        m.online = present.contains(&m.handle);
+                    }
+                    s.set_members(members);
+                })
+            }));
+            ws.on_profile(std::rc::Rc::new(move |profile| {
+                state.update(|s| s.set_profile(profile))
+            }));
             ws.on_notice(std::rc::Rc::new(move |route| match route {
                 crate::wire::NoticeRoute::Radio(u) => radio.update(|r| r.apply_update(u)),
                 crate::wire::NoticeRoute::Chat { from, text } => {
@@ -508,13 +524,25 @@ impl AppState {
         });
     }
 
-    /// Load the member directory snapshot into state.
+    /// Load the member directory snapshot into state. Live: request the
+    /// directory over the socket (empty query = list all; reply folds via sink).
     pub fn load_members(&self) {
-        if self.skip_mock_load() {
+        #[cfg(target_arch = "wasm32")]
+        if self.live.get_untracked() {
+            self.ws.update_value(|c| c.request_directory(""));
             return;
         }
         let members = self.client.with_value(|c| c.members());
         self.state.update(|s| s.set_members(members));
+    }
+
+    /// Select a member and (live) fetch their full profile card.
+    pub fn select_member(&self, handle: &str) {
+        self.state.update(|s| s.select_member(handle));
+        #[cfg(target_arch = "wasm32")]
+        if self.live.get_untracked() {
+            self.ws.update_value(|c| c.request_profile(handle));
+        }
     }
 
     /// Drive one [`FileCommand`] through the seam and fold its file events into

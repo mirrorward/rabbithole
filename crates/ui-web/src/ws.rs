@@ -88,6 +88,10 @@ pub type DmThreadSink = Rc<dyn Fn(Vec<crate::state::DmThread>)>;
 pub type DmHistorySink = Rc<dyn Fn(Vec<crate::state::DmMessage>)>;
 /// A sink the transport pushes a live `(peer, message)` DM into.
 pub type DmReceivedSink = Rc<dyn Fn((String, crate::state::DmMessage))>;
+/// A sink the transport pushes the directory member list into.
+pub type MembersSink = Rc<dyn Fn(Vec<crate::state::Member>)>;
+/// A sink the transport pushes one member's profile card into.
+pub type ProfileSink = Rc<dyn Fn(crate::state::MemberProfile)>;
 
 /// A browser WebSocket [`EventClient`] speaking RHP.
 ///
@@ -114,6 +118,8 @@ struct Inner {
     dm_thread_sink: Option<DmThreadSink>,
     dm_history_sink: Option<DmHistorySink>,
     dm_received_sink: Option<DmReceivedSink>,
+    members_sink: Option<MembersSink>,
+    profile_sink: Option<ProfileSink>,
     next_id: u64,
     /// While `true`, the keepalive loop keeps pinging; cleared on close.
     alive: bool,
@@ -209,6 +215,18 @@ impl Inner {
         }
     }
 
+    fn emit_members(&self, members: Vec<crate::state::Member>) {
+        if let Some(sink) = &self.members_sink {
+            sink(members);
+        }
+    }
+
+    fn emit_profile(&self, profile: crate::state::MemberProfile) {
+        if let Some(sink) = &self.profile_sink {
+            sink(profile);
+        }
+    }
+
     fn next_request_id(&mut self) -> RequestId {
         self.next_id += 1;
         RequestId(self.next_id)
@@ -235,6 +253,8 @@ impl WsClient {
                 dm_thread_sink: None,
                 dm_history_sink: None,
                 dm_received_sink: None,
+                members_sink: None,
+                profile_sink: None,
                 next_id: 0,
                 alive: false,
                 want_connected: false,
@@ -400,6 +420,37 @@ impl WsClient {
         }
     }
 
+    /// Register the directory member-list sink. Most recent registration wins.
+    pub fn on_members(&mut self, sink: MembersSink) {
+        self.inner.borrow_mut().members_sink = Some(sink);
+    }
+
+    /// Register the profile-card sink. Most recent registration wins.
+    pub fn on_profile(&mut self, sink: ProfileSink) {
+        self.inner.borrow_mut().profile_sink = Some(sink);
+    }
+
+    /// Ask for the directory member list matching `query` (empty = all).
+    pub fn request_directory(&self, query: &str) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) =
+            wire::directory_search_request(query, 100, id).and_then(|f| encode_frame(&f))
+        {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
+    /// Ask for one member's profile card ([`on_profile`](Self::on_profile)).
+    pub fn request_profile(&self, screen_name: &str) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) = wire::profile_get_request(screen_name, id).and_then(|f| encode_frame(&f))
+        {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
     /// Drive one [`FileCommand`]: encode it via the host-tested
     /// [`wire::file_command_to_frame`] and write it to the open socket. Replies
     /// arrive asynchronously through the FILE-family sink.
@@ -536,6 +587,12 @@ impl WsClient {
                         }
                         if let Some(dm) = wire::frame_to_dm_received(&frame) {
                             b.emit_dm_received(dm);
+                        }
+                        if let Some(members) = wire::frame_to_members(&frame) {
+                            b.emit_members(members);
+                        }
+                        if let Some(profile) = wire::frame_to_profile(&frame) {
+                            b.emit_profile(profile);
                         }
                     }
                     Err(err) => b.emit(Event::CommandFailed {

@@ -89,6 +89,20 @@ pub struct DmThread {
     pub messages: Vec<DmMessage>,
 }
 
+/// A member's full profile card (from a live `ProfileGet`), richer than the
+/// directory-list [`Member`] row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemberProfile {
+    pub screen_name: String,
+    pub location: Option<String>,
+    pub interests: Option<String>,
+    pub quote: Option<String>,
+    pub plan: Option<String>,
+    pub pronouns: Option<String>,
+    /// Whether the persona is online right now (from `online_transport`).
+    pub online: bool,
+}
+
 /// A member listed in the directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
@@ -135,6 +149,8 @@ pub struct UiState {
     pub members: Vec<Member>,
     /// Current directory search query.
     pub directory_query: String,
+    /// The selected member's full profile card (live `ProfileGet` reply).
+    pub selected_profile: Option<MemberProfile>,
     /// Handle of the member whose profile card is shown, if any.
     pub selected_member: Option<String>,
 }
@@ -295,6 +311,14 @@ impl UiState {
     /// Show a member's profile card by handle.
     pub fn select_member(&mut self, handle: &str) {
         self.selected_member = Some(handle.to_string());
+        // A live profile card loads asynchronously; clear the previous one so a
+        // stale card never shows under a new selection.
+        self.selected_profile = None;
+    }
+
+    /// Store a fetched live profile card.
+    pub fn set_profile(&mut self, profile: MemberProfile) {
+        self.selected_profile = Some(profile);
     }
 
     /// The member whose profile card is shown, if any.

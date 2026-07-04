@@ -900,9 +900,7 @@ pub fn Directory() -> impl IntoView {
                                 <li class="rh-tree-item">
                                     <button
                                         class="rh-member-link"
-                                        on:click=move |_| {
-                                            state.update(|s| s.select_member(&handle))
-                                        }
+                                        on:click=move |_| app.select_member(&handle)
                                     >
                                         <span class=dot aria-hidden="true"></span>
                                         <span class="rh-visually-hidden">{presence}</span>
@@ -917,12 +915,39 @@ pub fn Directory() -> impl IntoView {
             </section>
             <section class="rh-panel rh-profile" aria-label="Member profile">
                 <Show
-                    when=move || state.with(|s| s.active_member().is_some())
+                    when=move || {
+                        state.with(|s| s.active_member().is_some() || s.selected_profile.is_some())
+                    }
                     fallback=|| view! {
                         <p class="rh-empty">"Select a member to view their profile."</p>
                     }
                 >
                     {move || state.with(|s| {
+                        // Prefer the full live profile card; fall back to the
+                        // directory-row summary (mock, or before it loads).
+                        if let Some(p) = &s.selected_profile {
+                            let status = if p.online { "Online" } else { "Offline" };
+                            let field = |label: &'static str, v: &Option<String>| {
+                                v.clone().filter(|x| !x.is_empty()).map(|val| view! {
+                                    <p class="rh-card-field">
+                                        <span class="rh-card-label">{label}</span>{val}
+                                    </p>
+                                })
+                            };
+                            return view! {
+                                <div class="rh-card">
+                                    <h2 class="rh-card-name">{p.screen_name.clone()}</h2>
+                                    {p.pronouns.clone().filter(|x| !x.is_empty())
+                                        .map(|pr| view! { <p class="rh-card-handle">{pr}</p> })}
+                                    <p class="rh-card-status">{status}</p>
+                                    {p.quote.clone().filter(|x| !x.is_empty())
+                                        .map(|q| view! { <p class="rh-card-bio">{q}</p> })}
+                                    {field("Location", &p.location)}
+                                    {field("Interests", &p.interests)}
+                                    {field("Plan", &p.plan)}
+                                </div>
+                            }.into_view();
+                        }
                         s.active_member().map(|m| {
                             let status = if m.online { "Online" } else { "Offline" };
                             view! {
@@ -933,7 +958,7 @@ pub fn Directory() -> impl IntoView {
                                     <p class="rh-card-bio">{m.bio.clone()}</p>
                                 </div>
                             }
-                        })
+                        }).into_view()
                     })}
                 </Show>
             </section>
