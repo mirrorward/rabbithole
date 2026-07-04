@@ -250,6 +250,10 @@ pub const STYLESHEET: &str = "\
 .rh-shell-main{flex:1;min-width:0;display:flex;flex-direction:column}\
 .rh-rail{flex:none;width:3.4rem;display:flex;flex-direction:column;align-items:center;gap:var(--rh-space-2);padding:var(--rh-space-3) 0;background:color-mix(in srgb,var(--rh-accent) 6%,var(--rh-surface));border-right:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
 .rh-rail-hidden{display:none}\
+.rh-rail-dot{position:absolute;right:1px;bottom:1px;width:9px;height:9px;border-radius:50%;box-shadow:0 0 0 2px color-mix(in srgb,var(--rh-accent) 6%,var(--rh-surface))}\
+.rh-rail-dot.on{background:#3fbf7f}\
+.rh-rail-dot.pending{background:var(--rh-accent)}\
+.rh-rail-dot.off{background:var(--rh-muted)}\
 .rh-rail-tile{width:40px;height:40px;display:grid;place-items:center;border:0;padding:0;cursor:pointer;border-radius:12px;background:color-mix(in srgb,var(--rh-text) 5%,transparent);color:var(--rh-muted);font-family:var(--rh-font-sans);font-weight:700;font-size:.95rem;position:relative}\
 .rh-rail-tile:hover{color:var(--rh-text)}\
 .rh-rail-home,.rh-rail-add{border-radius:var(--rh-radius-full)}\

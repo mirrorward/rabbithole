@@ -23,7 +23,7 @@
 use std::time::Duration;
 
 /// The connection lifecycle surfaced to the UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ConnState {
     /// No socket, and none wanted (fresh, or a user-requested disconnect).
     #[default]

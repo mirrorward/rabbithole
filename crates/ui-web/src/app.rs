@@ -163,10 +163,11 @@ impl AppState {
         })
     }
 
-    /// The connected burrows for the rail: `(id, label, is_focused)`, reactive
-    /// over the session list + the focus. The label is the server's display
-    /// name once known, else a short form of its id.
-    pub fn burrow_tiles(&self) -> Vec<(ServerId, String, bool)> {
+    /// The connected burrows for the rail: `(id, label, is_focused, conn)`,
+    /// reactive over the session list, the focus, each session's name, and each
+    /// session's connection health. The label is the server's display name once
+    /// known, else a short form of its id.
+    pub fn burrow_tiles(&self) -> Vec<(ServerId, String, bool, crate::conn::ConnState)> {
         let focused = self.focused_id.get();
         self.sessions.with(|list| {
             list.iter()
@@ -179,7 +180,8 @@ impl AppState {
                         .or_else(|| session.server_theme.with(|t| t.as_ref().map(|o| o.name.clone())))
                         .filter(|n| !n.is_empty())
                         .unwrap_or_else(|| server_label(id));
-                    (id.clone(), name, *id == focused)
+                    let conn = session.state.with(|s| s.conn);
+                    (id.clone(), name, *id == focused, conn)
                 })
                 .collect()
         })
@@ -1197,21 +1199,31 @@ fn BurrowRail() -> impl IntoView {
             <div class="rh-rail-sep"></div>
             <For
                 each=move || app.burrow_tiles()
-                key=|(id, name, focused)| (id.0.clone(), name.clone(), *focused)
-                children=move |(id, name, focused)| {
+                key=|(id, name, focused, conn)| (id.0.clone(), name.clone(), *focused, *conn)
+                children=move |(id, name, focused, conn)| {
                     let glyph = name.chars().next().unwrap_or('?').to_uppercase().to_string();
                     let cls = if focused {
                         "rh-rail-tile rh-rail-server active"
                     } else {
                         "rh-rail-tile rh-rail-server"
                     };
+                    // Connection health: lit when online, pending on a
+                    // (re)connect, off otherwise.
+                    let dot = if conn.is_live() {
+                        "rh-rail-dot on"
+                    } else if conn.is_pending() {
+                        "rh-rail-dot pending"
+                    } else {
+                        "rh-rail-dot off"
+                    };
+                    let status = format!("{name} — {}", conn.label());
                     let nav = navigate.clone();
                     let click_id = id.clone();
                     view! {
                         <button
                             class=cls
-                            title=name.clone()
-                            aria-label=name
+                            title=status.clone()
+                            aria-label=status
                             aria-current=move || focused.then_some("true")
                             on:click=move |_| {
                                 app.focus(&click_id);
@@ -1219,6 +1231,7 @@ fn BurrowRail() -> impl IntoView {
                             }
                         >
                             {glyph}
+                            <span class=dot aria-hidden="true"></span>
                         </button>
                     }
                 }
