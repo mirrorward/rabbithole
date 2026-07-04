@@ -207,6 +207,7 @@ impl AppState {
         let state = self.state;
         let toasts = self.toasts;
         let radio = self.radio;
+        let files = self.files;
         let ws_sv = self.ws;
         self.ws.update_value(|ws| {
             ws.on_event(std::rc::Rc::new(move |event| {
@@ -272,6 +273,9 @@ impl AppState {
             }));
             ws.on_dm_received(std::rc::Rc::new(move |(peer, msg)| {
                 state.update(|s| s.receive_dm(&peer, msg))
+            }));
+            ws.on_file_event(std::rc::Rc::new(move |event| {
+                files.update(|f| f.apply(&event))
             }));
             ws.on_notice(std::rc::Rc::new(move |route| match route {
                 crate::wire::NoticeRoute::Radio(u) => radio.update(|r| r.apply_update(u)),
@@ -516,6 +520,13 @@ impl AppState {
     /// Drive one [`FileCommand`] through the seam and fold its file events into
     /// the [`FilesState`].
     fn dispatch_file(&self, command: FileCommand) {
+        // Live: send over the socket; replies fold in through the file sink
+        // registered in `connect_live`. Mock: drive the seam synchronously.
+        #[cfg(target_arch = "wasm32")]
+        if self.live.get_untracked() {
+            self.ws.update_value(|c| c.dispatch_file(&command));
+            return;
+        }
         let files = self.files;
         self.client.update_value(|client| {
             let events: Vec<FileEvent> = client.dispatch_file(command);
@@ -529,9 +540,6 @@ impl AppState {
 
     /// Load the file-area list into state.
     pub fn load_areas(&self) {
-        if self.skip_mock_load() {
-            return;
-        }
         self.dispatch_file(FileCommand::ListAreas);
     }
 

@@ -147,6 +147,22 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
             audit("board-create", slug.clone());
             Ok(json!({"slug": board.slug, "title": board.title}))
         }
+        "file-area-create" => {
+            let slug = str_arg("slug")?;
+            let title = str_arg("title")?;
+            let description = req
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let area = shared
+                .files
+                .create_area(&slug, &title, &description)
+                .await
+                .map_err(|e| e.to_string())?;
+            audit("file-area-create", slug.clone());
+            Ok(json!({"slug": area.slug, "title": area.title}))
+        }
         "board-post" => {
             let board = str_arg("board")?;
             let author = str_arg("author")?;

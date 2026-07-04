@@ -139,6 +139,12 @@ async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<
         ("board-post", [board, author, subject, body]) => {
             json!({"cmd": "board-post", "board": board, "author": author, "subject": subject, "body": body})
         }
+        ("file-area-create", [slug, title]) => {
+            json!({"cmd": "file-area-create", "slug": slug, "title": title})
+        }
+        ("file-area-create", [slug, title, description]) => {
+            json!({"cmd": "file-area-create", "slug": slug, "title": title, "description": description})
+        }
         ("theme-status", _) => json!({"cmd": "theme-status"}),
         ("theme-clear", _) => json!({"cmd": "theme-clear"}),
         ("gateway-stats", _) => json!({"cmd": "gateway-stats"}),
