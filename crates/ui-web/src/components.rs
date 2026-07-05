@@ -876,6 +876,16 @@ pub fn Lobby() -> impl IntoView {
                 // role=log: an implicitly polite live region — new messages
                 // are announced without moving focus off the compose box.
                 <div class="rh-scroll" role="log" aria-label="Chat messages">
+                    <Show
+                        when=move || state.with(|s| s.messages.is_empty())
+                        fallback=|| ()
+                    >
+                        <div class="rh-chat-empty">
+                            <div class="rh-chat-empty-mark" aria-hidden="true">"\u{273f}"</div>
+                            <p class="rh-chat-empty-title">"Quiet in here"</p>
+                            <p class="rh-chat-empty-sub">"Say hello \u{2014} the lobby's yours to open."</p>
+                        </div>
+                    </Show>
                     <ul class="rh-lines">
                         <For
                             each=move || {

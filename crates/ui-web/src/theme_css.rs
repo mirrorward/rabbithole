@@ -279,6 +279,13 @@ pub const STYLESHEET: &str = "\
 .rh-welcome-body{margin:0 0 .7rem;white-space:pre-wrap;max-width:70ch;line-height:1.5}\
 .rh-welcome-actions{display:flex;justify-content:flex-end}\
 .rh-person-idkey{color:var(--rh-muted);cursor:help;font-size:.9em}\
+.rh-chat-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.35rem;min-height:60%;padding:var(--rh-space-6);text-align:center;animation:rh-fade-up .3s ease both}\
+.rh-chat-empty-mark{font-size:2rem;color:var(--rh-accent);opacity:.7;line-height:1}\
+.rh-chat-empty-title{font-weight:700;margin:.3rem 0 0}\
+.rh-chat-empty-sub{color:var(--rh-muted);margin:0;max-width:32ch}\
+.rh-person,.rh-xfer-item,.rh-who-row,.rh-tree-item{border-radius:8px;transition:background-color .13s ease}\
+.rh-person:hover,.rh-xfer-item:hover,.rh-who-row:hover,.rh-tree-item:hover{background:color-mix(in srgb,var(--rh-text) 5%,transparent)}\
+.rh-empty{color:var(--rh-muted);font-style:italic;padding:var(--rh-space-4);text-align:center;animation:rh-fade-up .25s ease both}\
 .rh-person-servers{margin-left:auto;font-size:var(--rh-font-sm);color:var(--rh-muted)}\
 .rh-xfers{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}\
 .rh-xfer-row{display:flex;align-items:center;gap:.7rem;padding:.5rem .3rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\
