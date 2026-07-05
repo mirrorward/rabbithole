@@ -53,12 +53,22 @@ to B → B marks A's relayed session as the victim's key. Confirmed 3/3 by 5 age
 findings correctly dismissed. **Immediate fix (0.141.0)**: removed the false "verified ✓" —
 the People mark is now a neutral identity-key hint (⚿ "possession proven, not relay-proof");
 You-hub + `key_auth_message` doc state the limitation. The challenge/response stays (it stops
-a *passive* pubkey-copy and is the foundation for a real fix). **OPEN DECISION — channel
-binding**: the real fix is signing over a transport channel-binder (pinned cert fingerprint /
-TLS exporter of *this* connection). Achievable for **native QUIC** (client pins the cert) →
-would make native relay-proof; **impossible for browser WS** (no cert access). So a genuine
-"verified" tier is native-only, which means a two-tier UI + proto surface for a mostly-web
-userbase — a product/security tradeoff worth deciding deliberately, not building on autopilot.
+a *passive* pubkey-copy and is the foundation for a real fix). **Channel binding — DONE (0.142.0).** The real fix landed: the proof now binds to the
+transport channel (`key_auth_message` = `"rabbithole-key-auth-v2" || channel_binder || nonce`,
+where `channel_binder` is the server's TLS cert fingerprint of *this* connection).
+- **QUIC: relay-proof.** The native client binds to the cert fingerprint it pinned when
+  dialing; the server binds to its own cert fp. A relayed proof (signed for burrow A) fails at
+  burrow B (different cert fp). Tested both ways: `quic_client_with_pinned_fingerprint_is_verified`
+  (honest path verifies) + `proof_over_wrong_channel_binder_is_rejected` (a *valid* signature
+  over the wrong binder — exactly a relay — is rejected).
+- **WS: possession-only** (`NO_CHANNEL_BINDING` = [0;32]) — the browser can't read the TLS cert,
+  so it stays not-relay-proof; honestly labeled (no false ✓). Kept the UI single-tier +
+  conservative (all keys shown as the possession hint), so QUIC under-claims rather than adding
+  a two-tier UI for a mostly-web userbase. A future strong-✓ tier (surface channel-bound-ness in
+  the who-list for QUIC peers) remains possible but wasn't worth the proto+UI surface now.
+
+The relay finding is fully resolved: defeated where technically possible (QUIC), honestly
+disclosed where not (WS).
 
 **Key-auth hardening + reach (0.137.0–0.138.0)** — NOTE: the "verified" framing in the entries
 below was corrected to "possession-proven, not relay-proof" in 0.141.0 (see above):
