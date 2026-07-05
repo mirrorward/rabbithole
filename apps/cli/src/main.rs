@@ -282,12 +282,25 @@ struct Session {
     replay_cursor: u64,
 }
 
-fn session_path() -> Result<PathBuf> {
+/// The per-user RabbitHole data directory, created private (0700 on Unix) since
+/// it holds the identity seed + session token. Locking the directory too means
+/// another user can't even list or traverse it, not just not read the files.
+fn rabbithole_dir() -> Result<PathBuf> {
     let dir = dirs::data_dir()
         .context("no data dir on this platform")?
         .join("rabbithole");
     std::fs::create_dir_all(&dir)?;
-    Ok(dir.join("session.json"))
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Force 0700 even if the dir pre-existed with looser perms.
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(dir)
+}
+
+fn session_path() -> Result<PathBuf> {
+    Ok(rabbithole_dir()?.join("session.json"))
 }
 
 fn load_session() -> Result<Session> {
@@ -330,11 +343,7 @@ fn save_session(s: &Session) -> Result<()> {
 
 /// The persisted portable identity seed (hex), beside the session cache.
 fn identity_path() -> Result<PathBuf> {
-    let dir = dirs::data_dir()
-        .context("no data dir on this platform")?
-        .join("rabbithole");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir.join("identity.seed"))
+    Ok(rabbithole_dir()?.join("identity.seed"))
 }
 
 /// Load this machine's portable identity, minting + persisting one on first use.
