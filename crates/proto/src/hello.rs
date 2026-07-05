@@ -172,37 +172,44 @@ impl KeyProof {
     }
 }
 
-/// Domain-separation tag for the key-auth challenge signature. Bumped if the
-/// message construction ever changes.
-pub const KEY_AUTH_DOMAIN: &[u8] = b"rabbithole-key-auth-v1";
+/// Domain-separation tag for the key-auth challenge signature. Bumped (v2) when
+/// the message switched from binding the self-asserted `server_key` to binding
+/// the transport **channel** (see [`key_auth_message`]).
+pub const KEY_AUTH_DOMAIN: &[u8] = b"rabbithole-key-auth-v2";
 
 /// The exact bytes a client signs (and the server verifies) to prove possession
-/// of its identity key: a fixed domain tag, the **server's** identity key, and
-/// the challenge nonce. Both sides MUST build the message with this function so
-/// they agree byte-for-byte.
+/// of its identity key: a fixed domain tag, a **channel binder**, and the
+/// challenge nonce. Both sides MUST build the message with this function so they
+/// agree byte-for-byte.
 ///
-/// The domain tag ensures the signature is never over arbitrary/cross-protocol
-/// bytes, and the `server_key` binding stops *offline replay* of a completed
-/// proof to a burrow with a different key.
+/// The `channel_binder` is what makes the proof relay-resistant: it is the
+/// server's **TLS/QUIC certificate fingerprint** for *this* connection. The
+/// client uses the fingerprint it pinned when dialing (QUIC `ServerAuth::Pinned`),
+/// the server uses its own cert fingerprint. On an honest connection they match.
+/// On a relay — a malicious burrow A forwarding an honest burrow B's challenge to
+/// a user — the user signs over **A's** cert fingerprint (the connection they're
+/// actually on) while B verifies over **B's**, so the forwarded proof fails. The
+/// domain tag additionally ensures the signature is never over arbitrary or
+/// cross-protocol bytes.
 ///
-/// **Known limitation (not relay-proof).** `server_key` is a value the peer
-/// self-asserts in its `HelloAck`; it is authenticated by nothing (in
-/// particular it is NOT tied to the TLS/QUIC cert, and over browser WS the cert
-/// is invisible to the client anyway). So a live relay still works: a malicious
-/// burrow A that a user connects to can open its own session to honest burrow B,
-/// echo B's `server_key` + nonce back to the user as A's own challenge, collect
-/// the user's signature, and forward it to B — impersonating the user's key on
-/// B. Defeating that needs **transport channel binding** (signing over the
-/// pinned cert fingerprint / a TLS exporter of *this* connection), which the
-/// browser can't provide today. Consequently the UI presents the key as a
-/// possession-proven identity *hint*, never a relay-proof "verified" badge.
-pub fn key_auth_message(server_key: &[u8; 32], nonce: &[u8; 32]) -> Vec<u8> {
+/// **Transport caveat.** Channel binding needs the client to know the connection's
+/// cert fingerprint. Native QUIC clients do (they pin it) → relay-proof. Browser
+/// WebSocket clients **cannot** read the TLS cert, so they pass a zero binder;
+/// WS key-auth therefore proves possession (stops passive public-key copying) but
+/// is NOT relay-proof. The UI reflects the weakest case: a possession-proven
+/// identity *hint*, not a "verified" badge.
+pub fn key_auth_message(channel_binder: &[u8; 32], nonce: &[u8; 32]) -> Vec<u8> {
     let mut msg = Vec::with_capacity(KEY_AUTH_DOMAIN.len() + 64);
     msg.extend_from_slice(KEY_AUTH_DOMAIN);
-    msg.extend_from_slice(server_key);
+    msg.extend_from_slice(channel_binder);
     msg.extend_from_slice(nonce);
     msg
 }
+
+/// The all-zero channel binder used when no transport channel binding is
+/// available (browser WebSocket, plaintext ws://). Signals "possession-only,
+/// not relay-proof".
+pub const NO_CHANNEL_BINDING: [u8; 32] = [0u8; 32];
 
 impl Message for KeyProof {
     const FAMILY: Family = Family::SESSION;
@@ -254,17 +261,20 @@ mod tests {
     }
 
     #[test]
-    fn key_auth_message_binds_to_domain_and_server() {
+    fn key_auth_message_binds_to_domain_and_channel() {
         let nonce = [3u8; 32];
-        let server_a = [1u8; 32];
-        let server_b = [2u8; 32];
-        let msg_a = key_auth_message(&server_a, &nonce);
+        let chan_a = [1u8; 32]; // burrow A's cert fingerprint
+        let chan_b = [2u8; 32]; // burrow B's cert fingerprint
+        let msg_a = key_auth_message(&chan_a, &nonce);
         // Starts with the domain tag (no signature over bare attacker bytes).
         assert!(msg_a.starts_with(KEY_AUTH_DOMAIN));
         assert_eq!(msg_a.len(), KEY_AUTH_DOMAIN.len() + 64);
-        // Same nonce, different server → different message: a proof for server A
-        // can't be relayed to server B (the relay attack the review flagged).
-        assert_ne!(msg_a, key_auth_message(&server_b, &nonce));
+        // Same nonce, different channel (cert fp) → different message: a proof the
+        // user signs on their connection to A cannot be relayed to B, whose cert
+        // fingerprint differs (this is the relay defense, now channel-bound).
+        assert_ne!(msg_a, key_auth_message(&chan_b, &nonce));
+        // The zero binder (WS, no channel binding) is distinct from a real one.
+        assert_ne!(msg_a, key_auth_message(&NO_CHANNEL_BINDING, &nonce));
         // And the raw nonce is never what gets signed.
         assert_ne!(msg_a.as_slice(), &nonce[..]);
     }

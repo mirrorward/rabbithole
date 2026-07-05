@@ -65,6 +65,21 @@ impl SessionCtx {
     }
 }
 
+/// The channel binder for key-auth on a connection: this server's TLS cert
+/// fingerprint over QUIC (so a relayed proof signed for a *different* burrow's
+/// cert fails verification), or the zero binder over WebSocket (which can't
+/// channel-bind — possession-proven only). See `hello::key_auth_message`.
+fn channel_binder(shared: &Shared, transport: rabbithole_net::TransportKind) -> [u8; 32] {
+    match transport {
+        rabbithole_net::TransportKind::Quic => {
+            rabbithole_net::tls::CertFingerprint::from_hex(&shared.fingerprint_hex)
+                .map(|fp| fp.0)
+                .unwrap_or(rabbithole_proto::hello::NO_CHANNEL_BINDING)
+        }
+        _ => rabbithole_proto::hello::NO_CHANNEL_BINDING,
+    }
+}
+
 pub async fn run_session(
     mut conn: Box<dyn Connection>,
     session_id: u64,
@@ -158,13 +173,13 @@ pub async fn run_session(
         if let Some(Ok(proof)) = frame.decode::<rabbithole_proto::hello::KeyProof>() {
             if let (Some(pk), Some(nonce)) = (client_pubkey, challenge_nonce) {
                 if let Ok(sig) = <[u8; 64]>::try_from(proof.signature.as_slice()) {
-                    // Verify over the domain-separated, server-bound message — not
-                    // the raw nonce — so a proof made for another burrow can't be
-                    // relayed here (see hello::key_auth_message).
-                    let msg = rabbithole_proto::hello::key_auth_message(
-                        &shared.server_key,
-                        &nonce,
-                    );
+                    // Verify over the channel-bound message: for QUIC the binder is
+                    // this server's cert fingerprint (a relayed proof signed for a
+                    // different burrow's cert fails); for WS there is no cert to
+                    // bind, so a zero binder (possession-proven, not relay-proof —
+                    // see hello::key_auth_message).
+                    let binder = channel_binder(&shared, peer.transport);
+                    let msg = rabbithole_proto::hello::key_auth_message(&binder, &nonce);
                     if rabbithole_identity::PublicKey(pk)
                         .verify(&msg, &rabbithole_identity::Signature(sig))
                     {

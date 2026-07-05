@@ -270,6 +270,115 @@ async fn who_list_carries_the_verified_pubkey() {
     burrow.shutdown().await;
 }
 
+/// Over QUIC the proof is channel-bound to the pinned cert fingerprint, and the
+/// honest path still verifies: a client that connects to the real burrow's QUIC
+/// endpoint with the correct pinned fingerprint gets its key surfaced. Confirms
+/// the client (pinned fp) and server (own cert fp) compute the same binder — so
+/// channel binding hardens QUIC without breaking it.
+#[tokio::test]
+async fn quic_client_with_pinned_fingerprint_is_verified() {
+    use rabbithole_identity::IdentityKey;
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("qq", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+
+    let key = IdentityKey::from_seed(&[71; 32]);
+    let fp = burrow.fingerprint.to_hex();
+    let mut c = Client::connect_with_identity(
+        &format!("127.0.0.1:{}", burrow.quic_addr.port()),
+        None,
+        Some(&fp),
+        "e2e",
+        "0",
+        Some(&key),
+    )
+    .await
+    .unwrap();
+    c.auth_password("qq", "pw-pw-pw").await.unwrap();
+    c.expect_welcome().await.unwrap();
+
+    let who = c.who().await.unwrap();
+    let row = who.iter().find(|u| u.screen_name == "qq").unwrap();
+    assert_eq!(
+        row.pubkey,
+        Some(key.public().0),
+        "QUIC channel-bound proof verifies on the honest path"
+    );
+
+    burrow.shutdown().await;
+}
+
+/// A cryptographically VALID signature by the real key, but over the WRONG
+/// channel binder, is rejected — this is exactly a relayed proof (the victim
+/// signed for the burrow they were on; a different burrow verifies over its own
+/// cert fingerprint). Proves the channel binding, not just possession, is checked.
+#[tokio::test]
+async fn proof_over_wrong_channel_binder_is_rejected() {
+    use rabbithole_identity::IdentityKey;
+    use rabbithole_net::ws::WsTransport;
+    use rabbithole_net::Transport;
+    use rabbithole_proto::hello::{key_auth_message, Hello, HelloAck, KeyProof};
+    use rabbithole_proto::session::AuthPassword;
+    use rabbithole_proto::{CapabilitySet, Frame, RequestId};
+
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    for n in ["victim", "watcher"] {
+        burrow
+            .shared
+            .auth
+            .create_account(n, "pw-pw-pw", Role::User)
+            .await
+            .unwrap();
+    }
+    let url = format!("ws://127.0.0.1:{}", burrow.ws_addr.port());
+
+    // The client holds the real key and signs a genuine signature — but binds it
+    // to some OTHER burrow's cert fingerprint (as a relay would), not the zero
+    // binder this WS server verifies over.
+    let key = IdentityKey::from_seed(&[55; 32]);
+    let wrong_binder = [0xAB; 32]; // a different burrow's cert fp
+    let mut conn = WsTransport.connect(&url).await.unwrap();
+    conn.send(
+        Frame::request(
+            RequestId(1),
+            &Hello::new("v", "0", CapabilitySet::default()).with_pubkey(Some(key.public().0)),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let ack: HelloAck = conn.recv().await.unwrap().unwrap().decode().unwrap().unwrap();
+    let nonce = ack.challenge.expect("challenged");
+    let sig = key.sign(&key_auth_message(&wrong_binder, &nonce)).0.to_vec();
+    conn.send(Frame::request(RequestId(2), &KeyProof::new(sig)).unwrap())
+        .await
+        .unwrap();
+    let _ = conn.recv().await.unwrap(); // ack
+    conn.send(Frame::request(RequestId(3), &AuthPassword::new("victim", "pw-pw-pw")).unwrap())
+        .await
+        .unwrap();
+    let _ = conn.recv().await.unwrap();
+
+    let mut watcher = Client::connect(&url, None, None, "e2e", "0").await.unwrap();
+    watcher.auth_password("watcher", "pw-pw-pw").await.unwrap();
+    watcher.expect_welcome().await.unwrap();
+    let who = watcher.who().await.unwrap();
+    let victim = who.iter().find(|u| u.screen_name == "victim").unwrap();
+    assert_eq!(victim.pubkey, None, "a proof over the wrong channel binder is rejected");
+
+    burrow.shutdown().await;
+}
+
 /// A client that *claims* an identity key but cannot prove possession (sends a
 /// garbage KeyProof) is NOT surfaced in the who-list — the whole point of the
 /// challenge/response. Guards against the impersonation the review flagged:

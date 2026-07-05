@@ -157,10 +157,16 @@ impl Client {
             Hello::new(client_name, client_version, CapabilitySet::default()).with_pubkey(pubkey);
         let ack: HelloAck = client.request(&hello).await?;
         // Prove possession of the identity key if the server challenged it. Sign
-        // the domain-separated, server-bound message (not the raw nonce) so the
-        // proof can't be relayed to another burrow.
+        // the channel-bound message: over QUIC the binder is the cert fingerprint
+        // we pinned when dialing (so a malicious burrow can't relay this proof to
+        // a server with a different cert); over WS there is no cert, so a zero
+        // binder (possession-proven, not relay-proof — see hello::key_auth_message).
         if let (Some(key), Some(nonce)) = (identity, ack.challenge) {
-            let msg = rabbithole_proto::hello::key_auth_message(&ack.server_key, &nonce);
+            let binder = fingerprint
+                .and_then(CertFingerprint::from_hex)
+                .map(|fp| fp.0)
+                .unwrap_or(rabbithole_proto::hello::NO_CHANNEL_BINDING);
+            let msg = rabbithole_proto::hello::key_auth_message(&binder, &nonce);
             let sig = key.sign(&msg).0.to_vec();
             client
                 .request_ack(&rabbithole_proto::hello::KeyProof::new(sig))
