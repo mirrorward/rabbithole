@@ -24,8 +24,24 @@ browser identity). All 13 fixed:
 - **UI/security (HIGH/LOW)**: stale Directory dot (`<For>` key += `online`); presence
   ranking (Online>Idle>Away>Invisible); `sanitize_name` rejects `:` (Windows drive/ADS);
   postcard additive-field forward-compat caveat documented.
-Regression tests added at each layer. The most valuable follow-up the review implies:
-implement the **Ed25519 challenge/response** so the identity key can honestly be "verified".
+Regression tests added at each layer.
+
+**Ed25519 key-auth — the review's headline follow-up — landed (0.134.0–0.136.0)**, in 3 slices:
+the identity key is now *cryptographically verified* across the whole stack, so the People ✓
+is earned, not claimed.
+- **Slice 1 (proto)**: `HelloAck.challenge: Option<[u8;32]>` (additive) + a new `KeyProof
+  { signature }` message (SESSION type 3, REGISTRY 179→180, golden reblessed).
+- **Slice 2 (server + core)**: on a `Hello` with `client_pubkey` the server issues a random
+  OsRng nonce + advertises `KEY_AUTH`; a `KeyProof` is Ed25519-verified over the nonce;
+  `SessionCtx.pubkey` is the **verified** key only (a claim without a valid proof is never
+  surfaced). Core `connect_with_identity` takes `Option<&IdentityKey>` and signs the
+  challenge (identity moved to a `native`-gated optional dep so it stays out of the wasm SPA).
+  E2E: `who_list_carries_the_verified_pubkey` (happy path) + `unproven_claimed_pubkey_is_not_
+  surfaced` (a raw malicious client claiming a victim's key with a garbage proof gets NO key).
+- **Slice 3 (web)**: `identity::sign`; `ws.rs` answers the `HelloAck` challenge with a signed
+  `KeyProof`; the People mark is the honest accent ✓ ("verified identity · fp") again.
+  Verified live end to end (`alice ✓`, tooltip fingerprint == the You hub's).
+The impersonation vector the review found is closed: possession is proven, not assumed.
 
 **Status: Waves 0–5 complete (swarm coordinator, Bao-verified peer wire, multi-source scheduler, resumable fetches, blob cache policy; NAT traversal + WebRTC deferred to their proper environments). Wave 6 (legacy surfaces) underway — the `art` (CP437/ANSI/SAUCE), `legacy-telnet` (negotiation + login shell), and `legacy-finger` (RFC 1288) crates have landed as standalone libraries; Wave 10 gained an RSS/Atom parsing crate. Next: wire these surfaces into `burrow`.**
 
