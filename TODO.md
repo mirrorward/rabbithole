@@ -43,6 +43,40 @@ is earned, not claimed.
   Verified live end to end (`alice ✓`, tooltip fingerprint == the You hub's).
 The impersonation vector the review found is closed: possession is proven, not assumed.
 
+**Key-auth hardening + reach (0.137.0–0.138.0)**:
+- **Relay/oracle fix (0.137.0)**: a background security review flagged that all three
+  sides signed/verified the *raw* nonce — a signing oracle that let a malicious burrow
+  relay an honest burrow's challenge to a connected user and impersonate them as
+  "verified" elsewhere. Fixed with **domain separation**: everyone now signs/verifies
+  `hello::key_auth_message` = `b"rabbithole-key-auth-v1" || server_key || nonce`. Binding
+  to the domain (never a signature over arbitrary bytes) + the server key (a proof for A
+  fails at B) kills the relay. Proto test asserts the properties; e2e still agrees.
+- **Native CLI identity (0.138.0)**: `rabbit` now persists an Ed25519 seed
+  (`dirs::data_dir()/rabbithole/identity.seed`) and presents it via
+  `connect_with_identity` on login/reconnect, so CLI sessions carry a verified key too.
+  Verified live (login completes the challenge/response; seed stable across logins).
+  **Both real client families — web SPA + native CLI — now present a cryptographically
+  verified identity.** (The TUI is a terminal demo; left handle-only by choice.)
+
+---
+
+## Session status (as of key-auth + native swarm arc)
+
+The original ask — desktop/mobile multi-server client with centralized status, unified
+cross-server downloads, and multi-source swarming (servers **and** peers) — is built and,
+where headless-verifiable, tested:
+- **Multi-server warren client** (web SPA): rail, unified status/People/Transfers, portable
+  verified identity, welcome sheet, reconnect-on-launch.
+- **Native swarm backend** (Tauri desktop): multi-source Bao-verified downloads wired end
+  to end (6 slices + live-Burrow E2E); the only unverified link is the wasm↔Tauri IPC
+  round-trip, which needs `cargo tauri dev` on a real machine.
+- **Verified identity** across proto/server/web/CLI, hardened against relay.
+- **An adversarial review** (13 fixes) + a security-review relay fix.
+
+**Needs the user's machine (can't verify headlessly here):** running the desktop app
+(`cd apps/desktop && cargo tauri dev`, watch the console for the `[rh-native]` bridge
+lines), and the mobile builds (iOS simulator / Android NDK).
+
 **Status: Waves 0–5 complete (swarm coordinator, Bao-verified peer wire, multi-source scheduler, resumable fetches, blob cache policy; NAT traversal + WebRTC deferred to their proper environments). Wave 6 (legacy surfaces) underway — the `art` (CP437/ANSI/SAUCE), `legacy-telnet` (negotiation + login shell), and `legacy-finger` (RFC 1288) crates have landed as standalone libraries; Wave 10 gained an RSS/Atom parsing crate. Next: wire these surfaces into `burrow`.**
 
 > W4.2: transfers are resumable + integrity-checked, folder-pipelined, and
