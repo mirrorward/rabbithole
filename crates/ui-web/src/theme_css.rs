@@ -503,6 +503,22 @@ pub const STYLESHEET: &str = "\
 .rh-scroll::-webkit-scrollbar-thumb,.rh-panel::-webkit-scrollbar-thumb,.rh-who::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--rh-text) 18%,transparent);border-radius:var(--rh-radius-full);border:3px solid transparent;background-clip:padding-box}\
 .rh-scroll::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--rh-text) 30%,transparent);background-clip:padding-box}\
 @media (max-width:720px){.rh-header{flex-wrap:wrap;padding:var(--rh-space-2) var(--rh-space-4);min-height:0;gap:var(--rh-space-2) var(--rh-space-3)}.rh-status{display:none}.rh-nav{order:9;width:100%;overflow-x:auto;padding-bottom:.15rem}.rh-body{flex-direction:column}.rh-who,.rh-threads,.rh-members,.rh-files,.rh-stations{max-width:none;width:auto;border-right:0;border-left:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-reader{min-height:14rem}.rh-login{margin:var(--rh-space-6) var(--rh-space-4)}}\
+@keyframes rh-fade-up{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}\
+@keyframes rh-slide-down{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}\
+@keyframes rh-toast-in{from{opacity:0;transform:translateX(14px) scale(.98)}to{opacity:1;transform:none}}\
+@keyframes rh-pop{from{opacity:0;transform:scale(.85)}to{opacity:1;transform:none}}\
+@keyframes rh-pulse-ring{0%{box-shadow:0 0 0 0 color-mix(in srgb,#3fbf7f 55%,transparent)}70%{box-shadow:0 0 0 4px color-mix(in srgb,#3fbf7f 0%,transparent)}100%{box-shadow:0 0 0 0 color-mix(in srgb,#3fbf7f 0%,transparent)}}\
+.rh-body{animation:rh-fade-up .19s ease both}\
+.rh-welcome{animation:rh-slide-down .24s cubic-bezier(.2,.8,.2,1) both}\
+.rh-toast{animation:rh-toast-in .22s cubic-bezier(.2,.8,.2,1) both}\
+.rh-pres.on{box-shadow:0 0 0 2px color-mix(in srgb,#3fbf7f 22%,transparent)}\
+.rh-rail-dot.on{animation:rh-pulse-ring 2.8s ease-out infinite}\
+.rh-rail-tile{transition:background-color .15s ease,color .15s ease,transform .12s ease,box-shadow .15s ease}\
+.rh-rail-tile:hover{transform:translateY(-1px);box-shadow:0 3px 8px color-mix(in srgb,var(--rh-text) 14%,transparent)}\
+.rh-rail-tile:active{transform:translateY(0) scale(.95)}\
+.rh-person,.rh-xfer-item,.rh-who-row{animation:rh-fade-up .2s ease both}\
+.rh-btn:active{transform:scale(.97)}\
+.rh-rail-server.active{animation:rh-pop .22s cubic-bezier(.2,.9,.3,1.2) both}\
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:.01ms!important;transition-delay:0s!important;animation-duration:.01ms!important;animation-delay:0s!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}\
 ";
 
