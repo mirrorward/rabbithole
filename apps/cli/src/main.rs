@@ -297,8 +297,34 @@ fn load_session() -> Result<Session> {
     Ok(serde_json::from_str(&raw)?)
 }
 
+/// Write a secret file (identity seed, session token) readable only by the
+/// owner. On Unix the file is created/truncated with mode 0600 so another user
+/// on a shared machine can't read the private key or the resume token; on other
+/// platforms the per-user profile directory provides the isolation.
+fn write_private(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        // create() keeps prior perms if the file already exists; force 0600.
+        f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        f.write_all(contents)?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)?;
+    }
+    Ok(())
+}
+
 fn save_session(s: &Session) -> Result<()> {
-    std::fs::write(session_path()?, serde_json::to_string_pretty(s)?)?;
+    write_private(&session_path()?, serde_json::to_string_pretty(s)?.as_bytes())?;
     Ok(())
 }
 
@@ -324,7 +350,8 @@ fn load_or_create_identity() -> Result<rabbithole_identity::IdentityKey> {
         }
     }
     let key = rabbithole_identity::IdentityKey::generate();
-    std::fs::write(&path, hex::encode(key.seed()))?;
+    // The seed IS the private key — owner-only (0600).
+    write_private(&path, hex::encode(key.seed()).as_bytes())?;
     Ok(key)
 }
 
