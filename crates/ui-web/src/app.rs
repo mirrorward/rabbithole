@@ -430,6 +430,11 @@ impl AppState {
         // Endpoint captured for both the "connected" toast/label and, on a
         // successful auth, persisting the resume token + handle for next launch.
         let ep = endpoint.clone();
+        // Tracks whether this session authenticated, so a failure *before* auth
+        // (an expired/invalid resume token) can drop the dead token and toast —
+        // rather than leaving the burrow connected-but-unauthenticated forever.
+        let authed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let resuming = matches!(auth, AuthMethod::Resume { .. });
         self.focused().ws.update_value(|ws| {
             ws.on_event(std::rc::Rc::new(move |event| {
                 match &event {
@@ -475,11 +480,24 @@ impl AppState {
                         }
                     }
                     Event::Authenticated { token, screen_name } => {
+                        authed.set(true);
                         // Persist the session so a reload auto-reconnects: the
                         // handle (from the persona) + the resume token (empty for
                         // guests → cleared). Never the password.
                         crate::recent::remember(&ep, screen_name);
                         crate::recent::remember_token(&ep, token);
+                    }
+                    Event::CommandFailed { .. } if resuming && !authed.get() => {
+                        // An expired/invalid resume token: drop the dead token so
+                        // the next load falls back to a clean password sign-in,
+                        // and tell the user rather than leaving them stuck.
+                        crate::recent::remember_token(&ep, "");
+                        toasts.update(|q| {
+                            q.push(
+                                crate::toasts::ToastKind::Warn,
+                                "Your session expired \u{2014} please sign in again.",
+                            );
+                        });
                     }
                     _ => {}
                 }
