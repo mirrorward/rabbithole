@@ -158,8 +158,15 @@ pub async fn run_session(
         if let Some(Ok(proof)) = frame.decode::<rabbithole_proto::hello::KeyProof>() {
             if let (Some(pk), Some(nonce)) = (client_pubkey, challenge_nonce) {
                 if let Ok(sig) = <[u8; 64]>::try_from(proof.signature.as_slice()) {
+                    // Verify over the domain-separated, server-bound message — not
+                    // the raw nonce — so a proof made for another burrow can't be
+                    // relayed here (see hello::key_auth_message).
+                    let msg = rabbithole_proto::hello::key_auth_message(
+                        &shared.server_key,
+                        &nonce,
+                    );
                     if rabbithole_identity::PublicKey(pk)
-                        .verify(&nonce, &rabbithole_identity::Signature(sig))
+                        .verify(&msg, &rabbithole_identity::Signature(sig))
                     {
                         verified_pubkey = Some(pk);
                     }

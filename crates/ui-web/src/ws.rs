@@ -634,9 +634,15 @@ impl WsClient {
                         // burrow surfaces the key as *verified*. Fire-and-forget
                         // (the server acks it); only the socket + our key are
                         // needed, so it's safe under the immutable borrow.
-                        if let Some(nonce) = wire::hello_ack_challenge(&frame) {
+                        if let Some((server_key, nonce)) = wire::hello_ack_challenge(&frame) {
                             if let Some(ws) = &b.ws {
-                                let sig = crate::identity::load_or_create().sign(&nonce).to_vec();
+                                // Sign the domain-separated, server-bound message
+                                // (not the raw nonce) so the proof can't be relayed.
+                                let msg = rabbithole_proto::hello::key_auth_message(
+                                    &server_key,
+                                    &nonce,
+                                );
+                                let sig = crate::identity::load_or_create().sign(&msg).to_vec();
                                 if let Some(bytes) = wire::key_proof_frame(sig)
                                     .ok()
                                     .and_then(|f| encode_frame(&f).ok())

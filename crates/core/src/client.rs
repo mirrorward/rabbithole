@@ -156,9 +156,12 @@ impl Client {
         let hello =
             Hello::new(client_name, client_version, CapabilitySet::default()).with_pubkey(pubkey);
         let ack: HelloAck = client.request(&hello).await?;
-        // Prove possession of the identity key if the server challenged it.
+        // Prove possession of the identity key if the server challenged it. Sign
+        // the domain-separated, server-bound message (not the raw nonce) so the
+        // proof can't be relayed to another burrow.
         if let (Some(key), Some(nonce)) = (identity, ack.challenge) {
-            let sig = key.sign(&nonce).0.to_vec();
+            let msg = rabbithole_proto::hello::key_auth_message(&ack.server_key, &nonce);
+            let sig = key.sign(&msg).0.to_vec();
             client
                 .request_ack(&rabbithole_proto::hello::KeyProof::new(sig))
                 .await?;

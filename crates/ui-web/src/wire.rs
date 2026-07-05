@@ -137,11 +137,13 @@ pub fn hello_request(id: RequestId, pubkey: Option<[u8; 32]>) -> Result<Frame, P
     Frame::request(id, &hello)
 }
 
-/// The proof-of-possession challenge nonce, if this frame is a [`HelloAck`] that
-/// carries one (i.e. the server challenged the identity key we offered). The
-/// client answers by signing `nonce` and sending a [`key_proof_frame`].
-pub fn hello_ack_challenge(frame: &Frame) -> Option<[u8; 32]> {
-    frame.decode::<HelloAck>()?.ok()?.challenge
+/// The `(server_key, nonce)` for a proof-of-possession challenge, if this frame
+/// is a [`HelloAck`] that carries one (i.e. the server challenged the identity
+/// key we offered). The client signs [`key_auth_message`](rabbithole_proto::hello::key_auth_message)
+/// (domain- and server-bound, NOT the raw nonce) and sends a [`key_proof_frame`].
+pub fn hello_ack_challenge(frame: &Frame) -> Option<([u8; 32], [u8; 32])> {
+    let ack = frame.decode::<HelloAck>()?.ok()?;
+    ack.challenge.map(|nonce| (ack.server_key, nonce))
 }
 
 /// Build a [`KeyProof`](rabbithole_proto::hello::KeyProof) request frame carrying

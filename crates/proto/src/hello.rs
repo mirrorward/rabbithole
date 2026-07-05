@@ -172,6 +172,25 @@ impl KeyProof {
     }
 }
 
+/// Domain-separation tag for the key-auth challenge signature. Bumped if the
+/// message construction ever changes.
+pub const KEY_AUTH_DOMAIN: &[u8] = b"rabbithole-key-auth-v1";
+
+/// The exact bytes a client signs (and the server verifies) to prove possession
+/// of its identity key: a fixed domain tag, the **server's** identity key, and
+/// the challenge nonce. Binding to the domain and the server key defeats a
+/// signing-oracle / relay attack — a signature made for one burrow can't be
+/// replayed to another (different `server_key`), and the proof can never be a
+/// signature over arbitrary or cross-protocol data. Both sides MUST build the
+/// message with this function so they agree byte-for-byte.
+pub fn key_auth_message(server_key: &[u8; 32], nonce: &[u8; 32]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(KEY_AUTH_DOMAIN.len() + 64);
+    msg.extend_from_slice(KEY_AUTH_DOMAIN);
+    msg.extend_from_slice(server_key);
+    msg.extend_from_slice(nonce);
+    msg
+}
+
 impl Message for KeyProof {
     const FAMILY: Family = Family::SESSION;
     const MESSAGE_TYPE: u16 = 3;
@@ -219,6 +238,22 @@ mod tests {
         let decoded = frame.decode::<HelloAck>().unwrap().unwrap();
         assert_eq!(decoded.challenge, Some([0xAB; 32]));
         assert_eq!(decoded, challenged);
+    }
+
+    #[test]
+    fn key_auth_message_binds_to_domain_and_server() {
+        let nonce = [3u8; 32];
+        let server_a = [1u8; 32];
+        let server_b = [2u8; 32];
+        let msg_a = key_auth_message(&server_a, &nonce);
+        // Starts with the domain tag (no signature over bare attacker bytes).
+        assert!(msg_a.starts_with(KEY_AUTH_DOMAIN));
+        assert_eq!(msg_a.len(), KEY_AUTH_DOMAIN.len() + 64);
+        // Same nonce, different server → different message: a proof for server A
+        // can't be relayed to server B (the relay attack the review flagged).
+        assert_ne!(msg_a, key_auth_message(&server_b, &nonce));
+        // And the raw nonce is never what gets signed.
+        assert_ne!(msg_a.as_slice(), &nonce[..]);
     }
 
     #[test]
