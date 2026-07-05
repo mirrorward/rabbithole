@@ -322,6 +322,7 @@ pub const STYLESHEET: &str = "\
 .rh-header{display:flex;align-items:center;gap:var(--rh-space-3);padding:0 var(--rh-space-5);min-height:3.5rem;position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--rh-surface) 82%,transparent);backdrop-filter:saturate(1.4) blur(14px);-webkit-backdrop-filter:saturate(1.4) blur(14px);border-bottom:1px solid color-mix(in srgb,var(--rh-text) 10%,transparent)}\
 .rh-header .rh-title{order:1;display:inline-flex;align-items:center;gap:.55rem;white-space:nowrap;font-weight:700;font-size:var(--rh-font-lg);letter-spacing:-.01em;color:var(--rh-text)}\
 .rh-header .rh-title::before{content:'';flex:none;width:1.4rem;height:1.4rem;border-radius:var(--rh-radius-full);background:radial-gradient(circle at 50% 52%,var(--rh-surface) 0 15%,var(--rh-accent) 15% 27%,var(--rh-surface) 27% 41%,color-mix(in srgb,var(--rh-accent) 62%,var(--rh-surface)) 41% 58%,var(--rh-surface) 58% 73%,color-mix(in srgb,var(--rh-accent) 34%,var(--rh-surface)) 73% 100%);box-shadow:0 0 0 1px color-mix(in srgb,var(--rh-accent) 35%,transparent),0 2px 8px -2px color-mix(in srgb,var(--rh-accent) 60%,transparent)}\
+.rh-title-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
 .rh-dot{order:2;width:.5rem;height:.5rem;border-radius:50%;display:inline-block;flex:none;margin-left:.2rem}\
 .rh-dot.on{background:#3fbf7f;box-shadow:0 0 0 3px color-mix(in srgb,#3fbf7f 22%,transparent)}\
 .rh-dot.off{background:var(--rh-muted)}\
@@ -511,7 +512,7 @@ pub const STYLESHEET: &str = "\
 .rh-scroll::-webkit-scrollbar,.rh-panel::-webkit-scrollbar,.rh-who::-webkit-scrollbar{width:10px;height:10px}\
 .rh-scroll::-webkit-scrollbar-thumb,.rh-panel::-webkit-scrollbar-thumb,.rh-who::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--rh-text) 18%,transparent);border-radius:var(--rh-radius-full);border:3px solid transparent;background-clip:padding-box}\
 .rh-scroll::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--rh-text) 30%,transparent);background-clip:padding-box}\
-@media (max-width:720px){.rh-header{flex-wrap:wrap;padding:var(--rh-space-2) var(--rh-space-4);min-height:0;gap:var(--rh-space-2) var(--rh-space-3)}.rh-status{display:none}.rh-nav{order:9;width:100%;overflow-x:auto;padding-bottom:.15rem}.rh-body{flex-direction:column}.rh-who,.rh-threads,.rh-members,.rh-files,.rh-stations{max-width:none;width:auto;border-right:0;border-left:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-reader{min-height:14rem}.rh-login{margin:var(--rh-space-6) var(--rh-space-4)}}\
+@media (max-width:720px){.rh-header{display:grid;grid-template-columns:minmax(0,1fr) auto auto;grid-template-areas:\"title dot presence\" \"live live live\" \"nav nav theme\";align-items:center;padding:var(--rh-space-2) var(--rh-space-3);min-height:0;gap:var(--rh-space-2)}.rh-header .rh-title{grid-area:title;font-size:var(--rh-font-size);min-width:0;overflow:hidden}.rh-dot{grid-area:dot}.rh-presence{grid-area:presence;justify-self:end;padding:.25rem .4rem;font-size:var(--rh-font-xs)}.rh-live-slot{grid-area:live;min-width:0}.rh-nav{grid-area:nav;min-width:0;overflow-x:auto;padding-bottom:.15rem}.rh-theme-menu{grid-area:theme;justify-self:end}.rh-theme-menu button{padding:.25rem .5rem;font-size:var(--rh-font-xs)}.rh-status,.rh-kbd-jump,.rh-spacer{display:none}.rh-conn{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}.rh-toasts{top:6.4rem}.rh-body{flex-direction:column}.rh-who,.rh-threads,.rh-members,.rh-files,.rh-stations{max-width:none;width:auto;border-right:0;border-left:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-who{max-height:35vh}.rh-chat{min-height:0}.rh-scroll{padding:var(--rh-space-3)}.rh-compose{padding:var(--rh-space-2) var(--rh-space-3)}.rh-compose .rh-input{min-width:0}.rh-compose .rh-btn{padding-left:var(--rh-space-4);padding-right:var(--rh-space-4)}.rh-present{order:-1;display:flex;align-items:center;gap:var(--rh-space-2);padding:.4rem var(--rh-space-3);max-height:none}.rh-present h2{margin:0;flex:none}.rh-present ul{flex-direction:row;flex:1;min-width:0;overflow-x:auto;gap:.4rem;padding-bottom:.15rem}.rh-present li{flex:none;white-space:nowrap}.rh-reader{min-height:14rem}.rh-login{margin:var(--rh-space-6) var(--rh-space-4)}}\
 @keyframes rh-fade-up{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}\
 @keyframes rh-slide-down{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}\
 @keyframes rh-toast-in{from{opacity:0;transform:translateX(14px) scale(.98)}to{opacity:1;transform:none}}\
@@ -802,6 +803,27 @@ mod tests {
         // The header's live now-playing slot collapses when empty, so the
         // always-present role=status wrapper never leaves a phantom flex gap.
         assert!(STYLESHEET.contains(".rh-live-slot:empty{display:none}"));
+    }
+
+    #[test]
+    fn stylesheet_keeps_mobile_chat_usable() {
+        let block = STYLESHEET
+            .split("@media (max-width:720px){")
+            .nth(1)
+            .expect("narrow-screen media block present");
+        // The chat column may shrink below its content, so the log scrolls
+        // internally and the compose box stays pinned on screen — without
+        // this the whole pane scrolls and compose sits below the fold.
+        assert!(block.contains(".rh-chat{min-height:0}"));
+        // The lobby roster flips to a horizontal presence strip above the
+        // chat instead of a full column that buries the conversation.
+        assert!(block.contains(".rh-present{order:-1"));
+        assert!(block.contains(".rh-present ul{flex-direction:row"));
+        // Keyboard-only affordances leave the touch layout…
+        assert!(block.contains(".rh-kbd-jump,.rh-spacer{display:none}"));
+        // …but the connection state stays in the accessibility tree (the
+        // sr-only recipe, not display:none — it is a role=status region).
+        assert!(block.contains(".rh-conn{position:absolute;width:1px;height:1px"));
     }
 
     #[test]

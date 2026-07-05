@@ -74,6 +74,20 @@ impl ChatScroll {
             }
             n
         });
+        // A viewport resize (window resize, mobile soft keyboard opening,
+        // orientation change) shrinks the log: keep a following reader
+        // pinned to the newest line through it.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let handle = window_event_listener(ev::resize, move |_| {
+                if this.stick.get_value() {
+                    if let Some(el) = this.node.get_untracked() {
+                        snap_soon(el);
+                    }
+                }
+            });
+            on_cleanup(move || handle.remove());
+        }
         this
     }
 

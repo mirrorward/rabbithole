@@ -447,7 +447,7 @@ pub fn StatusBar() -> impl IntoView {
         <header class="rh-header">
             <span class=dot_class aria-hidden="true"></span>
             <span class="rh-conn" role="status">{conn_label}</span>
-            <span class="rh-title">{title}</span>
+            <span class="rh-title"><span class="rh-title-text">{title}</span></span>
             <span class="rh-status" role="status">{status}</span>
             <span class="rh-spacer"></span>
             <span class="rh-live-slot" role="status">
@@ -824,7 +824,10 @@ pub fn WhoList() -> impl IntoView {
     let app = expect_context::<AppState>();
     let state = app.focused().state;
     view! {
-        <aside class="rh-who">
+        // `rh-present` marks the lobby roster specifically: on narrow screens
+        // it renders as a horizontal presence strip above the chat, while the
+        // DM view's `.rh-who` conversation list keeps the stacked layout.
+        <aside class="rh-who rh-present">
             <h2>"Present"</h2>
             <ul>
                 <For
