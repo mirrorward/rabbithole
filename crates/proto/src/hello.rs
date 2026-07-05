@@ -178,11 +178,24 @@ pub const KEY_AUTH_DOMAIN: &[u8] = b"rabbithole-key-auth-v1";
 
 /// The exact bytes a client signs (and the server verifies) to prove possession
 /// of its identity key: a fixed domain tag, the **server's** identity key, and
-/// the challenge nonce. Binding to the domain and the server key defeats a
-/// signing-oracle / relay attack — a signature made for one burrow can't be
-/// replayed to another (different `server_key`), and the proof can never be a
-/// signature over arbitrary or cross-protocol data. Both sides MUST build the
-/// message with this function so they agree byte-for-byte.
+/// the challenge nonce. Both sides MUST build the message with this function so
+/// they agree byte-for-byte.
+///
+/// The domain tag ensures the signature is never over arbitrary/cross-protocol
+/// bytes, and the `server_key` binding stops *offline replay* of a completed
+/// proof to a burrow with a different key.
+///
+/// **Known limitation (not relay-proof).** `server_key` is a value the peer
+/// self-asserts in its `HelloAck`; it is authenticated by nothing (in
+/// particular it is NOT tied to the TLS/QUIC cert, and over browser WS the cert
+/// is invisible to the client anyway). So a live relay still works: a malicious
+/// burrow A that a user connects to can open its own session to honest burrow B,
+/// echo B's `server_key` + nonce back to the user as A's own challenge, collect
+/// the user's signature, and forward it to B — impersonating the user's key on
+/// B. Defeating that needs **transport channel binding** (signing over the
+/// pinned cert fingerprint / a TLS exporter of *this* connection), which the
+/// browser can't provide today. Consequently the UI presents the key as a
+/// possession-proven identity *hint*, never a relay-proof "verified" badge.
 pub fn key_auth_message(server_key: &[u8; 32], nonce: &[u8; 32]) -> Vec<u8> {
     let mut msg = Vec::with_capacity(KEY_AUTH_DOMAIN.len() + 64);
     msg.extend_from_slice(KEY_AUTH_DOMAIN);

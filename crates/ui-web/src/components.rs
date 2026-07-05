@@ -158,25 +158,29 @@ pub fn People() -> impl IntoView {
                                     _ => "rh-pres off",
                                 };
                                 let servers = p.servers.join(" · ");
-                                // The person carries a portable identity key the
-                                // burrow *verified* via challenge/response (the server
-                                // only surfaces a key after a valid KeyProof), so the
-                                // checkmark is earned — an unproven claim is never
-                                // shown. The tooltip carries the short fingerprint.
-                                let verified = p.key.as_ref().map(|k| {
+                                // The person carries a portable identity key whose
+                                // possession the burrow proved at handshake (a valid
+                                // KeyProof). That stops a passive attacker from just
+                                // copying a public key out of a roster — but it is NOT
+                                // relay-proof: a malicious burrow you connect to can
+                                // relay an honest burrow's challenge (server_key is
+                                // self-asserted, not channel-bound). So this is an
+                                // identity-coalescing HINT, not an authentication
+                                // badge — a key glyph, never a security checkmark.
+                                let idkey = p.key.as_ref().map(|k| {
                                     let fp = crate::identity::short_fingerprint(k);
                                     view! {
                                         <span
-                                            class="rh-person-verified"
-                                            title=format!("verified identity · {fp}")
-                                        >"\u{2713}"</span>
+                                            class="rh-person-idkey"
+                                            title=format!("identity key {fp} — possession proven, not relay-proof")
+                                        >"\u{26bf}"</span>
                                     }
                                 });
                                 view! {
                                     <li class="rh-person">
                                         <span class=dot aria-hidden="true"></span>
                                         <span class="rh-person-name">{p.screen_name}</span>
-                                        {verified}
+                                        {idkey}
                                         <span class="rh-person-servers">{servers}</span>
                                     </li>
                                 }
@@ -358,10 +362,14 @@ pub fn You() -> impl IntoView {
                             </div>
                             <p class="rh-you-note">
                                 "This Ed25519 key travels with you across burrows. At each handshake the \
-                                 burrow challenges it and you sign a one-time nonce to prove you hold the \
-                                 private key — so the People view can verify it's really you and coalesce \
-                                 your sightings even when your handle differs from server to server. Only a \
-                                 proven key earns the verified ✓; a bare claim is never shown."
+                                 burrow challenges it and you sign a one-time nonce, proving you hold the \
+                                 private key — enough to stop someone from simply copying your public key \
+                                 out of a roster, and to coalesce your sightings even when your handle \
+                                 differs from server to server. It's a portable identity hint, not a login: \
+                                 a burrow you connect to could still relay your proof elsewhere, so it isn't \
+                                 a relay-proof authentication (that needs transport channel-binding, a \
+                                 future step). Treat the mark as \u{201c}this is probably them,\u{201d} not \
+                                 a security guarantee."
                             </p>
                         }
                     })}
