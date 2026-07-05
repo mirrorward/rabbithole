@@ -116,6 +116,12 @@ pub struct HelloAck {
     /// The server's Ed25519 identity public key (32 bytes) — the anchor
     /// for federation identity and theme-bundle/event signatures.
     pub server_key: [u8; 32],
+    /// A random challenge nonce, present when the client offered a
+    /// `client_pubkey` in its `Hello`. The client proves possession of the
+    /// matching private key by signing this nonce and returning a [`KeyProof`];
+    /// only then does the server treat the key as verified and surface it in
+    /// presence. `None` when no key was offered. (Additive field.)
+    pub challenge: Option<[u8; 32]>,
 }
 
 impl HelloAck {
@@ -132,13 +138,43 @@ impl HelloAck {
             server_name: server_name.into(),
             server_version: server_version.into(),
             server_key,
+            challenge: None,
         }
+    }
+
+    /// Attach the proof-of-possession challenge nonce (issued when the client
+    /// offered a `client_pubkey`).
+    pub fn with_challenge(mut self, challenge: Option<[u8; 32]>) -> Self {
+        self.challenge = challenge;
+        self
     }
 }
 
 impl Message for HelloAck {
     const FAMILY: Family = Family::SESSION;
     const MESSAGE_TYPE: u16 = 2;
+}
+
+/// Proof of possession of the `client_pubkey` offered in [`Hello`]: an Ed25519
+/// signature over the [`HelloAck::challenge`] nonce. The server verifies it
+/// against the claimed key before treating the identity as *verified*; an absent
+/// or invalid proof leaves the key unverified (and unpublished in presence).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyProof {
+    /// Ed25519 signature (64 bytes) over the challenge nonce.
+    pub signature: Vec<u8>,
+}
+
+impl KeyProof {
+    pub fn new(signature: Vec<u8>) -> Self {
+        Self { signature }
+    }
+}
+
+impl Message for KeyProof {
+    const FAMILY: Family = Family::SESSION;
+    const MESSAGE_TYPE: u16 = 3;
 }
 
 #[cfg(test)]
@@ -171,6 +207,27 @@ mod tests {
         let decoded = frame.decode::<Hello>().unwrap().unwrap();
         assert_eq!(decoded.client_pubkey, Some([9; 32]));
         assert_eq!(decoded, keyed);
+    }
+
+    #[test]
+    fn hello_ack_carries_optional_challenge() {
+        let plain = HelloAck::new(PROTOCOL_VERSION, CapabilitySet::default(), "s", "0", [1; 32]);
+        assert_eq!(plain.challenge, None);
+        let challenged = HelloAck::new(PROTOCOL_VERSION, CapabilitySet::default(), "s", "0", [1; 32])
+            .with_challenge(Some([0xAB; 32]));
+        let frame = Frame::request(RequestId(1), &challenged).unwrap();
+        let decoded = frame.decode::<HelloAck>().unwrap().unwrap();
+        assert_eq!(decoded.challenge, Some([0xAB; 32]));
+        assert_eq!(decoded, challenged);
+    }
+
+    #[test]
+    fn key_proof_roundtrips() {
+        let proof = KeyProof::new(vec![9u8; 64]);
+        let frame = Frame::request(RequestId(1), &proof).unwrap();
+        let decoded = frame.decode::<KeyProof>().unwrap().unwrap();
+        assert_eq!(decoded.signature.len(), 64);
+        assert_eq!(decoded, proof);
     }
 
     #[test]

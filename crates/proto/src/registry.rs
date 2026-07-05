@@ -57,7 +57,7 @@ use crate::filelib::{
     FileDownloadRequest, FileUpload, FolderCreate, FolderListRequest, NodeDelete, NodeGet,
     NodeList, NodeReply, RateFile, SearchRequest, SearchResults, SetMetadata,
 };
-use crate::hello::{Hello, HelloAck};
+use crate::hello::{Hello, HelloAck, KeyProof};
 use crate::keybundle::{KeyBundle, KeyBundlePublish, KeyBundleRequest};
 use crate::persona::{
     KeyEnroll, PersonaCreate, PersonaDelete, PersonaList, PersonaListRequest, PersonaReply,
@@ -122,7 +122,7 @@ macro_rules! wire_registry {
 
 wire_registry! {
     // ── Family 0: SESSION ────────────────────────────────────────────────
-    Hello, HelloAck,
+    Hello, HelloAck, KeyProof,
     AuthPassword, AuthGuest, AuthResume, AuthOk, Register,
     Ping, Pong, AgreementAccept, Welcome, ServerNotice,
     WelcomeScreenRequest, WelcomeScreen, ThemeGet, ThemeReply, KeywordGo, KeywordTarget,
@@ -187,7 +187,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 179;
+pub const EXPECTED: usize = 180;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

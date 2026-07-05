@@ -1,9 +1,10 @@
 # RabbitHole Protocol (RHP) wire registry — golden snapshot. DO NOT hand-edit.
 # One line per (family, message_type): <family#> <FAMILY> <type#> <MessageName>
 # Re-bless an *intentional* wire change: BLESS=1 cargo test -p rabbithole-proto --test registry
-# total: 179
+# total: 180
   0 SESSION         1  Hello
   0 SESSION         2  HelloAck
+  0 SESSION         3  KeyProof
   0 SESSION        10  AuthPassword
   0 SESSION        11  AuthGuest
   0 SESSION        12  AuthResume
