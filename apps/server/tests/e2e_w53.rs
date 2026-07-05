@@ -224,11 +224,13 @@ async fn full_peer_to_peer_fetch_via_the_coordinator() {
     burrow.shutdown().await;
 }
 
-/// A client that presents a portable identity key in its handshake is surfaced
-/// in the who-list with that key, while a handle-only client shows `None` — the
-/// server half of verified-key People de-dup, end to end over a real Burrow.
+/// A client that presents a portable identity AND proves possession (signs the
+/// server's challenge nonce) is surfaced in the who-list with its key; a
+/// handle-only client shows `None`. The verified half of key-based People de-dup,
+/// end to end over a real Burrow with a real Ed25519 challenge/response.
 #[tokio::test]
-async fn who_list_carries_the_handshake_pubkey() {
+async fn who_list_carries_the_verified_pubkey() {
+    use rabbithole_identity::IdentityKey;
     let work = tempfile::tempdir().unwrap();
     let burrow = Burrow::start(test_config(&work.path().join("srv")))
         .await
@@ -243,8 +245,11 @@ async fn who_list_carries_the_handshake_pubkey() {
     }
     let url = format!("ws://127.0.0.1:{}", burrow.ws_addr.port());
 
-    // "keyed" connects presenting a portable identity key.
-    let mut keyed = Client::connect_with_identity(&url, None, None, "e2e", "0", Some([42; 32]))
+    // "keyed" connects with an identity key; connect_with_identity signs the
+    // challenge nonce and returns the KeyProof, so the server verifies possession.
+    let key = IdentityKey::from_seed(&[42; 32]);
+    let expected = key.public().0;
+    let mut keyed = Client::connect_with_identity(&url, None, None, "e2e", "0", Some(&key))
         .await
         .unwrap();
     keyed.auth_password("keyed", "pw-pw-pw").await.unwrap();
@@ -255,12 +260,82 @@ async fn who_list_carries_the_handshake_pubkey() {
     bare.auth_password("bare", "pw-pw-pw").await.unwrap();
     bare.expect_welcome().await.unwrap();
 
-    // The who-list echoes each session's key (or None).
+    // The who-list carries the *verified* key (or None), not a raw claim.
     let who = keyed.who().await.unwrap();
     let keyed_row = who.iter().find(|u| u.screen_name == "keyed").unwrap();
     let bare_row = who.iter().find(|u| u.screen_name == "bare").unwrap();
-    assert_eq!(keyed_row.pubkey, Some([42; 32]), "keyed session carries its handshake key");
+    assert_eq!(keyed_row.pubkey, Some(expected), "verified session carries its key");
     assert_eq!(bare_row.pubkey, None, "handle-only session has no key");
+
+    burrow.shutdown().await;
+}
+
+/// A client that *claims* an identity key but cannot prove possession (sends a
+/// garbage KeyProof) is NOT surfaced in the who-list — the whole point of the
+/// challenge/response. Guards against the impersonation the review flagged:
+/// reading a victim's public key and re-presenting it can't earn the key badge.
+#[tokio::test]
+async fn unproven_claimed_pubkey_is_not_surfaced() {
+    use rabbithole_net::ws::WsTransport;
+    use rabbithole_net::Transport;
+    use rabbithole_proto::hello::{Hello, HelloAck, KeyProof};
+    use rabbithole_proto::session::AuthPassword;
+    use rabbithole_proto::{CapabilitySet, Frame, RequestId};
+
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("mallory", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    let url = format!("ws://127.0.0.1:{}", burrow.ws_addr.port());
+
+    // Raw handshake: claim a victim's key but sign nothing valid.
+    let victim_key = [7u8; 32];
+    let mut conn = WsTransport.connect(&url).await.unwrap();
+    conn.send(
+        Frame::request(
+            RequestId(1),
+            &Hello::new("evil", "0", CapabilitySet::default()).with_pubkey(Some(victim_key)),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let ack = conn.recv().await.unwrap().unwrap();
+    let ack: HelloAck = ack.decode::<HelloAck>().unwrap().unwrap();
+    assert!(ack.challenge.is_some(), "server challenged the claimed key");
+    // A garbage signature: possession is not proved.
+    conn.send(Frame::request(RequestId(2), &KeyProof::new(vec![0u8; 64])).unwrap())
+        .await
+        .unwrap();
+    let _ = conn.recv().await.unwrap(); // ack (verification failed internally)
+    conn.send(
+        Frame::request(RequestId(3), &AuthPassword::new("mallory", "pw-pw-pw")).unwrap(),
+    )
+    .await
+    .unwrap();
+    // Drain the AuthOk reply so mallory is fully authenticated + joined to
+    // presence before we query the roster (avoids a join race).
+    let _ = conn.recv().await.unwrap();
+
+    // A legit client reads the roster: mallory must appear WITHOUT a key.
+    let mut good = Client::connect(&url, None, None, "e2e", "0").await.unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("good", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    good.auth_password("good", "pw-pw-pw").await.unwrap();
+    good.expect_welcome().await.unwrap();
+    let who = good.who().await.unwrap();
+    let mallory = who.iter().find(|u| u.screen_name == "mallory").unwrap();
+    assert_eq!(mallory.pubkey, None, "an unproven claimed key is never surfaced");
 
     burrow.shutdown().await;
 }

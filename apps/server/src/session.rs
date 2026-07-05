@@ -39,7 +39,10 @@ pub struct SessionCtx {
     pub screen_name: String,
     pub agreed: bool,
     pub is_guest: bool,
-    /// The client's portable identity public key from the handshake, if any.
+    /// The client's portable identity public key, present only when it PROVED
+    /// possession via a valid `KeyProof` over the challenge nonce. A mere claim
+    /// (no/invalid proof) leaves this `None`, so presence never surfaces an
+    /// unverified key.
     pub pubkey: Option<[u8; 32]>,
 }
 
@@ -73,9 +76,13 @@ pub async fn run_session(
 
     // ---- AwaitHello / AwaitAuth ----------------------------------------
     let mut negotiated: Option<ProtocolVersion> = None;
-    // The client's portable identity key, from the handshake — surfaced in
-    // presence so peers can verify who's who across burrows.
+    // The client's *claimed* portable identity key from the handshake, the
+    // random challenge nonce we issued for it, and the key once it has PROVED
+    // possession (a valid KeyProof signature over the nonce). Only the *verified*
+    // key is ever surfaced in presence — an unproved/spoofed key stays invisible.
     let mut client_pubkey: Option<[u8; 32]> = None;
+    let mut challenge_nonce: Option<[u8; 32]> = None;
+    let mut verified_pubkey: Option<[u8; 32]> = None;
     let authed: AuthedUser;
     let mut replay_cursor: u64 = 0;
     let mut resumed = false;
@@ -98,6 +105,15 @@ pub async fn run_session(
                 Some(v) => {
                     negotiated = Some(v);
                     client_pubkey = hello.client_pubkey;
+                    // If the client offered an identity key, challenge it to prove
+                    // possession: a random nonce it must sign (see the KeyProof
+                    // branch below). Reset any prior verification on re-hello.
+                    verified_pubkey = None;
+                    challenge_nonce = client_pubkey.map(|_| {
+                        let mut n = [0u8; 32];
+                        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut n);
+                        n
+                    });
                     let cfg = shared.config.read();
                     let ack = HelloAck::new(
                         v,
@@ -106,11 +122,13 @@ pub async fn run_session(
                                 rabbithole_proto::hello::caps::SESSION_RESUME,
                             ),
                             rabbithole_proto::Capability::new(rabbithole_proto::hello::caps::GUEST),
+                            rabbithole_proto::Capability::new(rabbithole_proto::hello::caps::KEY_AUTH),
                         ]),
                         cfg.name,
                         env!("CARGO_PKG_VERSION"),
                         shared.server_key,
-                    );
+                    )
+                    .with_challenge(challenge_nonce);
                     conn.send(Frame::reply_to(&frame, &ack)?).await?;
                 }
                 None => {
@@ -130,6 +148,24 @@ pub async fn run_session(
 
         if frame.decode::<psess::Ping>().is_some() {
             conn.send(Frame::reply_to(&frame, &psess::Pong)?).await?;
+            continue;
+        }
+
+        // Proof of possession of the claimed identity key: verify the signature
+        // over the challenge nonce. Only on success is the key marked verified
+        // (and later surfaced in presence). A bad/absent proof is not fatal — the
+        // session proceeds handle-only — so we always ack.
+        if let Some(Ok(proof)) = frame.decode::<rabbithole_proto::hello::KeyProof>() {
+            if let (Some(pk), Some(nonce)) = (client_pubkey, challenge_nonce) {
+                if let Ok(sig) = <[u8; 64]>::try_from(proof.signature.as_slice()) {
+                    if rabbithole_identity::PublicKey(pk)
+                        .verify(&nonce, &rabbithole_identity::Signature(sig))
+                    {
+                        verified_pubkey = Some(pk);
+                    }
+                }
+            }
+            conn.send(Frame::ack(&frame)).await?;
             continue;
         }
 
@@ -222,7 +258,8 @@ pub async fn run_session(
         screen_name: authed.persona.screen_name.clone(),
         agreed: agreement.is_none(),
         is_guest: authed.token.is_none(),
-        pubkey: client_pubkey,
+        // Only a key that PROVED possession is surfaced — never the raw claim.
+        pubkey: verified_pubkey,
     };
     let motd = cfg.motd.clone();
     drop(cfg);

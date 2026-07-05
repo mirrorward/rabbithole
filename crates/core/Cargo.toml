@@ -19,6 +19,9 @@ thiserror.workspace = true
 # native (non-wasm) session driver
 rabbithole-net = { workspace = true, optional = true }
 rabbithole-store-client = { workspace = true, optional = true }
+# The native client signs identity-key challenges (KeyProof); identity's argon2/
+# totp tree is heavy, so it's native-only and never reaches the wasm SPA build.
+rabbithole-identity = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
 
@@ -27,10 +30,10 @@ default = []
 native = [
     "dep:rabbithole-net",
     "dep:rabbithole-store-client",
+    "dep:rabbithole-identity",
     "dep:tokio",
     "dep:blake3",
 ]
 
 [dev-dependencies]
-rabbithole-identity.workspace = true
 rand.workspace = true

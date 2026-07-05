@@ -103,17 +103,21 @@ impl Client {
         .await
     }
 
-    /// [`connect`](Self::connect), presenting a portable identity public key in
-    /// the handshake so the server surfaces it in presence — the *verified* key
-    /// peers use to tell same-handle strangers apart across burrows.
+    /// [`connect`](Self::connect), presenting a portable identity and *proving
+    /// possession*: the public key rides in the `Hello`, and if the server
+    /// answers with a challenge nonce the client signs it and returns a
+    /// [`KeyProof`](rabbithole_proto::hello::KeyProof). Only then does the server
+    /// surface the key in presence — the verified key peers use to tell
+    /// same-handle strangers apart across burrows.
     pub async fn connect_with_identity(
         endpoint: &str,
         server_name: Option<&str>,
         fingerprint: Option<&str>,
         client_name: &str,
         client_version: &str,
-        pubkey: Option<[u8; 32]>,
+        identity: Option<&rabbithole_identity::IdentityKey>,
     ) -> Result<Client, ClientError> {
+        let pubkey = identity.map(|k| k.public().0);
         let transport: Box<dyn Transport> =
             if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
                 Box::new(WsTransport)
@@ -152,6 +156,13 @@ impl Client {
         let hello =
             Hello::new(client_name, client_version, CapabilitySet::default()).with_pubkey(pubkey);
         let ack: HelloAck = client.request(&hello).await?;
+        // Prove possession of the identity key if the server challenged it.
+        if let (Some(key), Some(nonce)) = (identity, ack.challenge) {
+            let sig = key.sign(&nonce).0.to_vec();
+            client
+                .request_ack(&rabbithole_proto::hello::KeyProof::new(sig))
+                .await?;
+        }
         client.server = ack;
         Ok(client)
     }
