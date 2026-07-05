@@ -43,7 +43,25 @@ is earned, not claimed.
   Verified live end to end (`alice ✓`, tooltip fingerprint == the You hub's).
 The impersonation vector the review found is closed: possession is proven, not assumed.
 
-**Key-auth hardening + reach (0.137.0–0.138.0)**:
+**⚠ Key-auth is possession-proven but NOT relay-proof (deep review, 0.141.0).** A focused
+5-surface adversarial review found the domain-separation fix (0.137.0) did **not** stop the
+relay it claimed to: `server_key` is self-asserted by the peer in `HelloAck` and bound to
+nothing (not the TLS/QUIC cert; over browser WS the cert is invisible to JS). Live relay: a
+malicious burrow A the user connects to opens its own session to honest burrow B, echoes B's
+`server_key`+nonce to the user as A's challenge, collects the signed `KeyProof`, forwards it
+to B → B marks A's relayed session as the victim's key. Confirmed 3/3 by 5 agents; 8 weaker
+findings correctly dismissed. **Immediate fix (0.141.0)**: removed the false "verified ✓" —
+the People mark is now a neutral identity-key hint (⚿ "possession proven, not relay-proof");
+You-hub + `key_auth_message` doc state the limitation. The challenge/response stays (it stops
+a *passive* pubkey-copy and is the foundation for a real fix). **OPEN DECISION — channel
+binding**: the real fix is signing over a transport channel-binder (pinned cert fingerprint /
+TLS exporter of *this* connection). Achievable for **native QUIC** (client pins the cert) →
+would make native relay-proof; **impossible for browser WS** (no cert access). So a genuine
+"verified" tier is native-only, which means a two-tier UI + proto surface for a mostly-web
+userbase — a product/security tradeoff worth deciding deliberately, not building on autopilot.
+
+**Key-auth hardening + reach (0.137.0–0.138.0)** — NOTE: the "verified" framing in the entries
+below was corrected to "possession-proven, not relay-proof" in 0.141.0 (see above):
 - **Relay/oracle fix (0.137.0)**: a background security review flagged that all three
   sides signed/verified the *raw* nonce — a signing oracle that let a malicious burrow
   relay an honest burrow's challenge to a connected user and impersonate them as
