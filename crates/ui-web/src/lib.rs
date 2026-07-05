@@ -90,6 +90,7 @@ pub mod packs;
 pub mod palette;
 pub mod pwa;
 pub mod radio;
+pub mod scroll;
 pub mod server_theme;
 pub mod servers;
 pub mod state;
@@ -122,6 +123,7 @@ pub use files::{FilesState, Transfer, TransferDir, TransferStatus};
 pub use packs::PackTokens;
 pub use pwa::{icon_rgba, MANIFEST_URL, SW_URL};
 pub use radio::{status_segment, stream_url, RadioPrefs, RadioState, RadioUpdate, StationStatus};
+pub use scroll::{is_near_bottom, ChatScroll};
 pub use server_theme::ServerOverlay;
 pub use state::{
     Board, ChatLine, DmMessage, DmThread, Member, MemberProfile, Post, Presence, Thread, UiState,

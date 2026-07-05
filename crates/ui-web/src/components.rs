@@ -857,6 +857,11 @@ pub fn Lobby() -> impl IntoView {
     let app = expect_context::<AppState>();
     let state = app.focused().state;
     let draft = create_rw_signal(String::new());
+    // Follow the newest line while the reader is at the bottom; offer a
+    // "new messages" jump instead of yanking them out of history otherwise.
+    let log = crate::scroll::ChatScroll::install(move || state.with(|s| s.messages.len()));
+    // The view! macro wants a bare identifier for `node_ref=`.
+    let log_node = log.node;
 
     let send = move || {
         let text = draft.get();
@@ -866,6 +871,8 @@ pub fn Lobby() -> impl IntoView {
         // Routes over the live socket when connected, else the mock seam.
         app.send_chat(text);
         draft.set(String::new());
+        // Your own message always brings you back to the newest line.
+        log.jump();
     };
 
     view! {
@@ -875,7 +882,13 @@ pub fn Lobby() -> impl IntoView {
             <section class="rh-chat" aria-label="Lobby chat">
                 // role=log: an implicitly polite live region — new messages
                 // are announced without moving focus off the compose box.
-                <div class="rh-scroll" role="log" aria-label="Chat messages">
+                <div
+                    class="rh-scroll"
+                    role="log"
+                    aria-label="Chat messages"
+                    node_ref=log_node
+                    on:scroll=move |_| log.on_scroll()
+                >
                     <Show
                         when=move || state.with(|s| s.messages.is_empty())
                         fallback=|| ()
@@ -901,6 +914,11 @@ pub fn Lobby() -> impl IntoView {
                         />
                     </ul>
                 </div>
+                <Show when=move || log.unseen.get() fallback=|| ()>
+                    <button class="rh-jump-new" on:click=move |_| log.jump()>
+                        "\u{2193} New messages"
+                    </button>
+                </Show>
                 <form
                     class="rh-compose"
                     on:submit=move |ev| {
@@ -1118,6 +1136,21 @@ pub fn Dms() -> impl IntoView {
     let draft = create_rw_signal(String::new());
     app.load_dms();
 
+    // Follow the newest message unless the reader has scrolled up to history.
+    let log = crate::scroll::ChatScroll::install(move || {
+        state.with(|s| s.active_dm().map(|t| t.messages.len()).unwrap_or(0))
+    });
+    // The view! macro wants a bare identifier for `node_ref=`.
+    let log_node = log.node;
+    // Switching conversations always lands on its newest message. A render
+    // effect for the same reason as ChatScroll::install: create_effect's
+    // queued first run panics if this view is disposed in the same tick (the
+    // <Routes> remount on burrow-focus change).
+    create_render_effect(move |_| {
+        state.with(|s| s.selected_dm.clone());
+        log.jump();
+    });
+
     let send = move || {
         let text = draft.get();
         if text.trim().is_empty() {
@@ -1125,6 +1158,8 @@ pub fn Dms() -> impl IntoView {
         }
         app.send_dm(&text);
         draft.set(String::new());
+        // Your own message always brings you back to the newest line.
+        log.jump();
     };
 
     let new_peer = create_rw_signal(String::new());
@@ -1195,7 +1230,13 @@ pub fn Dms() -> impl IntoView {
                         <p class="rh-empty">"Select a conversation."</p>
                     }
                 >
-                    <div class="rh-scroll" role="log" aria-label="Conversation messages">
+                    <div
+                        class="rh-scroll"
+                        role="log"
+                        aria-label="Conversation messages"
+                        node_ref=log_node
+                        on:scroll=move |_| log.on_scroll()
+                    >
                         <ul class="rh-lines">
                             <For
                                 each=move || {
@@ -1218,6 +1259,11 @@ pub fn Dms() -> impl IntoView {
                             />
                         </ul>
                     </div>
+                    <Show when=move || log.unseen.get() fallback=|| ()>
+                        <button class="rh-jump-new" on:click=move |_| log.jump()>
+                            "\u{2193} New messages"
+                        </button>
+                    </Show>
                     <form
                         class="rh-compose"
                         on:submit=move |ev| {

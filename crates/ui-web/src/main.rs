@@ -11,5 +11,13 @@
 //! never run — there is no DOM to mount into.
 
 fn main() {
+    // Surface panic locations in the browser console. Without a hook a wasm
+    // panic reports only an opaque `RuntimeError: unreachable` — with it the
+    // console shows the real message and file:line (this is how the
+    // effect-after-dispose panic in the 0.148.0 scroll work was found).
+    #[cfg(target_arch = "wasm32")]
+    std::panic::set_hook(Box::new(|info| {
+        web_sys::console::error_1(&format!("panic: {info}").into());
+    }));
     rabbithole_ui_web::mount();
 }

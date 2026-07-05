@@ -245,9 +245,9 @@ pub mod storage {
 /// `prefers-reduced-motion: reduce` block that neutralises all motion.
 pub const STYLESHEET: &str = "\
 *{box-sizing:border-box}\
-.rh-app{font-family:var(--rh-font-sans);font-size:var(--rh-font-size);line-height:1.5;color:var(--rh-text);background-color:var(--rh-bg);background-image:var(--rh-bg-image);min-height:100vh;display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}\
+.rh-app{font-family:var(--rh-font-sans);font-size:var(--rh-font-size);line-height:1.5;color:var(--rh-text);background-color:var(--rh-bg);background-image:var(--rh-bg-image);height:100vh;height:100dvh;display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}\
 .rh-shell{flex:1;display:flex;min-height:0}\
-.rh-shell-main{flex:1;min-width:0;display:flex;flex-direction:column}\
+.rh-shell-main{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;overflow-y:auto}\
 .rh-rail{flex:none;width:3.4rem;display:flex;flex-direction:column;align-items:center;gap:var(--rh-space-2);padding:var(--rh-space-3) 0;background:color-mix(in srgb,var(--rh-accent) 6%,var(--rh-surface));border-right:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
 .rh-rail-hidden{display:none}\
 .rh-rail-dot{position:absolute;right:1px;bottom:1px;width:9px;height:9px;border-radius:50%;box-shadow:0 0 0 2px color-mix(in srgb,var(--rh-accent) 6%,var(--rh-surface))}\
@@ -403,7 +403,9 @@ pub const STYLESHEET: &str = "\
 .rh-live-toggle{display:flex;align-items:center;gap:.5rem;font-size:var(--rh-font-sm);color:var(--rh-muted);cursor:pointer;text-transform:none;letter-spacing:normal;margin-bottom:0}\
 .rh-live-toggle input{accent-color:var(--rh-accent);cursor:pointer}\
 .rh-body{flex:1;display:flex;min-height:0}\
-.rh-chat{flex:1;display:flex;flex-direction:column;min-width:0}\
+.rh-chat{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}\
+.rh-jump-new{position:absolute;left:50%;bottom:4.6rem;transform:translateX(-50%);z-index:15;font:inherit;font-size:var(--rh-font-sm);font-weight:600;color:var(--rh-bg);background:var(--rh-accent);border:0;border-radius:var(--rh-radius-full);padding:.35rem .95rem;cursor:pointer;box-shadow:var(--rh-shadow-2);white-space:nowrap;animation:rh-pop .2s cubic-bezier(.2,.9,.3,1.2) both;transition:box-shadow .15s ease,background-color .15s ease}\
+.rh-jump-new:hover{background:color-mix(in srgb,var(--rh-accent) 88%,var(--rh-text));box-shadow:var(--rh-shadow-3)}\
 .rh-scroll{flex:1;overflow-y:auto;padding:var(--rh-space-5);display:flex;flex-direction:column;gap:.1rem}\
 .rh-lines{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.1rem}\
 .rh-line{padding:.35rem .6rem;border-radius:var(--rh-radius);transition:background-color .12s ease}\
@@ -800,6 +802,16 @@ mod tests {
         // The header's live now-playing slot collapses when empty, so the
         // always-present role=status wrapper never leaves a phantom flex gap.
         assert!(STYLESHEET.contains(".rh-live-slot:empty{display:none}"));
+    }
+
+    #[test]
+    fn stylesheet_anchors_the_new_messages_jump_pill() {
+        // The pill positions against the chat pane, so the pane must be a
+        // containing block — lose `position:relative` and the pill would
+        // anchor to the viewport instead.
+        assert!(STYLESHEET
+            .contains(".rh-chat{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}"));
+        assert!(STYLESHEET.contains(".rh-jump-new{position:absolute"));
     }
 
     #[test]
