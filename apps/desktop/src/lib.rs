@@ -50,16 +50,30 @@ const NATIVE_SHIM: &str = r#"
     .catch(function (e) { console.error('[rh-native] invoke ping FAILED', e); });
   window.__RH_NATIVE__.listen('test://tick', function (e) {
     console.log('[rh-native] event test://tick ->', e && e.payload);
+    // Invoke a Rust callback so the event (Rust->JS) round-trip is observable
+    // from the `cargo tauri dev` terminal, not just the webview console.
+    window.__RH_NATIVE__.invoke('tick_ack', { payload: String(e && e.payload) });
   })
     .then(function () { console.log('[rh-native] listening for test://tick'); })
     .catch(function (e) { console.error('[rh-native] listen FAILED', e); });
 })();
 "#;
 
-/// A trivial command proving JS→Rust invoke works.
+/// A trivial command proving JS→Rust invoke works. Logs on the Rust side so the
+/// round-trip is observable from the `cargo tauri dev` terminal (not just the
+/// webview devtools console).
 #[tauri::command]
 fn ping(name: String) -> String {
+    eprintln!("[rh-bridge] ping received from webview: name={name:?} — JS→Rust invoke works");
     format!("pong: {name}")
+}
+
+/// The webview calls this from its `test://tick` listener, so the Rust→JS event
+/// delivery (and the `listen` subscription over `core:event`) is confirmed from
+/// the terminal, closing the bridge round-trip in both directions.
+#[tauri::command]
+fn tick_ack(payload: String) {
+    eprintln!("[rh-bridge] tick_ack from webview: event payload={payload:?} — Rust→JS event delivery works");
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -70,6 +84,7 @@ pub fn run() {
         .manage(transfers::TransfersManager::default())
         .invoke_handler(tauri::generate_handler![
             ping,
+            tick_ack,
             transfers::native_available,
             transfers::connect_native,
             transfers::swarm_start_download,
@@ -89,8 +104,10 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                eprintln!("[rh-bridge] emitting test://tick — watch the webview console for receipt");
                 let _ = handle.emit("test://tick", "hello from the native core");
             });
+            eprintln!("[rh-bridge] window built with native shim; app starting");
             Ok(())
         })
         .run(tauri::generate_context!())
