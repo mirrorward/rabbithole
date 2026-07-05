@@ -278,7 +278,7 @@ pub const STYLESHEET: &str = "\
 .rh-welcome-motd{color:var(--rh-muted);margin:0 0 .5rem;font-style:italic}\
 .rh-welcome-body{margin:0 0 .7rem;white-space:pre-wrap;max-width:70ch;line-height:1.5}\
 .rh-welcome-actions{display:flex;justify-content:flex-end}\
-.rh-person-idkey{color:var(--rh-muted);cursor:help;font-size:.9em}\
+.rh-person-verified{color:var(--rh-accent);font-weight:700;cursor:help}\
 .rh-person-servers{margin-left:auto;font-size:var(--rh-font-sm);color:var(--rh-muted)}\
 .rh-xfers{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}\
 .rh-xfer-row{display:flex;align-items:center;gap:.7rem;padding:.5rem .3rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\

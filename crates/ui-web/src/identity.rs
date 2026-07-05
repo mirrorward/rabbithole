@@ -30,6 +30,13 @@ impl Identity {
         self.public
     }
 
+    /// Sign `message` with the identity key, returning the 64-byte Ed25519
+    /// signature — used to prove possession of the key against a server challenge.
+    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer;
+        SigningKey::from_bytes(&self.seed).sign(message).to_bytes()
+    }
+
     /// The secret seed. Handle with care (it *is* the private key).
     pub fn seed(&self) -> [u8; 32] {
         self.seed
@@ -149,6 +156,18 @@ mod tests {
         assert_eq!(short_fingerprint(&id.public_hex()), id.fingerprint());
         // Invalid hex degrades gracefully to a truncated echo.
         assert_eq!(short_fingerprint("nothex"), "nothex");
+    }
+
+    #[test]
+    fn sign_produces_a_signature_the_public_key_verifies() {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        let id = Identity::from_seed([11; 32]);
+        let msg = b"challenge-nonce";
+        let sig = id.sign(msg);
+        let vk = VerifyingKey::from_bytes(&id.public()).unwrap();
+        assert!(vk.verify(msg, &Signature::from_bytes(&sig)).is_ok(), "own key verifies");
+        // A different message does not verify against this signature.
+        assert!(vk.verify(b"other", &Signature::from_bytes(&sig)).is_err());
     }
 
     #[test]

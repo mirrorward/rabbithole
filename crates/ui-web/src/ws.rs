@@ -629,6 +629,22 @@ impl WsClient {
                 let b = inner.borrow();
                 match decode_frame(&bytes) {
                     Ok(frame) => {
+                        // Proof of possession: if the handshake ack challenged our
+                        // identity key, sign the nonce and return a KeyProof so the
+                        // burrow surfaces the key as *verified*. Fire-and-forget
+                        // (the server acks it); only the socket + our key are
+                        // needed, so it's safe under the immutable borrow.
+                        if let Some(nonce) = wire::hello_ack_challenge(&frame) {
+                            if let Some(ws) = &b.ws {
+                                let sig = crate::identity::load_or_create().sign(&nonce).to_vec();
+                                if let Some(bytes) = wire::key_proof_frame(sig)
+                                    .ok()
+                                    .and_then(|f| encode_frame(&f).ok())
+                                {
+                                    let _ = ws.send_with_u8_array(&bytes);
+                                }
+                            }
+                        }
                         for event in wire::frame_to_events(&frame) {
                             b.emit(event);
                         }

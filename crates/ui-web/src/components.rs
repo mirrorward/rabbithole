@@ -158,26 +158,25 @@ pub fn People() -> impl IntoView {
                                     _ => "rh-pres off",
                                 };
                                 let servers = p.servers.join(" · ");
-                                // The person carries a portable identity key — a
-                                // *self-asserted* fingerprint the burrow echoes, used
-                                // to coalesce their sightings. NOT authenticated: the
-                                // server does not challenge possession, so this is an
-                                // identity hint, not a verification badge. (A key glyph,
-                                // never a checkmark — see the security review.)
-                                let idkey = p.key.as_ref().map(|k| {
+                                // The person carries a portable identity key the
+                                // burrow *verified* via challenge/response (the server
+                                // only surfaces a key after a valid KeyProof), so the
+                                // checkmark is earned — an unproven claim is never
+                                // shown. The tooltip carries the short fingerprint.
+                                let verified = p.key.as_ref().map(|k| {
                                     let fp = crate::identity::short_fingerprint(k);
                                     view! {
                                         <span
-                                            class="rh-person-idkey"
-                                            title=format!("identity key {fp} (self-asserted, not verified)")
-                                        >"\u{26bf}"</span>
+                                            class="rh-person-verified"
+                                            title=format!("verified identity · {fp}")
+                                        >"\u{2713}"</span>
                                     }
                                 });
                                 view! {
                                     <li class="rh-person">
                                         <span class=dot aria-hidden="true"></span>
                                         <span class="rh-person-name">{p.screen_name}</span>
-                                        {idkey}
+                                        {verified}
                                         <span class="rh-person-servers">{servers}</span>
                                     </li>
                                 }
@@ -358,11 +357,11 @@ pub fn You() -> impl IntoView {
                                 </div>
                             </div>
                             <p class="rh-you-note">
-                                "This Ed25519 key travels with you across burrows, so the People view can \
-                                 coalesce your sightings even when your handle differs from server to \
-                                 server. It's a portable identity hint, not a login — burrows echo the key \
-                                 you present but don't yet challenge it, so treat it as self-asserted until \
-                                 a proof-of-possession handshake lands."
+                                "This Ed25519 key travels with you across burrows. At each handshake the \
+                                 burrow challenges it and you sign a one-time nonce to prove you hold the \
+                                 private key — so the People view can verify it's really you and coalesce \
+                                 your sightings even when your handle differs from server to server. Only a \
+                                 proven key earns the verified ✓; a bare claim is never shown."
                             </p>
                         }
                     })}

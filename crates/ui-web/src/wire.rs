@@ -137,6 +137,23 @@ pub fn hello_request(id: RequestId, pubkey: Option<[u8; 32]>) -> Result<Frame, P
     Frame::request(id, &hello)
 }
 
+/// The proof-of-possession challenge nonce, if this frame is a [`HelloAck`] that
+/// carries one (i.e. the server challenged the identity key we offered). The
+/// client answers by signing `nonce` and sending a [`key_proof_frame`].
+pub fn hello_ack_challenge(frame: &Frame) -> Option<[u8; 32]> {
+    frame.decode::<HelloAck>()?.ok()?.challenge
+}
+
+/// Build a [`KeyProof`](rabbithole_proto::hello::KeyProof) request frame carrying
+/// an Ed25519 `signature` over the challenge nonce. A fixed request id: the proof
+/// is fire-and-forget (the server acks it; the client doesn't correlate a reply).
+pub fn key_proof_frame(signature: Vec<u8>) -> Result<Frame, ProtoError> {
+    Frame::request(
+        RequestId(0),
+        &rabbithole_proto::hello::KeyProof::new(signature),
+    )
+}
+
 /// Build a keepalive [`Ping`] request frame.
 pub fn ping_request(id: RequestId) -> Result<Frame, ProtoError> {
     Frame::request(id, &Ping)
