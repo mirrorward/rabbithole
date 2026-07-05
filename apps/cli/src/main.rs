@@ -302,6 +302,32 @@ fn save_session(s: &Session) -> Result<()> {
     Ok(())
 }
 
+/// The persisted portable identity seed (hex), beside the session cache.
+fn identity_path() -> Result<PathBuf> {
+    let dir = dirs::data_dir()
+        .context("no data dir on this platform")?
+        .join("rabbithole");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join("identity.seed"))
+}
+
+/// Load this machine's portable identity, minting + persisting one on first use.
+/// Presented at every handshake so `rabbit` sessions carry a verified key (the
+/// same identity story as the web client), enabling cross-burrow People de-dup.
+fn load_or_create_identity() -> Result<rabbithole_identity::IdentityKey> {
+    let path = identity_path()?;
+    if let Ok(hex) = std::fs::read_to_string(&path) {
+        if let Ok(bytes) = hex::decode(hex.trim()) {
+            if let Ok(seed) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                return Ok(rabbithole_identity::IdentityKey::from_seed(&seed));
+            }
+        }
+    }
+    let key = rabbithole_identity::IdentityKey::generate();
+    std::fs::write(&path, hex::encode(key.seed()))?;
+    Ok(key)
+}
+
 const CLIENT_NAME: &str = "rabbit";
 
 #[tokio::main]
@@ -347,12 +373,14 @@ async fn main() -> Result<()> {
             guest,
             name,
         } => {
-            let mut c = Client::connect(
+            let identity = load_or_create_identity()?;
+            let mut c = Client::connect_with_identity(
                 &endpoint,
                 server_name.as_deref(),
                 fingerprint.as_deref(),
                 CLIENT_NAME,
                 env!("CARGO_PKG_VERSION"),
+                Some(&identity),
             )
             .await?;
             let ok = if guest {
@@ -1443,12 +1471,14 @@ fn report_wish(json: bool, verb: &str, w: &rabbithole_proto::wish::WishView) {
 /// (the login command surfaced it to the human).
 async fn reconnect() -> Result<(Client, Session)> {
     let mut s = load_session()?;
-    let mut c = Client::connect(
+    let identity = load_or_create_identity()?;
+    let mut c = Client::connect_with_identity(
         &s.endpoint,
         s.server_name.as_deref(),
         s.fingerprint.as_deref(),
         CLIENT_NAME,
         env!("CARGO_PKG_VERSION"),
+        Some(&identity),
     )
     .await?;
     let ok = match &s.token {
