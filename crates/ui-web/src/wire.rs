@@ -578,6 +578,10 @@ pub fn command_to_frame(command: &Command, id: RequestId) -> Result<Option<Frame
         Command::SignIn { login, password } => {
             Frame::request(id, &AuthPassword::new(login.clone(), password.clone()))?
         }
+        Command::Resume { token } => Frame::request(
+            id,
+            &rabbithole_proto::session::AuthResume::new(token.clone(), 0),
+        )?,
         Command::SendChat { room, text } => {
             Frame::request(id, &ChatSend::new(room.clone(), text.clone()))?
         }
@@ -628,6 +632,15 @@ pub fn frame_to_events(frame: &Frame) -> Vec<Event> {
             room: msg.room,
             from: msg.from,
             text: msg.text,
+        }];
+    }
+
+    // Session: authentication succeeded — carry the resume token so the client
+    // can persist it and auto-reconnect on next load.
+    if let Some(Ok(ok)) = frame.decode::<rabbithole_proto::session::AuthOk>() {
+        return vec![Event::Authenticated {
+            token: ok.token,
+            screen_name: ok.screen_name,
         }];
     }
 

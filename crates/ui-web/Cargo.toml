@@ -68,6 +68,9 @@ web-sys = { workspace = true, features = [
     # Portable identity seed generation (`src/identity.rs`):
     # crypto.getRandomValues into a 32-byte buffer.
     "Crypto",
+    # Auto-reconnect on load (`src/app.rs`): history.replaceState to land in the
+    # lobby (not the login screen) after restoring persisted burrow sessions.
+    "History",
 ] }
 gloo-timers.workspace = true
 # The Ed25519 seed comes from the browser CSPRNG (web-sys Crypto), so the curve

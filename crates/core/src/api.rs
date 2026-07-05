@@ -22,6 +22,9 @@ pub enum Command {
     Disconnect,
     /// Wave 1: authenticate the connected session.
     SignIn { login: String, password: String },
+    /// Resume a prior session with a bearer token (from a previous `AuthOk`),
+    /// so a reload reconnects without re-entering the password.
+    Resume { token: String },
     /// Send a line to the currently focused chat room.
     SendChat { room: String, text: String },
 }
@@ -50,5 +53,12 @@ pub enum Event {
     Welcome {
         motd: String,
         agreement: Option<String>,
+    },
+    /// Authentication succeeded. `token` is the resume bearer token (empty for
+    /// guests, which aren't resumable); the client persists it per-endpoint to
+    /// auto-reconnect on next load.
+    Authenticated {
+        token: String,
+        screen_name: String,
     },
 }

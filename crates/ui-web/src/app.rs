@@ -68,6 +68,15 @@ pub struct Session {
     client: StoredValue<MockClient>,
 }
 
+/// How a live session authenticates: a fresh password sign-in, or resuming a
+/// prior session with a persisted bearer token (auto-reconnect on load).
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+enum AuthMethod {
+    Password { login: String, password: String },
+    Resume { token: String },
+}
+
 /// Reactive, `Copy` handle bundle shared through context.
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -390,8 +399,21 @@ impl AppState {
     /// through [`UiState::apply`], connection-lifecycle states through
     /// [`UiState::set_conn`], and routed notices through the radio reducer /
     /// notice log. The default seeded [`MockClient`] path is untouched.
+    /// Open a live session to `endpoint`, authenticating with a fresh password.
     #[cfg(target_arch = "wasm32")]
     pub fn connect_live(&self, endpoint: String, login: String, password: String) {
+        self.connect_with(endpoint, AuthMethod::Password { login, password });
+    }
+
+    /// Auto-reconnect to `endpoint` by resuming a persisted session `token` — no
+    /// password needed. Used on launch to restore your burrows.
+    #[cfg(target_arch = "wasm32")]
+    pub fn reconnect_live(&self, endpoint: String, token: String) {
+        self.connect_with(endpoint, AuthMethod::Resume { token });
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn connect_with(&self, endpoint: String, auth: AuthMethod) {
         use crate::wire::EventClient;
         use rabbithole_core::api::{Command, Event};
         // Give this live server its own session (keyed by endpoint) + focus it,
@@ -405,40 +427,61 @@ impl AppState {
         let session_name = self.focused().name;
         let presence = self.presence;
         let ws_sv = self.focused().ws;
-        // Remembered on a *successful* connect so the login screen can offer
-        // one-tap reconnect next launch (endpoint + handle only; never the pw).
-        let remember_endpoint = endpoint.clone();
-        let remember_login = login.clone();
+        // Endpoint captured for both the "connected" toast/label and, on a
+        // successful auth, persisting the resume token + handle for next launch.
+        let ep = endpoint.clone();
         self.focused().ws.update_value(|ws| {
             ws.on_event(std::rc::Rc::new(move |event| {
-                if let Event::Connected { server_name, .. } = &event {
-                    let name = server_name.clone();
-                    // Label this session's rail tile with the burrow's name.
-                    if !name.is_empty() {
-                        session_name.set(Some(name.clone()));
-                    }
-                    crate::recent::remember(&remember_endpoint, &remember_login);
-                    toasts.update(|q| {
-                        q.push(
-                            crate::toasts::ToastKind::Success,
-                            format!("Connected to {name}"),
-                        );
-                    });
-                    // Authenticate once the handshake lands. We can't dispatch
-                    // from inside the transport's own borrow, so defer to the
-                    // next microtask.
-                    if !login.is_empty() {
-                        let (login, password) = (login.clone(), password.clone());
-                        wasm_bindgen_futures::spawn_local(async move {
-                            ws_sv.update_value(|c| {
-                                c.dispatch(Command::SignIn { login, password });
-                                // Pull the initial roster once signed in.
-                                c.request_who();
-                                // This burrow inherits the user's current status.
-                                c.set_presence(presence.get_untracked(), None);
-                            });
+                match &event {
+                    Event::Connected { server_name, .. } => {
+                        let name = server_name.clone();
+                        // Label this session's rail tile with the burrow's name.
+                        if !name.is_empty() {
+                            session_name.set(Some(name.clone()));
+                        }
+                        toasts.update(|q| {
+                            q.push(
+                                crate::toasts::ToastKind::Success,
+                                format!("Connected to {name}"),
+                            );
                         });
+                        // Authenticate once the handshake lands. We can't dispatch
+                        // from inside the transport's own borrow, so defer to the
+                        // next microtask. Password sign-in or token resume.
+                        let cmd = match &auth {
+                            AuthMethod::Password { login, password } if !login.is_empty() => {
+                                Some(Command::SignIn {
+                                    login: login.clone(),
+                                    password: password.clone(),
+                                })
+                            }
+                            AuthMethod::Resume { token } if !token.is_empty() => {
+                                Some(Command::Resume {
+                                    token: token.clone(),
+                                })
+                            }
+                            _ => None,
+                        };
+                        if let Some(cmd) = cmd {
+                            wasm_bindgen_futures::spawn_local(async move {
+                                ws_sv.update_value(|c| {
+                                    c.dispatch(cmd);
+                                    // Pull the initial roster once signed in.
+                                    c.request_who();
+                                    // This burrow inherits the user's current status.
+                                    c.set_presence(presence.get_untracked(), None);
+                                });
+                            });
+                        }
                     }
+                    Event::Authenticated { token, screen_name } => {
+                        // Persist the session so a reload auto-reconnects: the
+                        // handle (from the persona) + the resume token (empty for
+                        // guests → cleared). Never the password.
+                        crate::recent::remember(&ep, screen_name);
+                        crate::recent::remember_token(&ep, token);
+                    }
+                    _ => {}
                 }
                 state.update(|s| s.apply(&event));
             }));
@@ -1265,6 +1308,29 @@ pub fn App() -> impl IntoView {
     // Load (or mint) the portable identity that names you across every burrow.
     #[cfg(target_arch = "wasm32")]
     app.you.set(Some(crate::identity::load_or_create().you()));
+
+    // Persist connections across loads: auto-reconnect to every burrow that left
+    // a resume token, and land in the lobby instead of the login screen. Runs
+    // before <Router> mounts, so the URL is already `/lobby` when it reads it.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let resumable: Vec<_> = crate::recent::load()
+            .into_iter()
+            .filter_map(|b| b.token.map(|t| (b.endpoint, t)))
+            .collect();
+        if !resumable.is_empty() {
+            for (endpoint, token) in resumable {
+                app.reconnect_live(endpoint, token);
+            }
+            if let Some(hist) = web_sys::window().and_then(|w| w.history().ok()) {
+                let _ = hist.replace_state_with_url(
+                    &wasm_bindgen::JsValue::NULL,
+                    "",
+                    Some("/lobby"),
+                );
+            }
+        }
+    }
 
     let style = move || {
         let (pack, mode) = (app.theme.get().pack, app.mode());
