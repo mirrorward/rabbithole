@@ -16,6 +16,20 @@ pub struct ChatLine {
     pub from: String,
     /// The message body.
     pub text: String,
+    /// Server timestamp, unix milliseconds (0 when unknown).
+    pub at_unix_ms: i64,
+}
+
+/// Consecutive lines from the same sender inside this window render as one
+/// visual group (sender + time shown once, follow-ups as bare lines).
+pub const GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+/// Whether a line continues the previous line's message group: same sender,
+/// sent within [`GROUP_WINDOW_MS`], and time not going backwards (a clock
+/// jump breaks the group rather than gluing unrelated history). Pure —
+/// host-tested; both the lobby and DM views key their rendering off it.
+pub fn continues_group(prev_from: &str, prev_ms: i64, cur_from: &str, cur_ms: i64) -> bool {
+    prev_from == cur_from && cur_ms >= prev_ms && cur_ms - prev_ms <= GROUP_WINDOW_MS
 }
 
 /// A board in the board tree.
@@ -72,6 +86,8 @@ pub struct DmMessage {
     pub from: String,
     /// Message body.
     pub text: String,
+    /// Server timestamp, unix milliseconds (0 when unknown).
+    pub at_unix_ms: i64,
 }
 
 /// A direct-message conversation with a single peer.
@@ -294,10 +310,16 @@ impl UiState {
             Event::CommandFailed { detail } => {
                 self.status = format!("Error: {detail}");
             }
-            Event::ChatMessage { from, text, .. } => {
+            Event::ChatMessage {
+                from,
+                text,
+                at_unix_ms,
+                ..
+            } => {
                 self.messages.push(ChatLine {
                     from: from.clone(),
                     text: text.clone(),
+                    at_unix_ms: *at_unix_ms,
                 });
             }
             Event::Welcome { motd, agreement } => {
@@ -325,6 +347,7 @@ impl UiState {
         self.messages.push(ChatLine {
             from: format!("! {from}"),
             text: text.to_string(),
+            at_unix_ms: crate::clock::now_ms(),
         });
     }
 
@@ -516,15 +539,46 @@ mod tests {
             room: "lobby".into(),
             from: "alice".into(),
             text: "hi".into(),
+            at_unix_ms: 1_000,
         });
         s.apply(&Event::ChatMessage {
             room: "lobby".into(),
             from: "bob".into(),
             text: "yo".into(),
+            at_unix_ms: 2_000,
         });
         assert_eq!(s.messages.len(), 2);
         assert_eq!(s.messages[0].from, "alice");
         assert_eq!(s.messages[1].text, "yo");
+        assert_eq!(s.messages[0].at_unix_ms, 1_000);
+    }
+
+    #[test]
+    fn grouping_joins_same_sender_within_the_window() {
+        // Same sender, one minute apart: one visual group.
+        assert!(continues_group("alice", 1_000_000, "alice", 1_060_000));
+        // Exactly at the window edge still groups.
+        assert!(continues_group(
+            "alice",
+            1_000_000,
+            "alice",
+            1_000_000 + GROUP_WINDOW_MS
+        ));
+    }
+
+    #[test]
+    fn grouping_breaks_on_sender_gap_or_clock_jump() {
+        // Different sender.
+        assert!(!continues_group("alice", 1_000_000, "bob", 1_001_000));
+        // Too long a pause.
+        assert!(!continues_group(
+            "alice",
+            1_000_000,
+            "alice",
+            1_000_000 + GROUP_WINDOW_MS + 1
+        ));
+        // Time going backwards (clock jump / spliced history) breaks too.
+        assert!(!continues_group("alice", 2_000_000, "alice", 1_000_000));
     }
 
     #[test]
@@ -789,6 +843,7 @@ mod tests {
             DmMessage {
                 from: "kevin".into(),
                 text: "yo".into(),
+                at_unix_ms: 0,
             },
         );
         assert_eq!(s.active_dm().unwrap().peer, "bob");
@@ -810,6 +865,7 @@ mod tests {
             DmMessage {
                 from: "x".into(),
                 text: "y".into(),
+                at_unix_ms: 0,
             },
         );
         assert_eq!(s.dm_threads[0].messages.len(), 0);

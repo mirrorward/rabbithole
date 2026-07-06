@@ -904,13 +904,40 @@ pub fn Lobby() -> impl IntoView {
                     </Show>
                     <ul class="rh-lines">
                         <For
+                            // Rows carry a `head` flag: the first line of a
+                            // sender's burst shows the name + time, follow-ups
+                            // render as bare grouped lines. A row's head-ness
+                            // depends only on the (immutable) previous line,
+                            // so the index stays a sound key.
                             each=move || {
-                                state.with(|s| s.messages.clone().into_iter().enumerate().collect::<Vec<_>>())
+                                state.with(|s| {
+                                    s.messages
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, line)| {
+                                            let head = i == 0
+                                                || !crate::state::continues_group(
+                                                    &s.messages[i - 1].from,
+                                                    s.messages[i - 1].at_unix_ms,
+                                                    &line.from,
+                                                    line.at_unix_ms,
+                                                );
+                                            (i, line.clone(), head)
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
                             }
-                            key=|(i, _)| *i
-                            children=move |(_, line)| view! {
-                                <li class="rh-line">
-                                    <span class="rh-from">{line.from}</span>
+                            key=|(i, _, _)| *i
+                            children=move |(_, line, head)| view! {
+                                <li class=if head { "rh-line rh-line-head" } else { "rh-line rh-line-cont" }>
+                                    {head.then(|| view! {
+                                        <span class="rh-from">{line.from.clone()}</span>
+                                    })}
+                                    {(line.at_unix_ms != 0).then(|| view! {
+                                        <span class="rh-line-time">
+                                            {crate::clock::local_hhmm(line.at_unix_ms)}
+                                        </span>
+                                    })}
                                     {line.text}
                                 </li>
                             }
@@ -1242,20 +1269,43 @@ pub fn Dms() -> impl IntoView {
                     >
                         <ul class="rh-lines">
                             <For
+                                // Same sender-burst grouping as the lobby.
                                 each=move || {
                                     state.with(|s| {
-                                        s.active_dm()
+                                        // Key rows by conversation + index so
+                                        // switching conversations re-creates
+                                        // rows instead of reusing them.
+                                        let convo = s.selected_dm.clone().unwrap_or_default();
+                                        let msgs = s
+                                            .active_dm()
                                             .map(|t| t.messages.clone())
-                                            .unwrap_or_default()
-                                            .into_iter()
+                                            .unwrap_or_default();
+                                        msgs.iter()
                                             .enumerate()
+                                            .map(|(i, m)| {
+                                                let head = i == 0
+                                                    || !crate::state::continues_group(
+                                                        &msgs[i - 1].from,
+                                                        msgs[i - 1].at_unix_ms,
+                                                        &m.from,
+                                                        m.at_unix_ms,
+                                                    );
+                                                (format!("{convo}#{i}"), m.clone(), head)
+                                            })
                                             .collect::<Vec<_>>()
                                     })
                                 }
-                                key=|(i, _)| *i
-                                children=move |(_, m)| view! {
-                                    <li class="rh-line">
-                                        <span class="rh-from">{m.from}</span>
+                                key=|(k, _, _)| k.clone()
+                                children=move |(_, m, head)| view! {
+                                    <li class=if head { "rh-line rh-line-head" } else { "rh-line rh-line-cont" }>
+                                        {head.then(|| view! {
+                                            <span class="rh-from">{m.from.clone()}</span>
+                                        })}
+                                        {(m.at_unix_ms != 0).then(|| view! {
+                                            <span class="rh-line-time">
+                                                {crate::clock::local_hhmm(m.at_unix_ms)}
+                                            </span>
+                                        })}
                                         {m.text}
                                     </li>
                                 }

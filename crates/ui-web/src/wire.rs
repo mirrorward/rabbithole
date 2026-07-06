@@ -388,6 +388,7 @@ pub fn frame_to_dm_history(frame: &Frame) -> Option<Vec<crate::state::DmMessage>
             .map(|m| crate::state::DmMessage {
                 from: m.from,
                 text: m.text,
+                at_unix_ms: m.at_unix_ms,
             })
             .collect(),
     )
@@ -410,6 +411,7 @@ pub fn frame_to_dm_received(frame: &Frame) -> Option<(String, crate::state::DmMe
         crate::state::DmMessage {
             from: m.from,
             text: m.text,
+            at_unix_ms: m.at_unix_ms,
         },
     ))
 }
@@ -632,6 +634,7 @@ pub fn frame_to_events(frame: &Frame) -> Vec<Event> {
             room: msg.room,
             from: msg.from,
             text: msg.text,
+            at_unix_ms: msg.at_unix_ms,
         }];
     }
 
@@ -1449,6 +1452,7 @@ mod tests {
                 room: "lobby".into(),
                 from: "bob".into(),
                 text: "yo".into(),
+                at_unix_ms: 1_700_000_000_000,
             }]
         );
     }
@@ -1738,6 +1742,7 @@ mod tests {
                 room: "lobby".into(),
                 from: "bob".into(),
                 text: "hi".into(),
+                at_unix_ms: 0,
             }]
         );
     }

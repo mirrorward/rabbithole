@@ -409,9 +409,15 @@ pub const STYLESHEET: &str = "\
 .rh-jump-new:hover{background:color-mix(in srgb,var(--rh-accent) 88%,var(--rh-text));box-shadow:var(--rh-shadow-3)}\
 .rh-scroll{flex:1;overflow-y:auto;padding:var(--rh-space-5);display:flex;flex-direction:column;gap:.1rem}\
 .rh-lines{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.1rem}\
-.rh-line{padding:.35rem .6rem;border-radius:var(--rh-radius);transition:background-color .12s ease}\
+.rh-line{position:relative;padding:.35rem 3.6rem .35rem .6rem;border-radius:var(--rh-radius);transition:background-color .12s ease}\
 .rh-line:hover{background:color-mix(in srgb,var(--rh-text) 5%,transparent)}\
 .rh-line .rh-from{color:var(--rh-accent);font-weight:600;margin-right:var(--rh-space-2)}\
+.rh-line-time{position:absolute;right:.6rem;top:.45rem;font-size:var(--rh-font-xs);color:var(--rh-muted);font-variant-numeric:tabular-nums}\
+.rh-line-head{margin-top:.4rem}\
+.rh-line-head:first-child{margin-top:0}\
+.rh-line-cont{padding-top:.1rem;padding-bottom:.1rem}\
+.rh-line-cont .rh-line-time{opacity:0;transition:opacity .12s ease}\
+.rh-line-cont:hover .rh-line-time{opacity:1}\
 .rh-compose{display:flex;gap:var(--rh-space-2);padding:var(--rh-space-3) var(--rh-space-5);border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent);background:color-mix(in srgb,var(--rh-surface) 50%,transparent)}\
 .rh-compose .rh-input{flex:1;border-radius:var(--rh-radius-full);padding-left:var(--rh-space-4)}\
 .rh-compose .rh-btn{border-radius:var(--rh-radius-full);padding-left:var(--rh-space-5);padding-right:var(--rh-space-5)}\

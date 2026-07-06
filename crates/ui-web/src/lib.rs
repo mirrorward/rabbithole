@@ -83,6 +83,7 @@ pub mod admin;
 pub mod app;
 pub mod art;
 pub mod client;
+pub mod clock;
 pub mod components;
 pub mod conn;
 pub mod files;

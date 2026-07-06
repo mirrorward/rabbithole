@@ -268,6 +268,10 @@ impl MockClient {
     }
 
     fn seeded_dms() -> Vec<DmThread> {
+        // Seeded a plausible few minutes before "now", so timestamps and
+        // grouping read naturally in the offline demo (and stay 0-based,
+        // deterministic, on the host where the clock stub returns 0).
+        let now = crate::clock::now_ms();
         vec![
             DmThread {
                 id: "alice".to_string(),
@@ -276,10 +280,12 @@ impl MockClient {
                     DmMessage {
                         from: "alice".to_string(),
                         text: "hey, did you see the new board?".to_string(),
+                        at_unix_ms: now - 9 * 60_000,
                     },
                     DmMessage {
                         from: "rabbit".to_string(),
                         text: "yep, looks great".to_string(),
+                        at_unix_ms: now - 8 * 60_000,
                     },
                 ],
             },
@@ -289,6 +295,7 @@ impl MockClient {
                 messages: vec![DmMessage {
                     from: "bob".to_string(),
                     text: "ping me when you're around".to_string(),
+                    at_unix_ms: now - 25 * 60_000,
                 }],
             },
         ]
@@ -607,19 +614,22 @@ impl MockClient {
 
     /// The lobby scrollback every fresh session is seeded with.
     fn seeded_messages() -> Vec<Event> {
+        let now = crate::clock::now_ms();
         [
             (
                 "rabbit",
                 "Welcome to the warren. Be excellent to each other.",
+                now - 42 * 60_000,
             ),
-            ("alice", "morning all \u{2600}"),
-            ("bob", "anyone up for a game later?"),
+            ("alice", "morning all \u{2600}", now - 7 * 60_000),
+            ("bob", "anyone up for a game later?", now - 3 * 60_000),
         ]
         .into_iter()
-        .map(|(from, text)| Event::ChatMessage {
+        .map(|(from, text, at_unix_ms)| Event::ChatMessage {
             room: LOBBY.to_string(),
             from: from.to_string(),
             text: text.to_string(),
+            at_unix_ms,
         })
         .collect()
     }
@@ -667,7 +677,12 @@ impl UiClient for MockClient {
                     .current_user
                     .clone()
                     .unwrap_or_else(|| "me".to_string());
-                vec![Event::ChatMessage { room, from, text }]
+                vec![Event::ChatMessage {
+                    room,
+                    from,
+                    text,
+                    at_unix_ms: crate::clock::now_ms(),
+                }]
             }
             _ => vec![Event::CommandFailed {
                 detail: "unsupported command".to_string(),
@@ -716,6 +731,7 @@ impl UiClient for MockClient {
         let msg = DmMessage {
             from,
             text: text.to_string(),
+            at_unix_ms: crate::clock::now_ms(),
         };
         thread.messages.push(msg.clone());
         Some(msg)
@@ -827,6 +843,7 @@ mod tests {
                 room: LOBBY.into(),
                 from: "kevin".into(),
                 text: "hello warren".into(),
+                at_unix_ms: 0,
             }]
         );
     }

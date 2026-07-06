@@ -47,6 +47,9 @@ pub enum Event {
         room: String,
         from: String,
         text: String,
+        /// Server timestamp, unix milliseconds (0 when the transport has no
+        /// clock — e.g. seeded mock scrollback on the host).
+        at_unix_ms: i64,
     },
     /// The post-auth welcome: message of the day + an optional agreement the
     /// user must accept. Surfaced as a non-modal sheet on connect.
