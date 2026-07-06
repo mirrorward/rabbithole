@@ -61,6 +61,11 @@ pub struct Session {
     /// The burrow's display name, learned from the `Connected` handshake. `None`
     /// until connected (the rail tile falls back to the endpoint host).
     pub name: RwSignal<Option<String>>,
+    /// How many lobby lines the user has seen in this burrow — the message
+    /// count at the moment they last focused it (or focused away from it).
+    /// `messages.len() - seen` on an unfocused session is its rail-tile
+    /// unread count; the focused session always reads as caught up.
+    pub seen: RwSignal<usize>,
     /// This server's live browser WebSocket transport. wasm-only.
     #[cfg(target_arch = "wasm32")]
     ws: StoredValue<crate::ws::WsClient>,
@@ -141,6 +146,7 @@ impl AppState {
             live: create_rw_signal(false),
             server_theme: create_rw_signal(None),
             name: create_rw_signal(None),
+            seen: create_rw_signal(0),
             #[cfg(target_arch = "wasm32")]
             ws: store_value(crate::ws::WsClient::new()),
             client: store_value(MockClient::new()),
@@ -204,11 +210,13 @@ impl AppState {
         })
     }
 
-    /// The connected burrows for the rail: `(id, label, is_focused, conn)`,
-    /// reactive over the session list, the focus, each session's name, and each
-    /// session's connection health. The label is the server's display name once
-    /// known, else a short form of its id.
-    pub fn burrow_tiles(&self) -> Vec<(ServerId, String, bool, crate::conn::ConnState)> {
+    /// The connected burrows for the rail: `(id, label, is_focused, conn,
+    /// unread)`, reactive over the session list, the focus, each session's
+    /// name, connection health, and scrollback growth. The label is the
+    /// server's display name once known, else a short form of its id; unread
+    /// is the lobby lines that landed since the user last had that burrow
+    /// focused (always 0 for the focused one).
+    pub fn burrow_tiles(&self) -> Vec<(ServerId, String, bool, crate::conn::ConnState, usize)> {
         let focused = self.focused_id.get();
         self.sessions.with(|list| {
             list.iter()
@@ -222,7 +230,15 @@ impl AppState {
                         .filter(|n| !n.is_empty())
                         .unwrap_or_else(|| server_label(id));
                     let conn = session.state.with(|s| s.conn);
-                    (id.clone(), name, *id == focused, conn)
+                    let unread = if *id == focused {
+                        0
+                    } else {
+                        session
+                            .state
+                            .with(|s| s.messages.len())
+                            .saturating_sub(session.seen.get())
+                    };
+                    (id.clone(), name, *id == focused, conn, unread)
                 })
                 .collect()
         })
@@ -270,8 +286,26 @@ impl AppState {
     }
 
     /// Focus a connected burrow (switch which place is in the main pane).
+    ///
+    /// Both ends of the switch mark their scrollback read: leaving a place
+    /// means you saw everything in it, and arriving shows you everything —
+    /// so unread badges only ever count lines that landed while you were
+    /// somewhere else.
     pub fn focus(&self, id: &ServerId) {
+        self.mark_read(&self.focused_id.get_untracked());
         self.focused_id.set(id.clone());
+        self.mark_read(id);
+    }
+
+    /// Record that the user is caught up on a session's scrollback (its
+    /// current message count becomes the "seen" watermark).
+    fn mark_read(&self, id: &ServerId) {
+        self.sessions.with_untracked(|list| {
+            if let Some((_, session)) = list.iter().find(|(sid, _)| sid == id) {
+                let len = session.state.with_untracked(|s| s.messages.len());
+                session.seen.set(len);
+            }
+        });
     }
 
     /// Set the user's presence status and **fan it to every connected burrow** —
@@ -307,6 +341,7 @@ impl AppState {
                 live: create_rw_signal(false),
                 server_theme: create_rw_signal(None),
                 name: create_rw_signal(None),
+                seen: create_rw_signal(0),
                 ws: store_value(crate::ws::WsClient::new()),
                 client: store_value(MockClient::new()),
             };
@@ -1461,8 +1496,10 @@ fn BurrowRail() -> impl IntoView {
             <div class="rh-rail-sep"></div>
             <For
                 each=move || app.burrow_tiles()
-                key=|(id, name, focused, conn)| (id.0.clone(), name.clone(), *focused, *conn)
-                children=move |(id, name, focused, conn)| {
+                key=|(id, name, focused, conn, unread)| {
+                    (id.0.clone(), name.clone(), *focused, *conn, *unread)
+                }
+                children=move |(id, name, focused, conn, unread)| {
                     let glyph = name.chars().next().unwrap_or('?').to_uppercase().to_string();
                     let cls = if focused {
                         "rh-rail-tile rh-rail-server active"
@@ -1478,7 +1515,13 @@ fn BurrowRail() -> impl IntoView {
                     } else {
                         "rh-rail-dot off"
                     };
-                    let status = format!("{name} — {}", conn.label());
+                    // Lines that landed while the user was in another burrow.
+                    let badge = crate::state::unread_badge(unread);
+                    let status = if unread > 0 {
+                        format!("{name} — {} — {unread} unread", conn.label())
+                    } else {
+                        format!("{name} — {}", conn.label())
+                    };
                     let nav = navigate.clone();
                     let click_id = id.clone();
                     view! {
@@ -1494,6 +1537,9 @@ fn BurrowRail() -> impl IntoView {
                         >
                             {glyph}
                             <span class=dot aria-hidden="true"></span>
+                            {badge.map(|b| view! {
+                                <span class="rh-rail-badge" aria-hidden="true">{b}</span>
+                            })}
                         </button>
                     }
                 }

@@ -32,6 +32,17 @@ pub fn continues_group(prev_from: &str, prev_ms: i64, cur_from: &str, cur_ms: i6
     prev_from == cur_from && cur_ms >= prev_ms && cur_ms - prev_ms <= GROUP_WINDOW_MS
 }
 
+/// The rail-tile unread badge for a count: `None` when there is nothing
+/// unread, the count up to 9, then a capped "9+" so the badge stays tiny on
+/// a 40px tile. Pure — host-tested.
+pub fn unread_badge(unread: usize) -> Option<String> {
+    match unread {
+        0 => None,
+        1..=9 => Some(unread.to_string()),
+        _ => Some("9+".to_string()),
+    }
+}
+
 /// A board in the board tree.
 ///
 /// Boards, threads and posts have **no** [`Event`]/[`Command`] variants in
@@ -551,6 +562,15 @@ mod tests {
         assert_eq!(s.messages[0].from, "alice");
         assert_eq!(s.messages[1].text, "yo");
         assert_eq!(s.messages[0].at_unix_ms, 1_000);
+    }
+
+    #[test]
+    fn unread_badge_caps_at_nine_plus() {
+        assert_eq!(unread_badge(0), None);
+        assert_eq!(unread_badge(1), Some("1".into()));
+        assert_eq!(unread_badge(9), Some("9".into()));
+        assert_eq!(unread_badge(10), Some("9+".into()));
+        assert_eq!(unread_badge(250), Some("9+".into()));
     }
 
     #[test]

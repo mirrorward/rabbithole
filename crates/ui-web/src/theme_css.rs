@@ -252,6 +252,7 @@ pub const STYLESHEET: &str = "\
 .rh-rail-hidden{display:none}\
 .rh-rail-dot{position:absolute;right:1px;bottom:1px;width:9px;height:9px;border-radius:50%;box-shadow:0 0 0 2px color-mix(in srgb,var(--rh-accent) 6%,var(--rh-surface))}\
 .rh-rail-dot.on{background:#3fbf7f}\
+.rh-rail-badge{position:absolute;top:-5px;right:-5px;min-width:17px;height:17px;padding:0 4px;border-radius:var(--rh-radius-full);background:var(--rh-error);color:#fff;font-size:.62rem;font-weight:800;line-height:17px;text-align:center;box-shadow:0 0 0 2px color-mix(in srgb,var(--rh-accent) 6%,var(--rh-surface));animation:rh-pop .18s cubic-bezier(.2,.9,.3,1.2) both}\
 .rh-rail-dot.pending{background:var(--rh-accent)}\
 .rh-rail-dot.off{background:var(--rh-muted)}\
 .rh-presence{font:inherit;font-size:var(--rh-font-sm);color:var(--rh-text);background:var(--rh-surface);border:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);border-radius:var(--rh-radius);padding:.3rem .5rem;cursor:pointer}\
