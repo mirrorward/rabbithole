@@ -143,7 +143,11 @@ pub fn People() -> impl IntoView {
                 <Show
                     when=move || !app.people().is_empty()
                     fallback=|| view! {
-                        <p class="rh-empty">"No one's around yet. Connect to a burrow to see who's here."</p>
+                        <EmptyState
+                            mark="\u{263a}"
+                            title="No one's around yet"
+                            sub="Your people across every connected burrow gather here."
+                        />
                     }
                 >
                     <ul class="rh-people">
@@ -209,7 +213,11 @@ pub fn Transfers() -> impl IntoView {
                 <Show
                     when=move || !app.all_transfers().is_empty()
                     fallback=|| view! {
-                        <p class="rh-empty">"No transfers yet. Download a file from any burrow's Files."</p>
+                        <EmptyState
+                            mark="\u{2193}"
+                            title="No transfers yet"
+                            sub="Downloads and uploads from every burrow land here."
+                        />
                     }
                 >
                     <ul class="rh-xfers">
@@ -854,6 +862,28 @@ pub fn WhoList() -> impl IntoView {
     }
 }
 
+/// A friendly centered empty state for a panel with nothing to show yet: a
+/// quiet decorative mark, a headline, and a warmer line of guidance. Reuses
+/// the lobby's `.rh-chat-empty` styling so every view's "nothing here" moment
+/// reads the same.
+#[component]
+fn EmptyState(
+    /// Decorative glyph shown above the headline.
+    mark: &'static str,
+    /// One-line headline.
+    #[prop(into)] title: String,
+    /// A sentence of guidance under the headline.
+    #[prop(into)] sub: String,
+) -> impl IntoView {
+    view! {
+        <div class="rh-chat-empty">
+            <div class="rh-chat-empty-mark" aria-hidden="true">{mark}</div>
+            <p class="rh-chat-empty-title">{title}</p>
+            <p class="rh-chat-empty-sub">{sub}</p>
+        </div>
+    }
+}
+
 /// The main view: header, chat scrollback, compose box, and who-list.
 #[component]
 pub fn Lobby() -> impl IntoView {
@@ -896,11 +926,11 @@ pub fn Lobby() -> impl IntoView {
                         when=move || state.with(|s| s.messages.is_empty())
                         fallback=|| ()
                     >
-                        <div class="rh-chat-empty">
-                            <div class="rh-chat-empty-mark" aria-hidden="true">"\u{273f}"</div>
-                            <p class="rh-chat-empty-title">"Quiet in here"</p>
-                            <p class="rh-chat-empty-sub">"Say hello \u{2014} the lobby's yours to open."</p>
-                        </div>
+                        <EmptyState
+                            mark="\u{273f}"
+                            title="Quiet in here"
+                            sub="Say hello \u{2014} the lobby's yours to open."
+                        />
                     </Show>
                     <ul class="rh-lines">
                         <For
@@ -990,6 +1020,13 @@ pub fn Boards() -> impl IntoView {
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <section class="rh-panel">
                 <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">"Boards"</h1>
+                <Show when=move || state.with(|s| s.boards.is_empty()) fallback=|| ()>
+                    <EmptyState
+                        mark="\u{270e}"
+                        title="No boards yet"
+                        sub="This burrow hasn't opened any boards to post on."
+                    />
+                </Show>
                 <ul class="rh-tree">
                     <For
                         each=move || state.with(|s| s.boards.clone())
@@ -1063,6 +1100,9 @@ pub fn BoardView() -> impl IntoView {
             <section class="rh-panel rh-threads" aria-label="Threads">
                 <A href="/boards" class="rh-back">"\u{2190} All boards"</A>
                 <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">{board_name}</h1>
+                <Show when=move || state.with(|s| s.threads.is_empty()) fallback=|| ()>
+                    <p class="rh-empty">"No threads yet \u{2014} start the first one below."</p>
+                </Show>
                 <ul class="rh-tree">
                     <For
                         each=move || state.with(|s| s.threads.clone())
@@ -1211,6 +1251,9 @@ pub fn Dms() -> impl IntoView {
             </h1>
             <aside class="rh-who">
                 <h2>"Conversations"</h2>
+                <Show when=move || state.with(|s| s.dm_threads.is_empty()) fallback=|| ()>
+                    <p class="rh-empty">"No conversations yet \u{2014} message a handle below."</p>
+                </Show>
                 <form class="rh-dm-start" on:submit=start>
                     <input
                         class="rh-input"
@@ -1370,6 +1413,34 @@ pub fn Directory() -> impl IntoView {
                         state.update(|s| s.set_directory_query(q));
                     }
                 />
+                <Show
+                    when=move || state.with(|s| s.matching_members().is_empty())
+                    fallback=|| ()
+                >
+                    // An empty directory and an unmatched search read
+                    // differently: the first is about the burrow, the second
+                    // about the query.
+                    {move || state.with(|s| {
+                        if s.members.is_empty() {
+                            view! {
+                                <EmptyState
+                                    mark="\u{263a}"
+                                    title="Nobody here yet"
+                                    sub="Members appear here as they join this burrow."
+                                />
+                            }
+                            .into_view()
+                        } else {
+                            let q = s.directory_query.clone();
+                            view! {
+                                <p class="rh-empty">
+                                    {format!("No one matches \u{201c}{q}\u{201d}.")}
+                                </p>
+                            }
+                            .into_view()
+                        }
+                    })}
+                </Show>
                 <ul class="rh-tree">
                     <For
                         each=move || state.with(|s| s.matching_members())
@@ -1566,6 +1637,13 @@ fn AreaList() -> impl IntoView {
     let files = app.focused().files;
     view! {
         <h2 class="rh-panel-title">"File areas"</h2>
+        <Show when=move || files.with(|f| f.areas.is_empty()) fallback=|| ()>
+            <EmptyState
+                mark="\u{2750}"
+                title="No file areas yet"
+                sub="This burrow hasn't opened a file library."
+            />
+        </Show>
         <ul class="rh-tree">
             <For
                 each=move || files.with(|f| f.areas.clone())
@@ -1637,6 +1715,9 @@ fn FolderBrowser() -> impl IntoView {
             </button>
         </div>
         <h2 class="rh-visually-hidden">"Folder contents"</h2>
+        <Show when=move || files.with(|f| f.nodes.is_empty()) fallback=|| ()>
+            <p class="rh-empty">"This folder is empty."</p>
+        </Show>
         <ul class="rh-tree">
             <For
                 each=move || files.with(|f| f.nodes.clone())
