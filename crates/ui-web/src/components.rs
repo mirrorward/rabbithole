@@ -997,7 +997,7 @@ pub fn Lobby() -> impl IntoView {
                     <button
                         class="rh-btn"
                         type="submit"
-                        prop:disabled=move || !app.online()
+                        prop:disabled=move || !app.online() || draft.get().trim().is_empty()
                     >
                         "Send"
                     </button>
@@ -1154,7 +1154,7 @@ pub fn BoardView() -> impl IntoView {
                         prop:disabled=move || !app.online()
                         on:input=move |ev| new_body.set(event_target_value(&ev))
                     ></textarea>
-                    <button class="rh-btn" type="submit" prop:disabled=move || !app.online()>
+                    <button class="rh-btn" type="submit" prop:disabled=move || !app.online() || new_body.get().trim().is_empty()>
                         "Post thread"
                     </button>
                 </form>
@@ -1187,7 +1187,7 @@ pub fn BoardView() -> impl IntoView {
                             prop:disabled=move || !app.online()
                             on:input=move |ev| reply_body.set(event_target_value(&ev))
                         ></textarea>
-                        <button class="rh-btn" type="submit" prop:disabled=move || !app.online()>
+                        <button class="rh-btn" type="submit" prop:disabled=move || !app.online() || reply_body.get().trim().is_empty()>
                             "Reply"
                         </button>
                     </form>
@@ -1378,7 +1378,7 @@ pub fn Dms() -> impl IntoView {
                         <button
                             class="rh-btn"
                             type="submit"
-                            prop:disabled=move || !app.online()
+                            prop:disabled=move || !app.online() || draft.get().trim().is_empty()
                         >
                             "Send"
                         </button>
