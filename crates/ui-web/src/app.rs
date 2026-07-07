@@ -244,6 +244,13 @@ impl AppState {
         })
     }
 
+    /// Total unread lobby lines across every burrow you aren't currently viewing
+    /// — reactive. Drives the browser-tab title so a backgrounded warren still
+    /// tells you someone's talking.
+    pub fn total_unread(&self) -> usize {
+        self.burrow_tiles().iter().map(|(_, _, _, _, u)| u).sum()
+    }
+
     /// The aggregated cross-server People list: everyone present on any
     /// connected burrow, coalesced by screen name (reactive over every session's
     /// roster).
@@ -1361,6 +1368,23 @@ pub fn App() -> impl IntoView {
     // Load (or mint) the portable identity that names you across every burrow.
     #[cfg(target_arch = "wasm32")]
     app.you.set(Some(crate::identity::load_or_create().you()));
+
+    // Reflect cross-burrow unread in the browser tab title, so a backgrounded
+    // warren still signals activity: "(3) RabbitHole".
+    #[cfg(target_arch = "wasm32")]
+    create_effect(move |_| {
+        let n = app.total_unread();
+        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+            let title = if n == 0 {
+                "RabbitHole".to_string()
+            } else if n > 99 {
+                "(99+) RabbitHole".to_string()
+            } else {
+                format!("({n}) RabbitHole")
+            };
+            doc.set_title(&title);
+        }
+    });
 
     // Persist connections across loads: auto-reconnect to every burrow that left
     // a resume token, and land in the lobby instead of the login screen. Runs
