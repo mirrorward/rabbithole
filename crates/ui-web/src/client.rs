@@ -288,6 +288,7 @@ impl MockClient {
                         at_unix_ms: now - 8 * 60_000,
                     },
                 ],
+                unread: 0,
             },
             DmThread {
                 id: "bob".to_string(),
@@ -297,6 +298,7 @@ impl MockClient {
                     text: "ping me when you're around".to_string(),
                     at_unix_ms: now - 25 * 60_000,
                 }],
+                unread: 0,
             },
         ]
     }

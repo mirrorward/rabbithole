@@ -110,11 +110,25 @@ pub fn ThemeToggle() -> impl IntoView {
 pub fn Nav() -> impl IntoView {
     let app = expect_context::<AppState>();
     let is_admin = app.focused().is_admin;
+    let state = app.focused().state;
+    // Unread DMs across this burrow's conversations (reactive).
+    let dm_unread = move || state.with(|s| s.dm_unread_total());
     view! {
         <nav class="rh-nav" aria-label="Primary">
             <A href="/lobby">"Lobby"</A>
             <A href="/boards">"Boards"</A>
-            <A href="/dms">"DMs"</A>
+            <A href="/dms">
+                "DMs"
+                {move || crate::state::unread_badge(dm_unread()).map(|b| view! {
+                    <span class="rh-nav-badge" aria-hidden="true">{b}</span>
+                })}
+                <span class="rh-visually-hidden">
+                    {move || {
+                        let n = dm_unread();
+                        (n > 0).then(|| format!(", {n} unread"))
+                    }}
+                </span>
+            </A>
             <A href="/directory">"Directory"</A>
             <A href="/files">"Files"</A>
             <A href="/radio">"Radio"</A>
@@ -1206,6 +1220,18 @@ pub fn Dms() -> impl IntoView {
     let draft = create_rw_signal(String::new());
     app.load_dms();
 
+    // While this view is on screen, the selected conversation reads live (no
+    // unread counting); navigating away flips it back so later arrivals badge
+    // even for the still-selected conversation. Re-selecting the restored
+    // conversation on mount marks anything that queued up meanwhile as read.
+    state.update(|s| {
+        s.dms_open = true;
+        if let Some(id) = s.selected_dm.clone() {
+            s.select_dm(&id);
+        }
+    });
+    on_cleanup(move || state.update(|s| s.dms_open = false));
+
     // Follow the newest message unless the reader has scrolled up to history.
     let log = crate::scroll::ChatScroll::install(move || {
         state.with(|s| s.active_dm().map(|t| t.messages.len()).unwrap_or(0))
@@ -1266,7 +1292,9 @@ pub fn Dms() -> impl IntoView {
                 <ul>
                     <For
                         each=move || state.with(|s| s.dm_threads.clone())
-                        key=|t| t.id.clone()
+                        // Keyed on the unread count too, so the pill
+                        // re-renders as messages land or are read.
+                        key=|t| (t.id.clone(), t.unread)
                         children=move |t| {
                             let id = t.id.clone();
                             let selected = {
@@ -1281,6 +1309,11 @@ pub fn Dms() -> impl IntoView {
                                     "rh-dm-peer"
                                 }
                             };
+                            let badge = crate::state::unread_badge(t.unread).map(|b| view! {
+                                <span class="rh-dm-unread" aria-hidden="true">{b}</span>
+                            });
+                            let sr_unread = (t.unread > 0)
+                                .then(|| format!(", {} unread", t.unread));
                             view! {
                                 <li>
                                     <button
@@ -1289,6 +1322,8 @@ pub fn Dms() -> impl IntoView {
                                         on:click=move |_| app.select_dm(&id)
                                     >
                                         {t.peer}
+                                        {badge}
+                                        <span class="rh-visually-hidden">{sr_unread}</span>
                                     </button>
                                 </li>
                             }

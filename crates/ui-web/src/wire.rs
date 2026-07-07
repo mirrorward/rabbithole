@@ -363,6 +363,7 @@ pub fn frame_to_dm_threads(frame: &Frame) -> Option<Vec<crate::state::DmThread>>
                 id: t.with.clone(),
                 peer: t.with,
                 messages: Vec::new(),
+                unread: 0,
             })
             .collect(),
     )

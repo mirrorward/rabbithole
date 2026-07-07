@@ -253,6 +253,8 @@ pub const STYLESHEET: &str = "\
 .rh-rail-dot{position:absolute;right:1px;bottom:1px;width:9px;height:9px;border-radius:50%;box-shadow:0 0 0 2px color-mix(in srgb,var(--rh-accent) 6%,var(--rh-surface))}\
 .rh-rail-dot.on{background:#3fbf7f}\
 .rh-rail-badge{position:absolute;top:-5px;right:-5px;min-width:17px;height:17px;padding:0 4px;border-radius:var(--rh-radius-full);background:var(--rh-error);color:#fff;font-size:.62rem;font-weight:800;line-height:17px;text-align:center;box-shadow:0 0 0 2px color-mix(in srgb,var(--rh-accent) 6%,var(--rh-surface));animation:rh-pop .18s cubic-bezier(.2,.9,.3,1.2) both}\
+.rh-nav-badge{display:inline-block;margin-left:.35rem;min-width:16px;padding:0 4px;border-radius:var(--rh-radius-full);background:var(--rh-error);color:#fff;font-size:.6rem;font-weight:800;line-height:16px;text-align:center;vertical-align:1px;animation:rh-pop .18s cubic-bezier(.2,.9,.3,1.2) both}\
+.rh-dm-unread{margin-left:auto;min-width:17px;height:17px;padding:0 4px;border-radius:var(--rh-radius-full);background:var(--rh-error);color:#fff;font-size:.62rem;font-weight:800;line-height:17px;text-align:center;animation:rh-pop .18s cubic-bezier(.2,.9,.3,1.2) both}\
 .rh-rail-dot.pending{background:var(--rh-accent)}\
 .rh-rail-dot.off{background:var(--rh-muted)}\
 .rh-presence{font:inherit;font-size:var(--rh-font-sm);color:var(--rh-text);background:var(--rh-surface);border:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);border-radius:var(--rh-radius);padding:.3rem .5rem;cursor:pointer}\
@@ -334,7 +336,7 @@ pub const STYLESHEET: &str = "\
 .rh-live-slot{order:6}\
 .rh-theme-menu{order:8;display:inline-flex;gap:.35rem;align-items:center}\
 .rh-nav{order:7;display:flex;gap:.15rem;align-items:center}\
-.rh-nav a,.rh-nav .rh-nav-item{color:var(--rh-muted);text-decoration:none;font-size:var(--rh-font-sm);font-weight:500;padding:.35rem .7rem;border-radius:var(--rh-radius-full);transition:background-color .15s ease,color .15s ease;border-bottom:0}\
+.rh-nav a,.rh-nav .rh-nav-item{color:var(--rh-muted);text-decoration:none;font-size:var(--rh-font-sm);font-weight:500;padding:.35rem .7rem;border-radius:var(--rh-radius-full);transition:background-color .15s ease,color .15s ease;border-bottom:0;white-space:nowrap}\
 .rh-nav a:hover,.rh-nav .rh-nav-item:hover{color:var(--rh-text);background:color-mix(in srgb,var(--rh-text) 7%,transparent)}\
 .rh-nav a.active,.rh-nav a[aria-current=page],.rh-nav .rh-nav-item.active{color:var(--rh-accent);background:color-mix(in srgb,var(--rh-accent) 14%,transparent)}\
 .rh-btn{font:inherit;font-weight:600;cursor:pointer;border:1px solid transparent;background:var(--rh-accent);color:var(--rh-bg);border-radius:var(--rh-radius);padding:.5rem .9rem;line-height:1.2;display:inline-flex;align-items:center;gap:.4rem;transition:transform .12s ease,box-shadow .15s ease,background-color .15s ease;box-shadow:var(--rh-shadow-1)}\
@@ -427,7 +429,7 @@ pub const STYLESHEET: &str = "\
 .rh-who ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.1rem}\
 .rh-who li{display:flex;align-items:center;gap:.55rem;padding:.4rem .5rem;border-radius:var(--rh-radius);font-size:var(--rh-font-sm);transition:background-color .12s ease}\
 .rh-who li:hover{background:color-mix(in srgb,var(--rh-text) 6%,transparent)}\
-.rh-who li::before{content:'';flex:none;width:1.6rem;height:1.6rem;border-radius:var(--rh-radius-full);background:linear-gradient(135deg,color-mix(in srgb,var(--rh-accent) 75%,var(--rh-surface)),color-mix(in srgb,var(--rh-accent) 30%,var(--rh-surface)));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--rh-text) 10%,transparent)}\
+.rh-who li.rh-who-row::before{content:'';flex:none;width:1.6rem;height:1.6rem;border-radius:var(--rh-radius-full);background:linear-gradient(135deg,color-mix(in srgb,var(--rh-accent) 75%,var(--rh-surface)),color-mix(in srgb,var(--rh-accent) 30%,var(--rh-surface)));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--rh-text) 10%,transparent)}\
 .rh-panel{flex:1;padding:var(--rh-space-5);overflow-y:auto;min-width:0}\
 .rh-panel-title{font-size:var(--rh-font-xs);text-transform:uppercase;letter-spacing:.06em;font-weight:700;color:var(--rh-muted);margin:.2rem 0 var(--rh-space-4)}\
 .rh-tree{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--rh-space-2)}\

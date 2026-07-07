@@ -114,6 +114,9 @@ pub struct DmThread {
     pub peer: String,
     /// Messages, oldest first.
     pub messages: Vec<DmMessage>,
+    /// Messages received while this conversation wasn't the open one —
+    /// cleared when the user selects it ([`UiState::select_dm`]).
+    pub unread: usize,
 }
 
 /// A member's full profile card (from a live `ProfileGet`), richer than the
@@ -286,8 +289,14 @@ pub struct UiState {
     pub selected_thread: Option<String>,
     /// Direct-message conversations.
     pub dm_threads: Vec<DmThread>,
-    /// Id of the selected DM conversation, if any.
+    /// Id of the selected DM conversation, if any. Persists across views so
+    /// returning to DMs restores the last conversation.
     pub selected_dm: Option<String>,
+    /// Whether the DMs view is currently on screen (set by the view on
+    /// mount/unmount). A selected conversation only counts as *read live*
+    /// while the user is actually looking at it — selection alone persists
+    /// after navigating away and must not swallow unread counts.
+    pub dms_open: bool,
     /// Member directory.
     pub members: Vec<Member>,
     /// Current directory search query.
@@ -393,19 +402,32 @@ impl UiState {
     }
 
     /// Replace the DM conversation list (from a client snapshot).
-    pub fn set_dm_threads(&mut self, threads: Vec<DmThread>) {
+    ///
+    /// Unread counts are **local** state the wire snapshot knows nothing
+    /// about, so each incoming row inherits the count of the row it
+    /// replaces — otherwise merely opening the DMs view (which refreshes
+    /// the list) would silently mark everything read.
+    pub fn set_dm_threads(&mut self, mut threads: Vec<DmThread>) {
+        for t in &mut threads {
+            if let Some(old) = self.dm_threads.iter().find(|o| o.id == t.id) {
+                t.unread = old.unread;
+            }
+        }
         self.dm_threads = threads;
     }
 
     /// Select a DM conversation by id, creating an empty one if the peer isn't
-    /// in the list yet (so a fresh conversation can be started).
+    /// in the list yet (so a fresh conversation can be started). Opening a
+    /// conversation reads it: its unread count clears.
     pub fn select_dm(&mut self, id: &str) {
-        if !self.dm_threads.iter().any(|t| t.id == id) {
-            self.dm_threads.push(DmThread {
+        match self.dm_threads.iter_mut().find(|t| t.id == id) {
+            Some(t) => t.unread = 0,
+            None => self.dm_threads.push(DmThread {
                 id: id.to_string(),
                 peer: id.to_string(),
                 messages: Vec::new(),
-            });
+                unread: 0,
+            }),
         }
         self.selected_dm = Some(id.to_string());
     }
@@ -427,16 +449,29 @@ impl UiState {
     }
 
     /// Fold a live-received DM from `peer`: append to the existing conversation,
-    /// or start one (so a first-contact message surfaces immediately).
+    /// or start one (so a first-contact message surfaces immediately). Unless
+    /// that conversation is open **on screen** right now, it counts as unread.
     pub fn receive_dm(&mut self, peer: &str, msg: DmMessage) {
+        let open = self.dms_open && self.selected_dm.as_deref() == Some(peer);
         match self.dm_threads.iter_mut().find(|t| t.peer == peer) {
-            Some(t) => t.messages.push(msg),
+            Some(t) => {
+                t.messages.push(msg);
+                if !open {
+                    t.unread += 1;
+                }
+            }
             None => self.dm_threads.push(DmThread {
                 id: peer.to_string(),
                 peer: peer.to_string(),
                 messages: vec![msg],
+                unread: usize::from(!open),
             }),
         }
+    }
+
+    /// Unread DMs across every conversation — the DMs nav-link badge.
+    pub fn dm_unread_total(&self) -> usize {
+        self.dm_threads.iter().map(|t| t.unread).sum()
     }
 
     /// The currently selected DM conversation, if any.
@@ -850,11 +885,13 @@ mod tests {
                 id: "a".into(),
                 peer: "alice".into(),
                 messages: vec![],
+                unread: 0,
             },
             DmThread {
                 id: "b".into(),
                 peer: "bob".into(),
                 messages: vec![],
+                unread: 0,
             },
         ]);
         s.select_dm("b");
@@ -879,6 +916,7 @@ mod tests {
             id: "a".into(),
             peer: "alice".into(),
             messages: vec![],
+            unread: 0,
         }]);
         s.append_dm(
             "missing",
@@ -889,6 +927,110 @@ mod tests {
             },
         );
         assert_eq!(s.dm_threads[0].messages.len(), 0);
+    }
+
+    #[test]
+    fn received_dm_counts_unread_unless_the_conversation_is_open() {
+        let mut s = UiState::default();
+        let msg = |text: &str| DmMessage {
+            from: "alice".into(),
+            text: text.into(),
+            at_unix_ms: 0,
+        };
+        // First contact from an unopened peer: the new thread is unread.
+        s.receive_dm("alice", msg("hey"));
+        assert_eq!(s.dm_threads[0].unread, 1);
+        s.receive_dm("alice", msg("you there?"));
+        assert_eq!(s.dm_threads[0].unread, 2);
+        assert_eq!(s.dm_unread_total(), 2);
+        // Opening the conversation (DMs view on screen) reads it.
+        s.dms_open = true;
+        s.select_dm("alice");
+        assert_eq!(s.dm_threads[0].unread, 0);
+        assert_eq!(s.dm_unread_total(), 0);
+        // While it stays on screen, replies land already-read.
+        s.receive_dm("alice", msg("ah there you are"));
+        assert_eq!(s.dm_threads[0].unread, 0);
+    }
+
+    #[test]
+    fn selection_alone_does_not_swallow_unread_after_leaving_the_view() {
+        let mut s = UiState::default();
+        s.dms_open = true;
+        s.select_dm("alice");
+        // The user navigates away; the selection persists.
+        s.dms_open = false;
+        s.receive_dm(
+            "alice",
+            DmMessage {
+                from: "alice".into(),
+                text: "psst".into(),
+                at_unix_ms: 0,
+            },
+        );
+        assert_eq!(
+            s.dm_unread_total(),
+            1,
+            "a message to the still-selected conversation counts while the view is closed"
+        );
+    }
+
+    #[test]
+    fn snapshot_refresh_preserves_local_unread() {
+        let mut s = UiState::default();
+        s.receive_dm(
+            "alice",
+            DmMessage {
+                from: "alice".into(),
+                text: "hey".into(),
+                at_unix_ms: 0,
+            },
+        );
+        assert_eq!(s.dm_unread_total(), 1);
+        // A live list refresh (e.g. opening the DMs view) must not read it.
+        s.set_dm_threads(vec![
+            DmThread {
+                id: "alice".into(),
+                peer: "alice".into(),
+                messages: vec![],
+                unread: 0,
+            },
+            DmThread {
+                id: "carol".into(),
+                peer: "carol".into(),
+                messages: vec![],
+                unread: 0,
+            },
+        ]);
+        assert_eq!(s.dm_threads[0].unread, 1, "alice's unread survives");
+        assert_eq!(s.dm_threads[1].unread, 0, "new rows start read");
+        assert_eq!(s.dm_unread_total(), 1);
+    }
+
+    #[test]
+    fn own_sends_never_count_as_unread() {
+        let mut s = UiState::default();
+        s.select_dm("bob");
+        s.append_dm(
+            "bob",
+            DmMessage {
+                from: "me".into(),
+                text: "ping".into(),
+                at_unix_ms: 0,
+            },
+        );
+        assert_eq!(s.dm_threads[0].unread, 0);
+        // Even to a conversation that isn't open.
+        s.select_dm("carol");
+        s.append_dm(
+            "bob",
+            DmMessage {
+                from: "me".into(),
+                text: "ping again".into(),
+                at_unix_ms: 0,
+            },
+        );
+        assert_eq!(s.dm_unread_total(), 0);
     }
 
     #[test]
