@@ -1,0 +1,1331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transit — a tiny transport network</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="white" stroke="%2323221E" stroke-width="1.6"/><rect x="6.6" y="6.6" width="2.8" height="2.8" fill="%23D8433B"/></svg>'>
+<style>
+  :root {
+    --paper:  #F7F6F2;
+    --ink:    #23221E;
+    --grey-1: #CFCEC7;  /* light lines   */
+    --grey-2: #96958D;  /* mid lines     */
+    --grey-3: #8F8E86;  /* labels        */
+    --water:  #E0E9EB;
+    --coast:  #C8D7D9;
+    --red:    #D8433B;  /* cargo         */
+    --blue:   #3E63C4;  /* people        */
+    --gold:   #B98A2F;  /* currency      */
+    --pill:   rgba(255,255,255,.84);
+    --edge:   rgba(35,34,30,.10);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  canvas { display: block; touch-action: none; }
+
+  .pill {
+    position: fixed;
+    background: var(--pill);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--edge);
+    border-radius: 14px;
+    box-shadow: 0 6px 24px rgba(35,34,30,.07);
+  }
+
+  /* ---- top left: money + stats ---- */
+  #panel-money { top: 18px; left: 18px; padding: 12px 18px 11px; }
+  #money {
+    font-size: 23px; font-weight: 650; letter-spacing: .01em;
+    font-variant-numeric: tabular-nums; color: var(--ink);
+  }
+  #money .unit { color: var(--gold); }
+  #substats {
+    margin-top: 3px; font-size: 9.5px; letter-spacing: .13em;
+    color: var(--grey-3); text-transform: uppercase; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  #substats b { color: var(--ink); font-weight: 600; }
+
+  /* ---- top right ---- */
+  #panel-top-right { top: 18px; right: 18px; display: flex; }
+  #panel-top-right button {
+    all: unset; cursor: pointer; padding: 10px 16px;
+    font-size: 10px; letter-spacing: .14em; color: var(--grey-3);
+  }
+  #panel-top-right button:hover { color: var(--ink); }
+
+  /* ---- toolbar ---- */
+  #toolbar {
+    bottom: 18px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: stretch; padding: 6px;
+  }
+  .tool {
+    all: unset; cursor: pointer; text-align: center;
+    padding: 8px 13px 7px; border-radius: 10px;
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    color: var(--ink); position: relative;
+  }
+  .tool:hover { background: rgba(35,34,30,.05); }
+  .tool.active { background: var(--ink); color: var(--paper); }
+  .tool svg { display: block; }
+  .tool .nm { font-size: 9px; letter-spacing: .16em; font-weight: 600; }
+  .tool .pr { font-size: 8.5px; letter-spacing: .06em; color: var(--grey-3); font-variant-numeric: tabular-nums; }
+  .tool.active .pr { color: rgba(247,246,242,.65); }
+  .tool .kb {
+    position: absolute; top: 3px; right: 5px;
+    font-size: 7.5px; color: var(--grey-1); font-weight: 600;
+  }
+  .tool.active .kb { color: rgba(247,246,242,.4); }
+  #toolbar .sep { width: 1px; background: var(--edge); margin: 6px 7px; }
+  .spd {
+    all: unset; cursor: pointer; width: 34px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center; color: var(--grey-3);
+  }
+  .spd:hover { background: rgba(35,34,30,.05); color: var(--ink); }
+  .spd.active { color: var(--ink); background: rgba(35,34,30,.07); }
+
+  /* ---- hint / toast ---- */
+  #hint {
+    bottom: 92px; left: 50%; transform: translateX(-50%);
+    padding: 8px 16px; font-size: 10px; letter-spacing: .16em;
+    color: var(--grey-3); text-transform: uppercase; white-space: nowrap;
+    transition: opacity .6s; pointer-events: none;
+  }
+  #toast {
+    top: 24px; left: 50%; transform: translateX(-50%);
+    padding: 9px 18px; font-size: 10.5px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--ink); white-space: nowrap;
+    opacity: 0; transition: opacity .45s; pointer-events: none;
+  }
+  #toast b { color: var(--gold); font-weight: 650; }
+
+  /* ---- node tooltip ---- */
+  #tip {
+    padding: 8px 12px; pointer-events: none; opacity: 0; transition: opacity .15s;
+    white-space: nowrap;
+  }
+  #tip .t { font-size: 11px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase; }
+  #tip .s { margin-top: 2px; font-size: 9.5px; letter-spacing: .08em; color: var(--grey-3); font-variant-numeric: tabular-nums; }
+  #tip .p { color: var(--blue); } #tip .c { color: var(--red); }
+
+  /* ---- drag chip ---- */
+  #chip {
+    padding: 6px 11px; pointer-events: none; opacity: 0;
+    font-size: 10.5px; letter-spacing: .05em; font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+  #chip.bad { color: var(--red); font-weight: 500; letter-spacing: .1em; font-size: 9.5px; text-transform: uppercase; }
+
+  /* ---- link popup ---- */
+  #linkpop { padding: 12px 14px 11px; min-width: 172px; }
+  #linkpop .t { font-size: 10px; font-weight: 650; letter-spacing: .14em; text-transform: uppercase; }
+  #linkpop .s { margin: 3px 0 9px; font-size: 9.5px; letter-spacing: .06em; color: var(--grey-3); font-variant-numeric: tabular-nums; }
+  #linkpop button {
+    all: unset; cursor: pointer; display: block; width: 100%;
+    padding: 6px 9px; margin-top: 2px; border-radius: 8px;
+    font-size: 10.5px; letter-spacing: .06em; font-variant-numeric: tabular-nums;
+  }
+  #linkpop button:hover { background: rgba(35,34,30,.05); }
+  #linkpop button .cost { float: right; color: var(--grey-3); }
+  #linkpop button[disabled] { opacity: .35; cursor: default; }
+  #linkpop button.rm { color: var(--grey-3); margin-top: 7px; }
+  #linkpop button.rm:hover { color: var(--red); }
+
+  #wordmark {
+    position: fixed; bottom: 22px; right: 22px; pointer-events: none;
+    font-size: 9px; letter-spacing: .42em; color: var(--grey-1); font-weight: 600;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="pill" id="panel-money">
+  <div id="money"><span class="unit">$</span><span id="money-n">0</span></div>
+  <div id="substats">day <b id="st-day">1</b> · <b id="st-del">0</b> delivered · <b id="st-lost">0</b> lost</div>
+</div>
+
+<div class="pill" id="panel-top-right"><button id="btn-newmap">NEW MAP</button></div>
+
+<div class="pill" id="toolbar"></div>
+<div class="pill" id="hint">drag between two towns to build a road</div>
+<div class="pill" id="toast"></div>
+<div class="pill" id="tip"></div>
+<div class="pill" id="chip"></div>
+<div class="pill" id="linkpop" style="display:none"></div>
+<div id="wordmark">TRANSIT</div>
+
+<script>
+'use strict';
+/* ============================================================
+   TRANSIT — a tiny transport network
+   One file. No dependencies. People are blue, freight is red,
+   money is gold, everything else stays out of the way.
+   ============================================================ */
+
+// ---------------- constants ----------------
+const W = 1600, H = 900;                 // logical world size
+const INK = '#23221E', PAPER = '#F7F6F2';
+const GREY1 = '#CFCEC7', GREY2 = '#96958D', GREY3 = '#8F8E86';
+const WATER = '#E0E9EB', COAST = '#C8D7D9';
+const RED = '#D8433B', BLUE = '#3E63C4', GOLD = '#B98A2F';
+
+const MODES = {
+  road:   { label: 'Road',   base: 30,  perPx: 0.45 },
+  rail:   { label: 'Rail',   base: 70,  perPx: 1.10 },
+  subway: { label: 'Subway', base: 90,  perPx: 1.90, maxLen: 270 },
+  air:    { label: 'Air',    base: 420, perPx: 0.15, minLen: 420 },
+  ship:   { label: 'Ship',   base: 110, perPx: 0.25 },
+};
+const MODE_ORDER = ['road', 'rail', 'subway', 'air', 'ship'];
+
+const VEH = {
+  taxi:  { mode: 'road',   label: 'Taxi',  cost: 70,  speed: 78,  capP: 4,  capC: 0  },
+  truck: { mode: 'road',   label: 'Truck', cost: 110, speed: 62,  capP: 0,  capC: 4  },
+  train: { mode: 'rail',   label: 'Train', cost: 300, speed: 115, capP: 12, capC: 8  },
+  metro: { mode: 'subway', label: 'Metro', cost: 170, speed: 95,  capP: 10, capC: 0  },
+  plane: { mode: 'air',    label: 'Plane', cost: 540, speed: 265, capP: 10, capC: 2  },
+  ship:  { mode: 'ship',   label: 'Ship',  cost: 250, speed: 46,  capP: 6,  capC: 12 },
+};
+const DEFAULT_VEH = { road: 'taxi', rail: 'train', subway: 'metro', air: 'plane', ship: 'ship' };
+const MODE_VEHS   = { road: ['taxi', 'truck'], rail: ['train'], subway: ['metro'], air: ['plane'], ship: ['ship'] };
+
+const START_MONEY   = 650;
+const DAY_LEN       = 45;                 // seconds of sim time per day
+const PATIENCE      = { p: 70, c: 130 };  // seconds an agent waits before giving up
+const QUEUE_CAP     = { p: 14, c: 10 };   // max waiting per node (spawning stops)
+const SPAWN_RATE    = { p: 0.020, c: 0.009 }; // per pop per second
+const TRANSFER_PEN  = 7;                  // routing cost of each hop, seconds
+const DWELL         = 0.9;                // stop time at stations
+const SAVE_KEY      = 'transit.save.v1';
+const MILESTONES    = [
+  [1,    'first delivery'],
+  [25,   '25 delivered — it moves'],
+  [100,  '100 delivered — a real network'],
+  [250,  '250 delivered'],
+  [500,  '500 delivered'],
+  [1000, '1,000 delivered — beautiful'],
+];
+
+const farePerson = d => 5 + 0.020 * d;
+const fareCargo  = d => 9 + 0.034 * d;
+const linkCost   = (mode, len) => Math.round(MODES[mode].base + MODES[mode].perPx * len);
+
+// ---------------- tiny utils ----------------
+const TAU = Math.PI * 2;
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const fmt = n => Math.floor(n).toLocaleString('en-US');
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ---------------- world state ----------------
+let seed, rng;
+let waterBlobs = [];   // {x, y, r}
+let nodes = [];        // {id, x, y, r, name, pop, people:[], cargo:[], pulse, coastal}
+let links = [];        // see makeLink
+let money = START_MONEY;
+let simTime = 0;
+let stats = { delivered: 0, lost: 0, income: 0, spent: 0 };
+let milestonesShown = [];
+let hintStage = 0;     // 0 = build hint, 1 = manage hint, 2 = done
+let netV = 0;          // network version — bump on any change
+let speedMult = 1, prevSpeed = 1;
+let floaters = [];     // {x, y, text, age, color}
+let fades = [];        // expiring agents {x, y, kind, age}
+let agentSeq = 0, linkSeq = 0;
+
+const pathCache = new Map();  // `${kind}:${from}` -> dijkstra result (cleared on netV bump)
+
+// ---------------- water ----------------
+function isWater(x, y) {
+  for (const b of waterBlobs) {
+    const dx = x - b.x, dy = y - b.y;
+    if (dx * dx + dy * dy < b.r * b.r) return true;
+  }
+  return false;
+}
+function distToWater(x, y) {
+  let d = Infinity;
+  for (const b of waterBlobs) d = Math.min(d, Math.hypot(x - b.x, y - b.y) - b.r);
+  return d; // negative inside water
+}
+
+// ---------------- map generation ----------------
+const NAME_A = ['Al','Bel','Cor','Dun','El','Fen','Gil','Hal','Ist','Kar','Lor','Mer','Nor','Ost','Per','Ros','Sel','Tor','Val','Win','Yar','Bre'];
+const NAME_B = ['by','ford','haven','moor','port','stad','ton','vale','wick','mouth','field','gate','holm'];
+
+function genWater() {
+  waterBlobs = [];
+  // a bay creeping in from one edge
+  const edge = Math.floor(rng() * 4); // 0 top, 1 right, 2 bottom, 3 left
+  let x, y, dx, dy;
+  if (edge === 0)      { x = lerp(W * .25, W * .75, rng()); y = -40;     dx = 0;  dy = 1;  }
+  else if (edge === 1) { x = W + 40; y = lerp(H * .25, H * .75, rng());  dx = -1; dy = 0;  }
+  else if (edge === 2) { x = lerp(W * .25, W * .75, rng()); y = H + 40;  dx = 0;  dy = -1; }
+  else                 { x = -40;   y = lerp(H * .25, H * .75, rng());   dx = 1;  dy = 0;  }
+  const n = 5 + Math.floor(rng() * 3);
+  let r = 150 + rng() * 60;
+  for (let i = 0; i < n; i++) {
+    waterBlobs.push({ x, y, r });
+    const step = r * (0.75 + rng() * 0.35);
+    const veer = (rng() - 0.5) * 0.9;
+    const vx = dx + (dy !== 0 ? veer : 0), vy = dy + (dx !== 0 ? veer : 0);
+    const vl = Math.hypot(vx, vy);
+    x += (vx / vl) * step; y += (vy / vl) * step;
+    r *= 0.72 + rng() * 0.16;
+    x = clamp(x, -60, W + 60); y = clamp(y, -60, H + 60);
+  }
+  // one inland lake, away from the bay
+  for (let tries = 0; tries < 60; tries++) {
+    const lx = lerp(200, W - 200, rng()), ly = lerp(180, H - 180, rng());
+    if (distToWater(lx, ly) < 300) continue;
+    const m = 2 + Math.floor(rng() * 2);
+    let cx = lx, cy = ly;
+    for (let i = 0; i < m; i++) {
+      waterBlobs.push({ x: cx, y: cy, r: 55 + rng() * 50 });
+      const a = rng() * TAU;
+      cx += Math.cos(a) * 60; cy += Math.sin(a) * 60;
+    }
+    break;
+  }
+}
+
+function makeName(used) {
+  for (let i = 0; i < 200; i++) {
+    const nm = NAME_A[Math.floor(rng() * NAME_A.length)] + NAME_B[Math.floor(rng() * NAME_B.length)];
+    if (!used.has(nm)) { used.add(nm); return nm; }
+  }
+  return 'Nowhere';
+}
+
+function onLand(x, y, margin) {
+  return x > 80 && x < W - 80 && y > 100 && y < H - 80 && distToWater(x, y) > margin;
+}
+function farFromNodes(x, y, d) {
+  return nodes.every(nd => Math.hypot(nd.x - x, nd.y - y) >= d);
+}
+
+function genNodes() {
+  nodes = [];
+  const used = new Set();
+  const addNode = (x, y, pop) => {
+    nodes.push({
+      id: nodes.length, x, y, pop,
+      r: 6 + pop * 0.85,
+      name: makeName(used),
+      people: [], cargo: [], pulse: 0,
+      coastal: distToWater(x, y) <= 60,
+    });
+  };
+  // two metro clusters
+  const centers = [];
+  for (let c = 0; c < 2; c++) {
+    for (let t = 0; t < 300; t++) {
+      const x = lerp(230, W - 230, rng()), y = lerp(200, H - 180, rng());
+      if (!onLand(x, y, 30)) continue;
+      if (centers.some(p => Math.hypot(p.x - x, p.y - y) < 480)) continue;
+      centers.push({ x, y });
+      const k = 3 + (rng() < 0.5 ? 1 : 0);
+      for (let i = 0; i < k; i++) {
+        for (let u = 0; u < 200; u++) {
+          const a = rng() * TAU, rr = 55 + rng() * 90;
+          const nx = x + Math.cos(a) * rr, ny = y + Math.sin(a) * rr;
+          if (!onLand(nx, ny, 10) || !farFromNodes(nx, ny, 80)) continue;
+          addNode(nx, ny, 6 + Math.floor(rng() * 5));
+          break;
+        }
+      }
+      break;
+    }
+  }
+  // towns — first few prefer the coast so ships have a home
+  const townTarget = 10;
+  let coastWanted = 3;
+  for (let i = 0; i < townTarget; i++) {
+    for (let t = 0; t < 400; t++) {
+      const x = lerp(90, W - 90, rng()), y = lerp(110, H - 90, rng());
+      if (!onLand(x, y, 8) || !farFromNodes(x, y, 118)) continue;
+      if (coastWanted > 0 && distToWater(x, y) > 55) continue;
+      if (coastWanted > 0) coastWanted--;
+      addNode(x, y, 2 + Math.floor(rng() * 4));
+      break;
+    }
+    if (coastWanted > 0 && i >= 4) coastWanted = 0; // coast may not exist near land; give up gracefully
+  }
+}
+
+function genMap(newSeed) {
+  seed = newSeed;
+  rng = mulberry32(seed);
+  genWater();
+  genNodes();
+  links = [];
+  floaters = []; fades = [];
+  pathCache.clear(); netV++;
+}
+
+// ---------------- links ----------------
+function pairKey(a, b) { return a < b ? a + ':' + b : b + ':' + a; }
+
+function buildLUT(link) {
+  const A = nodes[link.a], B = nodes[link.b];
+  // parallel links between the same pair get nudged sideways
+  const dx = B.x - A.x, dy = B.y - A.y, L = Math.hypot(dx, dy) || 1;
+  const px = -dy / L, py = dx / L;
+  const off = link.off || 0;
+  const ax = A.x + px * off, ay = A.y + py * off;
+  const bx = B.x + px * off, by = B.y + py * off;
+  let pts;
+  if (link.mode === 'air') {
+    // gentle arc, bowed away from the map centre
+    const mx = (ax + bx) / 2, my = (ay + by) / 2;
+    const side = ((mx - W / 2) * px + (my - H / 2) * py) >= 0 ? 1 : -1;
+    const bow = L * 0.12 * side;
+    const cx = mx + px * bow, cy = my + py * bow;
+    pts = [];
+    for (let i = 0; i <= 32; i++) {
+      const t = i / 32, u = 1 - t;
+      pts.push({ x: u * u * ax + 2 * u * t * cx + t * t * bx,
+                 y: u * u * ay + 2 * u * t * cy + t * t * by });
+    }
+  } else {
+    pts = [{ x: ax, y: ay }, { x: bx, y: by }];
+  }
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + dist(pts[i - 1], pts[i]));
+  link.pts = pts; link.cum = cum; link.len = cum[cum.length - 1];
+}
+
+function pointAt(link, s) {
+  s = clamp(s, 0, link.len);
+  const { pts, cum } = link;
+  let i = 1;
+  while (i < cum.length - 1 && cum[i] < s) i++;
+  const seg = cum[i] - cum[i - 1] || 1;
+  const t = (s - cum[i - 1]) / seg;
+  const a = pts[i - 1], b = pts[i];
+  return { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t), ang: Math.atan2(b.y - a.y, b.x - a.x) };
+}
+
+function recomputeOffsets() {
+  const groups = new Map();
+  for (const l of links) {
+    const k = pairKey(l.a, l.b);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(l);
+  }
+  for (const g of groups.values()) {
+    g.forEach((l, i) => { l.off = (i - (g.length - 1) / 2) * 7; buildLUT(l); });
+  }
+}
+
+function validateLink(ai, bi, mode) {
+  if (ai === bi) return { ok: false, reason: '' };
+  if (links.some(l => l.mode === mode && pairKey(l.a, l.b) === pairKey(ai, bi)))
+    return { ok: false, reason: 'already linked' };
+  const A = nodes[ai], B = nodes[bi], d = dist(A, B);
+  const m = MODES[mode];
+  if (m.maxLen && d > m.maxLen) return { ok: false, reason: 'subway is short-haul' };
+  if (m.minLen && d < m.minLen) return { ok: false, reason: 'too close to fly' };
+  if (mode === 'road' || mode === 'rail') {
+    const n = Math.ceil(d / 13);
+    for (let i = 1; i < n; i++) {
+      const t = i / n;
+      if (isWater(lerp(A.x, B.x, t), lerp(A.y, B.y, t)))
+        return { ok: false, reason: 'cannot cross water' };
+    }
+  }
+  if (mode === 'ship') {
+    if (!A.coastal || !B.coastal) return { ok: false, reason: 'needs coastal towns' };
+    const n = Math.max(8, Math.ceil(d / 14));
+    let wet = 0, run = 0, maxRun = 0, total = 0;
+    for (let i = 1; i < n; i++) {
+      const t = i / n;
+      if (t < 0.13 || t > 0.87) continue; // ends may sit on the beach
+      total++;
+      if (isWater(lerp(A.x, B.x, t), lerp(A.y, B.y, t))) { wet++; run = 0; }
+      else { run++; maxRun = Math.max(maxRun, run); }
+    }
+    if (total === 0 || wet / total < 0.8 || maxRun > 3)
+      return { ok: false, reason: 'no clear sea lane' };
+  }
+  const cost = linkCost(mode, d) + VEH[DEFAULT_VEH[mode]].cost;
+  return { ok: true, cost, reason: '' };
+}
+
+function makeLink(ai, bi, mode) {
+  const link = { id: linkSeq++, a: ai, b: bi, mode, off: 0, vehicles: [], pts: null, cum: null, len: 0 };
+  links.push(link);
+  recomputeOffsets();
+  return link;
+}
+
+function addVehicle(link, type) {
+  const stagger = link.vehicles.length % 2 === 1;
+  link.vehicles.push({
+    type, t: stagger ? 1 : 0, dir: stagger ? -1 : 1,
+    dwell: 0.4, loadP: [], loadC: [],
+  });
+  pathCache.clear(); netV++;
+}
+
+function buildLink(ai, bi, mode) {
+  const v = validateLink(ai, bi, mode);
+  if (!v.ok) return false;
+  if (money < v.cost) return false;
+  money -= v.cost; stats.spent += v.cost;
+  const link = makeLink(ai, bi, mode);
+  addVehicle(link, DEFAULT_VEH[mode]);
+  const mid = pointAt(link, link.len / 2);
+  floaters.push({ x: mid.x, y: mid.y, text: '−$' + fmt(v.cost), age: 0, color: GREY3 });
+  if (hintStage === 0) setHint(1);
+  return true;
+}
+
+function buyVehicle(link, type) {
+  if (money < VEH[type].cost) return false;
+  money -= VEH[type].cost; stats.spent += VEH[type].cost;
+  addVehicle(link, type);
+  return true;
+}
+
+function linkValue(link) {
+  return linkCost(link.mode, dist(nodes[link.a], nodes[link.b])) +
+         link.vehicles.reduce((s, v) => s + VEH[v.type].cost, 0);
+}
+
+function removeLink(link) {
+  // riders walk back to the nearer end of their journey
+  for (const v of link.vehicles) {
+    for (const a of [...v.loadP, ...v.loadC]) {
+      a.wait = 0; a.pv = -1;
+      (a.kind === 'p' ? nodes[link.a].people : nodes[link.a].cargo).push(a);
+    }
+  }
+  const refund = Math.round(linkValue(link) * 0.5);
+  money += refund;
+  const mid = pointAt(link, link.len / 2);
+  floaters.push({ x: mid.x, y: mid.y, text: '+$' + fmt(refund), age: 0, color: GREY3 });
+  links.splice(links.indexOf(link), 1);
+  recomputeOffsets();
+  pathCache.clear(); netV++;
+}
+
+// ---------------- routing ----------------
+function usable(link, kind) {
+  return link.vehicles.some(v => (kind === 'p' ? VEH[v.type].capP : VEH[v.type].capC) > 0);
+}
+
+function dijkstra(from, kind) {
+  const key = kind + ':' + from;
+  const hit = pathCache.get(key);
+  if (hit) return hit;
+  const distMap = new Array(nodes.length).fill(Infinity);
+  const prev = new Array(nodes.length).fill(-1);
+  distMap[from] = 0;
+  const open = [[0, from]];
+  while (open.length) {
+    let bi = 0;
+    for (let i = 1; i < open.length; i++) if (open[i][0] < open[bi][0]) bi = i;
+    const [d, u] = open.splice(bi, 1)[0];
+    if (d > distMap[u]) continue;
+    for (const l of links) {
+      if (l.a !== u && l.b !== u) continue;
+      if (!usable(l, kind)) continue;
+      let best = 0;
+      for (const v of l.vehicles) {
+        const cap = kind === 'p' ? VEH[v.type].capP : VEH[v.type].capC;
+        if (cap > 0) best = Math.max(best, VEH[v.type].speed);
+      }
+      const w = l.len / best + TRANSFER_PEN;
+      const to = l.a === u ? l.b : l.a;
+      if (d + w < distMap[to]) {
+        distMap[to] = d + w; prev[to] = u;
+        open.push([d + w, to]);
+      }
+    }
+  }
+  const res = { distMap, prev };
+  pathCache.set(key, res);
+  return res;
+}
+
+function findPath(from, to, kind) {
+  if (from === to) return [];
+  const { distMap, prev } = dijkstra(from, kind);
+  if (!isFinite(distMap[to])) return null;
+  const path = [];
+  let u = to;
+  while (u !== from) { path.push(u); u = prev[u]; }
+  path.reverse();
+  return path;
+}
+
+// ---------------- agents ----------------
+function pickDest(origin, kind) {
+  // reachable places draw more travellers — building a line induces demand
+  const { distMap } = dijkstra(origin, kind);
+  const weight = n => Math.pow(n.pop, 1.2) * (isFinite(distMap[n.id]) ? 2.5 : 1);
+  let total = 0;
+  for (const n of nodes) if (n.id !== origin) total += weight(n);
+  let roll = Math.random() * total; // sim randomness is not seeded
+  for (const n of nodes) {
+    if (n.id === origin) continue;
+    roll -= weight(n);
+    if (roll <= 0) return n.id;
+  }
+  return (origin + 1) % nodes.length;
+}
+
+function spawnAgent(node, kind) {
+  const d = pickDest(node.id, kind);
+  const fare = kind === 'p' ? farePerson(dist(node, nodes[d])) : fareCargo(dist(node, nodes[d]));
+  const a = {
+    id: agentSeq++, kind, o: node.id, d,
+    path: findPath(node.id, d, kind), pv: netV,
+    wait: 0, fare: Math.round(fare), age: 0,
+  };
+  (kind === 'p' ? node.people : node.cargo).push(a);
+}
+
+function deliver(agent, node) {
+  money += agent.fare;
+  stats.delivered++; stats.income += agent.fare;
+  node.pulse = 1;
+  floaters.push({ x: node.x, y: node.y - node.r - 6, text: '+$' + fmt(agent.fare), age: 0, color: GOLD });
+  nodes[agent.d].pop = Math.min(16, nodes[agent.d].pop + 0.06);
+  nodes[agent.o].pop = Math.min(16, nodes[agent.o].pop + 0.03);
+  nodes[agent.d].r = 6 + nodes[agent.d].pop * 0.85;
+  nodes[agent.o].r = 6 + nodes[agent.o].pop * 0.85;
+  for (const [n, text] of MILESTONES) {
+    if (stats.delivered === n && !milestonesShown.includes(n)) {
+      milestonesShown.push(n);
+      showToast(text + ' · <b>$' + fmt(money) + '</b>');
+    }
+  }
+}
+
+// ---------------- simulation ----------------
+function update(dt) {
+  simTime += dt;
+
+  // demand, easing in over the first minutes
+  const ramp = Math.min(1, 0.35 + simTime / 300);
+  for (const node of nodes) {
+    if (node.people.length < QUEUE_CAP.p && Math.random() < node.pop * SPAWN_RATE.p * ramp * dt)
+      spawnAgent(node, 'p');
+    if (node.cargo.length < QUEUE_CAP.c && Math.random() < node.pop * SPAWN_RATE.c * ramp * dt)
+      spawnAgent(node, 'c');
+    node.pulse = Math.max(0, node.pulse - dt * 1.6);
+
+    // waiting agents: age, re-route, give up
+    for (const list of [node.people, node.cargo]) {
+      for (let i = list.length - 1; i >= 0; i--) {
+        const a = list[i];
+        a.wait += dt; a.age += dt;
+        if (a.pv !== netV) { a.path = findPath(node.id, a.d, a.kind); a.pv = netV; }
+        if (a.wait > PATIENCE[a.kind]) {
+          list.splice(i, 1);
+          if (a.path) stats.lost++; // only count demand the network could have served
+          fades.push({ x: node.x, y: node.y, kind: a.kind, age: 0 });
+        }
+      }
+    }
+  }
+
+  // vehicles
+  for (const link of links) {
+    for (const v of link.vehicles) {
+      if (v.dwell > 0) { v.dwell -= dt; continue; }
+      const spd = VEH[v.type].speed;
+      v.t += (v.dir * spd * dt) / link.len;
+      if (v.t >= 1 || v.t <= 0) {
+        v.t = clamp(v.t, 0, 1);
+        const hereId = v.t === 1 ? link.b : link.a;
+        arrive(link, v, nodes[hereId]);
+      }
+    }
+  }
+
+  // floaters & fades
+  for (let i = floaters.length - 1; i >= 0; i--)
+    if ((floaters[i].age += dt) > 1.4) floaters.splice(i, 1);
+  for (let i = fades.length - 1; i >= 0; i--)
+    if ((fades[i].age += dt) > 0.8) fades.splice(i, 1);
+}
+
+function arrive(link, v, node) {
+  // unload everyone whose next hop is this node
+  for (const list of [v.loadP, v.loadC]) {
+    for (let i = list.length - 1; i >= 0; i--) {
+      const a = list[i];
+      if (a.path && a.path[0] === node.id) {
+        list.splice(i, 1);
+        a.path.shift();
+        if (a.path.length === 0) deliver(a, node);
+        else {
+          a.wait = 0; a.pv = -1; // re-route on next tick
+          (a.kind === 'p' ? node.people : node.cargo).push(a);
+        }
+      }
+    }
+  }
+  // turn around, then board whoever is heading to the far end
+  v.dir = v.t === 1 ? -1 : 1;
+  v.dwell = DWELL;
+  const target = v.t === 1 ? link.a : link.b;
+  const spec = VEH[v.type];
+  boardFrom(node.people, v.loadP, spec.capP, target, netV);
+  boardFrom(node.cargo,  v.loadC, spec.capC, target, netV);
+}
+
+function boardFrom(queue, load, cap, target, version) {
+  for (let i = 0; i < queue.length && load.length < cap;) {
+    const a = queue[i];
+    if (a.pv !== version) { a.path = findPath(queueNodeOf(a, queue), a.d, a.kind); a.pv = version; }
+    if (a.path && a.path[0] === target) { queue.splice(i, 1); load.push(a); }
+    else i++;
+  }
+}
+// waiting queues live on their node; find it cheaply
+function queueNodeOf(a, queue) {
+  for (const n of nodes) if (n.people === queue || n.cargo === queue) return n.id;
+  return a.o;
+}
+
+// ---------------- canvas / camera ----------------
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let view = { s: 1, tx: 0, ty: 0 };
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = innerWidth * dpr; canvas.height = innerHeight * dpr;
+  canvas.style.width = innerWidth + 'px'; canvas.style.height = innerHeight + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const s = Math.min(innerWidth / (W + 30), innerHeight / (H + 30));
+  view = { s, tx: (innerWidth - W * s) / 2, ty: (innerHeight - H * s) / 2 };
+}
+addEventListener('resize', resize);
+const toScreen = (x, y) => [x * view.s + view.tx, y * view.s + view.ty];
+const toWorld = (x, y) => [(x - view.tx) / view.s, (y - view.ty) / view.s];
+
+// ---------------- drawing ----------------
+function draw() {
+  ctx.fillStyle = PAPER;
+  ctx.fillRect(0, 0, innerWidth, innerHeight);
+
+  // whisper of a dot grid, in screen space
+  ctx.fillStyle = 'rgba(35,34,30,0.045)';
+  for (let gx = 14; gx < innerWidth; gx += 26)
+    for (let gy = 14; gy < innerHeight; gy += 26)
+      ctx.fillRect(gx, gy, 1.4, 1.4);
+
+  ctx.save();
+  ctx.translate(view.tx, view.ty);
+  ctx.scale(view.s, view.s);
+
+  drawWater();
+  for (const mode of ['ship', 'road', 'rail', 'subway', 'air'])
+    for (const l of links) if (l.mode === mode) drawLink(l);
+  if (ui.selectedLink && links.includes(ui.selectedLink)) drawSelection(ui.selectedLink);
+  if (ui.drag) drawDragPreview();
+  drawHoverDesires();
+  for (const n of nodes) drawNode(n);
+  for (const l of links) for (const v of l.vehicles) drawVehicle(l, v);
+  drawFloaters();
+
+  ctx.restore();
+}
+
+function drawWater() {
+  ctx.fillStyle = COAST;
+  for (const b of waterBlobs) { ctx.beginPath(); ctx.arc(b.x, b.y, b.r + 4, 0, TAU); ctx.fill(); }
+  ctx.fillStyle = WATER;
+  for (const b of waterBlobs) { ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill(); }
+}
+
+function tracePath(link) {
+  ctx.beginPath();
+  ctx.moveTo(link.pts[0].x, link.pts[0].y);
+  for (let i = 1; i < link.pts.length; i++) ctx.lineTo(link.pts[i].x, link.pts[i].y);
+}
+
+function drawLink(l) {
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  tracePath(l);
+  if (l.mode === 'road') {
+    ctx.strokeStyle = GREY1; ctx.lineWidth = 3; ctx.setLineDash([]);
+    ctx.stroke();
+  } else if (l.mode === 'rail') {
+    ctx.strokeStyle = GREY2; ctx.lineWidth = 3.2; ctx.setLineDash([]);
+    ctx.stroke();
+    tracePath(l);
+    ctx.strokeStyle = PAPER; ctx.lineWidth = 1.4; ctx.setLineDash([7, 7]);
+    ctx.stroke(); ctx.setLineDash([]);
+  } else if (l.mode === 'subway') {
+    ctx.strokeStyle = '#B0AFA8'; ctx.lineWidth = 3; ctx.setLineDash([1.5, 8]);
+    ctx.stroke(); ctx.setLineDash([]);
+  } else if (l.mode === 'air') {
+    ctx.strokeStyle = GREY1; ctx.lineWidth = 1.5; ctx.setLineDash([9, 7]);
+    ctx.stroke(); ctx.setLineDash([]);
+  } else if (l.mode === 'ship') {
+    ctx.strokeStyle = '#A8C0C4'; ctx.lineWidth = 2.4; ctx.setLineDash([1.5, 9]);
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+}
+
+function drawSelection(l) {
+  tracePath(l);
+  ctx.strokeStyle = 'rgba(35,34,30,0.85)';
+  ctx.lineWidth = l.mode === 'air' ? 2.5 : 4.5;
+  ctx.setLineDash([]);
+  ctx.stroke();
+  drawLink(l);
+}
+
+function drawNode(n) {
+  // congestion warning
+  const load = Math.max(n.people.length / QUEUE_CAP.p, n.cargo.length / QUEUE_CAP.c);
+  if (load >= 0.8) {
+    const a = 0.25 + 0.2 * Math.sin(simTime * 5);
+    ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 10, 0, TAU);
+    ctx.strokeStyle = `rgba(216,67,59,${a})`; ctx.lineWidth = 1.6; ctx.stroke();
+  }
+  if (n.pulse > 0) {
+    ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 4 + (1 - n.pulse) * 14, 0, TAU);
+    ctx.strokeStyle = `rgba(185,138,47,${n.pulse * 0.5})`; ctx.lineWidth = 1.4; ctx.stroke();
+  }
+
+  ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, TAU);
+  ctx.fillStyle = '#FFFFFF'; ctx.fill();
+  ctx.strokeStyle = INK; ctx.lineWidth = 1.6; ctx.stroke();
+  if (n.pop >= 8) { // big city: a quiet double ring
+    ctx.beginPath(); ctx.arc(n.x, n.y, n.r - 3.5, 0, TAU);
+    ctx.strokeStyle = GREY1; ctx.lineWidth = 1; ctx.stroke();
+  }
+
+  // hovering / drag-target ring
+  if (ui.hoverNode === n || (ui.drag && ui.drag.to === n)) {
+    ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 5, 0, TAU);
+    ctx.strokeStyle = 'rgba(35,34,30,0.35)'; ctx.lineWidth = 1.2; ctx.stroke();
+  }
+
+  // waiting people: blue dots on the upper-left arc
+  const shown = 9;
+  n.people.slice(0, shown).forEach((a, i) => {
+    const ang = (165 - i * 13) * Math.PI / 180;
+    const px = n.x + Math.cos(ang) * (n.r + 7.5);
+    const py = n.y - Math.sin(ang) * (n.r + 7.5);
+    const sc = Math.min(1, a.age * 5);
+    ctx.beginPath(); ctx.arc(px, py, 2.3 * sc, 0, TAU);
+    ctx.fillStyle = BLUE; ctx.fill();
+  });
+  if (n.people.length > shown) countTag(n, 158, '+' + (n.people.length - shown), BLUE);
+
+  // waiting cargo: red squares on the right arc
+  n.cargo.slice(0, shown).forEach((a, i) => {
+    const ang = (15 - i * 13) * Math.PI / 180;
+    const px = n.x + Math.cos(ang) * (n.r + 7.5);
+    const py = n.y - Math.sin(ang) * (n.r + 7.5);
+    const s = 4.4 * Math.min(1, a.age * 5);
+    ctx.fillStyle = RED; ctx.fillRect(px - s / 2, py - s / 2, s, s);
+  });
+  if (n.cargo.length > shown) countTag(n, 22, '+' + (n.cargo.length - shown), RED);
+
+  // name
+  ctx.fillStyle = GREY3;
+  ctx.font = '600 9.5px -apple-system, "Segoe UI", sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(n.name.toUpperCase().split('').join(' '), n.x, n.y + n.r + 6);
+}
+
+function countTag(n, deg, text, color) {
+  const ang = deg * Math.PI / 180;
+  const px = n.x + Math.cos(ang) * (n.r + 17);
+  const py = n.y - Math.sin(ang) * (n.r + 17);
+  ctx.fillStyle = color;
+  ctx.font = '600 8.5px -apple-system, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(text, px, py);
+}
+
+// -- vehicle shapes: white bodies, ink outlines, loads visible inside --
+function drawVehicle(link, v) {
+  const spec = VEH[v.type];
+  const s = clamp(v.t, 0, 1) * link.len;
+  const p = pointAt(link, s);
+  const heading = v.dir > 0 ? p.ang : p.ang + Math.PI;
+
+  if (v.type === 'train' || v.type === 'metro') {
+    const carN = v.type === 'train' ? 3 : 2;
+    const gap = 15.5;
+    const all = [...v.loadP.map(() => 'p'), ...v.loadC.map(() => 'c')];
+    for (let i = 0; i < carN; i++) {
+      const cs = clamp(s - v.dir * i * gap, 0, link.len);
+      const cp = pointAt(link, cs);
+      const ch = v.dir > 0 ? cp.ang : cp.ang + Math.PI;
+      drawCar(cp.x, cp.y, ch, 13.5, 7.5, all.slice(i * 4, i * 4 + 4), i === 0);
+    }
+    return;
+  }
+
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(heading);
+  ctx.lineJoin = 'round';
+
+  if (v.type === 'taxi') {
+    body(-6.5, -3.7, 13, 7.4, 2.5);
+    loadMarks(kinds(v, 4), 0, 0, 2);
+  } else if (v.type === 'truck') {
+    body(1.5, -3.9, 6, 7.8, 2);              // cab
+    body(-8.5, -4.2, 9, 8.4, 1.5);           // bed
+    loadMarks(kinds(v, 4), -4, 0, 2);
+  } else if (v.type === 'plane') {
+    ctx.beginPath();                          // wings
+    ctx.moveTo(3.5, 0); ctx.lineTo(-2.5, 9); ctx.lineTo(-5.5, 9); ctx.lineTo(-2, 0);
+    ctx.lineTo(-5.5, -9); ctx.lineTo(-2.5, -9); ctx.closePath();
+    ctx.fillStyle = '#FFFFFF'; ctx.fill();
+    ctx.strokeStyle = INK; ctx.lineWidth = 1.1; ctx.stroke();
+    ctx.beginPath();                          // tail
+    ctx.moveTo(-7, 0); ctx.lineTo(-10.5, 4.5); ctx.lineTo(-12, 4.5); ctx.lineTo(-10, 0);
+    ctx.lineTo(-12, -4.5); ctx.lineTo(-10.5, -4.5); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    body(-11, -1.9, 23, 3.8, 1.9);            // fuselage
+    loadMarks(v.loadP.slice(0, 5).map(() => 'p'), 1, 0, 5, 3.1); // one row down the cabin
+    loadMarks(v.loadC.slice(0, 1).map(() => 'c'), -8, 0, 1);
+  } else if (v.type === 'ship') {
+    ctx.beginPath();
+    ctx.moveTo(-10, -4);
+    ctx.lineTo(4, -4); ctx.quadraticCurveTo(10, -2.6, 11.5, 0);
+    ctx.quadraticCurveTo(10, 2.6, 4, 4); ctx.lineTo(-10, 4);
+    ctx.quadraticCurveTo(-11.5, 0, -10, -4); ctx.closePath();
+    ctx.fillStyle = '#FFFFFF'; ctx.fill();
+    ctx.strokeStyle = INK; ctx.lineWidth = 1.2; ctx.stroke();
+    loadMarks(v.loadC.slice(0, 6).map(() => 'c'), -3.5, 0, 3);
+    loadMarks(v.loadP.slice(0, 2).map(() => 'p'), 6.5, 0, 2, 3.2);
+  }
+  ctx.restore();
+}
+// combined view of a small vehicle's load, people first
+function kinds(v, max) {
+  return [...v.loadP.map(() => 'p'), ...v.loadC.map(() => 'c')].slice(0, max);
+}
+
+function body(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, r);
+  ctx.fillStyle = '#FFFFFF'; ctx.fill();
+  ctx.strokeStyle = INK; ctx.lineWidth = 1.2; ctx.stroke();
+}
+function loadMarks(kindList, cx, cy, cols, pitch = 3.6) {
+  const n = kindList.length;
+  if (n === 0) return;
+  const rows = Math.ceil(n / cols);
+  kindList.forEach((k, i) => {
+    const col = i % cols, row = Math.floor(i / cols);
+    const inRow = Math.min(cols, n - row * cols);
+    const x = cx + (col - (inRow - 1) / 2) * pitch;
+    const y = cy + (row - (rows - 1) / 2) * pitch;
+    if (k === 'p') {
+      ctx.beginPath(); ctx.arc(x, y, 1.55, 0, TAU);
+      ctx.fillStyle = BLUE; ctx.fill();
+    } else {
+      ctx.fillStyle = RED;
+      ctx.fillRect(x - 1.65, y - 1.65, 3.3, 3.3);
+    }
+  });
+}
+function drawCar(x, y, ang, w, h, loads, lead) {
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(ang); ctx.lineJoin = 'round';
+  body(-w / 2, -h / 2, w, h, 2);
+  if (lead) { ctx.fillStyle = INK; ctx.fillRect(w / 2 - 2.4, -h / 2 + 1.6, 1.2, h - 3.2); }
+  loads.slice(0, 4).forEach((k, i) => {
+    const x0 = (i - (Math.min(loads.length, 4) - 1) / 2) * 3.4;
+    if (k === 'p') { ctx.beginPath(); ctx.arc(x0, 0, 1.5, 0, TAU); ctx.fillStyle = BLUE; ctx.fill(); }
+    else { ctx.fillStyle = RED; ctx.fillRect(x0 - 1.6, -1.6, 3.2, 3.2); }
+  });
+  ctx.restore();
+}
+
+function drawFloaters() {
+  ctx.font = '650 11px -apple-system, "Segoe UI", sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+  for (const f of floaters) {
+    const t = f.age / 1.4;
+    ctx.globalAlpha = t < 0.15 ? t / 0.15 : 1 - (t - 0.15) / 0.85;
+    ctx.fillStyle = f.color;
+    ctx.fillText(f.text, f.x, f.y - t * 26);
+  }
+  ctx.globalAlpha = 1;
+  for (const f of fades) {
+    const t = f.age / 0.8;
+    ctx.globalAlpha = 0.5 * (1 - t);
+    if (f.kind === 'p') { ctx.beginPath(); ctx.arc(f.x, f.y - t * 10, 2.3, 0, TAU); ctx.fillStyle = GREY2; ctx.fill(); }
+    else { ctx.fillStyle = GREY2; ctx.fillRect(f.x - 2.2, f.y - t * 10 - 2.2, 4.4, 4.4); }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHoverDesires() {
+  const n = ui.hoverNode;
+  if (!n || ui.drag) return;
+  ctx.lineWidth = 1;
+  for (const a of [...n.people, ...n.cargo]) {
+    const d = nodes[a.d];
+    ctx.beginPath(); ctx.moveTo(n.x, n.y); ctx.lineTo(d.x, d.y);
+    ctx.strokeStyle = a.kind === 'p' ? 'rgba(62,99,196,0.20)' : 'rgba(216,67,59,0.20)';
+    ctx.stroke();
+  }
+}
+
+function drawDragPreview() {
+  const { from, to, x, y, mode } = ui.drag;
+  const tx = to ? to.x : x, ty = to ? to.y : y;
+  const ok = to ? validateLink(from.id, to.id, mode).ok : null;
+  ctx.beginPath();
+  if (mode === 'air') {
+    const mx = (from.x + tx) / 2, my = (from.y + ty) / 2;
+    const dx = tx - from.x, dy = ty - from.y, L = Math.hypot(dx, dy) || 1;
+    const px = -dy / L, py = dx / L;
+    const side = ((mx - W / 2) * px + (my - H / 2) * py) >= 0 ? 1 : -1;
+    ctx.moveTo(from.x, from.y);
+    ctx.quadraticCurveTo(mx + px * L * .12 * side, my + py * L * .12 * side, tx, ty);
+  } else {
+    ctx.moveTo(from.x, from.y); ctx.lineTo(tx, ty);
+  }
+  ctx.strokeStyle = to && !ok ? 'rgba(216,67,59,0.55)' : 'rgba(35,34,30,0.45)';
+  ctx.lineWidth = 2.2;
+  ctx.setLineDash([6, 6]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+// ---------------- HUD (DOM) ----------------
+const $ = id => document.getElementById(id);
+const ui = {
+  mode: 'road',
+  drag: null,           // {from, to, x, y, mode}
+  hoverNode: null,
+  selectedLink: null,
+  moneyShown: -1,
+};
+
+const ICONS = {
+  road:  '<svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"><path d="M2 11v-1.5q0-1 1-1h2l2-3h3.5l2 3H14q1 0 1 1V11"/><circle cx="5" cy="12" r="1.5"/><circle cx="11.5" cy="12" r="1.5"/></svg>',
+  rail:  '<svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"><rect x="3.5" y="3" width="9" height="7.5" rx="1.5"/><path d="M3.5 7h9M5.5 13.5h5M6 10.5l-1 3M10 10.5l1 3"/></svg>',
+  subway:'<svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"><path d="M2.5 13V9.5a5.5 5.5 0 0 1 11 0V13"/><rect x="6" y="8.5" width="4" height="4.5" rx="1"/><path d="M1.5 13.5h13"/></svg>',
+  air:   '<svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"><path d="M14.5 2.2 8.6 13.8l-1.7-4.7-4.7-1.7z"/><path d="M14.5 2.2 6.9 9.1"/></svg>',
+  ship:  '<svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"><path d="M2.5 9.5h11l-2 4h-7z"/><path d="M8 9.5V3.5M8 3.5q3.5.5 3 4"/></svg>',
+};
+const SPD_ICONS = {
+  pause: '<svg width="13" height="13" viewBox="0 0 12 12" fill="currentColor"><rect x="2" y="1.5" width="2.6" height="9" rx="1"/><rect x="7.4" y="1.5" width="2.6" height="9" rx="1"/></svg>',
+  play:  '<svg width="13" height="13" viewBox="0 0 12 12" fill="currentColor"><path d="M2.5 1.5 10.5 6l-8 4.5z"/></svg>',
+  fast:  '<svg width="17" height="13" viewBox="0 0 17 12" fill="currentColor"><path d="M1 1.5 8 6l-7 4.5zM8.5 1.5 15.5 6l-7 4.5z"/></svg>',
+};
+
+function buildToolbar() {
+  const bar = $('toolbar');
+  bar.innerHTML = '';
+  MODE_ORDER.forEach((m, i) => {
+    const b = document.createElement('button');
+    b.className = 'tool' + (ui.mode === m ? ' active' : '');
+    b.dataset.mode = m;
+    b.innerHTML = `<span class="kb">${i + 1}</span>${ICONS[m]}<span class="nm">${MODES[m].label.toUpperCase()}</span><span class="pr">$${MODES[m].perPx.toFixed(2)}/km</span>`;
+    b.onclick = () => setMode(m);
+    bar.appendChild(b);
+  });
+  const sep = document.createElement('div');
+  sep.className = 'sep';
+  bar.appendChild(sep);
+  [['pause', 0], ['play', 1], ['fast', 3]].forEach(([k, v]) => {
+    const b = document.createElement('button');
+    b.className = 'spd' + (speedMult === v ? ' active' : '');
+    b.dataset.speed = v;
+    b.innerHTML = SPD_ICONS[k];
+    b.title = k;
+    b.onclick = () => setSpeed(v);
+    bar.appendChild(b);
+  });
+}
+function setMode(m) {
+  ui.mode = m;
+  document.querySelectorAll('.tool').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
+}
+function setSpeed(v) {
+  if (v !== 0) prevSpeed = v;
+  speedMult = v;
+  document.querySelectorAll('.spd').forEach(b => b.classList.toggle('active', +b.dataset.speed === v));
+}
+
+let toastTimer = null;
+function showToast(html) {
+  const t = $('toast');
+  t.innerHTML = html;
+  t.style.opacity = 1;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.style.opacity = 0, 3000);
+}
+
+const HINTS = [
+  'drag between two towns to build a road',
+  'click a line to add vehicles · 1–5 pick a mode · space pauses',
+];
+function setHint(stage) {
+  hintStage = stage;
+  const h = $('hint');
+  if (stage >= HINTS.length) { h.style.opacity = 0; return; }
+  h.textContent = HINTS[stage];
+  h.style.opacity = 1;
+  if (stage === 1) setTimeout(() => { if (hintStage === 1) setHint(2); }, 14000);
+}
+
+function refreshHUD() {
+  const m = Math.floor(money);
+  if (m !== ui.moneyShown) { $('money-n').textContent = fmt(m); ui.moneyShown = m; }
+  $('st-day').textContent = 1 + Math.floor(simTime / DAY_LEN);
+  $('st-del').textContent = fmt(stats.delivered);
+  $('st-lost').textContent = fmt(stats.lost);
+}
+
+// node tooltip
+function refreshTip() {
+  const tip = $('tip');
+  const n = ui.hoverNode;
+  if (!n || ui.drag) { tip.style.opacity = 0; return; }
+  const [sx, sy] = toScreen(n.x, n.y);
+  tip.innerHTML =
+    `<div class="t">${n.name}</div>` +
+    `<div class="s">pop ${Math.round(n.pop)} · <span class="p">●</span> ${n.people.length} waiting · <span class="c">■</span> ${n.cargo.length} freight</div>`;
+  tip.style.left = clamp(sx + 16, 8, innerWidth - 190) + 'px';
+  tip.style.top = clamp(sy - 44, 8, innerHeight - 70) + 'px';
+  tip.style.opacity = 1;
+}
+
+// drag cost chip
+function refreshChip() {
+  const chip = $('chip');
+  const d = ui.drag;
+  if (!d) { chip.style.opacity = 0; return; }
+  const [sx, sy] = toScreen(d.to ? d.to.x : d.x, d.to ? d.to.y : d.y);
+  chip.style.left = (sx + 18) + 'px';
+  chip.style.top = (sy + 14) + 'px';
+  chip.style.opacity = 1;
+  if (!d.to || d.to === d.from) {
+    const len = Math.hypot((d.to ? d.to.x : d.x) - d.from.x, (d.to ? d.to.y : d.y) - d.from.y);
+    chip.className = 'pill';
+    chip.textContent = '$' + fmt(linkCost(d.mode, len) + VEH[DEFAULT_VEH[d.mode]].cost);
+    return;
+  }
+  const v = validateLink(d.from.id, d.to.id, d.mode);
+  if (!v.ok) { chip.className = 'pill bad'; chip.textContent = v.reason || '·'; }
+  else if (money < v.cost) { chip.className = 'pill bad'; chip.textContent = `need $${fmt(v.cost)}`; }
+  else { chip.className = 'pill'; chip.textContent = '$' + fmt(v.cost); }
+}
+
+// link popup
+function openLinkPop(link) {
+  ui.selectedLink = link;
+  renderLinkPop();
+}
+function closeLinkPop() {
+  ui.selectedLink = null;
+  $('linkpop').style.display = 'none';
+}
+function renderLinkPop() {
+  const link = ui.selectedLink;
+  const pop = $('linkpop');
+  if (!link || !links.includes(link)) { pop.style.display = 'none'; return; }
+  const A = nodes[link.a], B = nodes[link.b];
+  const counts = {};
+  link.vehicles.forEach(v => counts[v.type] = (counts[v.type] || 0) + 1);
+  const fleet = Object.entries(counts).map(([t, c]) => `${c} ${VEH[t].label.toLowerCase()}${c > 1 ? 's' : ''}`).join(' · ') || 'no vehicles';
+  let html = `<div class="t">${MODES[link.mode].label} · ${A.name} — ${B.name}</div><div class="s">${fleet}</div>`;
+  for (const t of MODE_VEHS[link.mode]) {
+    const dis = money < VEH[t].cost ? 'disabled' : '';
+    html += `<button data-veh="${t}" ${dis}>+ ${VEH[t].label}<span class="cost">$${fmt(VEH[t].cost)}</span></button>`;
+  }
+  html += `<button class="rm" data-rm="1">remove<span class="cost">+$${fmt(Math.round(linkValue(link) * 0.5))}</span></button>`;
+  pop.innerHTML = html;
+  pop.querySelectorAll('button[data-veh]').forEach(b =>
+    b.onclick = () => { buyVehicle(link, b.dataset.veh); renderLinkPop(); });
+  const rm = pop.querySelector('button[data-rm]');
+  rm.onclick = () => { removeLink(link); closeLinkPop(); };
+  const mid = pointAt(link, link.len / 2);
+  const [sx, sy] = toScreen(mid.x, mid.y);
+  pop.style.display = 'block';
+  const bw = pop.offsetWidth || 180, bh = pop.offsetHeight || 120;
+  pop.style.left = clamp(sx - bw / 2, 10, innerWidth - bw - 10) + 'px';
+  pop.style.top = clamp(sy + 14, 10, innerHeight - bh - 10) + 'px';
+}
+
+// ---------------- input ----------------
+function nodeAt(wx, wy) {
+  let best = null, bd = Infinity;
+  for (const n of nodes) {
+    const d = Math.hypot(n.x - wx, n.y - wy);
+    if (d < Math.max(n.r + 9, 17) && d < bd) { best = n; bd = d; }
+  }
+  return best;
+}
+function linkAt(wx, wy) {
+  let best = null, bd = 8;
+  for (const l of links) {
+    for (let i = 1; i < l.pts.length; i++) {
+      const a = l.pts[i - 1], b = l.pts[i];
+      const abx = b.x - a.x, aby = b.y - a.y;
+      const t = clamp(((wx - a.x) * abx + (wy - a.y) * aby) / (abx * abx + aby * aby || 1), 0, 1);
+      const d = Math.hypot(a.x + abx * t - wx, a.y + aby * t - wy);
+      if (d < bd) { bd = d; best = l; }
+    }
+  }
+  return best;
+}
+
+canvas.addEventListener('pointerdown', e => {
+  const [wx, wy] = toWorld(e.clientX, e.clientY);
+  const n = nodeAt(wx, wy);
+  if (n) {
+    ui.drag = { from: n, to: null, x: wx, y: wy, mode: ui.mode };
+    closeLinkPop();
+    canvas.setPointerCapture(e.pointerId);
+    return;
+  }
+  const l = linkAt(wx, wy);
+  if (l) { openLinkPop(l); return; }
+  closeLinkPop();
+});
+
+canvas.addEventListener('pointermove', e => {
+  const [wx, wy] = toWorld(e.clientX, e.clientY);
+  ui.hoverNode = nodeAt(wx, wy);
+  canvas.style.cursor = ui.hoverNode ? 'crosshair' : (linkAt(wx, wy) ? 'pointer' : 'default');
+  if (ui.drag) {
+    ui.drag.x = wx; ui.drag.y = wy;
+    const n = nodeAt(wx, wy);
+    ui.drag.to = (n && n !== ui.drag.from) ? n : null;
+  }
+});
+
+canvas.addEventListener('pointerup', e => {
+  if (ui.drag && ui.drag.to) {
+    const ok = buildLink(ui.drag.from.id, ui.drag.to.id, ui.drag.mode);
+    if (ok) save();
+  }
+  ui.drag = null;
+  $('chip').style.opacity = 0;
+});
+canvas.addEventListener('pointercancel', () => { ui.drag = null; $('chip').style.opacity = 0; });
+
+addEventListener('keydown', e => {
+  if (e.key === ' ') { e.preventDefault(); setSpeed(speedMult === 0 ? prevSpeed : 0); }
+  else if (e.key >= '1' && e.key <= '5') setMode(MODE_ORDER[+e.key - 1]);
+  else if (e.key === 'Escape') { ui.drag = null; closeLinkPop(); }
+});
+
+$('btn-newmap').onclick = () => {
+  money = START_MONEY; simTime = 0;
+  stats = { delivered: 0, lost: 0, income: 0, spent: 0 };
+  milestonesShown = [];
+  genMap((Math.random() * 0xFFFFFFFF) >>> 0);
+  closeLinkPop();
+  setHint(0);
+  save();
+};
+
+// ---------------- persistence ----------------
+function save() {
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      v: 1, seed, money, simTime, stats, milestonesShown, hintStage,
+      pops: nodes.map(n => n.pop),
+      links: links.map(l => ({ a: l.a, b: l.b, mode: l.mode, veh: l.vehicles.map(v => v.type) })),
+    }));
+  } catch (_) { /* private mode etc. — play on without saving */ }
+}
+function load() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return false;
+    const s = JSON.parse(raw);
+    if (s.v !== 1) return false;
+    genMap(s.seed);
+    money = s.money; simTime = s.simTime; stats = s.stats;
+    milestonesShown = s.milestonesShown || [];
+    s.pops.forEach((p, i) => { if (nodes[i]) { nodes[i].pop = p; nodes[i].r = 6 + p * 0.85; } });
+    for (const sl of s.links) {
+      if (!nodes[sl.a] || !nodes[sl.b]) continue;
+      const link = makeLink(sl.a, sl.b, sl.mode);
+      sl.veh.forEach(t => addVehicle(link, t));
+    }
+    setHint(Math.min(s.hintStage ?? 0, 2) === 0 ? 0 : 2);
+    return true;
+  } catch (_) { return false; }
+}
+setInterval(save, 6000);
+addEventListener('beforeunload', save);
+
+// ---------------- main loop ----------------
+let last = performance.now();
+function frame(now) {
+  const real = clamp((now - last) / 1000, 0, 0.05);
+  last = now;
+  const simDt = real * speedMult;
+  if (simDt > 0) {
+    const steps = Math.ceil(simDt / 0.05);
+    for (let i = 0; i < steps; i++) update(simDt / steps);
+  }
+  draw();
+  refreshHUD();
+  refreshTip();
+  refreshChip();
+  requestAnimationFrame(frame);
+}
+
+// ---------------- boot ----------------
+resize();
+if (!load()) {
+  genMap((Math.random() * 0xFFFFFFFF) >>> 0);
+  setHint(0);
+}
+buildToolbar();
+setSpeed(1);
+requestAnimationFrame(frame);
+
+// test / debug handle
+window.__T = {
+  get nodes() { return nodes; }, get links() { return links; },
+  get money() { return money; }, get stats() { return stats; },
+  get seed() { return seed; },
+  validate: validateLink, build: buildLink,
+  buy: buyVehicle, remove: removeLink,
+  setSpeed, setMode,
+  grant(n) { money += n; },
+  ff(sec) { const dt = 0.05; for (let t = 0; t < sec; t += dt) update(dt); draw(); refreshHUD(); },
+  newMap(s) { genMap(s >>> 0); },
+  toScreen,
+};
+</script>
+</body>
+</html>
