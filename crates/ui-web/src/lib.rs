@@ -87,10 +87,12 @@ pub mod clock;
 pub mod components;
 pub mod conn;
 pub mod files;
+pub mod identity;
 pub mod packs;
 pub mod palette;
 pub mod pwa;
 pub mod radio;
+pub mod recent;
 pub mod scroll;
 pub mod server_theme;
 pub mod servers;
@@ -99,8 +101,6 @@ pub mod syndication_admin;
 pub mod theme_css;
 pub mod theme_editor;
 pub mod toasts;
-pub mod identity;
-pub mod recent;
 pub mod wire;
 
 /// Browser WebSocket transport (`wasm32-unknown-unknown` only).
@@ -136,14 +136,15 @@ pub use syndication_admin::{
 pub use theme_editor::{contrast_warnings, ContrastWarning, EditorAction, EditorState};
 pub use wire::{
     admin_command_to_frame, blob_get_request, blob_to_data_url, board_list_request,
-    command_to_frame, directory_search_request, dm_history_request, dm_send, dm_threads_request,
-    file_command_to_frame, frame_to_admin_events, frame_to_blob, frame_to_boards,
-    frame_to_dm_history, frame_to_dm_received, frame_to_dm_threads, frame_to_events,
-    frame_to_file_content, frame_to_file_events, frame_to_members, frame_to_notice_route,
-    frame_to_posts, frame_to_presence, frame_to_profile, frame_to_threads, frame_to_who,
-    hello_request, hex_to_id, id_to_hex, normalize_ws_url, ping_request, post_create, post_reply,
-    profile_get_request, thread_list_request, thread_request, who_request, AdminCommand,
-    AdminEvent, EventClient, EventSink, FileCommand, FileEvent, NoticeRoute, PresenceDelta,
+    chat_history_request, command_to_frame, directory_search_request, dm_history_request, dm_send,
+    dm_threads_request, file_command_to_frame, frame_to_admin_events, frame_to_blob,
+    frame_to_boards, frame_to_chat_history, frame_to_dm_history, frame_to_dm_received,
+    frame_to_dm_threads, frame_to_events, frame_to_file_content, frame_to_file_events,
+    frame_to_members, frame_to_notice_route, frame_to_posts, frame_to_presence, frame_to_profile,
+    frame_to_threads, frame_to_who, hello_request, hex_to_id, id_to_hex, normalize_ws_url,
+    ping_request, post_create, post_reply, profile_get_request, thread_list_request,
+    thread_request, who_request, AdminCommand, AdminEvent, EventClient, EventSink, FileCommand,
+    FileEvent, NoticeRoute, PresenceDelta,
 };
 
 #[cfg(target_arch = "wasm32")]

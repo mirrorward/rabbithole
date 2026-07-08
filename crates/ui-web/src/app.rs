@@ -226,7 +226,11 @@ impl AppState {
                     let name = session
                         .name
                         .get()
-                        .or_else(|| session.server_theme.with(|t| t.as_ref().map(|o| o.name.clone())))
+                        .or_else(|| {
+                            session
+                                .server_theme
+                                .with(|t| t.as_ref().map(|o| o.name.clone()))
+                        })
                         .filter(|n| !n.is_empty())
                         .unwrap_or_else(|| server_label(id));
                     let conn = session.state.with(|s| s.conn);
@@ -345,7 +349,8 @@ impl AppState {
                 ws: store_value(crate::ws::WsClient::new()),
                 client: store_value(MockClient::new()),
             };
-            self.sessions.update(|list| list.push((id.clone(), session)));
+            self.sessions
+                .update(|list| list.push((id.clone(), session)));
         }
         self.focused_id.set(id);
     }
@@ -416,7 +421,10 @@ impl AppState {
     /// demonstrable in dev (the real transport delivers this in the welcome
     /// frame). Mirrors [`AppState::load_radio`].
     pub fn load_server_theme(&self) {
-        let bundle = self.focused().client.with_value(|c| c.server_theme_bundle());
+        let bundle = self
+            .focused()
+            .client
+            .with_value(|c| c.server_theme_bundle());
         match bundle {
             Some(b) => self.apply_server_theme(&b),
             None => self.clear_server_theme(),
@@ -508,6 +516,11 @@ impl AppState {
                                     c.dispatch(cmd);
                                     // Pull the initial roster once signed in.
                                     c.request_who();
+                                    // Replay the lobby's recent scrollback so a
+                                    // new arrival lands mid-conversation, not in
+                                    // an empty room (re-runs on reconnect, where
+                                    // set_chat_history dedups the overlap).
+                                    c.request_chat_history(crate::client::LOBBY, 50);
                                     // This burrow inherits the user's current status.
                                     c.set_presence(presence.get_untracked(), None);
                                 });
@@ -594,6 +607,9 @@ impl AppState {
             }));
             ws.on_dm_received(std::rc::Rc::new(move |(peer, msg)| {
                 state.update(|s| s.receive_dm(&peer, msg))
+            }));
+            ws.on_chat_history(std::rc::Rc::new(move |lines| {
+                state.update(|s| s.set_chat_history(lines))
             }));
             ws.on_file_event(std::rc::Rc::new(move |event| {
                 files.update(|f| f.apply(&event))
@@ -732,12 +748,16 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         if self.focused().live.get_untracked() {
             // Reset the board view; the thread list arrives via the sink.
-            self.focused().state.update(|s| s.select_board(slug, Vec::new()));
+            self.focused()
+                .state
+                .update(|s| s.select_board(slug, Vec::new()));
             self.focused().ws.update_value(|c| c.request_threads(slug));
             return;
         }
         let threads = self.focused().client.with_value(|c| c.threads(slug));
-        self.focused().state.update(|s| s.select_board(slug, threads));
+        self.focused()
+            .state
+            .update(|s| s.select_board(slug, threads));
     }
 
     /// Open a thread and load its posts into state.
@@ -747,7 +767,9 @@ impl AppState {
             // Open the thread immediately; its posts stream in via the sink.
             // The live thread id is the root post's hex id.
             let root = crate::wire::hex_to_id(&id);
-            self.focused().state.update(|s| s.open_thread(id, Vec::new()));
+            self.focused()
+                .state
+                .update(|s| s.open_thread(id, Vec::new()));
             if let Some(root) = root {
                 self.focused().ws.update_value(|c| c.request_posts(root));
             }
@@ -797,7 +819,11 @@ impl AppState {
         if body.trim().is_empty() {
             return;
         }
-        let Some(thread_id) = self.focused().state.with_untracked(|s| s.selected_thread.clone()) else {
+        let Some(thread_id) = self
+            .focused()
+            .state
+            .with_untracked(|s| s.selected_thread.clone())
+        else {
             return;
         };
         #[cfg(target_arch = "wasm32")]
@@ -860,7 +886,9 @@ impl AppState {
         self.focused().state.update(|s| s.select_dm(peer));
         #[cfg(target_arch = "wasm32")]
         if self.focused().live.get_untracked() {
-            self.focused().ws.update_value(|c| c.request_dm_history(peer));
+            self.focused()
+                .ws
+                .update_value(|c| c.request_dm_history(peer));
         }
     }
 
@@ -871,7 +899,11 @@ impl AppState {
         if text.trim().is_empty() {
             return;
         }
-        let Some(id) = self.focused().state.with_untracked(|s| s.selected_dm.clone()) else {
+        let Some(id) = self
+            .focused()
+            .state
+            .with_untracked(|s| s.selected_dm.clone())
+        else {
             return;
         };
         #[cfg(target_arch = "wasm32")]
@@ -907,7 +939,9 @@ impl AppState {
         self.focused().state.update(|s| s.select_member(handle));
         #[cfg(target_arch = "wasm32")]
         if self.focused().live.get_untracked() {
-            self.focused().ws.update_value(|c| c.request_profile(handle));
+            self.focused()
+                .ws
+                .update_value(|c| c.request_profile(handle));
         }
     }
 
@@ -918,7 +952,9 @@ impl AppState {
         // registered in `connect_live`. Mock: drive the seam synchronously.
         #[cfg(target_arch = "wasm32")]
         if self.focused().live.get_untracked() {
-            self.focused().ws.update_value(|c| c.dispatch_file(&command));
+            self.focused()
+                .ws
+                .update_value(|c| c.dispatch_file(&command));
             return;
         }
         let files = self.focused().files;
@@ -993,8 +1029,13 @@ impl AppState {
         if crate::native::native_available() {
             let info = self.focused().files.with_untracked(|f| {
                 f.nodes.iter().find(|n| n.id == id).and_then(|n| {
-                    n.blob_id
-                        .map(|b| (crate::wire::id_to_hex(&b), n.size.max(0) as u64, n.name.clone()))
+                    n.blob_id.map(|b| {
+                        (
+                            crate::wire::id_to_hex(&b),
+                            n.size.max(0) as u64,
+                            n.name.clone(),
+                        )
+                    })
                 })
             });
             if let Some((root_hex, size, name)) = info {
@@ -1277,10 +1318,9 @@ fn server_label(id: &ServerId) -> String {
     if id.0 == "local" {
         return "Demo".to_string();
     }
-    let host = id
-        .0
-        .trim_start_matches("ws://")
-        .trim_start_matches("wss://");
+    let host =
+        id.0.trim_start_matches("ws://")
+            .trim_start_matches("wss://");
     host.split(['/', ':']).next().unwrap_or(host).to_string()
 }
 
@@ -1376,11 +1416,8 @@ pub fn App() -> impl IntoView {
                 app.reconnect_live(endpoint, token);
             }
             if let Some(hist) = web_sys::window().and_then(|w| w.history().ok()) {
-                let _ = hist.replace_state_with_url(
-                    &wasm_bindgen::JsValue::NULL,
-                    "",
-                    Some("/lobby"),
-                );
+                let _ =
+                    hist.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some("/lobby"));
             }
         }
     }

@@ -840,8 +840,9 @@ mod tests {
         // The pill positions against the chat pane, so the pane must be a
         // containing block — lose `position:relative` and the pill would
         // anchor to the viewport instead.
-        assert!(STYLESHEET
-            .contains(".rh-chat{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}"));
+        assert!(STYLESHEET.contains(
+            ".rh-chat{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}"
+        ));
         assert!(STYLESHEET.contains(".rh-jump-new{position:absolute"));
     }
 

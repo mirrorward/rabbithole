@@ -89,6 +89,9 @@ pub type DmThreadSink = Rc<dyn Fn(Vec<crate::state::DmThread>)>;
 pub type DmHistorySink = Rc<dyn Fn((String, Vec<crate::state::DmMessage>))>;
 /// A sink the transport pushes a live `(peer, message)` DM into.
 pub type DmReceivedSink = Rc<dyn Fn((String, crate::state::DmMessage))>;
+/// A sink the transport pushes the lobby's recent-history replay into (from a
+/// decoded [`ChatHistory`](rabbithole_proto::chat::ChatHistory) reply).
+pub type ChatHistorySink = Rc<dyn Fn(Vec<crate::state::ChatLine>)>;
 /// A sink the transport pushes the directory member list into.
 pub type MembersSink = Rc<dyn Fn(Vec<crate::state::Member>)>;
 /// A sink the transport pushes one member's profile card into.
@@ -126,6 +129,7 @@ struct Inner {
     /// id-less; the ordered socket answers in request order).
     pending_dm_history: RefCell<VecDeque<String>>,
     dm_received_sink: Option<DmReceivedSink>,
+    chat_history_sink: Option<ChatHistorySink>,
     members_sink: Option<MembersSink>,
     profile_sink: Option<ProfileSink>,
     avatar_sink: Option<AvatarSink>,
@@ -223,6 +227,12 @@ impl Inner {
         }
     }
 
+    fn emit_chat_history(&self, lines: Vec<crate::state::ChatLine>) {
+        if let Some(sink) = &self.chat_history_sink {
+            sink(lines);
+        }
+    }
+
     fn emit_dm_received(&self, msg: (String, crate::state::DmMessage)) {
         if let Some(sink) = &self.dm_received_sink {
             sink(msg);
@@ -274,6 +284,7 @@ impl WsClient {
                 dm_history_sink: None,
                 pending_dm_history: RefCell::new(VecDeque::new()),
                 dm_received_sink: None,
+                chat_history_sink: None,
                 members_sink: None,
                 profile_sink: None,
                 avatar_sink: None,
@@ -352,7 +363,8 @@ impl WsClient {
     ) {
         let mut b = self.inner.borrow_mut();
         let id = b.next_request_id();
-        if let Ok(bytes) = wire::presence_set_request(state, status, id).and_then(|f| encode_frame(&f))
+        if let Ok(bytes) =
+            wire::presence_set_request(state, status, id).and_then(|f| encode_frame(&f))
         {
             Self::write(&mut b, &bytes);
         }
@@ -440,6 +452,24 @@ impl WsClient {
     /// Register the live DM-received sink. Most recent registration wins.
     pub fn on_dm_received(&mut self, sink: DmReceivedSink) {
         self.inner.borrow_mut().dm_received_sink = Some(sink);
+    }
+
+    /// Register the lobby recent-history sink. The most recent registration
+    /// wins.
+    pub fn on_chat_history(&mut self, sink: ChatHistorySink) {
+        self.inner.borrow_mut().chat_history_sink = Some(sink);
+    }
+
+    /// Ask the server to replay the room's recent scrollback; the reply
+    /// arrives through the [`on_chat_history`](Self::on_chat_history) sink.
+    pub fn request_chat_history(&self, room: &str, limit: u32) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) =
+            wire::chat_history_request(room, limit, id).and_then(|f| encode_frame(&f))
+        {
+            Self::write(&mut b, &bytes);
+        }
     }
 
     /// Ask for the DM conversation list ([`on_dm_threads`](Self::on_dm_threads)).
@@ -696,6 +726,9 @@ impl WsClient {
                         }
                         if let Some(dm) = wire::frame_to_dm_received(&frame) {
                             b.emit_dm_received(dm);
+                        }
+                        if let Some(lines) = wire::frame_to_chat_history(&frame) {
+                            b.emit_chat_history(lines);
                         }
                         if let Some(members) = wire::frame_to_members(&frame) {
                             b.emit_members(members);

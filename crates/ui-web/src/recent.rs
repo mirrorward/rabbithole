@@ -37,7 +37,11 @@ pub fn add_recent(mut list: Vec<RecentBurrow>, mut entry: RecentBurrow) -> Vec<R
 }
 
 /// Set (or clear) the resume token for an endpoint already in the list. Pure.
-pub fn set_token(mut list: Vec<RecentBurrow>, endpoint: &str, token: Option<String>) -> Vec<RecentBurrow> {
+pub fn set_token(
+    mut list: Vec<RecentBurrow>,
+    endpoint: &str,
+    token: Option<String>,
+) -> Vec<RecentBurrow> {
     if let Some(b) = list.iter_mut().find(|b| b.endpoint == endpoint) {
         b.token = token;
     }
@@ -111,11 +115,19 @@ mod tests {
     #[test]
     fn token_survives_reconnect_and_set_token_updates_it() {
         // Auth captured a token for `a`.
-        let list = set_token(add_recent(vec![], b("ws://a", "alice")), "ws://a", Some("tok1".into()));
+        let list = set_token(
+            add_recent(vec![], b("ws://a", "alice")),
+            "ws://a",
+            Some("tok1".into()),
+        );
         assert_eq!(list[0].token.as_deref(), Some("tok1"));
         // A later reconnect (no token in the fresh entry) preserves the stored one.
         let list = add_recent(list, b("ws://a", "alice"));
-        assert_eq!(list[0].token.as_deref(), Some("tok1"), "reconnect keeps the resume token");
+        assert_eq!(
+            list[0].token.as_deref(),
+            Some("tok1"),
+            "reconnect keeps the resume token"
+        );
         // Signing out / a guest auth clears it.
         let list = set_token(list, "ws://a", None);
         assert_eq!(list[0].token, None);
@@ -128,7 +140,11 @@ mod tests {
         // Re-signing into `a` under a new handle moves it to front + updates it.
         let list = add_recent(list, b("ws://a", "alice2"));
         assert_eq!(list.len(), 2, "no duplicate endpoint");
-        assert_eq!(list[0], b("ws://a", "alice2"), "most recent first, handle updated");
+        assert_eq!(
+            list[0],
+            b("ws://a", "alice2"),
+            "most recent first, handle updated"
+        );
         assert_eq!(list[1], b("ws://b", "bob"));
     }
 

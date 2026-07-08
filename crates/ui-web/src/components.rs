@@ -885,9 +885,11 @@ fn EmptyState(
     /// Decorative glyph shown above the headline.
     mark: &'static str,
     /// One-line headline.
-    #[prop(into)] title: String,
+    #[prop(into)]
+    title: String,
     /// A sentence of guidance under the headline.
-    #[prop(into)] sub: String,
+    #[prop(into)]
+    sub: String,
 ) -> impl IntoView {
     view! {
         <div class="rh-chat-empty">

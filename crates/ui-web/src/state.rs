@@ -219,9 +219,12 @@ pub fn merge_people(rosters: &[(String, Vec<Presence>)]) -> Vec<Person> {
     for (server, who) in rosters {
         for p in who {
             let id = coalesce_id(p);
-            let found = people
-                .iter_mut()
-                .find(|x| (x.key.is_some(), x.key.clone().unwrap_or_else(|| x.screen_name.clone())) == id);
+            let found = people.iter_mut().find(|x| {
+                (
+                    x.key.is_some(),
+                    x.key.clone().unwrap_or_else(|| x.screen_name.clone()),
+                ) == id
+            });
             match found {
                 Some(person) => {
                     if !person.servers.iter().any(|s| s == server) {
@@ -369,6 +372,22 @@ impl UiState {
             text: text.to_string(),
             at_unix_ms: crate::clock::now_ms(),
         });
+    }
+
+    /// Replace the scrollback with a server history snapshot (a post-sign-in
+    /// replay), keeping any lines that arrived live **after** the snapshot
+    /// was taken — their server timestamps are newer than the snapshot's
+    /// newest line. On a reconnect this also flushes stale scrollback the
+    /// replay supersedes, so nothing duplicates.
+    pub fn set_chat_history(&mut self, history: Vec<ChatLine>) {
+        let newest = history.last().map(|l| l.at_unix_ms).unwrap_or(i64::MIN);
+        let live_tail: Vec<ChatLine> = self
+            .messages
+            .drain(..)
+            .filter(|m| m.at_unix_ms > newest)
+            .collect();
+        self.messages = history;
+        self.messages.extend(live_tail);
     }
 
     /// Set the transport connection state (driven by the transport's
@@ -637,6 +656,55 @@ mod tests {
     }
 
     #[test]
+    fn history_replay_fills_an_empty_scrollback() {
+        let mut s = UiState::default();
+        let line = |from: &str, text: &str, ms: i64| ChatLine {
+            from: from.into(),
+            text: text.into(),
+            at_unix_ms: ms,
+        };
+        s.set_chat_history(vec![line("alice", "hi", 1_000), line("bob", "yo", 2_000)]);
+        assert_eq!(s.messages.len(), 2);
+        assert_eq!(s.messages[0].from, "alice");
+        assert_eq!(s.messages[1].at_unix_ms, 2_000);
+    }
+
+    #[test]
+    fn history_replay_keeps_lines_that_raced_in_after_the_snapshot() {
+        let mut s = UiState::default();
+        let line = |text: &str, ms: i64| ChatLine {
+            from: "alice".into(),
+            text: text.into(),
+            at_unix_ms: ms,
+        };
+        // A live push lands before the history reply is processed…
+        s.messages.push(line("raced in live", 5_000));
+        // …and the snapshot (taken just before that push) arrives.
+        s.set_chat_history(vec![line("old one", 1_000), line("snapshot newest", 4_000)]);
+        let texts: Vec<&str> = s.messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, ["old one", "snapshot newest", "raced in live"]);
+    }
+
+    #[test]
+    fn history_replay_supersedes_stale_scrollback_on_reconnect() {
+        let mut s = UiState::default();
+        let line = |text: &str, ms: i64| ChatLine {
+            from: "alice".into(),
+            text: text.into(),
+            at_unix_ms: ms,
+        };
+        // Pre-reconnect scrollback: both lines are inside the replay window.
+        s.messages.push(line("seen before the drop", 1_000));
+        s.messages.push(line("also seen", 2_000));
+        // The replay covers them (same lines, same timestamps) — no doubling.
+        s.set_chat_history(vec![
+            line("seen before the drop", 1_000),
+            line("also seen", 2_000),
+        ]);
+        assert_eq!(s.messages.len(), 2);
+    }
+
+    #[test]
     fn operator_notice_lands_in_the_scrollback_marked() {
         let mut s = UiState::default();
         s.push_notice("rabbit", "server restarts at midnight");
@@ -729,7 +797,10 @@ mod tests {
             agreement: None,
         });
         assert!(s.welcome.is_some());
-        assert_eq!(s.welcome.as_ref().unwrap().motd, "Be excellent to each other.");
+        assert_eq!(
+            s.welcome.as_ref().unwrap().motd,
+            "Be excellent to each other."
+        );
         // Dismissing clears it.
         s.dismiss_welcome();
         assert!(s.welcome.is_none());
@@ -760,15 +831,25 @@ mod tests {
         let rosters = vec![
             (
                 "The Warren".to_string(),
-                vec![pres("alice", PresenceState::Away), pres("bob", PresenceState::Online)],
+                vec![
+                    pres("alice", PresenceState::Away),
+                    pres("bob", PresenceState::Online),
+                ],
             ),
             (
                 "Briar Patch".to_string(),
-                vec![pres("alice", PresenceState::Online), pres("carol", PresenceState::Idle)],
+                vec![
+                    pres("alice", PresenceState::Online),
+                    pres("carol", PresenceState::Idle),
+                ],
             ),
         ];
         let people = merge_people(&rosters);
-        assert_eq!(people.len(), 3, "alice de-duped across two burrows (by handle)");
+        assert_eq!(
+            people.len(),
+            3,
+            "alice de-duped across two burrows (by handle)"
+        );
         let alice = &people[0];
         assert_eq!(alice.screen_name, "alice");
         assert_eq!(alice.servers, vec!["The Warren", "Briar Patch"]);
@@ -801,7 +882,11 @@ mod tests {
             ("A".to_string(), vec![pres("mo", PresenceState::Online)]),
             ("B".to_string(), vec![pres("mo", PresenceState::Away)]),
         ];
-        assert_eq!(merge_people(&rosters2)[0].state, PresenceState::Online, "Online stays");
+        assert_eq!(
+            merge_people(&rosters2)[0].state,
+            PresenceState::Online,
+            "Online stays"
+        );
     }
 
     #[test]
@@ -838,15 +923,30 @@ mod tests {
         // Three rows: the verified rabbit (kf00, both burrows), the unkeyed
         // "rabbit" stranger, and nothing else — the shared handle did NOT merge
         // the stranger into the verified person.
-        assert_eq!(people.len(), 2, "verified key + unkeyed stranger stay distinct");
-        let verified = people.iter().find(|p| p.key.as_deref() == Some("kf00")).unwrap();
-        assert_eq!(verified.servers, vec!["The Warren", "Briar Patch"], "coalesced by key across burrows");
+        assert_eq!(
+            people.len(),
+            2,
+            "verified key + unkeyed stranger stay distinct"
+        );
+        let verified = people
+            .iter()
+            .find(|p| p.key.as_deref() == Some("kf00"))
+            .unwrap();
+        assert_eq!(
+            verified.servers,
+            vec!["The Warren", "Briar Patch"],
+            "coalesced by key across burrows"
+        );
         // The Online sighting's handle wins → shows "mr_rabbit", their live name.
         assert_eq!(verified.screen_name, "mr_rabbit");
         assert_eq!(verified.state, PresenceState::Online);
         let stranger = people.iter().find(|p| p.key.is_none()).unwrap();
         assert_eq!(stranger.screen_name, "rabbit");
-        assert_eq!(stranger.servers, vec!["The Warren"], "the unkeyed stranger is only on the Warren");
+        assert_eq!(
+            stranger.servers,
+            vec!["The Warren"],
+            "the unkeyed stranger is only on the Warren"
+        );
     }
 
     #[test]

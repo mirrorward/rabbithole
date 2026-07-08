@@ -82,7 +82,7 @@ use rabbithole_proto::board::{
     BoardList, BoardListRequest, PostCreate, ThreadList, ThreadListRequest, ThreadPosts,
     ThreadRequest,
 };
-use rabbithole_proto::chat::{ChatMessage, ChatSend};
+use rabbithole_proto::chat::{ChatHistory, ChatHistoryRequest, ChatMessage, ChatSend};
 use rabbithole_proto::directory::{DirectoryResults, DirectorySearch, ProfileCard, ProfileGet};
 use rabbithole_proto::dm::{
     DmHistory, DmHistoryRequest, DmReceived, DmSend, DmThreads, DmThreadsRequest,
@@ -165,6 +165,33 @@ pub fn ping_request(id: RequestId) -> Result<Frame, ProtoError> {
 /// Build a presence [`Who`] request frame.
 pub fn who_request(id: RequestId) -> Result<Frame, ProtoError> {
     Frame::request(id, &Who)
+}
+
+/// Build a [`ChatHistoryRequest`] — the recent-scrollback replay a client
+/// asks for right after signing in, so a new arrival doesn't face an empty
+/// lobby mid-conversation.
+pub fn chat_history_request(room: &str, limit: u32, id: RequestId) -> Result<Frame, ProtoError> {
+    Frame::request(id, &ChatHistoryRequest::new(room, limit))
+}
+
+/// Decode a [`ChatHistory`] reply into scrollback lines, oldest first, with
+/// their **original** server timestamps (so time chips and sender-burst
+/// grouping read exactly as they did live).
+pub fn frame_to_chat_history(frame: &Frame) -> Option<Vec<crate::state::ChatLine>> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let hist = frame.decode::<ChatHistory>()?.ok()?;
+    Some(
+        hist.messages
+            .into_iter()
+            .map(|m| crate::state::ChatLine {
+                from: m.from,
+                text: m.text,
+                at_unix_ms: m.at_unix_ms,
+            })
+            .collect(),
+    )
 }
 
 /// Build a [`PresenceSet`] frame — the user's presence status, broadcast to a
@@ -911,7 +938,9 @@ pub fn swarm_event_to_file_events(ev: &SwarmWireEvent, size: u64) -> Vec<FileEve
         // Done is the only completion signal. A TransferOpened with
         // server_have == size is the reducer's "done" shape, and record_transfer
         // upserts by id, so this is idempotent with a prior last-Chunk.
-        SwarmWireEvent::Done { transfer_id, bytes, .. } => vec![FileEvent::TransferOpened {
+        SwarmWireEvent::Done {
+            transfer_id, bytes, ..
+        } => vec![FileEvent::TransferOpened {
             transfer_id: *transfer_id,
             size: *bytes,
             server_have: *bytes,
@@ -1316,8 +1345,16 @@ mod tests {
                 resumed.apply(&fe);
             }
         }
-        let t = resumed.transfers.iter().find(|t| t.id == 7).expect("transfer exists");
-        assert_eq!(t.status, crate::files::TransferStatus::Done, "resume-only path completes");
+        let t = resumed
+            .transfers
+            .iter()
+            .find(|t| t.id == 7)
+            .expect("transfer exists");
+        assert_eq!(
+            t.status,
+            crate::files::TransferStatus::Done,
+            "resume-only path completes"
+        );
 
         // The whole sequence — Opened then every unit — drives a Transfer to
         // 100% through the real reducer, exactly as a WS ranged transfer would.
@@ -1337,7 +1374,11 @@ mod tests {
                 st.apply(&fe);
             }
         }
-        let t = st.transfers.iter().find(|t| t.id == 7).expect("transfer created");
+        let t = st
+            .transfers
+            .iter()
+            .find(|t| t.id == 7)
+            .expect("transfer created");
         assert_eq!(t.done, size, "reassembled progress reaches full size");
         assert_eq!(t.status, crate::files::TransferStatus::Done);
     }
@@ -1456,6 +1497,27 @@ mod tests {
                 at_unix_ms: 1_700_000_000_000,
             }]
         );
+    }
+
+    #[test]
+    fn chat_history_round_trips_to_scrollback_lines() {
+        let req = chat_history_request("lobby", 50, RequestId(7)).unwrap();
+        let reply = Frame::reply_to(
+            &req,
+            &ChatHistory::new(vec![
+                ChatMessage::new("lobby", "alice", "first", 1_000),
+                ChatMessage::new("lobby", "bob", "second", 2_000),
+            ]),
+        )
+        .unwrap();
+        let lines = frame_to_chat_history(&reply).expect("history decodes");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].from, "alice");
+        assert_eq!(lines[1].text, "second");
+        assert_eq!(lines[1].at_unix_ms, 2_000);
+        // An error reply yields nothing (the scrollback is left alone).
+        let err = Frame::error_reply(&req, ErrorCode::Forbidden);
+        assert!(frame_to_chat_history(&err).is_none());
     }
 
     #[test]
@@ -1660,7 +1722,8 @@ mod tests {
 
     #[test]
     fn presence_set_request_builds_a_decodable_frame() {
-        let frame = presence_set_request(PresenceState::Away, Some("brb".into()), RequestId(1)).unwrap();
+        let frame =
+            presence_set_request(PresenceState::Away, Some("brb".into()), RequestId(1)).unwrap();
         let msg = frame.decode::<PresenceSet>().unwrap().unwrap();
         assert_eq!(msg.state, PresenceState::Away);
         assert_eq!(msg.status.as_deref(), Some("brb"));
