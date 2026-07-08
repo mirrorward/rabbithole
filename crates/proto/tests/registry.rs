@@ -82,13 +82,18 @@ fn golden_matches() {
         return;
     }
 
-    let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!(
-            "cannot read {} ({e}). Create it with:\n  \
-             BLESS=1 cargo test -p rabbithole-proto --test registry golden_matches",
-            path.display()
-        )
-    });
+    let expected = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| {
+            panic!(
+                "cannot read {} ({e}). Create it with:\n  \
+                 BLESS=1 cargo test -p rabbithole-proto --test registry golden_matches",
+                path.display()
+            )
+        })
+        // A Windows checkout with autocrlf rewrites the golden to CRLF; the
+        // comparison is about the registry's *content*, not line endings
+        // (belt and braces with the `*.golden -text` gitattribute).
+        .replace("\r\n", "\n");
 
     assert_eq!(
         actual,
