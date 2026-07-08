@@ -25,6 +25,13 @@ rabbithole-identity = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The crypto tree (ed25519/x25519/chacha20 via e2ee) transitively requires
+# getrandom, which refuses to build for wasm32-unknown-unknown without an
+# entropy backend; the "js" feature (browser CSPRNG) satisfies it at compile
+# time. Same pattern as ui-web's own declaration.
+getrandom = { version = "0.2", features = ["js"] }
+
 [features]
 default = []
 native = [

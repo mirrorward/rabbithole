@@ -1055,8 +1055,10 @@ mod tests {
 
     #[test]
     fn selection_alone_does_not_swallow_unread_after_leaving_the_view() {
-        let mut s = UiState::default();
-        s.dms_open = true;
+        let mut s = UiState {
+            dms_open: true,
+            ..UiState::default()
+        };
         s.select_dm("alice");
         // The user navigates away; the selection persists.
         s.dms_open = false;

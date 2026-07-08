@@ -250,10 +250,22 @@ mod tests {
 
     #[test]
     fn hello_ack_carries_optional_challenge() {
-        let plain = HelloAck::new(PROTOCOL_VERSION, CapabilitySet::default(), "s", "0", [1; 32]);
+        let plain = HelloAck::new(
+            PROTOCOL_VERSION,
+            CapabilitySet::default(),
+            "s",
+            "0",
+            [1; 32],
+        );
         assert_eq!(plain.challenge, None);
-        let challenged = HelloAck::new(PROTOCOL_VERSION, CapabilitySet::default(), "s", "0", [1; 32])
-            .with_challenge(Some([0xAB; 32]));
+        let challenged = HelloAck::new(
+            PROTOCOL_VERSION,
+            CapabilitySet::default(),
+            "s",
+            "0",
+            [1; 32],
+        )
+        .with_challenge(Some([0xAB; 32]));
         let frame = Frame::request(RequestId(1), &challenged).unwrap();
         let decoded = frame.decode::<HelloAck>().unwrap().unwrap();
         assert_eq!(decoded.challenge, Some([0xAB; 32]));

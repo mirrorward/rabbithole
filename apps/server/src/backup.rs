@@ -166,7 +166,10 @@ pub fn verify_snapshot(dir: &Path) -> Result<Manifest> {
 
 /// Offline restore: verify the snapshot, move any existing data directory
 /// aside (never delete), and copy the manifest-listed files into place.
-/// Refuses when a live burrow answers on the data dir's ctl socket.
+/// Refuses when a live burrow answers on the data dir's ctl socket. On
+/// platforms without a ctl socket (Windows), a live server still cannot be
+/// clobbered: its open database handles make the move-aside rename fail
+/// atomically, and that failure is reported as the same refusal.
 pub fn restore_offline(snapshot: &Path, data_dir: &Path) -> Result<RestoreOutcome> {
     refuse_if_running(data_dir)?;
     let manifest = verify_snapshot(snapshot)
@@ -176,7 +179,9 @@ pub fn restore_offline(snapshot: &Path, data_dir: &Path) -> Result<RestoreOutcom
         let aside = aside_path(data_dir)?;
         fs::rename(data_dir, &aside).with_context(|| {
             format!(
-                "moving current data dir aside ({} -> {})",
+                "moving current data dir aside ({} -> {}): if its files are \
+                 locked, a burrow may still be running on it — stop the \
+                 server before restoring",
                 data_dir.display(),
                 aside.display()
             )

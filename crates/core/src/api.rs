@@ -60,8 +60,5 @@ pub enum Event {
     /// Authentication succeeded. `token` is the resume bearer token (empty for
     /// guests, which aren't resumable); the client persists it per-endpoint to
     /// auto-reconnect on next load.
-    Authenticated {
-        token: String,
-        screen_name: String,
-    },
+    Authenticated { token: String, screen_name: String },
 }

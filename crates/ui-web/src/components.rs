@@ -239,13 +239,17 @@ pub fn Transfers() -> impl IntoView {
                             each=move || app.all_transfers()
                             key=|(burrow, t)| (burrow.clone(), t.id, t.done, t.status)
                             children=move |(burrow, t)| {
-                                let pct = if t.total > 0 {
-                                    ((t.done.min(t.total) * 100) / t.total) as u32
-                                } else if matches!(t.status, TransferStatus::Done) {
-                                    100
-                                } else {
-                                    0
-                                };
+                                let pct = (t.done.min(t.total) * 100)
+                                    .checked_div(t.total)
+                                    .map(|p| p as u32)
+                                    .unwrap_or(
+                                        // Zero-length transfers: Done is 100%.
+                                        if matches!(t.status, TransferStatus::Done) {
+                                            100
+                                        } else {
+                                            0
+                                        },
+                                    );
                                 let (status_cls, status_txt) = match t.status {
                                     TransferStatus::Queued => ("rh-badge", "Queued"),
                                     TransferStatus::Active => ("rh-badge active", "Active"),
