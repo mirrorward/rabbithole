@@ -289,9 +289,17 @@ impl AuthService {
         }
 
         let token = SessionToken::generate();
-        SessionsRepo(&self.pool)
-            .insert(&token.storage_hash(), account.id, self.session_ttl_secs)
-            .await?;
+        if !SessionsRepo(&self.pool)
+            .insert_if_current(
+                &token.storage_hash(),
+                account.id,
+                account.authz_epoch,
+                self.session_ttl_secs,
+            )
+            .await?
+        {
+            return Err(AuthError::SessionExpired);
+        }
 
         let subject = self.subject_for(&account).await?;
         let persona = self.default_persona(&account).await?;
@@ -339,6 +347,7 @@ impl AuthService {
             grant_mask: 0,
             revoke_mask: 0,
             disabled: false,
+            authz_epoch: 0,
         };
         let class_mask = ClassesRepo(&self.pool)
             .by_name(Role::Guest.class_name())
@@ -378,11 +387,16 @@ impl AuthService {
 
     /// Token resume.
     pub async fn login_resume(&self, token_str: &str) -> Result<AuthedUser, AuthError> {
-        let Some(token) = SessionToken::decode(token_str) else {
+        let Some(old_token) = SessionToken::decode(token_str) else {
             return Err(AuthError::SessionExpired);
         };
-        let Some(account_id) = SessionsRepo(&self.pool)
-            .resume(&token.storage_hash())
+        let token = SessionToken::generate();
+        let Some((account_id, authz_epoch)) = SessionsRepo(&self.pool)
+            .rotate(
+                &old_token.storage_hash(),
+                &token.storage_hash(),
+                self.session_ttl_secs,
+            )
             .await?
         else {
             return Err(AuthError::SessionExpired);
@@ -392,6 +406,41 @@ impl AuthService {
         };
         if account.disabled {
             return Err(AuthError::Disabled);
+        }
+        if account.authz_epoch != authz_epoch {
+            return Err(AuthError::SessionExpired);
+        }
+        let subject = self.subject_for(&account).await?;
+        let persona = self.default_persona(&account).await?;
+        Ok(AuthedUser {
+            account,
+            subject,
+            persona,
+            token: Some(token),
+        })
+    }
+
+    /// Revalidate an authenticated principal immediately before a protocol
+    /// surface makes the connection live. This closes the gap between the
+    /// credential check and registration on the invalidation bus.
+    pub async fn refresh_activation(&self, user: &AuthedUser) -> Result<AuthedUser, AuthError> {
+        let Some(token) = user.token.clone() else {
+            return Ok(user.clone()); // synthetic guests have no durable account
+        };
+        let identity = SessionsRepo(&self.pool)
+            .active_account(&token.storage_hash())
+            .await?;
+        if identity != Some((user.account.id, user.account.authz_epoch)) {
+            return Err(AuthError::SessionExpired);
+        }
+        let Some(account) = AccountsRepo(&self.pool).by_id(user.account.id).await? else {
+            return Err(AuthError::SessionExpired);
+        };
+        if account.disabled {
+            return Err(AuthError::Disabled);
+        }
+        if account.authz_epoch != user.account.authz_epoch {
+            return Err(AuthError::SessionExpired);
         }
         let subject = self.subject_for(&account).await?;
         let persona = self.default_persona(&account).await?;
@@ -484,16 +533,63 @@ mod tests {
             Err(AuthError::BadCredentials)
         ));
 
-        // Resume with the issued token.
+        // Resume consumes the issued token and returns a fresh bearer.
         let token = authed.token.unwrap().encode();
         let resumed = svc.login_resume(&token).await.unwrap();
         assert_eq!(resumed.account.login, "alice");
+        let rotated = resumed.token.unwrap().encode();
+        assert_ne!(rotated, token);
+        assert!(matches!(
+            svc.login_resume(&token).await,
+            Err(AuthError::SessionExpired)
+        ));
+        assert_eq!(
+            svc.login_resume(&rotated).await.unwrap().account.login,
+            "alice"
+        );
 
         // Garbage token.
         assert!(matches!(
             svc.login_resume("garbage").await,
             Err(AuthError::SessionExpired)
         ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_resume_has_exactly_one_winner() {
+        let svc = std::sync::Arc::new(service().await);
+        svc.create_account("alice", "correct horse", Role::User)
+            .await
+            .unwrap();
+        let token = svc
+            .login_password("alice", "correct horse", None)
+            .await
+            .unwrap()
+            .token
+            .unwrap()
+            .encode();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(21));
+        let mut tasks = Vec::new();
+        for _ in 0..20 {
+            let svc = svc.clone();
+            let token = token.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                svc.login_resume(&token).await
+            }));
+        }
+        barrier.wait().await;
+        let mut winners = Vec::new();
+        for task in tasks {
+            if let Ok(user) = task.await.unwrap() {
+                winners.push(user.token.unwrap().encode());
+            }
+        }
+        assert_eq!(winners.len(), 1);
+        let successor = winners.pop().unwrap();
+        assert_ne!(successor, token);
+        assert!(svc.login_resume(&successor).await.is_ok());
     }
 
     #[tokio::test]

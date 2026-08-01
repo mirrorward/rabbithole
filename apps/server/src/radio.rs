@@ -499,6 +499,14 @@ where
             return Ok(());
         }
     };
+    let activation_gate = shared.auth_gate.read().await;
+    let authed = match shared.auth.refresh_activation(&authed).await {
+        Ok(user) => user,
+        Err(_) => {
+            wr.write_all(source_unauthorized().as_bytes()).await?;
+            return Ok(());
+        }
+    };
     if !shared
         .perms
         .allows(&authed.subject, RADIO_RESOURCE, Caps::BROADCAST)
@@ -506,6 +514,9 @@ where
         wr.write_all(source_forbidden().as_bytes()).await?;
         return Ok(());
     }
+    let session_lease = shared
+        .account_sessions
+        .register(authed.account.id, shared.next_session_id());
 
     // Claim the mount (reject if a source is already live on it). The lock is
     // released before any `.await` so the guard never crosses a suspension.
@@ -546,6 +557,7 @@ where
     let _ = shared.radio.registry.set_enabled(&slug, true);
 
     wr.write_all(source_ok(req.method).as_bytes()).await?;
+    drop(activation_gate);
     tracing::info!(mount = %slug, dj = %authed.persona.screen_name, "radio source live");
 
     // Fan the body out verbatim until the source disconnects.
@@ -554,11 +566,17 @@ where
     }
     let mut chunk = vec![0u8; SOURCE_CHUNK];
     loop {
-        let n = match rd.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
-        };
-        let _ = tx.send(Arc::from(&chunk[..n]));
+        tokio::select! {
+            biased;
+            () = session_lease.cancelled() => break,
+            read = rd.read(&mut chunk) => {
+                let n = match read {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                let _ = tx.send(Arc::from(&chunk[..n]));
+            }
+        }
     }
 
     // Source gone: drop the mount (closing every listener) and disable it.

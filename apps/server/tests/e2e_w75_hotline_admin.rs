@@ -106,14 +106,17 @@ impl Client {
     /// Expect the server to close the connection (EOF or reset), then shut
     /// our own write half down gracefully.
     async fn expect_closed(mut self) {
-        let mut buf = [0u8; 1];
-        let read = tokio::time::timeout(Duration::from_secs(5), self.stream.read(&mut buf))
-            .await
-            .expect("timed out waiting for the server to close the connection");
-        match read {
-            Ok(0) | Err(_) => {}
-            Ok(n) => panic!("expected the connection to close, got {n} more byte(s)"),
-        }
+        let mut buf = [0u8; 1024];
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match self.stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {} // drain pushes already buffered before invalidation
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for the server to close the connection");
         let _ = self.stream.shutdown().await;
     }
 }
@@ -286,8 +289,6 @@ async fn hotline_admin_account_lifecycle_roundtrips_access_mask() {
         !field_mask(&m_login, field::USER_ACCESS).has(Privilege::CreateUsers),
         "member session gets a member mask"
     );
-    mallory.close().await;
-
     // SetUser with an admin-shaped mask promotes to the admin role/class.
     let promoted = root
         .roundtrip(
@@ -300,6 +301,7 @@ async fn hotline_admin_account_lifecycle_roundtrips_access_mask() {
         )
         .await;
     assert_eq!(promoted.header.error, 0, "SetUser accepted");
+    mallory.expect_closed().await;
     let got = root
         .roundtrip(
             transaction::GET_USER,

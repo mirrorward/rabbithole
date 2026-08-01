@@ -47,6 +47,12 @@ impl ClassCache {
         self.ids.read().get(name).copied()
     }
 
+    /// Apply a class row that was already committed by a wider transaction.
+    pub fn install(&self, id: i64, name: &str, mask: u64) {
+        self.masks.write().insert(id, mask);
+        self.ids.write().insert(name.to_string(), id);
+    }
+
     /// Persist + apply a mask change (creating the class if new).
     pub async fn set(&self, pool: &SqlitePool, name: &str, mask: u64) -> Result<(), StoreError> {
         let id = ClassesRepo(pool).upsert(name, mask).await?;

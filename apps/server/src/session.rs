@@ -99,6 +99,7 @@ pub async fn run_session(
     let mut challenge_nonce: Option<[u8; 32]> = None;
     let mut verified_pubkey: Option<[u8; 32]> = None;
     let authed: AuthedUser;
+    let auth_frame: Frame;
     let mut replay_cursor: u64 = 0;
     let mut resumed = false;
 
@@ -227,16 +228,8 @@ pub async fn run_session(
 
         match attempt {
             Some(Ok(user)) => {
-                let ok = psess::AuthOk::new(
-                    user.token.as_ref().map(|t| t.encode()).unwrap_or_default(),
-                    user.account.id,
-                    user.persona.screen_name.clone(),
-                    user.account.role,
-                    shared.perms.effective(&user.subject, ""),
-                    resumed,
-                );
-                conn.send(Frame::reply_to(&frame, &ok)?).await?;
                 authed = user;
+                auth_frame = frame;
                 break;
             }
             Some(Err(e)) => {
@@ -267,6 +260,12 @@ pub async fn run_session(
         }
     }
 
+    // Subscribe before activation so product events cannot fall into the
+    // short window while the direct cancellation lease is being registered.
+    let mut bus_rx = shared.bus.subscribe();
+    let activation_gate = shared.auth_gate.read().await;
+    let authed = shared.auth.refresh_activation(&authed).await?;
+
     // ---- Active ---------------------------------------------------------
     let cfg = shared.config.read();
     let agreement = (!cfg.agreement.is_empty()).then(|| cfg.agreement.clone());
@@ -285,9 +284,29 @@ pub async fn run_session(
         // Only a key that PROVED possession is surfaced — never the raw claim.
         pubkey: verified_pubkey,
     };
+    let session_lease = shared
+        .account_sessions
+        .register(ctx.account_id, ctx.session_id);
     let motd = cfg.motd.clone();
     drop(cfg);
 
+    // The activation lease is visible before success is sent while the read
+    // gate is still held. An authorization mutation must therefore either
+    // precede this refresh or wait, invalidate this lease, and only then
+    // acknowledge the administrator.
+    let ok = psess::AuthOk::new(
+        authed
+            .token
+            .as_ref()
+            .map(|token| token.encode())
+            .unwrap_or_default(),
+        authed.account.id,
+        authed.persona.screen_name.clone(),
+        authed.account.role,
+        shared.perms.effective(&authed.subject, ""),
+        resumed,
+    );
+    conn.send(Frame::reply_to(&auth_frame, &ok)?).await?;
     shared.presence.join(PresenceEntry {
         session_id,
         account_id: ctx.account_id,
@@ -300,8 +319,7 @@ pub async fn run_session(
         pubkey: ctx.pubkey,
     });
     shared.chat.join_lobby(session_id, &ctx.screen_name);
-    // Subscribe BEFORE welcome/replay so no event falls in a gap.
-    let mut bus_rx = shared.bus.subscribe();
+    drop(activation_gate);
 
     // Replay pushes missed while disconnected (token resume) BEFORE the
     // fresh Welcome — the new Welcome gets a higher sequence and must not
@@ -350,10 +368,15 @@ pub async fn run_session(
     let result: anyhow::Result<()> = async {
         loop {
             tokio::select! {
+                biased;
+                () = session_lease.cancelled() => break,
                 incoming = conn.recv() => {
                     let Some(frame) = incoming? else { break };
                     if frame.kind != FrameKind::Request {
                         continue;
+                    }
+                    if session_lease.is_cancelled() {
+                        break;
                     }
                     handle_request(&mut conn, &frame, &shared, &mut ctx).await?;
                 }

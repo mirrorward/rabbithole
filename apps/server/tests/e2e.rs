@@ -2,8 +2,9 @@
 //! client over both transports.
 
 use burrow::Burrow;
-use rabbithole_core::Client;
+use rabbithole_core::{Client, ClientError};
 use rabbithole_proto::chat::ChatMessage;
+use rabbithole_proto::ErrorCode;
 use rabbithole_server_core::{Role, ServerConfig};
 
 fn test_config(dir: &std::path::Path) -> ServerConfig {
@@ -125,6 +126,12 @@ async fn password_login_resume_and_replay_over_ws() {
     let ok2 = c2.auth_resume(&token, cursor).await.unwrap();
     assert!(ok2.resumed);
     assert_eq!(ok2.screen_name, "alice");
+    assert_ne!(ok2.token, token, "resume rotates the bearer");
+    let mut replay = Client::connect(&ws, None, None, "e2e", "0").await.unwrap();
+    assert!(matches!(
+        replay.auth_resume(&token, cursor).await,
+        Err(ClientError::Refused(ErrorCode::SessionExpired))
+    ));
 
     let mut saw_missed = false;
     for _ in 0..10 {

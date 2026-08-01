@@ -92,6 +92,20 @@ impl Client {
         self.send(pass).await;
         self.expect(b"Command: ").await;
     }
+
+    async fn expect_closed(&mut self) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut chunk = [0u8; 1024];
+            loop {
+                match self.sock.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {} // drain output already buffered before invalidation
+                }
+            }
+        })
+        .await
+        .expect("telnet connection did not close after invalidation");
+    }
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -103,6 +117,31 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 
 // ---------------------------------------------------------------------------
 // The tests.
+
+#[tokio::test]
+async fn authorization_change_closes_active_telnet_session() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("alice", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    let mut client = Client::connect(burrow.telnet_addr.expect("telnet enabled")).await;
+    client.login("alice", "pw-pw-pw").await;
+
+    assert!(
+        burrow::admin_store::account_set(&burrow.shared, "alice", None, None, Some(true),)
+            .await
+            .unwrap()
+    );
+    client.expect_closed().await;
+
+    burrow.shutdown().await;
+}
 
 #[tokio::test]
 async fn login_shows_composed_welcome_screen() {

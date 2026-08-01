@@ -46,7 +46,51 @@ pub async fn account_set(
         },
         None => None,
     };
-    Ok(AccountsRepo(&shared.pool)
-        .admin_set(login, role, class_id, disabled)
-        .await?)
+    account_update(
+        shared,
+        login,
+        None,
+        role,
+        class_id,
+        disabled,
+        "account authorization changed",
+    )
+    .await
+}
+
+/// Atomically apply authentication/authorization changes and revoke all
+/// durable bearers, then invalidate every live protocol connection.
+pub async fn account_update(
+    shared: &Shared,
+    login: &str,
+    phc: Option<&str>,
+    role: Option<u8>,
+    class_id: Option<Option<i64>>,
+    disabled: Option<bool>,
+    reason: &str,
+) -> anyhow::Result<bool> {
+    let _gate = shared.auth_gate.write().await;
+    let Some(account_id) = AccountsRepo(&shared.pool)
+        .admin_update_and_revoke_sessions(login, phc, role, class_id, disabled)
+        .await?
+    else {
+        return Ok(false);
+    };
+    shared.invalidate_account_sessions(account_id, reason);
+    Ok(true)
+}
+
+/// Persist a class mask and invalidate every current member. The write gate
+/// ensures a connection either activates before this change (and registers a
+/// cancellation lease) or authenticates afterward under the new mask.
+pub async fn class_set(shared: &Shared, name: &str, base_mask: u64) -> anyhow::Result<()> {
+    let _gate = shared.auth_gate.write().await;
+    let (class_id, account_ids) = ClassesRepo(&shared.pool)
+        .set_mask_and_revoke_sessions(name, base_mask)
+        .await?;
+    shared.classes.install(class_id, name, base_mask);
+    for account_id in account_ids {
+        shared.invalidate_account_sessions(account_id, "permission class changed");
+    }
+    Ok(())
 }

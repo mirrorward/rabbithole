@@ -84,6 +84,13 @@ newer than the cursor from a bounded in-memory ring (best-effort — a
 long-offline client re-syncs from state instead). Guests are not
 resumable (`AuthOk.token` is empty).
 
+Every successful `AuthResume` consumes the presented bearer and returns a
+replacement in `AuthOk.token`; clients must persist that replacement before
+the next reconnect. Account disable, password/role/class changes, and class
+mask changes revoke all bearers for the affected account(s) and disconnect
+their active protocol sessions. Re-enabling an account never revives an older
+bearer.
+
 ## Errors
 
 `Unauthenticated` bad credentials · `TotpRequired` 2FA code needed ·

@@ -348,10 +348,7 @@ pub async fn handle(
         if !ctx.allows(shared, "admin", Caps::ACCOUNT_ADMIN) {
             fail!(ErrorCode::Forbidden);
         }
-        shared
-            .classes
-            .set(&shared.pool, &req.name, req.base_mask)
-            .await?;
+        crate::admin_store::class_set(shared, &req.name, req.base_mask).await?;
         audit(
             shared,
             &ctx.login,

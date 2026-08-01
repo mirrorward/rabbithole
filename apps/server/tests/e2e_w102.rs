@@ -74,6 +74,44 @@ impl NntpClient {
             .await
             .unwrap();
     }
+
+    async fn expect_closed(&mut self) {
+        let mut line = String::new();
+        let read = tokio::time::timeout(Duration::from_secs(5), self.reader.read_line(&mut line))
+            .await
+            .expect("NNTP connection did not close after invalidation")
+            .unwrap();
+        assert_eq!(read, 0, "expected NNTP EOF, got {line:?}");
+    }
+}
+
+#[tokio::test]
+async fn authorization_change_closes_authenticated_nntp_session() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("alice", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    let mut client = NntpClient::connect(burrow.nntp_addr.expect("nntp enabled")).await;
+    assert!(client.read_line().await.starts_with("200"));
+    client.send("AUTHINFO USER alice").await;
+    assert!(client.read_line().await.starts_with("381"));
+    client.send("AUTHINFO PASS pw-pw-pw").await;
+    assert!(client.read_line().await.starts_with("281"));
+
+    assert!(
+        burrow::admin_store::account_set(&burrow.shared, "alice", None, None, Some(true),)
+            .await
+            .unwrap()
+    );
+    client.expect_closed().await;
+
+    burrow.shutdown().await;
 }
 
 #[tokio::test]

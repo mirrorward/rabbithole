@@ -17,6 +17,10 @@ fn test_config(dir: &std::path::Path) -> ServerConfig {
         quic_addr: "127.0.0.1:0".parse().unwrap(),
         ws_addr: "127.0.0.1:0".parse().unwrap(),
         data_dir: dir.to_path_buf(),
+        // The lifecycle test deliberately opens more than the default
+        // per-IP burst so it can model several independent live bearers.
+        ratelimit_conn_per_min: 600,
+        ratelimit_conn_burst: 100,
         ..ServerConfig::default()
     }
 }
@@ -274,14 +278,25 @@ async fn admin_family_classes_broadcast_kick() {
         .create_account("pleb", "pleb-pw", Role::User)
         .await
         .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("operator", "operator-pw", Role::Admin)
+        .await
+        .unwrap();
 
     let mut admin = connect(&burrow).await;
     admin.auth_password("root", "root-pw").await.unwrap();
     admin.expect_welcome().await.unwrap();
 
     let mut pleb = connect(&burrow).await;
-    pleb.auth_password("pleb", "pleb-pw").await.unwrap();
+    let pleb_login = pleb.auth_password("pleb", "pleb-pw").await.unwrap();
+    let pre_class_token_a = pleb_login.token;
     pleb.expect_welcome().await.unwrap();
+    let mut pleb_two = connect(&burrow).await;
+    let pleb_two_login = pleb_two.auth_password("pleb", "pleb-pw").await.unwrap();
+    let pre_class_token_b = pleb_two_login.token;
+    pleb_two.expect_welcome().await.unwrap();
 
     // Non-admin denied everywhere.
     assert!(matches!(
@@ -290,21 +305,15 @@ async fn admin_family_classes_broadcast_kick() {
         Err(ClientError::Refused(ErrorCode::Forbidden))
     ));
 
-    // Class list + live inheritance: strip CHAT_SEND from members mid-session.
+    // A class-mask change invalidates every live member and all of their
+    // independently issued bearers.
     let classes: padm::ClassList = admin.request(&padm::ClassListRequest).await.unwrap();
     let member = classes.classes.iter().find(|c| c.name == "member").unwrap();
     assert!(member.members >= 1);
 
     pleb.chat_send("lobby", "before").await.unwrap();
-    let stripped = member.base_mask & !Caps::CHAT_SEND.0;
-    admin
-        .request_ack(&padm::ClassSet::new("member", stripped))
-        .await
-        .unwrap();
-    // Note: User role default still grants CHAT_SEND; revoke via account
-    // grant/revoke isn't the class path. To observe class-only effect, use
-    // a capability the role default lacks: give members DROPBOX_VIEW.
-    let with_dropbox = stripped | Caps::DROPBOX_VIEW.0;
+    pleb_two.chat_send("lobby", "before-two").await.unwrap();
+    let with_dropbox = member.base_mask | Caps::DROPBOX_VIEW.0;
     admin
         .request_ack(&padm::ClassSet::new("member", with_dropbox))
         .await
@@ -315,6 +324,72 @@ async fn admin_family_classes_broadcast_kick() {
         member_now.base_mask, with_dropbox,
         "class change persisted + live"
     );
+    assert!(
+        pleb.chat_send("lobby", "after class change").await.is_err(),
+        "first class member session retained cached authorization"
+    );
+    assert!(
+        pleb_two
+            .chat_send("lobby", "after class change-two")
+            .await
+            .is_err(),
+        "second class member session retained cached authorization"
+    );
+    let mut stale = connect(&burrow).await;
+    assert!(matches!(
+        stale.auth_resume(&pre_class_token_a, 0).await,
+        Err(ClientError::Refused(ErrorCode::SessionExpired))
+    ));
+    let mut stale = connect(&burrow).await;
+    assert!(matches!(
+        stale.auth_resume(&pre_class_token_b, 0).await,
+        Err(ClientError::Refused(ErrorCode::SessionExpired))
+    ));
+
+    // Demotion is account-wide too: every live admin connection closes and
+    // neither pre-demotion bearer can be resumed.
+    let mut operator_a = connect(&burrow).await;
+    let operator_a_login = operator_a
+        .auth_password("operator", "operator-pw")
+        .await
+        .unwrap();
+    operator_a.expect_welcome().await.unwrap();
+    let mut operator_b = connect(&burrow).await;
+    let operator_b_login = operator_b
+        .auth_password("operator", "operator-pw")
+        .await
+        .unwrap();
+    operator_b.expect_welcome().await.unwrap();
+    let mut set = padm::AccountSet::new("operator");
+    set.role = Some(Role::User as u8);
+    set.class = Some("member".into());
+    admin.request_ack(&set).await.unwrap();
+    assert!(
+        operator_a
+            .request::<_, padm::AccountList>(&padm::AccountListRequest::new(0, 10))
+            .await
+            .is_err(),
+        "first demoted session retained admin authority"
+    );
+    assert!(
+        operator_b
+            .request::<_, padm::AccountList>(&padm::AccountListRequest::new(0, 10))
+            .await
+            .is_err(),
+        "second demoted session retained admin authority"
+    );
+    for token in [operator_a_login.token, operator_b_login.token] {
+        let mut stale = connect(&burrow).await;
+        assert!(matches!(
+            stale.auth_resume(&token, 0).await,
+            Err(ClientError::Refused(ErrorCode::SessionExpired))
+        ));
+    }
+
+    let mut pleb = connect(&burrow).await;
+    let pleb_login = pleb.auth_password("pleb", "pleb-pw").await.unwrap();
+    let pre_disable_token = pleb_login.token;
+    pleb.expect_welcome().await.unwrap();
 
     // Account admin: list + disable.
     let list: padm::AccountList = admin
@@ -325,6 +400,15 @@ async fn admin_family_classes_broadcast_kick() {
     let mut set = padm::AccountSet::new("pleb");
     set.disabled = Some(true);
     admin.request_ack(&set).await.unwrap();
+    assert!(
+        pleb.chat_send("lobby", "after disable").await.is_err(),
+        "disable closes an already-active session"
+    );
+    let mut stale = connect(&burrow).await;
+    assert!(matches!(
+        stale.auth_resume(&pre_disable_token, 0).await,
+        Err(ClientError::Refused(ErrorCode::SessionExpired))
+    ));
     let mut denied = connect(&burrow).await;
     assert!(matches!(
         denied.auth_password("pleb", "pleb-pw").await,
@@ -333,6 +417,14 @@ async fn admin_family_classes_broadcast_kick() {
     let mut set = padm::AccountSet::new("pleb");
     set.disabled = Some(false);
     admin.request_ack(&set).await.unwrap();
+    let mut stale = connect(&burrow).await;
+    assert!(matches!(
+        stale.auth_resume(&pre_disable_token, 0).await,
+        Err(ClientError::Refused(ErrorCode::SessionExpired))
+    ));
+    let mut pleb = connect(&burrow).await;
+    pleb.auth_password("pleb", "pleb-pw").await.unwrap();
+    pleb.expect_welcome().await.unwrap();
 
     // Broadcast reaches sessions as ServerNotice.
     admin

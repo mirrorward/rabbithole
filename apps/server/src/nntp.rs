@@ -421,6 +421,8 @@ where
         group: None,
         article: None,
     };
+    let mut bus_rx = shared.bus.subscribe();
+    let mut session_lease: Option<crate::account_sessions::AccountSessionLease> = None;
 
     // Greeting: posting is offered (the client authenticates before POST).
     // A STARTTLS upgrade resumes without one (RFC 4642 §2.2.2). A fresh
@@ -440,7 +442,35 @@ where
         // here, so no response can be left stranded in the record buffer).
         reader.get_mut().flush().await?;
         line.clear();
-        if reader.read_line(&mut line).await? == 0 {
+        let read = loop {
+            tokio::select! {
+                biased;
+                () = async {
+                    match session_lease.as_ref() {
+                        Some(lease) => lease.cancelled().await,
+                        None => std::future::pending().await,
+                    }
+                } => return Ok(SessionEnd::Closed),
+                read = reader.read_line(&mut line) => break read?,
+                event = bus_rx.recv() => {
+                    match event {
+                        Ok(ServerEvent::Shutdown) => return Ok(SessionEnd::Closed),
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n))
+                            if session.authed.is_some() =>
+                        {
+                            tracing::warn!(missed = n, "authenticated NNTP session lagged behind the bus; closing fail-closed");
+                            return Ok(SessionEnd::Closed);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            return Ok(SessionEnd::Closed);
+                        }
+                    }
+                }
+            }
+        };
+        if read == 0 {
             break; // client hung up
         }
         // Coarse per-IP legacy command budget: refuse the command (400
@@ -464,6 +494,12 @@ where
                 continue;
             }
         };
+        if session_lease
+            .as_ref()
+            .is_some_and(|lease| lease.is_cancelled())
+        {
+            return Ok(SessionEnd::Closed);
+        }
 
         // RFC 4643 §2.3.1: AUTHINFO carries credentials, so it is refused on
         // an unsecured connection while the gate is up (483 — encryption
@@ -574,6 +610,7 @@ where
                         break;
                     }
                 }
+                let mut activation_gate = None;
                 let status = match session.pending_user.take() {
                     None => Status::AuthSequenceError,
                     Some(user) => match shared.auth.login_password(&user, &pass, None).await {
@@ -581,8 +618,19 @@ where
                         // with 481 — right password, wrong standing.
                         Ok(u) if u.subject.role < session.min_role() => Status::AuthRejected,
                         Ok(u) => {
-                            session.authed = Some(u);
-                            Status::AuthAccepted
+                            let gate = shared.auth_gate.read().await;
+                            match shared.auth.refresh_activation(&u).await {
+                                Ok(u) => {
+                                    let lease = shared
+                                        .account_sessions
+                                        .register(u.account.id, shared.next_session_id());
+                                    session.authed = Some(u);
+                                    session_lease = Some(lease);
+                                    activation_gate = Some(gate);
+                                    Status::AuthAccepted
+                                }
+                                Err(_) => Status::AuthRejected,
+                            }
                         }
                         Err(_) => Status::AuthRejected,
                     },
@@ -591,6 +639,7 @@ where
                     .get_mut()
                     .write_all(status.response().render().as_bytes())
                     .await?;
+                drop(activation_gate);
                 if status == Status::AuthRejected {
                     if let Some(ip) = peer_ip {
                         if !shared.rate_allow(Scope::Ip(ip), rl::AUTH) {

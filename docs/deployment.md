@@ -167,6 +167,10 @@ docker compose logs -f burrow
 Data persists in the named `burrow-data` volume mounted at `/data`
 (`RABBITHOLE_DATA_DIR=/data` is baked into the image).
 
+Upgrading across the authorization-epoch migration invalidates pre-upgrade
+session bearers once; members must sign in again. This is deliberate because
+older session rows were not bound to the account authorization state.
+
 ## Path 3 — systemd
 
 Install the binary and unit, create the service user, and enable it:

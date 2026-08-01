@@ -167,6 +167,21 @@ async fn source_pushes_and_listener_receives_with_metadata_at_boundary() {
         "audio resumes after the metadata block"
     );
 
+    // Account invalidation directly cancels this long-lived source; it does
+    // not depend on presence or delivery through the broadcast bus.
+    assert!(
+        burrow::admin_store::account_set(&burrow.shared, "dj", None, None, Some(true))
+            .await
+            .unwrap()
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while burrow.shared.radio.is_live("live") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("radio source did not close after invalidation");
+
     burrow.shutdown().await;
 }
 

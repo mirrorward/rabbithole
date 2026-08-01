@@ -20,6 +20,7 @@ pub struct Account {
     pub grant_mask: u64,
     pub revoke_mask: u64,
     pub disabled: bool,
+    pub authz_epoch: i64,
 }
 
 fn row_to_account(row: &sqlx::sqlite::SqliteRow) -> Account {
@@ -33,6 +34,7 @@ fn row_to_account(row: &sqlx::sqlite::SqliteRow) -> Account {
         grant_mask: row.get::<i64, _>("grant_mask") as u64,
         revoke_mask: row.get::<i64, _>("revoke_mask") as u64,
         disabled: row.get::<i64, _>("disabled") != 0,
+        authz_epoch: row.get("authz_epoch"),
     }
 }
 
@@ -85,6 +87,33 @@ impl AccountsRepo<'_> {
             .execute(self.0)
             .await?;
         Ok(())
+    }
+
+    /// Replace a password hash and revoke every bearer for the account in
+    /// the same SQLite write transaction.
+    pub async fn update_phc_and_revoke_sessions(
+        &self,
+        id: i64,
+        phc: &str,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.0.begin().await?;
+        let affected =
+            sqlx::query("UPDATE accounts SET phc = ?, authz_epoch = authz_epoch + 1 WHERE id = ?")
+                .bind(phc)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        if affected == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("DELETE FROM sessions WHERE account_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     pub async fn count(&self) -> Result<i64, StoreError> {
@@ -157,6 +186,48 @@ impl AccountsRepo<'_> {
         .rows_affected();
         Ok(affected > 0)
     }
+
+    /// Apply account authorization edits and revoke every bearer atomically.
+    /// Returns the changed account id, or `None` when `login` did not exist.
+    pub async fn admin_update_and_revoke_sessions(
+        &self,
+        login: &str,
+        phc: Option<&str>,
+        role: Option<u8>,
+        class_id: Option<Option<i64>>,
+        disabled: Option<bool>,
+    ) -> Result<Option<i64>, StoreError> {
+        let mut tx = self.0.begin().await?;
+        let row = sqlx::query(
+            "UPDATE accounts SET
+               phc = COALESCE(?, phc),
+               role = COALESCE(?, role),
+               class_id = CASE WHEN ? THEN ? ELSE class_id END,
+               disabled = COALESCE(?, disabled),
+               authz_epoch = authz_epoch + 1
+             WHERE login = ?
+             RETURNING id",
+        )
+        .bind(phc)
+        .bind(role.map(|r| r as i64))
+        .bind(class_id.is_some())
+        .bind(class_id.flatten())
+        .bind(disabled.map(|d| d as i64))
+        .bind(login)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let id: i64 = row.get("id");
+        sqlx::query("DELETE FROM sessions WHERE account_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(Some(id))
+    }
 }
 
 /// A permission class row.
@@ -201,6 +272,47 @@ impl ClassesRepo<'_> {
             .execute(self.0)
             .await?;
         Ok(())
+    }
+
+    /// Create/update a class and revoke every bearer belonging to its current
+    /// members in one SQLite write transaction. Returns those account ids so
+    /// live connections can be invalidated after the durable commit.
+    pub async fn set_mask_and_revoke_sessions(
+        &self,
+        name: &str,
+        mask: u64,
+    ) -> Result<(i64, Vec<i64>), StoreError> {
+        let mut tx = self.0.begin().await?;
+        let id: i64 = sqlx::query(
+            "INSERT INTO classes (name, base_mask) VALUES (?, ?)
+             ON CONFLICT (name) DO UPDATE SET base_mask = excluded.base_mask
+             RETURNING id",
+        )
+        .bind(name)
+        .bind(mask as i64)
+        .fetch_one(&mut *tx)
+        .await?
+        .get("id");
+        let account_ids: Vec<i64> =
+            sqlx::query("SELECT id FROM accounts WHERE class_id = ? ORDER BY id")
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?
+                .iter()
+                .map(|row| row.get("id"))
+                .collect();
+        sqlx::query("UPDATE accounts SET authz_epoch = authz_epoch + 1 WHERE class_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "DELETE FROM sessions WHERE account_id IN (SELECT id FROM accounts WHERE class_id = ?)",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok((id, account_ids))
     }
 
     pub async fn all(&self) -> Result<Vec<Class>, StoreError> {
@@ -252,31 +364,100 @@ impl SessionsRepo<'_> {
         &self,
         token_hash: &[u8; 32],
         account_id: i64,
+        authz_epoch: i64,
         ttl_secs: i64,
     ) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO sessions (token_hash, account_id, created_at, expires_at, last_seen)
-             VALUES (?, ?, unixepoch(), unixepoch() + ?, unixepoch())",
+            "INSERT INTO sessions
+                (token_hash, account_id, authz_epoch, created_at, expires_at, last_seen)
+             VALUES (?, ?, ?, unixepoch(), unixepoch() + ?, unixepoch())",
         )
         .bind(token_hash.as_slice())
         .bind(account_id)
+        .bind(authz_epoch)
         .bind(ttl_secs)
         .execute(self.0)
         .await?;
         Ok(())
     }
 
-    /// Look up a live (unexpired) session, touching last_seen.
-    pub async fn resume(&self, token_hash: &[u8; 32]) -> Result<Option<i64>, StoreError> {
-        let row = sqlx::query(
-            "UPDATE sessions SET last_seen = unixepoch()
-             WHERE token_hash = ? AND expires_at > unixepoch()
-             RETURNING account_id",
+    /// Issue a token only while the account is enabled and still at the
+    /// authorization epoch observed during credential verification.
+    pub async fn insert_if_current(
+        &self,
+        token_hash: &[u8; 32],
+        account_id: i64,
+        authz_epoch: i64,
+        ttl_secs: i64,
+    ) -> Result<bool, StoreError> {
+        Ok(sqlx::query(
+            "INSERT INTO sessions
+                (token_hash, account_id, authz_epoch, created_at, expires_at, last_seen)
+             SELECT ?, id, authz_epoch, unixepoch(), unixepoch() + ?, unixepoch()
+             FROM accounts
+             WHERE id = ? AND disabled = 0 AND authz_epoch = ?",
         )
         .bind(token_hash.as_slice())
-        .fetch_optional(self.0)
+        .bind(ttl_secs)
+        .bind(account_id)
+        .bind(authz_epoch)
+        .execute(self.0)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// Atomically consume one live token and replace it with a fresh token.
+    ///
+    /// The delete and insert share one SQLite write transaction, so two
+    /// concurrent resume attempts with the same bearer cannot both succeed.
+    /// `ttl_secs` deliberately starts a fresh lifetime for the rotated token.
+    pub async fn rotate(
+        &self,
+        old_hash: &[u8; 32],
+        new_hash: &[u8; 32],
+        ttl_secs: i64,
+    ) -> Result<Option<(i64, i64)>, StoreError> {
+        let mut tx = self.0.begin().await?;
+        let row = sqlx::query(
+            "DELETE FROM sessions
+             WHERE token_hash = ? AND expires_at > unixepoch()
+             RETURNING account_id, authz_epoch",
+        )
+        .bind(old_hash.as_slice())
+        .fetch_optional(&mut *tx)
         .await?;
-        Ok(row.map(|r| r.get("account_id")))
+        let Some(row) = row else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let account_id: i64 = row.get("account_id");
+        let authz_epoch: i64 = row.get("authz_epoch");
+        let current = sqlx::query(
+            "SELECT 1 FROM accounts
+             WHERE id = ? AND disabled = 0 AND authz_epoch = ?",
+        )
+        .bind(account_id)
+        .bind(authz_epoch)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if current.is_none() {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        sqlx::query(
+            "INSERT INTO sessions
+                (token_hash, account_id, authz_epoch, created_at, expires_at, last_seen)
+             VALUES (?, ?, ?, unixepoch(), unixepoch() + ?, unixepoch())",
+        )
+        .bind(new_hash.as_slice())
+        .bind(account_id)
+        .bind(authz_epoch)
+        .bind(ttl_secs)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some((account_id, authz_epoch)))
     }
 
     pub async fn revoke(&self, token_hash: &[u8; 32]) -> Result<(), StoreError> {
@@ -285,6 +466,33 @@ impl SessionsRepo<'_> {
             .execute(self.0)
             .await?;
         Ok(())
+    }
+
+    /// Resolve an unexpired bearer without consuming or extending it.
+    pub async fn active_account(
+        &self,
+        token_hash: &[u8; 32],
+    ) -> Result<Option<(i64, i64)>, StoreError> {
+        Ok(sqlx::query(
+            "SELECT s.account_id, s.authz_epoch
+             FROM sessions s
+             JOIN accounts a ON a.id = s.account_id
+             WHERE s.token_hash = ? AND s.expires_at > unixepoch()
+               AND a.disabled = 0 AND a.authz_epoch = s.authz_epoch",
+        )
+        .bind(token_hash.as_slice())
+        .fetch_optional(self.0)
+        .await?
+        .map(|row| (row.get("account_id"), row.get("authz_epoch"))))
+    }
+
+    /// Revoke every resumable bearer belonging to an account.
+    pub async fn revoke_account(&self, account_id: i64) -> Result<u64, StoreError> {
+        Ok(sqlx::query("DELETE FROM sessions WHERE account_id = ?")
+            .bind(account_id)
+            .execute(self.0)
+            .await?
+            .rows_affected())
     }
 
     /// Remove expired sessions; returns how many were reaped.
@@ -442,17 +650,219 @@ mod tests {
         let a = accounts.create("bob", None, "Bob", 1, None).await.unwrap();
 
         let hash = [7u8; 32];
-        sessions.insert(&hash, a.id, 3600).await.unwrap();
-        assert_eq!(sessions.resume(&hash).await.unwrap(), Some(a.id));
+        sessions
+            .insert(&hash, a.id, a.authz_epoch, 3600)
+            .await
+            .unwrap();
+        let rotated = [8u8; 32];
+        assert_eq!(
+            sessions.rotate(&hash, &rotated, 3600).await.unwrap(),
+            Some((a.id, a.authz_epoch))
+        );
+        assert_eq!(
+            sessions.rotate(&hash, &[6u8; 32], 3600).await.unwrap(),
+            None,
+            "a resumed bearer is single-use"
+        );
 
         // Expired token doesn't resume and gets reaped.
         let stale = [9u8; 32];
-        sessions.insert(&stale, a.id, -10).await.unwrap();
-        assert_eq!(sessions.resume(&stale).await.unwrap(), None);
+        sessions
+            .insert(&stale, a.id, a.authz_epoch, -10)
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions.rotate(&stale, &[5u8; 32], 3600).await.unwrap(),
+            None
+        );
         assert_eq!(sessions.reap_expired().await.unwrap(), 1);
 
-        sessions.revoke(&hash).await.unwrap();
-        assert_eq!(sessions.resume(&hash).await.unwrap(), None);
+        sessions.revoke(&rotated).await.unwrap();
+        assert_eq!(
+            sessions.rotate(&rotated, &[4u8; 32], 3600).await.unwrap(),
+            None
+        );
+
+        sessions
+            .insert(&[1u8; 32], a.id, a.authz_epoch, 3600)
+            .await
+            .unwrap();
+        sessions
+            .insert(&[2u8; 32], a.id, a.authz_epoch, 3600)
+            .await
+            .unwrap();
+        assert_eq!(sessions.revoke_account(a.id).await.unwrap(), 2);
+        assert_eq!(
+            sessions.rotate(&[1u8; 32], &[3u8; 32], 3600).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_mutations_bump_epoch_and_revoke_scoped_bearers() {
+        let pool = open_in_memory().await.unwrap();
+        let accounts = AccountsRepo(&pool);
+        let classes = ClassesRepo(&pool);
+        let sessions = SessionsRepo(&pool);
+        let member = classes.by_name("member").await.unwrap().unwrap();
+        let alice = accounts
+            .create("alice", None, "Alice", 1, Some(member.id))
+            .await
+            .unwrap();
+        let bob = accounts
+            .create("bob", None, "Bob", 1, Some(member.id))
+            .await
+            .unwrap();
+        sessions
+            .insert(&[1u8; 32], alice.id, alice.authz_epoch, 3600)
+            .await
+            .unwrap();
+        sessions
+            .insert(&[2u8; 32], bob.id, bob.authz_epoch, 3600)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            accounts
+                .admin_update_and_revoke_sessions("alice", None, Some(2), None, None)
+                .await
+                .unwrap(),
+            Some(alice.id)
+        );
+        let alice_now = accounts.by_id(alice.id).await.unwrap().unwrap();
+        assert_eq!(alice_now.authz_epoch, alice.authz_epoch + 1);
+        assert_eq!(sessions.active_account(&[1u8; 32]).await.unwrap(), None);
+        assert!(
+            !sessions
+                .insert_if_current(&[9u8; 32], alice.id, alice.authz_epoch, 3600)
+                .await
+                .unwrap(),
+            "a credential check from the prior epoch cannot issue after mutation"
+        );
+        assert_eq!(
+            sessions.active_account(&[2u8; 32]).await.unwrap(),
+            Some((bob.id, bob.authz_epoch)),
+            "another account is unaffected"
+        );
+
+        sessions
+            .insert(&[3u8; 32], alice.id, alice_now.authz_epoch, 3600)
+            .await
+            .unwrap();
+        let (class_id, affected) = classes
+            .set_mask_and_revoke_sessions("member", 0x55)
+            .await
+            .unwrap();
+        assert_eq!(class_id, member.id);
+        assert_eq!(affected, vec![alice.id, bob.id]);
+        assert_eq!(sessions.active_account(&[2u8; 32]).await.unwrap(), None);
+        assert_eq!(sessions.active_account(&[3u8; 32]).await.unwrap(), None);
+        assert_eq!(
+            accounts.by_id(alice.id).await.unwrap().unwrap().authz_epoch,
+            alice_now.authz_epoch + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_and_resume_races_cannot_survive_an_authorization_change() {
+        let work = tempfile::tempdir().unwrap();
+        let pool = crate::open(&work.path().join("authz-races.sqlite"))
+            .await
+            .unwrap();
+        let account = AccountsRepo(&pool)
+            .create("alice", None, "Alice", 1, None)
+            .await
+            .unwrap();
+
+        for round in 0..20u8 {
+            let before = AccountsRepo(&pool)
+                .by_id(account.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let issued_hash = [round; 32];
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+
+            let issue_pool = pool.clone();
+            let issue_barrier = barrier.clone();
+            let issue = tokio::spawn(async move {
+                issue_barrier.wait().await;
+                SessionsRepo(&issue_pool)
+                    .insert_if_current(&issued_hash, before.id, before.authz_epoch, 3600)
+                    .await
+                    .unwrap()
+            });
+
+            let mutation_pool = pool.clone();
+            let mutation_barrier = barrier.clone();
+            let mutate = tokio::spawn(async move {
+                mutation_barrier.wait().await;
+                AccountsRepo(&mutation_pool)
+                    .admin_update_and_revoke_sessions("alice", None, Some(before.role), None, None)
+                    .await
+                    .unwrap()
+            });
+
+            barrier.wait().await;
+            let _issued_before_mutation = issue.await.unwrap();
+            assert_eq!(mutate.await.unwrap(), Some(account.id));
+            assert_eq!(
+                SessionsRepo(&pool)
+                    .active_account(&issued_hash)
+                    .await
+                    .unwrap(),
+                None,
+                "round {round}: a password-login issuance race left a usable bearer"
+            );
+
+            let current = AccountsRepo(&pool)
+                .by_id(account.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let old_hash = [round.wrapping_add(64); 32];
+            let successor_hash = [round.wrapping_add(128); 32];
+            SessionsRepo(&pool)
+                .insert(&old_hash, current.id, current.authz_epoch, 3600)
+                .await
+                .unwrap();
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+
+            let resume_pool = pool.clone();
+            let resume_barrier = barrier.clone();
+            let resume = tokio::spawn(async move {
+                resume_barrier.wait().await;
+                SessionsRepo(&resume_pool)
+                    .rotate(&old_hash, &successor_hash, 3600)
+                    .await
+                    .unwrap()
+            });
+
+            let mutation_pool = pool.clone();
+            let mutation_barrier = barrier.clone();
+            let mutate = tokio::spawn(async move {
+                mutation_barrier.wait().await;
+                AccountsRepo(&mutation_pool)
+                    .admin_update_and_revoke_sessions("alice", None, Some(current.role), None, None)
+                    .await
+                    .unwrap()
+            });
+
+            barrier.wait().await;
+            let _resumed_before_mutation = resume.await.unwrap();
+            assert_eq!(mutate.await.unwrap(), Some(account.id));
+            let sessions = SessionsRepo(&pool);
+            assert_eq!(
+                sessions.active_account(&old_hash).await.unwrap(),
+                None,
+                "round {round}: the consumed bearer survived its mutation race"
+            );
+            assert_eq!(
+                sessions.active_account(&successor_hash).await.unwrap(),
+                None,
+                "round {round}: the rotated successor survived its mutation race"
+            );
+        }
     }
 
     #[tokio::test]

@@ -925,6 +925,27 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
         return Ok(());
     }
 
+    // Subscribe before activation so product events cannot fall into the
+    // short window while the direct cancellation lease is being registered.
+    let mut bus_rx = shared.bus.subscribe();
+    let activation_gate = shared.auth_gate.read().await;
+    let authed = match shared.auth.refresh_activation(&authed).await {
+        Ok(user) => user,
+        Err(_) => {
+            wr.write_all(
+                &Transaction::reply(
+                    transaction::LOGIN,
+                    login_txn.header.id,
+                    1,
+                    vec![Field::text(field::ERROR_TEXT, "login expired")],
+                )
+                .encode(),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
     // Surface minimum (`hotline_min_role`, live): guests and accounts below
     // it are refused with a login error naming the requirement.
     let min_role =
@@ -953,6 +974,9 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
     let screen_name = want_name.unwrap_or_else(|| authed.persona.screen_name.clone());
     let session_id = shared.next_session_id();
     let user_id = session_id as u32;
+    let session_lease = shared
+        .account_sessions
+        .register(authed.account.id, session_id);
 
     // 4. Login reply: success carries a server version + name, plus the
     //    session's access bitmap (projected from role + capabilities) so real
@@ -991,7 +1015,6 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
 
     // 5. Join the shared world. Subscribe to the bus BEFORE joining presence so
     //    no roster delta falls into a gap.
-    let mut bus_rx = shared.bus.subscribe();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     shared.hotline.register(user_id, out_tx, icon, peer_ip);
     shared.stats.incr("hotline", "logins");
@@ -1008,6 +1031,7 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
         pubkey: None,
     });
     shared.chat.join_lobby(session_id, &screen_name);
+    drop(activation_gate);
     tracing::info!(user_id, name = %screen_name, "hotline client logged in");
 
     let mut active = Active {
@@ -1026,8 +1050,13 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
     let result: Result<()> = async {
         loop {
             tokio::select! {
+                biased;
+                () = session_lease.cancelled() => break,
                 inbound = rx_in.recv() => {
                     let Some(txn) = inbound else { break };
+                    if session_lease.is_cancelled() {
+                        break;
+                    }
                     handle_txn(&mut wr, &txn, &shared, &mut active).await?;
                 }
                 ev = bus_rx.recv() => {
@@ -2893,22 +2922,20 @@ async fn delete_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -
     {
         return err_reply(ty, id, "cannot delete that account");
     }
-    match AccountsRepo(&shared.pool)
-        .admin_set(&login, None, None, Some(true))
-        .await
+    match crate::admin_store::account_update(
+        shared,
+        &login,
+        None,
+        None,
+        None,
+        Some(true),
+        "account deleted",
+    )
+    .await
     {
         Ok(true) => {}
         Ok(false) => return err_reply(ty, id, "no such account"),
         Err(e) => return err_reply(ty, id, &format!("{e}")),
-    }
-    // Classic servers drop the deleted account's live sessions.
-    for e in shared.presence.snapshot() {
-        if e.account_id == account.id {
-            shared.bus.publish(ServerEvent::Kick {
-                session_id: e.session_id,
-                reason: "account deleted".into(),
-            });
-        }
     }
     audit(
         shared,
@@ -2979,6 +3006,9 @@ async fn set_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> T
     };
 
     let mut detail = Vec::new();
+    let mut new_phc = None;
+    let mut new_role = None;
+    let mut new_class = None;
 
     // Password: empty means unchanged (GetUser sends an empty placeholder).
     let password = field_text_deobf(txn, field::USER_PASSWORD);
@@ -2986,12 +3016,7 @@ async fn set_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> T
         let Ok(phc) = hash_password(&password) else {
             return err_reply(ty, id, "password rejected");
         };
-        if let Err(e) = AccountsRepo(&shared.pool)
-            .update_phc(account.id, &phc)
-            .await
-        {
-            return err_reply(ty, id, &format!("{e}"));
-        }
+        new_phc = Some(phc);
         detail.push("password".to_string());
     }
 
@@ -3003,30 +3028,27 @@ async fn set_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> T
         let wanted = role_for_access(&mask);
         if wanted != current && current != Role::Superuser {
             let class = shared.classes.id_by_name(wanted.class_name());
-            match AccountsRepo(&shared.pool)
-                .admin_set(&login, Some(wanted as u8), Some(class), None)
-                .await
-            {
-                Ok(true) => detail.push(format!("role={wanted:?}")),
-                Ok(false) => return err_reply(ty, id, "no such account"),
-                Err(e) => return err_reply(ty, id, &format!("{e}")),
-            }
-            // Push the new bitmap (UserAccess, 354) to the account's live
-            // Hotline sessions so their menus update immediately.
-            if let Ok(Some(updated)) = AccountsRepo(&shared.pool).by_login(&login).await {
-                let mask = access_mask_for(wanted, account_base_caps(shared, &updated));
-                let push = Transaction::request(
-                    transaction::USER_ACCESS,
-                    0,
-                    vec![Field::new(field::USER_ACCESS, mask.to_bytes().to_vec())],
-                )
-                .encode();
-                for e in shared.presence.snapshot() {
-                    if e.account_id == account.id {
-                        shared.hotline.deliver(e.session_id as u32, push.clone());
-                    }
-                }
-            }
+            new_role = Some(wanted as u8);
+            new_class = Some(class);
+            detail.push(format!("role={wanted:?}"));
+        }
+    }
+
+    if !detail.is_empty() {
+        match crate::admin_store::account_update(
+            shared,
+            &login,
+            new_phc.as_deref(),
+            new_role,
+            new_class,
+            None,
+            "account credentials or authorization changed",
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => return err_reply(ty, id, "no such account"),
+            Err(e) => return err_reply(ty, id, &format!("{e}")),
         }
     }
 

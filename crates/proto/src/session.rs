@@ -96,7 +96,8 @@ impl Message for AuthResume {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthOk {
     /// Bearer token for [`AuthResume`] (empty for guests — guest sessions
-    /// are not resumable).
+    /// are not resumable). A resume consumes its presented token and returns
+    /// a fresh replacement here.
     pub token: String,
     pub account_id: i64,
     pub screen_name: String,

@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod account_sessions;
 pub mod admin_store;
 pub mod backup;
 pub mod ctl;
@@ -62,6 +63,11 @@ pub struct Shared {
     pub bus: EventBus,
     pub pool: SqlitePool,
     pub auth: AuthService,
+    /// Serializes account authorization changes with the short activation
+    /// window in which an authenticated connection registers its direct
+    /// cancellation lease.
+    pub auth_gate: tokio::sync::RwLock<()>,
+    pub account_sessions: Arc<account_sessions::AccountSessionRegistry>,
     pub perms: PermissionEvaluator,
     pub presence: PresenceRegistry,
     pub chat: ChatService,
@@ -116,6 +122,14 @@ pub struct Shared {
 impl Shared {
     pub fn next_session_id(&self) -> u64 {
         self.next_session.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Close every live protocol connection for an account after its durable
+    /// bearers have been revoked.
+    pub fn invalidate_account_sessions(&self, account_id: i64, reason: impl Into<String>) {
+        let reason = reason.into();
+        let cancelled = self.account_sessions.invalidate(account_id);
+        tracing::info!(account_id, cancelled, %reason, "account sessions invalidated");
     }
 
     /// The server's origin id for `persona@origin` event authorship. Federated
@@ -320,6 +334,8 @@ impl Burrow {
             bus,
             pool,
             auth,
+            auth_gate: tokio::sync::RwLock::new(()),
+            account_sessions: Arc::new(account_sessions::AccountSessionRegistry::default()),
             perms: PermissionEvaluator::new(),
             pushlog: PushLog::new(),
             classes,

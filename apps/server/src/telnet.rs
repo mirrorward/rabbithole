@@ -106,17 +106,26 @@ where
     let Some(authed) = login(&mut t, shared, peer_ip).await? else {
         return Ok(()); // disconnected or out of attempts
     };
+    let mut bus_rx = shared.bus.subscribe();
+    let activation_gate = shared.auth_gate.read().await;
+    let authed = match shared.auth.refresh_activation(&authed).await {
+        Ok(user) => user,
+        Err(_) => return Ok(()),
+    };
     shared.stats.incr("telnet", "logins");
     // Retro terminal types get CP437 on the wire (the art-crate tables
     // behind the encoding seam); unknown or modern terminals stay UTF-8.
     if t.terminal().is_some_and(cp437_terminal) {
         t.set_encoding(Encoding::Cp437);
     }
-    greet(&mut t, &authed).await?;
 
     // Join the shared world — presence + the chat lobby — exactly like a
     // native or Hotline session, and leave it however the shell ends.
     let session_id = shared.next_session_id();
+    let session_lease = shared
+        .account_sessions
+        .register(authed.account.id, session_id);
+    greet(&mut t, &authed).await?;
     shared.presence.join(PresenceEntry {
         session_id,
         account_id: authed.account.id,
@@ -132,11 +141,36 @@ where
     shared
         .chat
         .join_lobby(session_id, &authed.persona.screen_name);
-    let result = async {
-        show_welcome(&mut t, shared, &authed, session_id).await?;
-        menu_loop(&mut t, shared, &authed, session_id, peer_ip).await
-    }
-    .await;
+    drop(activation_gate);
+    let invalidated = async {
+        loop {
+            match bus_rx.recv().await {
+                Ok(ServerEvent::Kick {
+                    session_id: target, ..
+                }) if target == session_id => break,
+                Ok(ServerEvent::Shutdown) => break,
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        session_id,
+                        missed = n,
+                        "telnet session lagged behind the bus; closing fail-closed"
+                    );
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    let result = tokio::select! {
+        biased;
+        () = session_lease.cancelled() => Ok(()),
+        () = invalidated => Ok(()),
+        result = async {
+            show_welcome(&mut t, shared, &authed, session_id).await?;
+            menu_loop(&mut t, shared, &authed, session_id, peer_ip).await
+        } => result,
+    };
     shared.chat.session_closed(session_id);
     shared.presence.leave(session_id);
     result
