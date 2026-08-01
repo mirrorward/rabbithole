@@ -282,11 +282,8 @@ impl AuthService {
             }
         }
 
-        if needs_rehash(phc)? {
-            accounts
-                .update_phc(account.id, &hash_password(password)?)
-                .await?;
-        }
+        self.rehash_password_if_needed(&account, phc, password)
+            .await?;
 
         let token = SessionToken::generate();
         if !SessionsRepo(&self.pool)
@@ -309,6 +306,27 @@ impl AuthService {
             persona,
             token: Some(token),
         })
+    }
+
+    /// Upgrade a verified password hash without overwriting a concurrent
+    /// administrative credential or authorization change.
+    async fn rehash_password_if_needed(
+        &self,
+        account: &Account,
+        observed_phc: &str,
+        password: &str,
+    ) -> Result<(), AuthError> {
+        if !needs_rehash(observed_phc)? {
+            return Ok(());
+        }
+        let replacement = hash_password(password)?;
+        if !AccountsRepo(&self.pool)
+            .update_phc_if_current(account.id, observed_phc, account.authz_epoch, &replacement)
+            .await?
+        {
+            return Err(AuthError::SessionExpired);
+        }
+        Ok(())
     }
 
     /// The account's default persona (creating one if somehow missing).
@@ -590,6 +608,100 @@ mod tests {
         let successor = winners.pop().unwrap();
         assert_ne!(successor, token);
         assert!(svc.login_resume(&successor).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn maintenance_rehash_cannot_restore_an_admin_replaced_password() {
+        const OLD_PASSWORD: &str = "password";
+        const NEW_PASSWORD: &str = "administrator-replaced-password";
+
+        use argon2::password_hash::{PasswordHasher, SaltString};
+        use argon2::{Algorithm, Argon2, Params, Version};
+
+        let weak_params = Params::new(19 * 1024, 2, 1, Some(32)).unwrap();
+        let weak_argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, weak_params);
+        let weak_salt = SaltString::encode_b64(b"rehash-race-salt").unwrap();
+        let weak_old_phc = weak_argon2
+            .hash_password(OLD_PASSWORD.as_bytes(), &weak_salt)
+            .unwrap()
+            .to_string();
+        assert!(verify_password(OLD_PASSWORD, &weak_old_phc).unwrap());
+        assert!(needs_rehash(&weak_old_phc).unwrap());
+
+        let svc = std::sync::Arc::new(service().await);
+        let class_id = ClassesRepo(&svc.pool)
+            .by_name(Role::User.class_name())
+            .await
+            .unwrap()
+            .map(|class| class.id);
+        let account = AccountsRepo(&svc.pool)
+            .create(
+                "alice",
+                Some(&weak_old_phc),
+                "Alice",
+                Role::User as u8,
+                class_id,
+            )
+            .await
+            .unwrap();
+        PersonasRepo(&svc.pool)
+            .create(account.id, "Alice", true)
+            .await
+            .unwrap();
+
+        // Model a login that has verified the old credential and is paused
+        // immediately before its maintenance CAS. The administrator commits
+        // the replacement credential and epoch bump before releasing it.
+        let observed = AccountsRepo(&svc.pool)
+            .by_id(account.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let observed_phc = observed.phc.clone().unwrap();
+        let reached_rehash = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let release_rehash = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let rehash_svc = svc.clone();
+        let rehash_reached = reached_rehash.clone();
+        let rehash_release = release_rehash.clone();
+        let rehash = tokio::spawn(async move {
+            rehash_reached.wait().await;
+            rehash_release.wait().await;
+            rehash_svc
+                .rehash_password_if_needed(&observed, &observed_phc, OLD_PASSWORD)
+                .await
+        });
+
+        reached_rehash.wait().await;
+        let replacement = hash_password(NEW_PASSWORD).unwrap();
+        assert_eq!(
+            AccountsRepo(&svc.pool)
+                .admin_update_and_revoke_sessions("alice", Some(&replacement), None, None, None,)
+                .await
+                .unwrap(),
+            Some(account.id)
+        );
+        release_rehash.wait().await;
+        assert!(matches!(
+            rehash.await.unwrap(),
+            Err(AuthError::SessionExpired)
+        ));
+
+        let stored = AccountsRepo(&svc.pool)
+            .by_id(account.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let stored_phc = stored.phc.unwrap();
+        assert!(!verify_password(OLD_PASSWORD, &stored_phc).unwrap());
+        assert!(verify_password(NEW_PASSWORD, &stored_phc).unwrap());
+        assert!(matches!(
+            svc.login_password("alice", OLD_PASSWORD, None).await,
+            Err(AuthError::BadCredentials)
+        ));
+        assert!(svc
+            .login_password("alice", NEW_PASSWORD, None)
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

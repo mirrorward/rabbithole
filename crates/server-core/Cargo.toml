@@ -24,5 +24,6 @@ postcard.workspace = true
 blake3.workspace = true
 
 [dev-dependencies]
+argon2.workspace = true
 proptest.workspace = true
 tempfile.workspace = true

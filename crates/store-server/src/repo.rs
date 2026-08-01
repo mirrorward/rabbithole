@@ -80,13 +80,29 @@ impl AccountsRepo<'_> {
             .map(|r| row_to_account(&r)))
     }
 
-    pub async fn update_phc(&self, id: i64, phc: &str) -> Result<(), StoreError> {
-        sqlx::query("UPDATE accounts SET phc = ? WHERE id = ?")
-            .bind(phc)
-            .bind(id)
-            .execute(self.0)
-            .await?;
-        Ok(())
+    /// Apply a transparent maintenance rehash only if the credential and
+    /// authorization generation observed during verification are still
+    /// current. A concurrent administrative password or authorization change
+    /// wins the compare-and-set and leaves its credential untouched.
+    pub async fn update_phc_if_current(
+        &self,
+        id: i64,
+        observed_phc: &str,
+        observed_authz_epoch: i64,
+        replacement_phc: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(sqlx::query(
+            "UPDATE accounts SET phc = ?
+             WHERE id = ? AND phc = ? AND authz_epoch = ? AND disabled = 0",
+        )
+        .bind(replacement_phc)
+        .bind(id)
+        .bind(observed_phc)
+        .bind(observed_authz_epoch)
+        .execute(self.0)
+        .await?
+        .rows_affected()
+            == 1)
     }
 
     /// Replace a password hash and revoke every bearer for the account in
