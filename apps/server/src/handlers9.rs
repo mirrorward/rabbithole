@@ -63,6 +63,9 @@ pub struct Ticket {
 pub struct TransferRegistry {
     inner: Mutex<HashMap<u64, Ticket>>,
     next: AtomicU64,
+    /// Serializes quota check + node commit so concurrent finishes cannot
+    /// both observe the same free space and oversubscribe an account.
+    commit_lock: tokio::sync::Mutex<()>,
 }
 
 impl TransferRegistry {
@@ -70,6 +73,7 @@ impl TransferRegistry {
         Self {
             inner: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
+            commit_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -135,7 +139,7 @@ pub async fn serve_bulk_stream(
     mut send: BulkSend,
     mut recv: BulkRecv,
 ) {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     let Ok(bytes) = read_framed(&mut recv, 4096).await else {
         return;
@@ -202,24 +206,10 @@ pub async fn serve_bulk_stream(
             else {
                 return;
             };
-            if f.seek(std::io::SeekFrom::Start(pre.offset)).await.is_err() {
+            let Ok(offset) = receive_bounded_upload(&mut recv, &mut f, pre.offset, size).await
+            else {
                 return;
-            }
-            let mut offset = pre.offset;
-            let mut buf = vec![0u8; CHUNK_MAX];
-            loop {
-                match recv.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if f.write_all(&buf[..n]).await.is_err() {
-                            return;
-                        }
-                        offset += n as u64;
-                    }
-                    Err(_) => return,
-                }
-            }
-            let _ = f.flush().await;
+            };
             {
                 let mut map = shared.transfers.inner.lock();
                 if let Some(t) = map.get_mut(&pre.transfer_id) {
@@ -232,6 +222,44 @@ pub async fn serve_bulk_stream(
         }
         _ => {}
     }
+}
+
+/// Persist an upload stream only when it ends exactly at the ticket's
+/// declared size. Excess bytes are detected but never written.
+async fn receive_bounded_upload<R>(
+    recv: &mut R,
+    file: &mut tokio::fs::File,
+    mut offset: u64,
+    size: u64,
+) -> Result<u64, ()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    if offset > size || file.seek(std::io::SeekFrom::Start(offset)).await.is_err() {
+        return Err(());
+    }
+    let mut buf = vec![0u8; CHUNK_MAX];
+    while offset < size {
+        let want = ((size - offset).min(CHUNK_MAX as u64)) as usize;
+        match recv.read(&mut buf[..want]).await {
+            Ok(0) => return Err(()),
+            Ok(n) => {
+                file.write_all(&buf[..n]).await.map_err(|_| ())?;
+                offset += n as u64;
+            }
+            Err(_) => return Err(()),
+        }
+    }
+    // The peer must close exactly at the declared boundary. Reading one byte
+    // past it detects an understated ticket without persisting the excess.
+    let mut extra = [0u8; 1];
+    if !matches!(recv.read(&mut extra).await, Ok(0)) {
+        return Err(());
+    }
+    file.flush().await.map_err(|_| ())?;
+    Ok(offset)
 }
 
 /// Bandwidth cap: sleep long enough after emitting `bytes` to hold the
@@ -510,7 +538,7 @@ pub async fn handle(
 
     // ---- Upload a chunk --------------------------------------------------
     if let Some(Ok(req)) = frame.decode::<pt::FileChunkPut>() {
-        let outcome: Result<PathBuf, ErrorCode> = {
+        let outcome: Result<(PathBuf, u64), ErrorCode> = {
             let map = shared.transfers.inner.lock();
             match map.get(&req.transfer_id) {
                 None => Err(ErrorCode::NotFound),
@@ -518,12 +546,20 @@ pub async fn handle(
                     Err(ErrorCode::Forbidden)
                 }
                 Some(t) => match &t.staging {
-                    Some(p) => Ok(p.clone()),
+                    Some(p) => {
+                        let len = req.bytes.len() as u64;
+                        match req.offset.checked_add(len) {
+                            Some(end) if req.bytes.len() <= CHUNK_MAX && end <= t.size => {
+                                Ok((p.clone(), end))
+                            }
+                            _ => Err(ErrorCode::TooLarge),
+                        }
+                    }
                     None => Err(ErrorCode::Internal),
                 },
             }
         };
-        let staging = match outcome {
+        let (staging, end) = match outcome {
             Ok(v) => v,
             Err(code) => fail!(code),
         };
@@ -556,7 +592,7 @@ pub async fn handle(
         {
             let mut map = shared.transfers.inner.lock();
             if let Some(t) = map.get_mut(&req.transfer_id) {
-                t.have = t.have.max(req.offset + req.bytes.len() as u64);
+                t.have = t.have.max(end);
             }
         }
         conn.send(Frame::ack(frame)).await?;
@@ -580,6 +616,30 @@ pub async fn handle(
             Err(code) => fail!(code),
         };
         let staging = ticket.staging.clone().unwrap_or_default();
+        let measured_size = match tokio::fs::metadata(&staging).await {
+            Ok(meta) if meta.len() == ticket.size => meta.len(),
+            _ => {
+                let _ = tokio::fs::remove_file(&staging).await;
+                fail!(ErrorCode::BadRequest);
+            }
+        };
+        let _commit_guard = shared.transfers.commit_lock.lock().await;
+        // Recheck at commit time: multiple individually valid tickets may
+        // have opened concurrently while the account still had free space.
+        // Only committed, measured bytes are authoritative for quota.
+        let quota = shared.config.read().upload_quota_bytes;
+        if quota > 0 {
+            let used = shared
+                .files
+                .uploaded_bytes(ctx.account_id)
+                .await
+                .unwrap_or(0)
+                .max(0) as u64;
+            if used.saturating_add(measured_size) > quota {
+                let _ = tokio::fs::remove_file(&staging).await;
+                fail!(ErrorCode::TooLarge);
+            }
+        }
         // Hash-deny gate at finalize: the staged bytes must verify against
         // `ticket.root`, so a denied root can never be committed — even if
         // the hash was denied after the transfer opened.
@@ -603,7 +663,7 @@ pub async fn handle(
                 ticket.parent.as_deref(),
                 &ticket.name,
                 &ticket.root,
-                ticket.size as i64,
+                measured_size as i64,
                 &ticket.mime,
                 "",
                 &ticket.comment,
@@ -625,12 +685,20 @@ pub async fn handle(
 
     // ---- Abort -----------------------------------------------------------
     if let Some(Ok(req)) = frame.decode::<pt::TransferAbort>() {
-        let staging = shared
-            .transfers
-            .inner
-            .lock()
-            .remove(&req.transfer_id)
-            .and_then(|t| t.staging);
+        let outcome: Result<Option<PathBuf>, ErrorCode> = {
+            let mut map = shared.transfers.inner.lock();
+            match map.get(&req.transfer_id) {
+                None => Err(ErrorCode::NotFound),
+                Some(t) if t.account_id != ctx.account_id || t.session_id != ctx.session_id => {
+                    Err(ErrorCode::Forbidden)
+                }
+                Some(_) => Ok(map.remove(&req.transfer_id).expect("just checked").staging),
+            }
+        };
+        let staging = match outcome {
+            Ok(path) => path,
+            Err(code) => fail!(code),
+        };
         if let Some(p) = staging {
             let _ = tokio::fs::remove_file(p).await;
         }
@@ -670,4 +738,41 @@ pub async fn handle(
     }
 
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::receive_bounded_upload;
+    use tokio::io::AsyncWriteExt;
+
+    async fn receive(bytes: &[u8], declared_size: u64) -> (Result<u64, ()>, Vec<u8>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stage.part");
+        let mut file = tokio::fs::File::create(&path).await.unwrap();
+        let (mut sender, mut receiver) = tokio::io::duplex(bytes.len().max(1) + 1);
+        let body = bytes.to_vec();
+        let writer = tokio::spawn(async move {
+            sender.write_all(&body).await.unwrap();
+            sender.shutdown().await.unwrap();
+        });
+
+        let result = receive_bounded_upload(&mut receiver, &mut file, 0, declared_size).await;
+        writer.await.unwrap();
+        drop(file);
+        (result, tokio::fs::read(path).await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn bulk_upload_requires_exact_declared_length() {
+        let (exact, staged) = receive(b"data", 4).await;
+        assert_eq!(exact, Ok(4));
+        assert_eq!(staged, b"data");
+
+        let (short, _) = receive(b"abc", 4).await;
+        assert_eq!(short, Err(()));
+
+        let (overrun, staged) = receive(b"abcde", 4).await;
+        assert_eq!(overrun, Err(()));
+        assert_eq!(staged, b"abcd", "excess byte was never persisted");
+    }
 }

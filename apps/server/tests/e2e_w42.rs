@@ -6,6 +6,9 @@
 use burrow::Burrow;
 use rabbithole_core::{Client, ClientError};
 use rabbithole_proto::filelib::FolderCreate;
+use rabbithole_proto::transfer::{
+    FileChunkPut, TransferAbort, TransferOpen, TransferTicket, UploadFinish,
+};
 use rabbithole_proto::ErrorCode;
 use rabbithole_server_core::{Role, ServerConfig};
 
@@ -54,6 +57,10 @@ async fn login_quic(burrow: &Burrow, user: &str) -> Client {
 /// A deterministic multi-chunk payload (larger than the 256 KiB chunk).
 fn payload(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+fn root(bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(bytes).as_bytes()
 }
 
 #[tokio::test]
@@ -324,6 +331,238 @@ async fn upload_requires_permission_and_verifies_hash() {
     let out = work.path().join("small.out");
     admin.transfer_download(node.id, &out).await.unwrap();
     assert_eq!(std::fs::read(&out).unwrap(), b"just a little file");
+
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn chunk_upload_rejects_overrun_sparse_offset_and_short_finish() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("admin", "pw-pw-pw", Role::Admin)
+        .await
+        .unwrap();
+    let mut admin = login(&burrow, "admin").await;
+    admin.area_create("pub", "Public", "").await.unwrap();
+
+    let overrun: TransferTicket = admin
+        .request(&TransferOpen::upload(
+            "pub",
+            None,
+            "over.bin",
+            1,
+            root(b"x"),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        admin
+            .request_ack(&FileChunkPut::new(
+                overrun.transfer_id,
+                0,
+                true,
+                b"xx".to_vec(),
+            ))
+            .await,
+        Err(ClientError::Refused(ErrorCode::TooLarge))
+    ));
+
+    let sparse: TransferTicket = admin
+        .request(&TransferOpen::upload(
+            "pub",
+            None,
+            "sparse.bin",
+            4,
+            root(b"data"),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        admin
+            .request_ack(&FileChunkPut::new(
+                sparse.transfer_id,
+                u64::MAX,
+                true,
+                vec![1],
+            ))
+            .await,
+        Err(ClientError::Refused(ErrorCode::TooLarge))
+    ));
+
+    let short: TransferTicket = admin
+        .request(&TransferOpen::upload(
+            "pub",
+            None,
+            "short.bin",
+            4,
+            root(b"abc"),
+        ))
+        .await
+        .unwrap();
+    admin
+        .request_ack(&FileChunkPut::new(
+            short.transfer_id,
+            0,
+            true,
+            b"abc".to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        admin
+            .request::<_, rabbithole_proto::filelib::NodeReply>(&UploadFinish::new(
+                short.transfer_id,
+            ))
+            .await,
+        Err(ClientError::Refused(ErrorCode::BadRequest))
+    ));
+
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn upload_quota_is_rechecked_when_concurrent_tickets_finish() {
+    let work = tempfile::tempdir().unwrap();
+    let cfg = ServerConfig {
+        upload_quota_bytes: 4,
+        ..test_config(&work.path().join("srv"))
+    };
+    let burrow = Burrow::start(cfg).await.unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("admin", "pw-pw-pw", Role::Admin)
+        .await
+        .unwrap();
+    let mut first_client = login(&burrow, "admin").await;
+    first_client.area_create("pub", "Public", "").await.unwrap();
+    let mut second_client = login(&burrow, "admin").await;
+
+    // Both tickets fit when opened, but only one can fit when committed.
+    let first: TransferTicket = first_client
+        .request(&TransferOpen::upload(
+            "pub",
+            None,
+            "one.bin",
+            3,
+            root(b"one"),
+        ))
+        .await
+        .unwrap();
+    let second: TransferTicket = second_client
+        .request(&TransferOpen::upload(
+            "pub",
+            None,
+            "two.bin",
+            3,
+            root(b"two"),
+        ))
+        .await
+        .unwrap();
+    first_client
+        .request_ack(&FileChunkPut::new(
+            first.transfer_id,
+            0,
+            true,
+            b"one".to_vec(),
+        ))
+        .await
+        .unwrap();
+    second_client
+        .request_ack(&FileChunkPut::new(
+            second.transfer_id,
+            0,
+            true,
+            b"two".to_vec(),
+        ))
+        .await
+        .unwrap();
+
+    let first_finish = UploadFinish::new(first.transfer_id);
+    let second_finish = UploadFinish::new(second.transfer_id);
+    let (first_result, second_result) = tokio::join!(
+        first_client.request::<_, rabbithole_proto::filelib::NodeReply>(&first_finish),
+        second_client.request::<_, rabbithole_proto::filelib::NodeReply>(&second_finish),
+    );
+    let outcomes = [first_result, second_result];
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, Err(ClientError::Refused(ErrorCode::TooLarge))))
+            .count(),
+        1
+    );
+
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn transfer_abort_is_bound_to_the_opening_session() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    for (name, role) in [
+        ("admin", Role::Admin),
+        ("alice", Role::User),
+        ("bob", Role::User),
+    ] {
+        burrow
+            .shared
+            .auth
+            .create_account(name, "pw-pw-pw", role)
+            .await
+            .unwrap();
+    }
+    login(&burrow, "admin")
+        .await
+        .area_create("pub", "Public", "")
+        .await
+        .unwrap();
+
+    let mut alice = login(&burrow, "alice").await;
+    let mut alice_other_session = login(&burrow, "alice").await;
+    let mut bob = login(&burrow, "bob").await;
+    let ticket: TransferTicket = alice
+        .request(&TransferOpen::upload(
+            "pub",
+            None,
+            "owned.bin",
+            3,
+            root(b"own"),
+        ))
+        .await
+        .unwrap();
+
+    for attacker in [&mut bob, &mut alice_other_session] {
+        assert!(matches!(
+            attacker
+                .request_ack(&TransferAbort::new(ticket.transfer_id))
+                .await,
+            Err(ClientError::Refused(ErrorCode::Forbidden))
+        ));
+    }
+
+    // The unauthorized aborts did not disturb the owner's transfer.
+    alice
+        .request_ack(&FileChunkPut::new(
+            ticket.transfer_id,
+            0,
+            true,
+            b"own".to_vec(),
+        ))
+        .await
+        .unwrap();
+    alice
+        .request::<_, rabbithole_proto::filelib::NodeReply>(&UploadFinish::new(ticket.transfer_id))
+        .await
+        .unwrap();
 
     burrow.shutdown().await;
 }
