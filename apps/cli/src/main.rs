@@ -337,7 +337,10 @@ fn write_private(path: &std::path::Path, contents: &[u8]) -> Result<()> {
 }
 
 fn save_session(s: &Session) -> Result<()> {
-    write_private(&session_path()?, serde_json::to_string_pretty(s)?.as_bytes())?;
+    write_private(
+        &session_path()?,
+        serde_json::to_string_pretty(s)?.as_bytes(),
+    )?;
     Ok(())
 }
 

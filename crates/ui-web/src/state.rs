@@ -216,9 +216,12 @@ pub fn merge_people(rosters: &[(String, Vec<Presence>)]) -> Vec<Person> {
     for (server, who) in rosters {
         for p in who {
             let id = coalesce_id(p);
-            let found = people
-                .iter_mut()
-                .find(|x| (x.key.is_some(), x.key.clone().unwrap_or_else(|| x.screen_name.clone())) == id);
+            let found = people.iter_mut().find(|x| {
+                (
+                    x.key.is_some(),
+                    x.key.clone().unwrap_or_else(|| x.screen_name.clone()),
+                ) == id
+            });
             match found {
                 Some(person) => {
                     if !person.servers.iter().any(|s| s == server) {
@@ -694,7 +697,10 @@ mod tests {
             agreement: None,
         });
         assert!(s.welcome.is_some());
-        assert_eq!(s.welcome.as_ref().unwrap().motd, "Be excellent to each other.");
+        assert_eq!(
+            s.welcome.as_ref().unwrap().motd,
+            "Be excellent to each other."
+        );
         // Dismissing clears it.
         s.dismiss_welcome();
         assert!(s.welcome.is_none());
@@ -725,15 +731,25 @@ mod tests {
         let rosters = vec![
             (
                 "The Warren".to_string(),
-                vec![pres("alice", PresenceState::Away), pres("bob", PresenceState::Online)],
+                vec![
+                    pres("alice", PresenceState::Away),
+                    pres("bob", PresenceState::Online),
+                ],
             ),
             (
                 "Briar Patch".to_string(),
-                vec![pres("alice", PresenceState::Online), pres("carol", PresenceState::Idle)],
+                vec![
+                    pres("alice", PresenceState::Online),
+                    pres("carol", PresenceState::Idle),
+                ],
             ),
         ];
         let people = merge_people(&rosters);
-        assert_eq!(people.len(), 3, "alice de-duped across two burrows (by handle)");
+        assert_eq!(
+            people.len(),
+            3,
+            "alice de-duped across two burrows (by handle)"
+        );
         let alice = &people[0];
         assert_eq!(alice.screen_name, "alice");
         assert_eq!(alice.servers, vec!["The Warren", "Briar Patch"]);
@@ -766,7 +782,11 @@ mod tests {
             ("A".to_string(), vec![pres("mo", PresenceState::Online)]),
             ("B".to_string(), vec![pres("mo", PresenceState::Away)]),
         ];
-        assert_eq!(merge_people(&rosters2)[0].state, PresenceState::Online, "Online stays");
+        assert_eq!(
+            merge_people(&rosters2)[0].state,
+            PresenceState::Online,
+            "Online stays"
+        );
     }
 
     #[test]
@@ -803,15 +823,30 @@ mod tests {
         // Three rows: the verified rabbit (kf00, both burrows), the unkeyed
         // "rabbit" stranger, and nothing else — the shared handle did NOT merge
         // the stranger into the verified person.
-        assert_eq!(people.len(), 2, "verified key + unkeyed stranger stay distinct");
-        let verified = people.iter().find(|p| p.key.as_deref() == Some("kf00")).unwrap();
-        assert_eq!(verified.servers, vec!["The Warren", "Briar Patch"], "coalesced by key across burrows");
+        assert_eq!(
+            people.len(),
+            2,
+            "verified key + unkeyed stranger stay distinct"
+        );
+        let verified = people
+            .iter()
+            .find(|p| p.key.as_deref() == Some("kf00"))
+            .unwrap();
+        assert_eq!(
+            verified.servers,
+            vec!["The Warren", "Briar Patch"],
+            "coalesced by key across burrows"
+        );
         // The Online sighting's handle wins → shows "mr_rabbit", their live name.
         assert_eq!(verified.screen_name, "mr_rabbit");
         assert_eq!(verified.state, PresenceState::Online);
         let stranger = people.iter().find(|p| p.key.is_none()).unwrap();
         assert_eq!(stranger.screen_name, "rabbit");
-        assert_eq!(stranger.servers, vec!["The Warren"], "the unkeyed stranger is only on the Warren");
+        assert_eq!(
+            stranger.servers,
+            vec!["The Warren"],
+            "the unkeyed stranger is only on the Warren"
+        );
     }
 
     #[test]

@@ -225,8 +225,10 @@ pub fn Transfers() -> impl IntoView {
                             each=move || app.all_transfers()
                             key=|(burrow, t)| (burrow.clone(), t.id, t.done, t.status)
                             children=move |(burrow, t)| {
-                                let pct = if t.total > 0 {
-                                    ((t.done.min(t.total) * 100) / t.total) as u32
+                                let pct = if let Some(pct) = t.done.min(t.total).saturating_mul(100)
+                                    .checked_div(t.total)
+                                {
+                                    pct as u32
                                 } else if matches!(t.status, TransferStatus::Done) {
                                     100
                                 } else {
@@ -871,9 +873,11 @@ fn EmptyState(
     /// Decorative glyph shown above the headline.
     mark: &'static str,
     /// One-line headline.
-    #[prop(into)] title: String,
+    #[prop(into)]
+    title: String,
     /// A sentence of guidance under the headline.
-    #[prop(into)] sub: String,
+    #[prop(into)]
+    sub: String,
 ) -> impl IntoView {
     view! {
         <div class="rh-chat-empty">

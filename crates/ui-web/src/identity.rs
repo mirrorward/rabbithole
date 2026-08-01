@@ -165,7 +165,10 @@ mod tests {
         let msg = b"challenge-nonce";
         let sig = id.sign(msg);
         let vk = VerifyingKey::from_bytes(&id.public()).unwrap();
-        assert!(vk.verify(msg, &Signature::from_bytes(&sig)).is_ok(), "own key verifies");
+        assert!(
+            vk.verify(msg, &Signature::from_bytes(&sig)).is_ok(),
+            "own key verifies"
+        );
         // A different message does not verify against this signature.
         assert!(vk.verify(b"other", &Signature::from_bytes(&sig)).is_err());
     }

@@ -126,9 +126,13 @@ async fn backup_then_offline_restore_roundtrip() {
         "refusal points at the offline flow: {resp}"
     );
 
-    // The offline path also refuses while this burrow is up (live socket).
-    let err = burrow::backup::restore_offline(&snapshot_dir, live.path()).unwrap_err();
-    assert!(err.to_string().contains("running"), "refused: {err}");
+    // The offline path also refuses while this burrow is up when the local
+    // admin socket exists. The ctl transport is Unix-only for now.
+    #[cfg(unix)]
+    {
+        let err = burrow::backup::restore_offline(&snapshot_dir, live.path()).unwrap_err();
+        assert!(err.to_string().contains("running"), "refused: {err}");
+    }
 
     // ---- Mutate the live server *after* the snapshot ---------------------
     seed_post(

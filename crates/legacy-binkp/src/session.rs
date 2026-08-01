@@ -468,15 +468,13 @@ impl Session {
                 Action::SendCommand(Command::File(info.clone())),
                 Action::StreamFile(info),
             ]
+        } else if !self.local_eob {
+            self.local_eob = true;
+            let mut actions = vec![Action::SendCommand(Command::Eob)];
+            actions.extend(self.maybe_finish());
+            actions
         } else {
-            if !self.local_eob {
-                self.local_eob = true;
-                let mut actions = vec![Action::SendCommand(Command::Eob)];
-                actions.extend(self.maybe_finish());
-                actions
-            } else {
-                self.maybe_finish()
-            }
+            self.maybe_finish()
         }
     }
 

@@ -137,7 +137,9 @@ pub async fn run_session(
                                 rabbithole_proto::hello::caps::SESSION_RESUME,
                             ),
                             rabbithole_proto::Capability::new(rabbithole_proto::hello::caps::GUEST),
-                            rabbithole_proto::Capability::new(rabbithole_proto::hello::caps::KEY_AUTH),
+                            rabbithole_proto::Capability::new(
+                                rabbithole_proto::hello::caps::KEY_AUTH,
+                            ),
                         ]),
                         cfg.name,
                         env!("CARGO_PKG_VERSION"),
