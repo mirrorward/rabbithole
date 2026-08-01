@@ -157,6 +157,16 @@ async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<
         ("theme-status", _) => json!({"cmd": "theme-status"}),
         ("theme-clear", _) => json!({"cmd": "theme-clear"}),
         ("gateway-stats", _) => json!({"cmd": "gateway-stats"}),
+        ("peer-list", _) => json!({"cmd": "peer-list"}),
+        ("peer-approve", [key]) => json!({"cmd": "peer-approve", "key": key}),
+        ("peer-approve", [key, origin]) => {
+            json!({"cmd": "peer-approve", "key": key, "origin": origin})
+        }
+        ("peer-revoke", [key]) => json!({"cmd": "peer-revoke", "key": key}),
+        ("origin-list", _) => json!({"cmd": "origin-list"}),
+        ("origin-pin", [origin, key]) => {
+            json!({"cmd": "origin-pin", "origin": origin, "key": key})
+        }
         ("fed-catalogs", _) => json!({"cmd": "fed-catalogs"}),
         ("fed-search", terms) if !terms.is_empty() => {
             json!({"cmd": "fed-search", "terms": terms.join(" ")})
@@ -166,7 +176,7 @@ async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<
         // Always refused by the server with the offline procedure.
         ("restore", [dir]) => json!({"cmd": "restore", "path": dir}),
         _ => anyhow::bail!(
-            "usage: burrow ctl <status|who|config-get KEY|config-set KEY VALUE|account-create LOGIN PASSWORD [ROLE]|theme-status|theme-clear|gateway-stats|fed-catalogs|fed-search TERMS…|backup DEST-DIR|backup-verify SNAPSHOT-DIR>"
+            "usage: burrow ctl <status|who|config-get KEY|config-set KEY VALUE|account-create LOGIN PASSWORD [ROLE]|theme-status|theme-clear|gateway-stats|peer-list|peer-approve KEY [ORIGIN]|peer-revoke KEY|origin-list|origin-pin ORIGIN KEY|fed-catalogs|fed-search TERMS…|backup DEST-DIR|backup-verify SNAPSHOT-DIR>"
         ),
     };
 

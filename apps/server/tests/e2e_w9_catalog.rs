@@ -31,6 +31,7 @@ fn fed_config(dir: &std::path::Path) -> ServerConfig {
         quic_addr: "127.0.0.1:0".parse().unwrap(),
         ws_addr: "127.0.0.1:0".parse().unwrap(),
         federation_enabled: true,
+        federation_origin: dir.file_name().unwrap().to_string_lossy().into_owned(),
         federation_addr: "127.0.0.1:0".parse().unwrap(),
         data_dir: dir.to_path_buf(),
         ..ServerConfig::default()
@@ -44,6 +45,7 @@ fn target_for(b: &Burrow) -> DialTarget {
         server_name: "localhost".into(),
         fingerprint: b.fingerprint,
         expected_key: Some(b.shared.server_key),
+        expected_origin: b.shared.origin_name(),
     }
 }
 
@@ -220,7 +222,10 @@ async fn tampered_impersonated_and_stale_catalogs_are_rejected() {
     assert!(err.to_string().contains("non-approved"), "{err}");
 
     // Admin approves the peer; the same catalog now ingests.
-    assert!(!b.shared.peers.approve(&peer_key));
+    assert!(!b
+        .shared
+        .peers
+        .approve_origin(&peer_key, "peer.example".into()));
     burrow::fed_catalog::ingest_peer_catalog(&b.shared, peer_key, &gen1.to_bytes()).unwrap();
     assert_eq!(
         b.shared

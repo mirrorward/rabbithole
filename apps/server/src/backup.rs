@@ -15,9 +15,11 @@
 //!   filename splicing, and the copy arrives already defragmented.
 //! - `identity/` — the Ed25519 signing seed and TLS material, so the
 //!   restored server keeps its federation identity and pinned fingerprint.
-//! - `federation/approved_peers.json` — admin-approved peer keys.
-//! - `federation/origin_keys.json` — pinned peer origin keys (key-continuity
-//!   for the board flood survives a restore, not just a restart).
+//! - `federation/approved_peers.json` — versioned, admin-approved peer
+//!   origin-key tuples.
+//! - `federation/origin_keys.json` — versioned provenance-bearing origin-key
+//!   bindings (direct peer or explicit operator trust), so board-flood trust
+//!   survives a restore rather than being relearned from relayed traffic.
 //! - `federation/catalog.bin` — the signed local file catalog (preserves
 //!   the generation chain peers have seen).
 //! - `blobs/` — the content-addressed store. Blobs are immutable once

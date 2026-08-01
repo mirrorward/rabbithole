@@ -252,13 +252,16 @@ where
             Err(_) => return Err(()),
         }
     }
+    // Make the accepted prefix durable before probing past the boundary.
+    // Tokio's file drop does not wait for outstanding blocking-file work, so
+    // an overrun return without this flush can expose an empty staging file.
+    file.flush().await.map_err(|_| ())?;
     // The peer must close exactly at the declared boundary. Reading one byte
     // past it detects an understated ticket without persisting the excess.
     let mut extra = [0u8; 1];
     if !matches!(recv.read(&mut extra).await, Ok(0)) {
         return Err(());
     }
-    file.flush().await.map_err(|_| ())?;
     Ok(offset)
 }
 

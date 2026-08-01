@@ -1,11 +1,10 @@
 # RHP Federation Family (8) — Tunnels (S2S)
 
-Status: **Wave 9** — the mutually-authenticated peering handshake with admin
-approval and signed-catalog sync are on the wire (`apps/server/src/federation.rs`).
-The rest of the federation data model (descriptors, board flood-fill,
-redactions, attestations) is implemented and tested in `crates/federation`
-but **not yet carried by this transport** — the last section marks what
-rides the wire today vs what is model-only.
+Status: **Wave 9** — mutually authenticated peering, signed-catalog sync, and
+signed board-event flood-fill are on the wire (`apps/server/src/federation.rs`).
+Federation protocol v2 binds an immutable origin namespace to the handshake
+key and requires independently established provenance before accepting a
+relayed origin. The last section separates the remaining model-only pieces.
 
 Family 8 is **server-to-server only**. It is never spoken on a client
 connection; a client sending family-8 frames gets `Unsupported` like any
@@ -19,7 +18,8 @@ other unknown message.
 - Same TLS identity and ALPN (`rhp/1`) as the client transport; the dialer
   **pins the peer's certificate blake3 fingerprint** (from the peer entry's
   `fingerprint`) and may additionally pin the expected Ed25519 server key
-  (`key`; empty = accept whatever key the handshake proves).
+  (`key`). Every configured target also declares its immutable expected
+  `origin`.
 - Messages are ordinary RHP `Frame`s with `family = 8`; the request `id` is
   always 0 (the exchange is strictly sequenced, not pipelined). Isolation is
   by port **and** by family: a non-federation frame on the S2S channel kills
@@ -33,27 +33,33 @@ other unknown message.
 ## Messages
 
 Message-type constants from `apps/server/src/federation.rs`
-(`FED_PROTOCOL = 1`):
+(`FED_PROTOCOL = 2`):
 
 | type | name | direction | payload |
 |---|---|---|---|
-| 1 | Hello | dialer → listener | `hello: PeerHello` {`server_key: [u8;32]`, `server_name`, `protocol_version: u32`, `software`}, `nonce: [u8;32]` |
-| 2 | HelloAck | listener → dialer | `ack: PeerHelloAck` {same fields + `accepted: bool` (advisory approval verdict for the claimed key)}, `nonce: [u8;32]`, `proof: Signature` |
+| 1 | Hello | dialer → listener | `hello: PeerHello` {`server_key: [u8;32]`, `origin`, `server_name`, `protocol_version: u32`, `software`}, `nonce: [u8;32]` |
+| 2 | HelloAck | listener → dialer | `ack: PeerHelloAck` {same fields + `accepted: bool` (advisory verdict for the claimed origin/key tuple)}, `nonce: [u8;32]`, `proof: Signature` |
 | 3 | Proof | dialer → listener | `proof: Signature` |
 | 4 | Welcome | listener → dialer | `connected: bool` — sent *after* the listener's registry is updated, so the dialer has a deterministic readiness signal |
 | 5 | CatalogAnnounce | both, post-welcome | `catalog_id: [u8;32]`, `generation: u64` — "my current catalog", cheap staleness check |
 | 6 | CatalogGet | dialer → listener | — (empty) request the full signed catalog |
 | 7 | Catalog | listener → dialer | `bytes: Vec<u8>` — a `SignedCatalog` in its postcard wire form; verified before a byte of it is trusted |
+| 8 | Subscribe | both, post-welcome | bounded board slugs (or `*`) this peer wants |
+| 9 | IHave | both, post-welcome | bounded signed-event ids available for a board |
+| 10 | Pull | both, post-welcome | bounded signed-event ids requested for a board |
+| 11 | Events | both, post-welcome | signed events plus parallel origin-key selectors; selectors never establish trust |
 
 `PeerHello`/`PeerHelloAck` are the `crates/federation::handshake` types.
 
 ## Handshake: nonce-bound challenge-response
 
 Both sides sign the same transcript with their Ed25519 server identity key
-(domain separator `rhp-fed-s2s-auth-v1`):
+(domain separator `rhp-fed-s2s-auth-v2`; strings are length-prefixed):
 
 ```text
-transcript = "rhp-fed-s2s-auth-v1" ‖ dialer_key ‖ listener_key
+transcript = "rhp-fed-s2s-auth-v2" ‖ dialer_key ‖ listener_key
+             ‖ len(dialer_origin) ‖ dialer_origin
+             ‖ len(listener_origin) ‖ listener_origin
              ‖ dialer_nonce ‖ listener_nonce
 ```
 
@@ -61,31 +67,40 @@ transcript = "rhp-fed-s2s-auth-v1" ‖ dialer_key ‖ listener_key
    32-byte random nonce.
 2. Listener replies `HelloAck`: its announcement, its own fresh nonce, and
    its signature over the transcript. The dialer verifies it against the
-   announced key (and against `expected_key` when configured — a mismatch
-   aborts).
+   announced key, the configured `expected_origin`, and `expected_key` when
+   configured; any mismatch aborts.
 3. Dialer sends `Proof` — its signature over the same transcript. The
    listener verifies it against the dialer's announced key.
 4. Listener sends `Welcome { connected }`.
 
-Each proof demonstrates **live possession** of the announced identity key,
-and the nonces bind the proof to *this* connection — a captured proof cannot
-be replayed on another session.
+Each proof demonstrates **live possession** of the announced identity key and
+binds the immutable origin to it. The nonces bind the proof to *this*
+connection, so a captured proof cannot be replayed on another session.
+
+`federation_origin` is TOML-only, restart-only, and required whenever
+federation is enabled. The hot-reloadable display `name` does not change the
+origin used in newly signed events.
 
 ## Admin approval: pending / approved peers
 
-A new peer key is **never trusted automatically**:
+A new peer origin/key tuple is **never trusted automatically**:
 
-- An inbound handshake from an unknown key authenticates, is recorded
+- An inbound handshake from an unknown tuple authenticates, is recorded
   `PeerState::Pending` in the `PeerRegistry`, receives
   `Welcome { connected: false }`, and the connection closes.
-- An admin approves the key (audited, via the `ctl` peer commands). Approved
-  keys persist to `<data_dir>/federation/approved_peers.json` and reload on
-  boot. A subsequent handshake then transitions to `PeerState::Connected`.
-- **Dialing implies approval on the dialer's side** (the operator configured
-  the peer in `federation_peers`); the listener still approves the dialer
-  independently.
-- Approval is re-checked at every catalog fetch, so revoking a peer
-  mid-session stops serving it.
+- An admin approves the exact tuple with `ctl peer-approve KEY [ORIGIN]`.
+  Approved tuples persist in versioned
+  `<data_dir>/federation/approved_peers.json` and reload on boot. A subsequent
+  matching handshake transitions to `PeerState::Connected`.
+- **Dialing implies tuple approval on the dialer's side**: the operator
+  configured `origin` and the TLS/key pins in `federation_peers`. The listener
+  still approves the dialer independently.
+- Approval is re-checked before every post-welcome frame and on a one-second
+  lifecycle tick. `peer-revoke` therefore stops ingestion and closes an active
+  session rather than waiting for reconnect.
+- A configured outbound peer is implicitly approved by `federation_peers`.
+  Remove it from configuration and restart before running `peer-revoke`; the
+  command refuses a contradictory revoke that the dialer would immediately undo.
 
 A background dialer re-checks configured `federation_peers` every 30 s and
 redials any without a live session.
@@ -132,12 +147,16 @@ From `crates/federation::catalog`, signature domain `rhp-fed-catalog-v1`:
 A burrow with the HTTP surface enabled (`http_enabled`) serves its
 self-certifying **`PeerDescriptor`** as JSON at
 `/.well-known/rabbithole/server` (`apps/server/src/well_known.rs`). The body
-is built from live config — server name, advertised `scheme://host:port`
+is built from config — immutable federation origin, display name, advertised `scheme://host:port`
 endpoints (`quic`, `ws`, and `http`/`fed+quic` when enabled), feature tags per
 enabled surface, and a unix-ms `issued_at` — signed with the burrow's identity
-key over `rhp-fed-descriptor-v1 ‖ postcard(body)`. Anyone can fetch it and
-verify server-key continuity without a round trip: the signature is checked
-against the very key the document names.
+key over `rhp-fed-descriptor-v2 ‖ postcard(body)`. Descriptor v2 adds the
+immutable signed `origin`; v1 bodies are not decoded or accepted as v2. Anyone
+can fetch it and
+verify that the document is self-consistent: the signature is checked against
+the key the document names. Self-signature alone is **not** proof that the key
+owns the claimed origin; authoritative HTTPS retrieval or explicit operator
+approval is still required before installing an origin binding.
 
 The host of each advertised endpoint comes from the TOML-only `advertise_host`
 config; with it unset, a concrete bind IP is used and wildcard (`0.0.0.0`/`::`)
@@ -145,16 +164,40 @@ binds contribute no host-based address (the fetcher already knows the host it
 dialed). JSON is the transport convention here; because the signature covers
 the **postcard** encoding of the body, the same descriptor verifies whether it
 arrives as `.well-known` JSON or postcard over a tracker/S2S relay. Automated
-peer fetch + consumption of the descriptor is the remaining half.
+peer fetch + authoritative consumption of the descriptor is the remaining
+half.
+
+## Origin provenance and relayed events
+
+`MT_EVENTS` carries an origin key next to each signed event, but that key is
+only a selector for an existing trusted binding. It cannot create or change
+authority. A direct, approved peer installs its own proven origin/key tuple;
+an operator can pre-anchor an indirect origin with `ctl origin-pin ORIGIN KEY`.
+This permits A to accept C's events relayed through B without an A–C peer
+session, while preventing B from minting an unseen `C` origin.
+
+Bindings persist in the versioned
+`<data_dir>/federation/origin_keys.json`. Installation is serialized and
+persisted before visibility; conflicts, aliasing one key across origins, cap
+exhaustion, corrupt/legacy state, and write failure all fail closed. The old
+unversioned first-seen files and key-only peer approvals are intentionally not
+promoted: after upgrading, operators must confirm/re-pin origins and re-approve
+peer tuples before their events are accepted.
+
+Server-key rotation is not implicit. The current store retains one authorized
+key per origin and rejects a replacement. A future protocol must carry an
+old-key-authorized, monotonic successor chain and retain historical keys; lost
+key recovery requires an explicit audited operator procedure, never
+first-seen network input.
+
+Protocol-v1 peers do not get a permissive compatibility path. They can be
+upgraded and re-approved, but v1 traffic cannot ingest board events under the
+v2 provenance rules.
 
 ## Model-only today (implemented in `crates/federation`, not on this wire)
 
-These are pure, tested data models awaiting a transport slice. Nothing
-below is exchanged between servers yet.
-
-- **Board flood-fill** (`floodfill`) — `Subscription`, `IHave` / `PullRequest`
-  / `PushEvents` moving signed board events between peers unchanged, gated
-  by a Bloom-filter seen-set (`bloom`) against re-ingest loops.
+These are pure, tested data models awaiting a transport slice. Nothing below
+is exchanged between servers yet.
 - **Redactions** (`redaction`) — the *cross-community* server-sovereign
   redaction signal ("I no longer serve this hash"), still model-only. (Board
   **Edit/Tombstone follow-ups now flood live** over `MT_IHAVE`/`MT_PULL`/
@@ -162,8 +205,10 @@ below is exchanged between servers yet.
   author-or-home-server authorization check in `BoardService::ingest_event`
   and reconciled when they arrive before their target post — see
   `docs/design/board-followup-flood.md`.)
-- **Ingest defense** (`policy`) — per-peer token-bucket `RateLimiter` and
-  allow/deny `PeerPolicy`.
+- **Additional ingest defense** (`policy`) — per-peer token-bucket
+  `RateLimiter` and allow/deny `PeerPolicy`; origin provenance and signatures
+  are enforced live, while reputation and automatic defederation remain
+  model-only.
 - **Search / dedupe / fan-out** (`search`, `dedupe`, `fanout`) — these *run*
   today, but locally over stored catalogs; no query travels between servers.
 

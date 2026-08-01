@@ -526,6 +526,7 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
                     json!({
                         "key": p.key_hex(),
                         "name": p.name,
+                        "origin": p.origin,
                         "addr": p.addr,
                         "state": p.state.as_str(),
                         "approved": p.approved,
@@ -537,18 +538,83 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
         "peer-approve" => {
             let key_hex = str_arg("key")?;
             let key = crate::federation::hex_key(&key_hex).ok_or("key must be 32-byte hex")?;
-            let existed = shared.peers.approve(&key);
-            crate::federation::persist_approved(shared).map_err(|e| e.to_string())?;
-            audit("peer-approve", key_hex.clone());
-            Ok(json!({"key": key_hex, "was_known": existed}))
+            let origin = req
+                .get("origin")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| shared.peers.get(&key).and_then(|peer| peer.origin))
+                .ok_or(
+                    "peer origin is unknown; let it complete a pending handshake or pass origin explicitly",
+                )?;
+            if !rabbithole_federation::is_valid_server_name(&origin) {
+                return Err("origin must be a valid lowercase federation server name".into());
+            }
+            if let Some(existing) = shared.peers.get(&key).and_then(|peer| peer.origin) {
+                if existing != origin {
+                    return Err(format!(
+                        "peer key is already associated with origin {existing}; refusing an origin alias"
+                    ));
+                }
+            }
+            let was_approved = shared.peers.is_approved_origin(&key, &origin);
+            let existed = shared.peers.approve_origin(&key, origin.clone());
+            if let Err(error) = crate::federation::persist_approved(shared) {
+                if !was_approved {
+                    shared.peers.revoke(&key);
+                }
+                return Err(error.to_string());
+            }
+            audit("peer-approve", format!("{origin} {key_hex}"));
+            Ok(json!({"key": key_hex, "origin": origin, "was_known": existed}))
         }
         "peer-revoke" => {
             let key_hex = str_arg("key")?;
             let key = crate::federation::hex_key(&key_hex).ok_or("key must be 32-byte hex")?;
+            let known_origin = shared.peers.get(&key).and_then(|peer| peer.origin);
+            let configured = shared.config.read().federation_peers.iter().any(|peer| {
+                crate::federation::hex_key(&peer.key) == Some(key)
+                    || known_origin.as_deref() == Some(peer.origin.as_str())
+            });
+            if configured {
+                return Err(
+                    "peer is an implicitly approved federation_peers dial target; remove it from configuration and restart before revoking it"
+                        .into(),
+                );
+            }
             let existed = shared.peers.revoke(&key);
             crate::federation::persist_approved(shared).map_err(|e| e.to_string())?;
             audit("peer-revoke", key_hex.clone());
             Ok(json!({"key": key_hex, "was_known": existed}))
+        }
+        "origin-list" => {
+            let pins: Vec<Value> = shared
+                .fed_flood
+                .pins()
+                .into_iter()
+                .map(|pin| {
+                    json!({
+                        "origin": pin.origin,
+                        "key": hex::encode(pin.key),
+                        "trust": pin.trust.as_str(),
+                    })
+                })
+                .collect();
+            Ok(Value::Array(pins))
+        }
+        "origin-pin" => {
+            let origin = str_arg("origin")?;
+            let key_hex = str_arg("key")?;
+            let key = crate::federation::hex_key(&key_hex).ok_or("key must be 32-byte hex")?;
+            let outcome = shared
+                .fed_flood
+                .trust_operator(&origin, key)
+                .map_err(|e| e.to_string())?;
+            audit("origin-pin", format!("{origin} {key_hex}"));
+            Ok(json!({
+                "origin": origin,
+                "key": key_hex,
+                "inserted": matches!(outcome, crate::fed_flood::PinOutcome::Inserted),
+            }))
         }
         // ---- Federated catalogs + cross-server search (Wave 9.x) -------
         "fed-catalogs" => {

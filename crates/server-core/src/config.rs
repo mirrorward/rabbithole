@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 pub struct FederationPeer {
     /// Human-readable label for logs/status.
     pub name: String,
+    /// Immutable federation origin expected from this peer (for example
+    /// `sister.example`). This is the namespace bound to its server key.
+    pub origin: String,
     /// `host:port` to dial (the peer's `federation_addr`).
     pub addr: String,
     /// TLS SNI / certificate name to expect (default "localhost" for
@@ -273,6 +276,10 @@ pub struct ServerConfig {
     /// Serve the server-to-server (S2S) federation peering surface on
     /// `federation_addr` and dial `federation_peers` (Wave 9). Off by default.
     pub federation_enabled: bool,
+    /// Immutable local federation origin used in signed events and peer
+    /// identity. Required when federation is enabled; unlike `name` it is
+    /// TOML-only and never hot-reloads.
+    pub federation_origin: String,
     /// Federation S2S listener address (default 0.0.0.0:4655 — alongside the
     /// QUIC 4653 / WebSocket 4654 client transports).
     pub federation_addr: SocketAddr,
@@ -454,6 +461,7 @@ impl Default for ServerConfig {
             syndication_feeds: std::collections::HashMap::new(),
             syndication_poll_secs: 1800,
             federation_enabled: false,
+            federation_origin: String::new(),
             federation_addr: "0.0.0.0:4655".parse().expect("valid"),
             federation_peers: Vec::new(),
             federation_board_subscribe: Vec::new(),
@@ -624,6 +632,7 @@ impl ServerConfig {
             "syndication_enabled" => self.syndication_enabled.to_string(),
             "syndication_poll_secs" => self.syndication_poll_secs.to_string(),
             "federation_enabled" => self.federation_enabled.to_string(),
+            "federation_origin" => self.federation_origin.clone(),
             "federation_addr" => self.federation_addr.to_string(),
             "portmap_enabled" => self.portmap_enabled.to_string(),
             "portmap_gateway" => self.portmap_gateway.clone(),

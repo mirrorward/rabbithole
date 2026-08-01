@@ -118,11 +118,11 @@ impl Shared {
         self.next_session.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// The server's origin id for `persona@origin` event authorship: the
-    /// configured name, lowercased and space-free (federation hostnames
-    /// arrive in W9).
+    /// The server's origin id for `persona@origin` event authorship. Federated
+    /// servers use the immutable restart-only `federation_origin`; legacy
+    /// non-federated configs retain their display-name-derived local id.
     pub fn origin_name(&self) -> String {
-        self.config.read().name.to_lowercase().replace(' ', "-")
+        effective_origin(&self.config.read())
     }
 
     /// Parse the configured registration mode (bad values read as closed —
@@ -221,6 +221,7 @@ impl Burrow {
     /// accepting. Returns once listening (not once shut down).
     pub async fn start(config: ServerConfig) -> Result<Burrow> {
         validate_ws_policy(&config)?;
+        validate_federation_policy(&config)?;
         if !config.ws_addr.ip().is_loopback() {
             tracing::warn!(
                 ws = %config.ws_addr,
@@ -244,7 +245,7 @@ impl Burrow {
             BlobStore::open(data_dir.join("blobs")).map_err(|e| anyhow::anyhow!("blobs: {e}"))?,
         );
 
-        let origin_name = config.name.to_lowercase().replace(' ', "-");
+        let origin_name = effective_origin(&config);
         let boards = BoardService::new(pool.clone(), origin_name, identity.signing.seed());
 
         let quic = QuicListener::bind(config.quic_addr, &identity.tls)?;
@@ -349,12 +350,17 @@ impl Burrow {
 
         // Seed the peer registry: admin-approved keys persisted on disk, plus
         // configured dial targets (implicitly approved on our side).
-        for key in federation::load_approved(&data_dir) {
-            shared.peers.seed_approved(key, "");
+        for peer in federation::load_approved(&data_dir) {
+            shared.peers.seed_approved(peer.key, "", Some(peer.origin));
         }
         for peer in &federation_peers {
-            if let Some(key) = federation::hex_key(&peer.key) {
-                shared.peers.seed_approved(key, peer.name.clone());
+            if let (Some(key), true) = (
+                federation::hex_key(&peer.key),
+                rabbithole_federation::is_valid_server_name(&peer.origin),
+            ) {
+                shared
+                    .peers
+                    .seed_approved(key, peer.name.clone(), Some(peer.origin.clone()));
             }
         }
 
@@ -553,6 +559,33 @@ fn validate_ws_policy(config: &ServerConfig) -> Result<()> {
     Ok(())
 }
 
+fn effective_origin(config: &ServerConfig) -> String {
+    if config.federation_origin.is_empty() {
+        config.name.to_lowercase().replace(' ', "-")
+    } else {
+        config.federation_origin.clone()
+    }
+}
+
+fn validate_federation_policy(config: &ServerConfig) -> Result<()> {
+    if !config.federation_enabled {
+        return Ok(());
+    }
+    if !rabbithole_federation::is_valid_server_name(&config.federation_origin) {
+        anyhow::bail!(
+            "federation_origin must be set to an immutable lowercase federation server name before federation can be enabled"
+        );
+    }
+    for (index, peer) in config.federation_peers.iter().enumerate() {
+        if !rabbithole_federation::is_valid_server_name(&peer.origin) {
+            anyhow::bail!(
+                "federation_peers[{index}].origin must be set to the peer's immutable lowercase federation origin; migrate this configured peer before starting"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Periodic housekeeping: enforce the blob cache policy
 /// (`swarm_cache_max_bytes`) by evicting oldest unreferenced blobs over the
 /// cap. Referenced library content is never touched; `0` means unlimited
@@ -700,6 +733,38 @@ mod tests {
         assert!(config.ws_addr.ip().is_loopback());
         assert!(!config.ws_allow_insecure_remote);
         assert!(validate_ws_policy(&config).is_ok());
+    }
+
+    #[test]
+    fn federation_requires_an_immutable_origin() {
+        let mut config = ServerConfig {
+            federation_enabled: true,
+            ..ServerConfig::default()
+        };
+        assert!(validate_federation_policy(&config).is_err());
+        config.federation_origin = "warren.example".into();
+        assert!(validate_federation_policy(&config).is_ok());
+        config.name = "A Different Display Name".into();
+        assert_eq!(effective_origin(&config), "warren.example");
+    }
+
+    #[test]
+    fn federation_rejects_unmigrated_configured_peer_origins() {
+        let mut config = ServerConfig {
+            federation_enabled: true,
+            federation_origin: "warren.example".into(),
+            federation_peers: vec![rabbithole_server_core::config::FederationPeer {
+                name: "legacy-peer".into(),
+                ..Default::default()
+            }],
+            ..ServerConfig::default()
+        };
+        let error = validate_federation_policy(&config).unwrap_err().to_string();
+        assert!(error.contains("federation_peers[0].origin"));
+        assert!(error.contains("migrate"));
+
+        config.federation_peers[0].origin = "peer.example".into();
+        assert!(validate_federation_policy(&config).is_ok());
     }
 
     #[test]

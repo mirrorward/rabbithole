@@ -17,7 +17,7 @@ use rabbithole_identity::{IdentityKey, PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 
 /// Domain separator for server descriptor signatures.
-pub const DESCRIPTOR_CONTEXT: &[u8] = b"rhp-fed-descriptor-v1";
+pub const DESCRIPTOR_CONTEXT: &[u8] = b"rhp-fed-descriptor-v2";
 
 /// Opening announcement a server sends when dialing a peer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +26,10 @@ pub struct PeerHello {
     pub server_key: [u8; 32],
     /// Human-readable server name (e.g. `"rabbithole.example"`).
     pub server_name: String,
+    /// Immutable federation origin claimed by this server. The transport
+    /// handshake binds it to `server_key`; admission policy separately checks
+    /// it against the operator-approved origin-key tuple.
+    pub origin: String,
     /// Federation protocol version the sender speaks.
     pub protocol_version: u32,
     /// Free-form software id/version (e.g. `"rabbithole/0.5.0"`).
@@ -40,6 +44,8 @@ pub struct PeerHelloAck {
     pub server_key: [u8; 32],
     /// The responding server's human-readable name.
     pub server_name: String,
+    /// Immutable federation origin bound to the responding server key.
+    pub origin: String,
     /// Federation protocol version the responder speaks.
     pub protocol_version: u32,
     /// The responder's software id/version.
@@ -58,6 +64,8 @@ pub struct DescriptorBody {
     pub server_key: [u8; 32],
     /// Human-readable server name.
     pub name: String,
+    /// Immutable federation namespace bound to `server_key`.
+    pub origin: String,
     /// Reachable addresses (host:port, URLs, or later RNS destinations).
     pub addresses: Vec<String>,
     /// Advertised feature tags (e.g. `"boards"`, `"swarm"`, `"radio"`).
@@ -138,10 +146,26 @@ fn signed_bytes(body: &DescriptorBody) -> Result<Vec<u8>, DescriptorError> {
 mod tests {
     use super::*;
 
+    #[derive(Serialize)]
+    struct LegacyDescriptorBody {
+        server_key: [u8; 32],
+        name: String,
+        addresses: Vec<String>,
+        features: Vec<String>,
+        issued_at: i64,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyPeerDescriptor {
+        body: LegacyDescriptorBody,
+        sig: Signature,
+    }
+
     fn body() -> DescriptorBody {
         DescriptorBody {
             server_key: [0u8; 32],
             name: "rabbithole.example".into(),
+            origin: "rabbithole.example".into(),
             addresses: vec!["quic://rabbithole.example:4433".into()],
             features: vec!["boards".into(), "swarm".into()],
             issued_at: 1_700_000_000_000,
@@ -153,6 +177,7 @@ mod tests {
         let hello = PeerHello {
             server_key: [7u8; 32],
             server_name: "a".into(),
+            origin: "a.example".into(),
             protocol_version: 1,
             software: "rabbithole/0.5.0".into(),
         };
@@ -163,6 +188,7 @@ mod tests {
         let ack = PeerHelloAck {
             server_key: [8u8; 32],
             server_name: "b".into(),
+            origin: "b.example".into(),
             protocol_version: 1,
             software: "rabbithole/0.5.0".into(),
             accepted: true,
@@ -185,6 +211,42 @@ mod tests {
         let back = PeerDescriptor::from_bytes(&wire).unwrap();
         assert_eq!(back, desc);
         assert_eq!(back.verify(), Ok(()));
+    }
+
+    #[test]
+    fn descriptor_v1_body_is_not_decoded_as_v2() {
+        let key = IdentityKey::from_seed(&[3u8; 32]);
+        let body = LegacyDescriptorBody {
+            server_key: key.public().0,
+            name: "rabbithole.example".into(),
+            addresses: vec!["quic://rabbithole.example:4433".into()],
+            features: vec!["boards".into()],
+            issued_at: 1_700_000_000_000,
+        };
+        let mut signed = b"rhp-fed-descriptor-v1".to_vec();
+        signed.extend(postcard::to_allocvec(&body).unwrap());
+        let legacy = LegacyPeerDescriptor {
+            sig: key.sign(&signed),
+            body,
+        };
+        assert!(
+            PeerDescriptor::from_bytes(&postcard::to_allocvec(&legacy).unwrap()).is_none(),
+            "the origin-less v1 postcard shape must not be interpreted as v2"
+        );
+    }
+
+    #[test]
+    fn descriptor_v1_signature_context_is_rejected_by_v2() {
+        let key = IdentityKey::from_seed(&[3u8; 32]);
+        let mut body = body();
+        body.server_key = key.public().0;
+        let mut signed = b"rhp-fed-descriptor-v1".to_vec();
+        signed.extend(postcard::to_allocvec(&body).unwrap());
+        let descriptor = PeerDescriptor {
+            sig: key.sign(&signed),
+            body,
+        };
+        assert_eq!(descriptor.verify(), Err(DescriptorError::BadSignature));
     }
 
     #[test]
