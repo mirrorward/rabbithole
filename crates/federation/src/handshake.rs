@@ -26,6 +26,10 @@ pub struct PeerHello {
     pub server_key: [u8; 32],
     /// Human-readable server name (e.g. `"rabbithole.example"`).
     pub server_name: String,
+    /// Immutable federation origin claimed by this server. The transport
+    /// handshake binds it to `server_key`; admission policy separately checks
+    /// it against the operator-approved origin-key tuple.
+    pub origin: String,
     /// Federation protocol version the sender speaks.
     pub protocol_version: u32,
     /// Free-form software id/version (e.g. `"rabbithole/0.5.0"`).
@@ -40,6 +44,8 @@ pub struct PeerHelloAck {
     pub server_key: [u8; 32],
     /// The responding server's human-readable name.
     pub server_name: String,
+    /// Immutable federation origin bound to the responding server key.
+    pub origin: String,
     /// Federation protocol version the responder speaks.
     pub protocol_version: u32,
     /// The responder's software id/version.
@@ -58,6 +64,8 @@ pub struct DescriptorBody {
     pub server_key: [u8; 32],
     /// Human-readable server name.
     pub name: String,
+    /// Immutable federation namespace bound to `server_key`.
+    pub origin: String,
     /// Reachable addresses (host:port, URLs, or later RNS destinations).
     pub addresses: Vec<String>,
     /// Advertised feature tags (e.g. `"boards"`, `"swarm"`, `"radio"`).
@@ -142,6 +150,7 @@ mod tests {
         DescriptorBody {
             server_key: [0u8; 32],
             name: "rabbithole.example".into(),
+            origin: "rabbithole.example".into(),
             addresses: vec!["quic://rabbithole.example:4433".into()],
             features: vec!["boards".into(), "swarm".into()],
             issued_at: 1_700_000_000_000,
@@ -153,6 +162,7 @@ mod tests {
         let hello = PeerHello {
             server_key: [7u8; 32],
             server_name: "a".into(),
+            origin: "a.example".into(),
             protocol_version: 1,
             software: "rabbithole/0.5.0".into(),
         };
@@ -163,6 +173,7 @@ mod tests {
         let ack = PeerHelloAck {
             server_key: [8u8; 32],
             server_name: "b".into(),
+            origin: "b.example".into(),
             protocol_version: 1,
             software: "rabbithole/0.5.0".into(),
             accepted: true,

@@ -112,6 +112,12 @@ Native transports and rate limiting are the only things on out of the box;
 | QWK/QWKE offline mail | — (telnet `[M]` + `ctl`) | `qwk_enabled` | off |
 | Looking Glass tracker | 5498 TCP / 5499 UDP + 4656 UDP gossip | (`looking-glass` daemon) | — |
 
+Federation also requires a restart-only `federation_origin`. This immutable
+lowercase namespace is bound to the server key in protocol-v2 handshakes and
+signed events; changing the display `name` does not change it. Peer approvals
+are exact origin/key tuples, and relayed events require an independently
+trusted origin binding. See [`docs/protocol/federation.md`](docs/protocol/federation.md).
+
 ## Try it
 
 ```console

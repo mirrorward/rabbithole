@@ -331,6 +331,7 @@ radio_source_password = "CHANGE-ME-to-a-strong-source-password"
 # Pending until an admin runs `ctl peer-approve`.
 
 federation_enabled = true
+federation_origin = "the-rabbit-hole" # immutable signed-event namespace (restart)
 
 # S2S listener (default 4655 — beside the QUIC 4653 / WS 4654 client ports). (restart)
 # federation_addr = "0.0.0.0:4655"
@@ -467,11 +468,12 @@ theme_accent = "6c9cff"
 # daily_limit_mins = 60
 
 # --- Federation dial targets: one [[federation_peers]] table per peer --------
-# Requires federation_enabled = true. Dialing a peer implies you approve them;
-# the peer still approves YOU before a session is established.
+# Requires federation_enabled = true. Dialing approves the exact configured
+# origin/key tuple on this side; the peer still approves YOU independently.
 # [[federation_peers]]
 # name = "Sister Burrow"
+# origin = "sister.example"             # immutable namespace expected in handshake/events
 # addr = "sister.example.org:4655"     # the peer's federation_addr
 # server_name = "localhost"            # TLS SNI / cert name (self-signed = "localhost")
-# key = ""                             # peer's Ed25519 server key, 32-byte hex ("" = accept + pin)
+# key = ""                             # peer Ed25519 key, 32-byte hex; pin when known
 # fingerprint = ""                     # peer's pinned TLS cert blake3 fingerprint, hex

@@ -8,18 +8,20 @@
 //! 1. The dialer opens a QUIC connection to the peer's `federation_addr`,
 //!    pinning the peer's self-signed TLS certificate fingerprint.
 //! 2. Both sides exchange the [`PeerHello`]/[`PeerHelloAck`] announcements from
-//!    the [`rabbithole_federation`] crate (identity key, name, protocol version,
-//!    capabilities/software) plus a nonce each.
+//!    the [`rabbithole_federation`] crate (identity key, immutable federation
+//!    origin, display name, protocol version, capabilities/software) plus a
+//!    nonce each.
 //! 3. Each side signs a session transcript
-//!    (`context ‖ dialer_key ‖ listener_key ‖ dialer_nonce ‖ listener_nonce`)
+//!    (`context ‖ dialer_key ‖ listener_key ‖ dialer_origin ‖
+//!    listener_origin ‖ dialer_nonce ‖ listener_nonce`)
 //!    with its Ed25519 server key and the other verifies it — proving live
 //!    possession of the announced identity and binding the proof to *this*
 //!    connection (nonces defeat replay).
-//! 4. A new peer key is **not** trusted automatically: an inbound handshake
-//!    from an unknown key is recorded [`PeerState::Pending`]
+//! 4. A new peer origin-key tuple is **not** trusted automatically: an inbound
+//!    handshake from an unknown tuple is recorded [`PeerState::Pending`]
 //!    (see [`rabbithole_server_core::PeerRegistry`]) and refused. An admin
-//!    approves it (audited, via the `ctl` peer commands); approved keys persist
-//!    to `<data_dir>/federation/approved_peers.json` and are reloaded on boot.
+//!    approves it (audited, via the `ctl` peer commands); approved tuples
+//!    persist to `<data_dir>/federation/approved_peers.json` and reload on boot.
 //!    Only then does a subsequent handshake transition to
 //!    [`PeerState::Connected`].
 //!
@@ -63,7 +65,8 @@
 //! whoever holds a matching event offers its ids ([`IHave`]), the subscriber
 //! pulls what it lacks ([`PullRequest`]), and the holder delivers the raw
 //! signed events ([`PushEvents`]/[`FedEvent`]) plus each event's origin server
-//! key. On ingest the origin signature is verified (mirroring
+//! key. A carried key can select an existing trusted origin binding but can
+//! never establish one. On ingest the origin signature is verified (mirroring
 //! [`crate::fed_catalog::ingest_peer_catalog`]), the id is deduped through the
 //! shared [`rabbithole_server_core::DedupStore`], and the post is projected via
 //! `BoardService` **unchanged** — never re-signed as local. A fresh ingest
@@ -89,9 +92,10 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rabbithole_federation::{
-    BloomFilter, FedEvent, IHave, PeerHello, PeerHelloAck, PullRequest, PushEvents, Subscription,
+    is_valid_server_name, BloomFilter, FedEvent, IHave, PeerHello, PeerHelloAck, PullRequest,
+    PushEvents, Subscription,
 };
 use rabbithole_identity::{IdentityKey, PublicKey, Signature};
 use rabbithole_net::quic::{QuicListener, QuicTransport};
@@ -108,10 +112,10 @@ use tokio::task::JoinHandle;
 use crate::Shared;
 
 /// Domain separator for the S2S handshake proof signatures.
-const AUTH_CONTEXT: &[u8] = b"rhp-fed-s2s-auth-v1";
+const AUTH_CONTEXT: &[u8] = b"rhp-fed-s2s-auth-v2";
 
 /// Federation protocol version this build speaks.
-const FED_PROTOCOL: u32 = 1;
+const FED_PROTOCOL: u32 = 2;
 
 /// Software id announced in the handshake.
 const SOFTWARE: &str = concat!("rabbithole/", env!("CARGO_PKG_VERSION"));
@@ -122,6 +126,8 @@ const MAX_MSG: usize = 64 * 1024;
 /// Largest catalog frame payload we will decode (a full listing is bigger
 /// than any handshake message, but still bounded).
 const MAX_CATALOG: usize = 4 * 1024 * 1024;
+/// Hard cap on durable peer approvals loaded from disk.
+const MAX_APPROVED_PEERS: usize = 4096;
 
 /// Federation frame message types (within [`Family::FEDERATION`]).
 const MT_HELLO: u16 = 1;
@@ -225,8 +231,9 @@ struct CatalogMsg {
 /// `MT_EVENTS` payload: the model's [`PushEvents`] plus a parallel list of
 /// origin server keys, one per event (same order + length). The origin key is
 /// what verifies each event's origin signature; carrying it lets a burrow that
-/// never peered with the origin still verify a relayed post. Each carried key
-/// is *pinned* per origin on first verification, so a relay can't swap it.
+/// never peered with the origin still verify a relayed post, provided that
+/// origin-key tuple was independently trusted first. A carried key is only a
+/// selector: `MT_EVENTS` can never create origin authority.
 #[derive(Debug, Serialize, Deserialize)]
 struct EventsMsg {
     push: PushEvents,
@@ -259,6 +266,8 @@ impl Interest {
 struct FloodEdge {
     /// The peer's proven Ed25519 server key.
     peer_key: [u8; 32],
+    /// Immutable origin approved for `peer_key`.
+    peer_origin: String,
     /// What the peer wants offered (from its `MT_SUBSCRIBE`).
     interest: Interest,
     /// Whether we've already announced our own interest to the peer, so a
@@ -272,11 +281,12 @@ struct FloodEdge {
 }
 
 impl FloodEdge {
-    fn new(peer_key: [u8; 32]) -> Self {
+    fn new(peer_key: [u8; 32], peer_origin: String) -> Self {
         // Salt from the peer key so independent edges disagree on collisions.
         let salt = u64::from_le_bytes(peer_key[0..8].try_into().expect("8 bytes"));
         Self {
             peer_key,
+            peer_origin,
             interest: Interest::None,
             sent_subscription: false,
             seen: BloomFilter::with_capacity_salted(EDGE_SEEN_CAPACITY, EDGE_SEEN_FP, salt),
@@ -305,6 +315,8 @@ pub struct DialTarget {
     pub fingerprint: CertFingerprint,
     /// Expected Ed25519 server key, if known (rejects a mismatch).
     pub expected_key: Option<[u8; 32]>,
+    /// Immutable federation origin expected from the peer.
+    pub expected_origin: String,
 }
 
 // ---- frame helpers -------------------------------------------------------
@@ -368,18 +380,26 @@ fn random_nonce() -> [u8; 32] {
     n
 }
 
-/// The exact bytes both sides sign: context ‖ dialer_key ‖ listener_key ‖
-/// dialer_nonce ‖ listener_nonce. Fixed role order so both compute identically.
+/// The exact bytes both sides sign: context, keys, immutable origins, and
+/// nonces in fixed role order.
 fn auth_transcript(
     dialer_key: &[u8; 32],
     listener_key: &[u8; 32],
+    dialer_origin: &str,
+    listener_origin: &str,
     dialer_nonce: &[u8; 32],
     listener_nonce: &[u8; 32],
 ) -> Vec<u8> {
-    let mut m = Vec::with_capacity(AUTH_CONTEXT.len() + 128);
+    let mut m = Vec::with_capacity(
+        AUTH_CONTEXT.len() + 128 + dialer_origin.len() + listener_origin.len() + 4,
+    );
     m.extend_from_slice(AUTH_CONTEXT);
     m.extend_from_slice(dialer_key);
     m.extend_from_slice(listener_key);
+    m.extend_from_slice(&(dialer_origin.len() as u16).to_be_bytes());
+    m.extend_from_slice(dialer_origin.as_bytes());
+    m.extend_from_slice(&(listener_origin.len() as u16).to_be_bytes());
+    m.extend_from_slice(listener_origin.as_bytes());
     m.extend_from_slice(dialer_nonce);
     m.extend_from_slice(listener_nonce);
     m
@@ -389,6 +409,7 @@ fn my_hello(shared: &Shared) -> PeerHello {
     PeerHello {
         server_key: shared.server_key,
         server_name: shared.config.read().name,
+        origin: shared.origin_name(),
         protocol_version: FED_PROTOCOL,
         software: SOFTWARE.to_string(),
     }
@@ -444,16 +465,35 @@ async fn serve_peer(mut conn: Box<dyn Connection>, shared: Arc<Shared>) -> Resul
     let hello: HelloMsg = recv_fed(conn.as_mut(), MT_HELLO).await?;
     let dialer_key = hello.hello.server_key;
     let dialer_name = hello.hello.server_name.clone();
+    let dialer_origin = hello.hello.origin.clone();
+    if hello.hello.protocol_version != FED_PROTOCOL {
+        bail!("peer federation protocol version is not supported");
+    }
+    if !is_valid_server_name(&dialer_origin) {
+        bail!("peer announced an invalid federation origin");
+    }
+    if dialer_origin == shared.origin_name() && dialer_key != my_key {
+        bail!("peer attempted to claim our local federation origin");
+    }
 
     // 2. Reply with our announcement + proof. `accepted` reflects the current
     //    approval of the claimed key (advisory; the session only goes live
     //    after we verify the dialer's proof below).
     let listener_nonce = random_nonce();
-    let transcript = auth_transcript(&dialer_key, &my_key, &hello.nonce, &listener_nonce);
-    let approved = shared.peers.is_approved(&dialer_key);
+    let listener_origin = shared.origin_name();
+    let transcript = auth_transcript(
+        &dialer_key,
+        &my_key,
+        &dialer_origin,
+        &listener_origin,
+        &hello.nonce,
+        &listener_nonce,
+    );
+    let approved = shared.peers.is_approved_origin(&dialer_key, &dialer_origin);
     let ack = PeerHelloAck {
         server_key: my_key,
         server_name: shared.config.read().name,
+        origin: listener_origin,
         protocol_version: FED_PROTOCOL,
         software: SOFTWARE.to_string(),
         accepted: approved,
@@ -479,14 +519,21 @@ async fn serve_peer(mut conn: Box<dyn Connection>, shared: Arc<Shared>) -> Resul
     //    deterministic readiness signal.
     let connected = if approved {
         shared
+            .fed_flood
+            .trust_direct(&dialer_origin, dialer_key)
+            .context("peer origin conflicts with trusted provenance")?;
+        shared
             .peers
             .set_connected(dialer_key, dialer_name.clone(), Some(remote.clone()));
         tracing::info!(peer = %PublicKey(dialer_key).fingerprint(), %remote, "federation peer connected");
         true
     } else {
-        shared
-            .peers
-            .note_pending(dialer_key, dialer_name.clone(), Some(remote.clone()));
+        shared.peers.note_pending(
+            dialer_key,
+            dialer_name.clone(),
+            dialer_origin.clone(),
+            Some(remote.clone()),
+        );
         tracing::info!(
             peer = %PublicKey(dialer_key).fingerprint(),
             %remote,
@@ -510,7 +557,7 @@ async fn serve_peer(mut conn: Box<dyn Connection>, shared: Arc<Shared>) -> Resul
     // Serve catalog traffic + board-event flood-fill until the peer drops the
     // session. This listener side also answers catalog announce/get (the
     // dialer pulls; see `sync_catalogs`).
-    run_peer_session(conn, dialer_key, shared, true).await;
+    run_peer_session(conn, dialer_key, dialer_origin, shared, true).await;
     Ok(())
 }
 
@@ -527,10 +574,11 @@ async fn serve_peer(mut conn: Box<dyn Connection>, shared: Arc<Shared>) -> Resul
 async fn run_peer_session(
     mut conn: Box<dyn Connection>,
     peer_key: [u8; 32],
+    peer_origin: String,
     shared: Arc<Shared>,
     serve_catalog: bool,
 ) {
-    let mut edge = FloodEdge::new(peer_key);
+    let mut edge = FloodEdge::new(peer_key, peer_origin);
     // The dialer announces its interest first (after its synchronous catalog
     // pull has completed, so it can't collide with that request/reply). The
     // listener stays quiet until it receives a subscription, then replies with
@@ -545,8 +593,22 @@ async fn run_peer_session(
         }
     }
     let mut bus = shared.bus.subscribe();
+    let mut approval_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    approval_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            _ = approval_tick.tick() => {
+                if !shared
+                    .peers
+                    .is_approved_origin(&edge.peer_key, &edge.peer_origin)
+                {
+                    tracing::info!(
+                        peer = %PublicKey(peer_key).fingerprint(),
+                        "federation: closing session after approval revocation"
+                    );
+                    break;
+                }
+            }
             incoming = conn.recv() => {
                 match incoming {
                     Ok(Some(frame)) => {
@@ -569,6 +631,12 @@ async fn run_peer_session(
                 match ev {
                     Ok(ServerEvent::BoardPost { board, id, .. })
                     | Ok(ServerEvent::BoardEvent { board, id }) => {
+                        if !shared
+                            .peers
+                            .is_approved_origin(&edge.peer_key, &edge.peer_origin)
+                        {
+                            break;
+                        }
                         if let Err(e) = maybe_offer(conn.as_mut(), &mut edge, &board, id).await {
                             tracing::debug!(
                                 peer = %PublicKey(peer_key).fingerprint(),
@@ -620,8 +688,9 @@ async fn serve_catalog_get(
     conn: &mut dyn Connection,
     shared: &Arc<Shared>,
     dialer_key: &[u8; 32],
+    dialer_origin: &str,
 ) -> Result<()> {
-    if !shared.peers.is_approved(dialer_key) {
+    if !shared.peers.is_approved_origin(dialer_key, dialer_origin) {
         bail!("peer approval revoked; refusing catalog fetch");
     }
     let signed = crate::fed_catalog::local_catalog(shared).await?;
@@ -647,12 +716,20 @@ async fn handle_peer_frame(
     frame: &Frame,
     serve_catalog: bool,
 ) -> Result<()> {
+    if !shared
+        .peers
+        .is_approved_origin(&edge.peer_key, &edge.peer_origin)
+    {
+        bail!("peer approval revoked");
+    }
     if frame.family != Family::FEDERATION {
-        return Ok(());
+        bail!("non-federation frame on the S2S channel");
     }
     match frame.message_type {
         MT_CATALOG_ANNOUNCE if serve_catalog => serve_catalog_announce(conn, shared, frame).await,
-        MT_CATALOG_GET if serve_catalog => serve_catalog_get(conn, shared, &edge.peer_key).await,
+        MT_CATALOG_GET if serve_catalog => {
+            serve_catalog_get(conn, shared, &edge.peer_key, &edge.peer_origin).await
+        }
         MT_SUBSCRIBE => {
             handle_subscribe(shared, edge, frame)?;
             // Reply with our own interest if we haven't announced it yet (the
@@ -710,7 +787,10 @@ async fn announce_subscription(
 /// from an admin-approved peer (subscriptions are exchanged post-welcome with
 /// approved peers only).
 fn handle_subscribe(shared: &Arc<Shared>, edge: &mut FloodEdge, frame: &Frame) -> Result<()> {
-    if !shared.peers.is_approved(&edge.peer_key) {
+    if !shared
+        .peers
+        .is_approved_origin(&edge.peer_key, &edge.peer_origin)
+    {
         bail!("subscribe from non-approved peer");
     }
     let subs: Vec<Subscription> = decode_fed(frame, MT_SUBSCRIBE)?;
@@ -857,7 +937,10 @@ async fn handle_pull(
     edge: &mut FloodEdge,
     frame: &Frame,
 ) -> Result<()> {
-    if !shared.peers.is_approved(&edge.peer_key) {
+    if !shared
+        .peers
+        .is_approved_origin(&edge.peer_key, &edge.peer_origin)
+    {
         bail!("pull from non-approved peer");
     }
     let req: PullRequest = decode_fed(frame, MT_PULL)?;
@@ -959,7 +1042,7 @@ async fn handle_events(shared: &Arc<Shared>, edge: &mut FloodEdge, frame: &Frame
 }
 
 /// Verify + store one delivered event. Mirrors `ingest_peer_catalog`: the
-/// origin signature must verify under the (pinned) origin key before a byte is
+/// origin signature must verify under the trusted origin key before a byte is
 /// trusted; forgeries and stale/duplicate replays are refused. The board is
 /// verified to exist by the caller.
 async fn ingest_fed_event(
@@ -989,19 +1072,17 @@ async fn ingest_fed_event(
     }
 
     // Resolve the origin server key. Our own echoed-back events verify under
-    // our key (never a peer-supplied one). For a remote origin we pin the
-    // first verified key; a later conflicting key for the same origin is a
-    // spoof and is refused (key continuity).
-    let origin_key = if signed.origin == shared.origin_name() {
-        shared.server_key
-    } else if let Some(pinned) = shared.fed_flood.resolve(&signed.origin) {
-        if pinned != *carried_origin_key {
-            bail!("origin key conflict for {}", signed.origin);
-        }
-        pinned
-    } else {
-        *carried_origin_key
-    };
+    // our key (never a peer-supplied one). Remote origins must already have a
+    // provenance-bearing pin established by a direct authenticated session or
+    // an explicit operator action. A relay can never create a first pin.
+    let local_origin = shared.origin_name();
+    let origin_key = trusted_origin_key(
+        &local_origin,
+        shared.server_key,
+        &shared.fed_flood,
+        &signed.origin,
+        *carried_origin_key,
+    )?;
 
     // Verify the content id + author signature + origin signature. (The
     // Edit/Tombstone *authorization* gate — author-or-home-server — lives in
@@ -1044,12 +1125,6 @@ async fn ingest_fed_event(
         return Ok(());
     }
     edge.seen.insert(&fe.id);
-
-    // Pin the (verified) remote origin key so we can relay this event onward
-    // and detect a future key swap for the same origin.
-    if signed.origin != shared.origin_name() {
-        shared.fed_flood.note(signed.origin.clone(), origin_key);
-    }
 
     // Ingest without re-signing (origin author + signed blob kept). An
     // unauthorized follow-up is refused and dropped without re-firing.
@@ -1094,10 +1169,33 @@ async fn ingest_fed_event(
     Ok(())
 }
 
+fn trusted_origin_key(
+    local_origin: &str,
+    local_key: [u8; 32],
+    trusted: &crate::fed_flood::FloodState,
+    claimed_origin: &str,
+    carried_key: [u8; 32],
+) -> Result<[u8; 32]> {
+    if claimed_origin == local_origin {
+        if carried_key != local_key {
+            bail!("peer supplied the wrong key for our local origin");
+        }
+        return Ok(local_key);
+    }
+    let Some(pinned) = trusted.resolve(claimed_origin) else {
+        bail!(
+            "origin {claimed_origin} has no trusted provenance; relays cannot establish origin keys"
+        );
+    };
+    if pinned != carried_key {
+        bail!("origin key conflict for {claimed_origin}");
+    }
+    Ok(pinned)
+}
+
 /// The origin server key that signs an event's origin signature: our own key
-/// for locally-authored events, else the pinned key learned when we first
-/// verified an event from that origin. `None` = we can't vouch for it (so we
-/// won't relay it).
+/// for locally-authored events, else a provenance-bearing trusted pin.
+/// `None` = we can't vouch for it (so we won't relay it).
 fn origin_key_for(shared: &Arc<Shared>, signed: &SignedEvent) -> Option<[u8; 32]> {
     if signed.origin == shared.origin_name() {
         Some(shared.server_key)
@@ -1137,12 +1235,30 @@ pub async fn dial_peer(shared: Arc<Shared>, target: DialTarget) -> Result<DialOu
     let ack: HelloAckMsg = recv_fed(conn.as_mut(), MT_HELLO_ACK).await?;
     let listener_key = ack.ack.server_key;
     let listener_name = ack.ack.server_name.clone();
+    let listener_origin = ack.ack.origin.clone();
+    if ack.ack.protocol_version != FED_PROTOCOL {
+        bail!("peer federation protocol version is not supported");
+    }
+    if !is_valid_server_name(&listener_origin) || listener_origin != target.expected_origin {
+        bail!("peer presented an unexpected federation origin");
+    }
+    if listener_origin == shared.origin_name() && listener_key != my_key {
+        bail!("peer attempted to claim our local federation origin");
+    }
     if let Some(expected) = target.expected_key {
         if expected != listener_key {
             bail!("peer presented an unexpected server key");
         }
     }
-    let transcript = auth_transcript(&my_key, &listener_key, &dialer_nonce, &ack.nonce);
+    let dialer_origin = shared.origin_name();
+    let transcript = auth_transcript(
+        &my_key,
+        &listener_key,
+        &dialer_origin,
+        &listener_origin,
+        &dialer_nonce,
+        &ack.nonce,
+    );
     if !PublicKey(listener_key).verify(&transcript, &ack.proof) {
         bail!("peer failed to authenticate its server key");
     }
@@ -1161,12 +1277,18 @@ pub async fn dial_peer(shared: Arc<Shared>, target: DialTarget) -> Result<DialOu
     let welcome: WelcomeMsg = recv_fed(conn.as_mut(), MT_WELCOME).await?;
 
     // We chose to dial this peer, so it is approved on our side.
-    shared
-        .peers
-        .seed_approved(listener_key, listener_name.clone());
+    shared.peers.seed_approved(
+        listener_key,
+        listener_name.clone(),
+        Some(listener_origin.clone()),
+    );
     let remote = conn.peer().remote_addr.to_string();
 
     if welcome.connected {
+        shared
+            .fed_flood
+            .trust_direct(&listener_origin, listener_key)
+            .context("peer origin conflicts with trusted provenance")?;
         shared
             .peers
             .set_connected(listener_key, listener_name.clone(), Some(remote));
@@ -1187,7 +1309,7 @@ pub async fn dial_peer(shared: Arc<Shared>, target: DialTarget) -> Result<DialOu
         // Hold the session open in the background until it drops.
         let hold = shared.clone();
         tokio::spawn(async move {
-            hold_dialer(conn, listener_key, hold).await;
+            hold_dialer(conn, listener_key, listener_origin, hold).await;
         });
         Ok(DialOutcome::Connected(listener_key))
     } else {
@@ -1244,8 +1366,13 @@ async fn sync_catalogs(
 /// board-event flood-fill over it. The dialer's catalog sync already ran
 /// before this hold, so catalog serving here is disabled (the listener side
 /// answers those).
-async fn hold_dialer(conn: Box<dyn Connection>, peer_key: [u8; 32], shared: Arc<Shared>) {
-    run_peer_session(conn, peer_key, shared, false).await;
+async fn hold_dialer(
+    conn: Box<dyn Connection>,
+    peer_key: [u8; 32],
+    peer_origin: String,
+    shared: Arc<Shared>,
+) {
+    run_peer_session(conn, peer_key, peer_origin, shared, false).await;
 }
 
 /// Background task: periodically dial configured peers that aren't connected.
@@ -1299,11 +1426,16 @@ pub fn resolve_target(peer: &rabbithole_server_core::config::FederationPeer) -> 
     } else {
         peer.server_name.clone()
     };
+    let expected_origin = peer.origin.trim().to_string();
+    if !is_valid_server_name(&expected_origin) {
+        return None;
+    }
     Some(DialTarget {
         addr: peer.addr.clone(),
         server_name,
         fingerprint,
         expected_key,
+        expected_origin,
     })
 }
 
@@ -1318,32 +1450,202 @@ fn approved_path(data_dir: &Path) -> PathBuf {
     data_dir.join("federation").join("approved_peers.json")
 }
 
-/// Load the admin-approved peer keys from disk (empty when absent/corrupt).
-pub fn load_approved(data_dir: &Path) -> Vec<[u8; 32]> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovedPeer {
+    pub key: [u8; 32],
+    pub origin: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovedFile {
+    version: u32,
+    peers: Vec<PersistedApprovedPeer>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedApprovedPeer {
+    key: String,
+    origin: String,
+}
+
+/// Load only provenance-bearing approved peer tuples. The former key-only
+/// format is ignored fail-closed and requires an explicit re-approval.
+pub fn load_approved(data_dir: &Path) -> Vec<ApprovedPeer> {
     let path = approved_path(data_dir);
     let Ok(bytes) = std::fs::read(&path) else {
         return Vec::new();
     };
-    let Ok(hexes) = serde_json::from_slice::<Vec<String>>(&bytes) else {
-        tracing::warn!(path = %path.display(), "federation: approved_peers.json unreadable");
+    let Ok(file) = serde_json::from_slice::<ApprovedFile>(&bytes) else {
+        tracing::warn!(
+            path = %path.display(),
+            "federation: ignoring legacy or unreadable peer approvals; approve origin-key tuples again"
+        );
         return Vec::new();
     };
-    hexes.iter().filter_map(|h| hex_key(h)).collect()
+    if file.version != 2 {
+        tracing::warn!(
+            path = %path.display(),
+            version = file.version,
+            "federation: ignoring unsupported peer approval version"
+        );
+        return Vec::new();
+    }
+    if file.peers.len() > MAX_APPROVED_PEERS {
+        tracing::warn!(path = %path.display(), "federation: ignoring over-cap peer approval file");
+        return Vec::new();
+    }
+    let mut keys = std::collections::HashSet::new();
+    let mut origins = std::collections::HashSet::new();
+    let mut approved = Vec::with_capacity(file.peers.len());
+    for peer in file.peers {
+        let Some(key) = hex_key(&peer.key) else {
+            tracing::warn!(path = %path.display(), "federation: ignoring invalid peer approval file");
+            return Vec::new();
+        };
+        if !is_valid_server_name(&peer.origin)
+            || !keys.insert(key)
+            || !origins.insert(peer.origin.clone())
+        {
+            tracing::warn!(path = %path.display(), "federation: ignoring conflicting peer approval file");
+            return Vec::new();
+        }
+        approved.push(ApprovedPeer {
+            key,
+            origin: peer.origin,
+        });
+    }
+    approved
 }
 
-/// Persist the registry's current approved keys to disk.
+/// Persist the registry's current approved origin-key tuples to disk.
 pub fn persist_approved(shared: &Shared) -> Result<()> {
     let data_dir = shared.config.read().data_dir;
     let path = approved_path(&data_dir);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let hexes: Vec<String> = shared
+    let peers: Vec<PersistedApprovedPeer> = shared
         .peers
-        .approved_keys()
-        .iter()
-        .map(hex::encode)
+        .approved_origins()
+        .into_iter()
+        .map(|(key, origin)| PersistedApprovedPeer {
+            key: hex::encode(key),
+            origin,
+        })
         .collect();
-    std::fs::write(&path, serde_json::to_vec_pretty(&hexes)?)?;
+    let bytes = serde_json::to_vec_pretty(&ApprovedFile { version: 2, peers })?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    #[test]
+    fn relay_cannot_establish_an_unseen_origin() {
+        let trusted = crate::fed_flood::FloodState::new();
+        let relay_key = [2u8; 32];
+        let result =
+            trusted_origin_key("warren-a", [1u8; 32], &trusted, "victim.example", relay_key);
+        assert!(result.is_err());
+        assert!(
+            trusted.resolve("victim.example").is_none(),
+            "a rejected relay claim must not create durable trust"
+        );
+    }
+
+    #[test]
+    fn handshake_proof_is_bound_to_both_origins() {
+        let key = IdentityKey::from_seed(&[9u8; 32]);
+        let transcript = auth_transcript(
+            &[1u8; 32],
+            &key.public().0,
+            "warren-a",
+            "warren-b",
+            &[3u8; 32],
+            &[4u8; 32],
+        );
+        let proof = key.sign(&transcript);
+        let substituted = auth_transcript(
+            &[1u8; 32],
+            &key.public().0,
+            "warren-a",
+            "victim.example",
+            &[3u8; 32],
+            &[4u8; 32],
+        );
+        assert!(key.public().verify(&transcript, &proof));
+        assert!(!key.public().verify(&substituted, &proof));
+    }
+
+    #[test]
+    fn trusted_indirect_origin_accepts_only_its_pinned_key() {
+        let trusted = crate::fed_flood::FloodState::new();
+        trusted
+            .trust_operator("warren-c", [3u8; 32])
+            .expect("operator pin");
+        assert_eq!(
+            trusted_origin_key("warren-a", [1u8; 32], &trusted, "warren-c", [3u8; 32],).unwrap(),
+            [3u8; 32]
+        );
+        assert!(
+            trusted_origin_key("warren-a", [1u8; 32], &trusted, "warren-c", [4u8; 32],).is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_key_only_peer_approvals_are_not_promoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = approved_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&vec![hex::encode([7u8; 32])]).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            load_approved(dir.path()).is_empty(),
+            "a key-only approval has no authenticated namespace binding"
+        );
+
+        let file = ApprovedFile {
+            version: 2,
+            peers: vec![PersistedApprovedPeer {
+                key: hex::encode([7u8; 32]),
+                origin: "warren-b".into(),
+            }],
+        };
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        assert_eq!(
+            load_approved(dir.path()),
+            vec![ApprovedPeer {
+                key: [7u8; 32],
+                origin: "warren-b".into(),
+            }]
+        );
+
+        let conflicting = ApprovedFile {
+            version: 2,
+            peers: vec![
+                PersistedApprovedPeer {
+                    key: hex::encode([7u8; 32]),
+                    origin: "warren-b".into(),
+                },
+                PersistedApprovedPeer {
+                    key: hex::encode([7u8; 32]),
+                    origin: "victim.example".into(),
+                },
+            ],
+        };
+        std::fs::write(&path, serde_json::to_vec(&conflicting).unwrap()).unwrap();
+        assert!(
+            load_approved(dir.path()).is_empty(),
+            "conflicting approval state must fail closed as a whole"
+        );
+    }
 }

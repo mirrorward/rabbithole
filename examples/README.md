@@ -55,6 +55,11 @@ so every key in the sample is a real one. Each key is annotated in the file:
   `[syndication_feeds]`, `[keywords]`, `[[doors]]`, `[[federation_peers]]`);
   `ctl config-set` cannot touch them, edit the file and restart.
 
+Federation additionally requires the scalar `federation_origin`. It is an
+immutable signed-event namespace, not the hot-reloadable display name. Each
+`[[federation_peers]]` entry must declare the exact `origin` expected from that
+peer's authenticated handshake.
+
 Because of a TOML rule, **all scalar keys must appear before the first
 `[table]`/`[[array]]` header** — that is why the map/array sections live at the
 very bottom of the sample.
@@ -115,6 +120,7 @@ $ burrow --data-dir ./burrow-data run
 ```
 
 A snapshot bundles the SQLite DB (via `VACUUM INTO`, WAL-consistent), the
-identity keys, `approved_peers.json`, the federation catalog, and the blob
-store, each hashed in a `MANIFEST.json`. See `apps/server/src/backup.rs` for the
-details.
+identity keys, versioned `approved_peers.json` origin/key approvals,
+`origin_keys.json` provenance bindings, the federation catalog, and the blob
+store, each hashed in a `MANIFEST.json`. See `apps/server/src/backup.rs` for
+the details.

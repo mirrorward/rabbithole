@@ -41,6 +41,7 @@ fn fed_config(name: &str, dir: &std::path::Path, subscribe: &[&str]) -> ServerCo
         quic_addr: "127.0.0.1:0".parse().unwrap(),
         ws_addr: "127.0.0.1:0".parse().unwrap(),
         federation_enabled: true,
+        federation_origin: name.to_lowercase().replace(' ', "-"),
         federation_addr: "127.0.0.1:0".parse().unwrap(),
         federation_board_subscribe: subscribe.iter().map(|s| s.to_string()).collect(),
         data_dir: dir.to_path_buf(),
@@ -72,16 +73,30 @@ fn target_for(b: &Burrow) -> DialTarget {
         server_name: "localhost".into(),
         fingerprint: b.fingerprint,
         expected_key: Some(b.shared.server_key),
+        expected_origin: b.shared.origin_name(),
     }
 }
 
-async fn approve(on: &Burrow, key: [u8; 32]) {
+async fn approve(on: &Burrow, key: [u8; 32], origin: &str) {
     let resp = burrow::ctl::handle(
         &on.shared,
-        &json!({"cmd": "peer-approve", "key": hex::encode(key)}),
+        &json!({"cmd": "peer-approve", "key": hex::encode(key), "origin": origin}),
     )
     .await;
     assert_eq!(resp["ok"], json!(true), "peer-approve accepted: {resp}");
+}
+
+async fn pin_origin(on: &Burrow, origin: &str, key: [u8; 32]) {
+    let resp = burrow::ctl::handle(
+        &on.shared,
+        &json!({
+            "cmd": "origin-pin",
+            "origin": origin,
+            "key": hex::encode(key),
+        }),
+    )
+    .await;
+    assert_eq!(resp["ok"], json!(true), "origin-pin accepted: {resp}");
 }
 
 async fn connect(dialer: &Burrow, listener: &Burrow) {
@@ -252,10 +267,13 @@ async fn edit_and_tombstone_flood_multi_hop() {
         c.shared.server_key,
     );
 
-    approve(&b, a_key).await;
-    approve(&a, b_key).await;
-    approve(&b, c_key).await;
-    approve(&c, b_key).await;
+    approve(&b, a_key, "warren-a").await;
+    approve(&a, b_key, "warren-b").await;
+    approve(&b, c_key, "warren-c").await;
+    approve(&c, b_key, "warren-b").await;
+    // A has no direct relationship with C, so its operator bootstraps C's
+    // origin key explicitly; relay B is not allowed to create this trust.
+    pin_origin(&a, "warren-c", c_key).await;
     connect(&a, &b).await;
     connect(&b, &c).await;
 
@@ -325,10 +343,11 @@ async fn multi_hop_relay_through_b() {
     );
 
     // Chain edges only: A↔B and B↔C. A and C never meet.
-    approve(&b, a_key).await;
-    approve(&a, b_key).await;
-    approve(&b, c_key).await;
-    approve(&c, b_key).await;
+    approve(&b, a_key, "warren-a").await;
+    approve(&a, b_key, "warren-b").await;
+    approve(&b, c_key, "warren-c").await;
+    approve(&c, b_key, "warren-b").await;
+    pin_origin(&a, "warren-c", c_key).await;
     connect(&a, &b).await;
     connect(&b, &c).await;
     assert_eq!(a.shared.peers.state(&b_key), Some(PeerState::Connected));
@@ -364,7 +383,7 @@ async fn multi_hop_relay_through_b() {
     assert_eq!(a.shared.fed_flood.resolve("warren-c"), Some(c_key));
     // …and persisted it to disk, so the pin survives a restart (a reboot must
     // not let a spoofer re-pin "warren-c" to a different key).
-    let pins: std::collections::BTreeMap<String, String> = serde_json::from_slice(
+    let pins: serde_json::Value = serde_json::from_slice(
         &std::fs::read(
             work.path()
                 .join("a")
@@ -375,13 +394,61 @@ async fn multi_hop_relay_through_b() {
     )
     .unwrap();
     assert_eq!(
-        pins.get("warren-c").map(String::as_str),
-        Some(hex::encode(c_key).as_str())
+        pins["version"],
+        json!(2),
+        "only the provenance-bearing pin schema is trusted"
     );
+    assert_eq!(
+        pins["origins"]["warren-c"]["key"],
+        json!(hex::encode(c_key))
+    );
+    assert_eq!(pins["origins"]["warren-c"]["trust"], json!("operator"));
 
     // Exactly one copy — the flood did not duplicate it on A or B.
     assert_eq!(a.shared.boards.thread(&id, 100).await.unwrap().len(), 1);
     assert_eq!(b.shared.boards.thread(&id, 100).await.unwrap().len(), 1);
+
+    a.shutdown().await;
+    b.shutdown().await;
+    c.shutdown().await;
+}
+
+/// The same A-B-C transport without A's independent C anchor fails closed:
+/// relay B cannot make A trust C's name/key merely by carrying a valid event.
+#[tokio::test]
+async fn unanchored_relay_origin_is_rejected() {
+    let work = tempfile::tempdir().unwrap();
+    let a = start("Warren A", &work.path().join("a"), &["rabbit.general"]).await;
+    let b = start("Warren B", &work.path().join("b"), &["rabbit.general"]).await;
+    let c = start("Warren C", &work.path().join("c"), &["rabbit.general"]).await;
+    let (a_key, b_key, c_key) = (
+        a.shared.server_key,
+        b.shared.server_key,
+        c.shared.server_key,
+    );
+
+    approve(&b, a_key, "warren-a").await;
+    approve(&a, b_key, "warren-b").await;
+    approve(&b, c_key, "warren-c").await;
+    approve(&c, b_key, "warren-b").await;
+    connect(&a, &b).await;
+    connect(&b, &c).await;
+
+    let rx_b = b.shared.bus.subscribe();
+    let id = post_and_announce(&c, "cottontail@warren-c", "Unanchored", "reject me").await;
+    assert!(
+        wait_ingested(rx_b, &b, id).await,
+        "direct peer B accepts C under their approved origin-key tuple"
+    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        a.shared.boards.post_by_id(&id).await.unwrap().is_none(),
+        "A rejects C when only relay B vouches for the unseen origin"
+    );
+    assert!(
+        a.shared.fed_flood.resolve("warren-c").is_none(),
+        "the rejected relay delivery creates no trust record"
+    );
 
     a.shutdown().await;
     b.shutdown().await;
@@ -402,13 +469,13 @@ async fn full_mesh_is_loop_safe() {
         c.shared.server_key,
     );
 
-    for (on, keys) in [
-        (&a, [b_key, c_key]),
-        (&b, [a_key, c_key]),
-        (&c, [a_key, b_key]),
+    for (on, peers) in [
+        (&a, [(b_key, "warren-b"), (c_key, "warren-c")]),
+        (&b, [(a_key, "warren-a"), (c_key, "warren-c")]),
+        (&c, [(a_key, "warren-a"), (b_key, "warren-b")]),
     ] {
-        for key in keys {
-            approve(on, key).await;
+        for (key, origin) in peers {
+            approve(on, key, origin).await;
         }
     }
     // All six directed edges live (a live session each way per pair).

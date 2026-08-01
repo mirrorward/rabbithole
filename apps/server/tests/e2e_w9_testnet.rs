@@ -50,6 +50,7 @@ fn fed_config(name: &str, dir: &std::path::Path) -> ServerConfig {
         quic_addr: "127.0.0.1:0".parse().unwrap(),
         ws_addr: "127.0.0.1:0".parse().unwrap(),
         federation_enabled: true,
+        federation_origin: name.to_lowercase().replace(' ', "-"),
         federation_addr: "127.0.0.1:0".parse().unwrap(),
         data_dir: dir.to_path_buf(),
         ..ServerConfig::default()
@@ -67,6 +68,7 @@ fn target_for(b: &Burrow) -> DialTarget {
         server_name: "localhost".into(),
         fingerprint: b.fingerprint,
         expected_key: Some(b.shared.server_key),
+        expected_origin: b.shared.origin_name(),
     }
 }
 
@@ -102,10 +104,10 @@ async fn publish_one(b: &Burrow, name: &str, hash: u8) {
 }
 
 /// Admin-approve `key` on `on` through the audited ctl path.
-async fn approve(on: &Burrow, key: [u8; 32]) {
+async fn approve(on: &Burrow, key: [u8; 32], origin: &str) {
     let resp = burrow::ctl::handle(
         &on.shared,
-        &json!({"cmd": "peer-approve", "key": hex::encode(key)}),
+        &json!({"cmd": "peer-approve", "key": hex::encode(key), "origin": origin}),
     )
     .await;
     assert_eq!(resp["ok"], json!(true), "peer-approve accepted: {resp}");
@@ -172,13 +174,13 @@ async fn three_server_full_mesh() {
 
     // Every listener approves every dialer (audited ctl path), then all six
     // directed edges dial: each dialer pulls each listener's catalog.
-    for (on, keys) in [
-        (&a, [b_key, c_key]),
-        (&b, [a_key, c_key]),
-        (&c, [a_key, b_key]),
+    for (on, peers) in [
+        (&a, [(b_key, "warren-b"), (c_key, "warren-c")]),
+        (&b, [(a_key, "warren-a"), (c_key, "warren-c")]),
+        (&c, [(a_key, "warren-a"), (b_key, "warren-b")]),
     ] {
-        for key in keys {
-            approve(on, key).await;
+        for (key, origin) in peers {
+            approve(on, key, origin).await;
         }
     }
     for (dialer, listener) in [(&a, &b), (&a, &c), (&b, &a), (&b, &c), (&c, &a), (&c, &b)] {
@@ -252,10 +254,10 @@ async fn partition_rejoin() {
     );
 
     // Chain edges only: A<->B and B<->C. No A<->C relationship exists.
-    approve(&a, b_key).await;
-    approve(&b, a_key).await;
-    approve(&b, c_key).await;
-    approve(&c, b_key).await;
+    approve(&a, b_key, "warren-b").await;
+    approve(&b, a_key, "warren-a").await;
+    approve(&b, c_key, "warren-c").await;
+    approve(&c, b_key, "warren-b").await;
     connect(&a, &b).await;
     connect(&b, &a).await;
     connect(&b, &c).await;
@@ -381,7 +383,7 @@ async fn dupe_storm_announce() {
     publish_one(&a, "storm-pack.zip", 7).await;
 
     let (a_key, b_key) = (a.shared.server_key, b.shared.server_key);
-    approve(&a, b_key).await;
+    approve(&a, b_key, "warren-b").await;
     connect(&b, &a).await;
 
     let first = b.shared.catalogs.peer_catalog(&a_key).unwrap();
@@ -465,8 +467,8 @@ async fn stale_generation_refused_meshwide() {
         b.shared.server_key,
         c.shared.server_key,
     );
-    approve(&c, a_key).await;
-    approve(&c, b_key).await;
+    approve(&c, a_key, "warren-a").await;
+    approve(&c, b_key, "warren-b").await;
     connect(&a, &c).await;
     connect(&b, &c).await;
 

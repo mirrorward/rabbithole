@@ -35,6 +35,11 @@ pub fn descriptor_body(cfg: &ServerConfig, issued_at_ms: i64) -> DescriptorBody 
     DescriptorBody {
         server_key: [0u8; 32],
         name: cfg.name.clone(),
+        origin: if cfg.federation_origin.is_empty() {
+            cfg.name.to_lowercase().replace(' ', "-")
+        } else {
+            cfg.federation_origin.clone()
+        },
         addresses: advertised_addresses(cfg),
         features: advertised_features(cfg),
         issued_at: issued_at_ms,

@@ -26,6 +26,7 @@ fn fed_config(dir: &std::path::Path) -> ServerConfig {
         quic_addr: "127.0.0.1:0".parse().unwrap(),
         ws_addr: "127.0.0.1:0".parse().unwrap(),
         federation_enabled: true,
+        federation_origin: dir.file_name().unwrap().to_string_lossy().into_owned(),
         federation_addr: "127.0.0.1:0".parse().unwrap(),
         data_dir: dir.to_path_buf(),
         ..ServerConfig::default()
@@ -39,6 +40,7 @@ fn target_for(b: &Burrow) -> DialTarget {
         server_name: "localhost".into(),
         fingerprint: b.fingerprint,
         expected_key: Some(b.shared.server_key),
+        expected_origin: b.shared.origin_name(),
     }
 }
 
@@ -89,6 +91,24 @@ async fn unknown_peer_pending_until_approved_then_connected() {
     assert_eq!(outcome, DialOutcome::Connected(b_key));
     assert_eq!(b.shared.peers.state(&a_key), Some(PeerState::Connected));
     assert_eq!(a.shared.peers.state(&b_key), Some(PeerState::Connected));
+
+    // Revocation is a live-session boundary, not merely a future-dial gate.
+    let revoked = burrow::ctl::handle(
+        &b.shared,
+        &json!({"cmd": "peer-revoke", "key": hex::encode(a_key)}),
+    )
+    .await;
+    assert_eq!(revoked["ok"], json!(true));
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if a.shared.peers.state(&b_key) == Some(PeerState::Disconnected) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("revoking a live peer closes the session");
 
     a.shutdown().await;
     b.shutdown().await;
@@ -143,6 +163,13 @@ async fn peer_with_unexpected_key_is_rejected() {
     assert!(
         dial_peer(a.shared.clone(), target).await.is_err(),
         "a peer presenting an unexpected key is rejected"
+    );
+
+    let mut target = target_for(&b);
+    target.expected_origin = "victim.example".into();
+    assert!(
+        dial_peer(a.shared.clone(), target).await.is_err(),
+        "a peer cannot substitute an unapproved federation origin"
     );
 
     a.shutdown().await;
