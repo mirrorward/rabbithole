@@ -48,6 +48,24 @@ pub fn set_token(
     list
 }
 
+/// Split remembered bearer sessions into safe auto-resume targets and entries
+/// that need the user to replace a remote `ws://` URL with `wss://`. Blocked
+/// entries stay persisted; their bearer is never dispatched over plaintext.
+pub fn secure_resumable(list: &[RecentBurrow]) -> (Vec<(String, String)>, Vec<String>) {
+    let mut ready = Vec::new();
+    let mut blocked = Vec::new();
+    for burrow in list {
+        let Some(token) = &burrow.token else {
+            continue;
+        };
+        match rabbithole_core::api::normalize_secure_ws_endpoint(&burrow.endpoint) {
+            Ok(endpoint) => ready.push((endpoint, token.clone())),
+            Err(_) => blocked.push(burrow.endpoint.clone()),
+        }
+    }
+    (ready, blocked)
+}
+
 #[cfg(target_arch = "wasm32")]
 mod persist {
     use super::RecentBurrow;
@@ -157,5 +175,35 @@ mod tests {
         assert_eq!(list.len(), MAX_RECENT);
         // The newest (last inserted) is at the front.
         assert_eq!(list[0].endpoint, "ws://19");
+    }
+
+    #[test]
+    fn auto_resume_never_dispatches_a_bearer_to_remote_plaintext() {
+        let list = vec![
+            RecentBurrow {
+                endpoint: "ws://burrow.example:4654".into(),
+                handle: "alice".into(),
+                token: Some("secret".into()),
+            },
+            RecentBurrow {
+                endpoint: "ws://127.0.0.1:4654".into(),
+                handle: "local".into(),
+                token: Some("local-token".into()),
+            },
+            RecentBurrow {
+                endpoint: "wss://safe.example/rhp".into(),
+                handle: "safe".into(),
+                token: Some("safe-token".into()),
+            },
+        ];
+        let (ready, blocked) = secure_resumable(&list);
+        assert_eq!(
+            ready,
+            vec![
+                ("ws://127.0.0.1:4654".into(), "local-token".into()),
+                ("wss://safe.example/rhp".into(), "safe-token".into())
+            ]
+        );
+        assert_eq!(blocked, vec!["ws://burrow.example:4654"]);
     }
 }

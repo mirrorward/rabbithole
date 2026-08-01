@@ -46,7 +46,7 @@ use anyhow::Result;
 use rabbithole_blobs::BlobStore;
 use rabbithole_net::quic::QuicListener;
 use rabbithole_net::tls::CertFingerprint;
-use rabbithole_net::ws::WsListener;
+use rabbithole_net::ws::{validate_allowed_origins, WsListener};
 use rabbithole_net::Listener;
 use rabbithole_server_core::ratelimit::{self, Decision, LimitKey, Policy, Scope};
 use rabbithole_server_core::{
@@ -220,6 +220,14 @@ impl Burrow {
     /// Boot: open the store, load/create identity, bind listeners, start
     /// accepting. Returns once listening (not once shut down).
     pub async fn start(config: ServerConfig) -> Result<Burrow> {
+        validate_ws_policy(&config)?;
+        if !config.ws_addr.ip().is_loopback() {
+            tracing::warn!(
+                ws = %config.ws_addr,
+                "INSECURE: remote plaintext WebSocket explicitly enabled; credentials and bearer tokens are exposed in transit"
+            );
+        }
+
         let data_dir = config.data_dir.clone();
         std::fs::create_dir_all(&data_dir)?;
 
@@ -240,7 +248,8 @@ impl Burrow {
         let boards = BoardService::new(pool.clone(), origin_name, identity.signing.seed());
 
         let quic = QuicListener::bind(config.quic_addr, &identity.tls)?;
-        let ws = WsListener::bind(config.ws_addr).await?;
+        let ws = WsListener::bind_with_allowed_origins(config.ws_addr, &config.ws_allowed_origins)
+            .await?;
         let quic_addr = quic.local_addr()?;
         let ws_addr = ws.local_addr()?;
 
@@ -525,6 +534,25 @@ impl Burrow {
     }
 }
 
+fn validate_ws_policy(config: &ServerConfig) -> Result<()> {
+    if !config.ws_addr.ip().is_loopback() && !config.ws_allow_insecure_remote {
+        anyhow::bail!(
+            "refusing plaintext WebSocket listener on {}; keep ws_addr loopback-only behind a WSS reverse proxy, or explicitly set ws_allow_insecure_remote = true to acknowledge credential exposure",
+            config.ws_addr
+        );
+    }
+    validate_allowed_origins(&config.ws_allowed_origins)?;
+    let public_url = config.ws_public_url.trim();
+    if !public_url.is_empty() {
+        let normalized = rabbithole_core::api::normalize_secure_ws_endpoint(public_url)
+            .map_err(|error| anyhow::anyhow!("invalid ws_public_url: {error}"))?;
+        if normalized != public_url {
+            anyhow::bail!("ws_public_url must be an explicit ws:// or wss:// URL");
+        }
+    }
+    Ok(())
+}
+
 /// Periodic housekeeping: enforce the blob cache policy
 /// (`swarm_cache_max_bytes`) by evicting oldest unreferenced blobs over the
 /// cap. Referenced library content is never touched; `0` means unlimited
@@ -659,5 +687,46 @@ async fn accept_loop(mut listener: Box<dyn Listener>, shared: Arc<Shared>) {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn websocket_defaults_to_loopback_only() {
+        let config = ServerConfig::default();
+        assert!(config.ws_addr.ip().is_loopback());
+        assert!(!config.ws_allow_insecure_remote);
+        assert!(validate_ws_policy(&config).is_ok());
+    }
+
+    #[test]
+    fn remote_plaintext_websocket_requires_explicit_acknowledgement() {
+        let mut config = ServerConfig {
+            ws_addr: "0.0.0.0:4654".parse().unwrap(),
+            ..ServerConfig::default()
+        };
+        assert!(validate_ws_policy(&config).is_err());
+
+        config.ws_allow_insecure_remote = true;
+        assert!(validate_ws_policy(&config).is_ok());
+    }
+
+    #[test]
+    fn public_websocket_url_and_browser_origins_fail_closed() {
+        let mut config = ServerConfig {
+            ws_public_url: "ws://burrow.example:4654".into(),
+            ..ServerConfig::default()
+        };
+        assert!(validate_ws_policy(&config).is_err());
+
+        config.ws_public_url = "wss://burrow.example/rhp".into();
+        config.ws_allowed_origins = vec!["http://burrow.example".into()];
+        assert!(validate_ws_policy(&config).is_err());
+
+        config.ws_allowed_origins = vec!["https://burrow.example".into()];
+        assert!(validate_ws_policy(&config).is_ok());
     }
 }

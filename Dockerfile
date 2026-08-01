@@ -35,10 +35,9 @@ VOLUME ["/data"]
 
 ENV RABBITHOLE_DATA_DIR=/data
 
-# QUIC (primary, UDP), WebSocket (fallback, TCP). 4655 reserved for a
-# co-located looking-glass tracker status listener.
+# QUIC (primary, UDP) and optional S2S federation. The plaintext WebSocket
+# backend is loopback-only and intentionally not exposed by this image.
 EXPOSE 4653/udp
-EXPOSE 4654/tcp
 EXPOSE 4655/tcp
 
 ENTRYPOINT ["burrow"]

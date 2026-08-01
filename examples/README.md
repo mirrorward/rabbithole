@@ -39,7 +39,7 @@ Precedence is: **defaults < TOML file < `RABBITHOLE_*` env vars < runtime
 `burrow ctl config-set` edits.** A handful of fields also honour env overrides
 (`RABBITHOLE_NAME`, `RABBITHOLE_MOTD`, `RABBITHOLE_AGREEMENT`,
 `RABBITHOLE_GUEST_ENABLED`, `RABBITHOLE_QUIC_ADDR`, `RABBITHOLE_WS_ADDR`,
-`RABBITHOLE_DATA_DIR`).
+`RABBITHOLE_WS_ALLOW_INSECURE_REMOTE`, `RABBITHOLE_DATA_DIR`).
 
 ### live vs. restart, and TOML-only keys
 

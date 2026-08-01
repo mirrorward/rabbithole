@@ -20,8 +20,8 @@ Open these on the host/firewall for a public burrow:
 | Port | Proto | Purpose                                        |
 | ---- | ----- | ---------------------------------------------- |
 | 4653 | UDP   | QUIC — primary transport                       |
-| 4654 | TCP   | WebSocket — fallback transport                 |
-| 4655 | TCP   | `looking-glass` status listener (tracker only) |
+| 443  | TCP   | Optional WSS reverse proxy for browser clients |
+| 4655 | TCP   | S2S federation (when enabled)                  |
 
 Optional legacy surfaces served by `burrow` when enabled in config: telnet
 (default `0.0.0.0:2323`, TCP) and finger (default `0.0.0.0:7979`, TCP).
@@ -45,12 +45,34 @@ The **only** environment variables that exist (see
 | `RABBITHOLE_AGREEMENT`     | (empty)            | Agreement text users must accept (empty = off) |
 | `RABBITHOLE_GUEST_ENABLED` | `true`             | Allow guest sign-in (`true`/`false`/`on`/`off`)|
 | `RABBITHOLE_QUIC_ADDR`     | `0.0.0.0:4653`     | QUIC listener socket address                   |
-| `RABBITHOLE_WS_ADDR`       | `0.0.0.0:4654`     | WebSocket listener socket address              |
+| `RABBITHOLE_WS_ADDR`       | `127.0.0.1:4654`   | Plaintext WebSocket backend (loopback only)     |
+| `RABBITHOLE_WS_ALLOW_INSECURE_REMOTE` | `false` | Explicit break-glass remote-plaintext acknowledgement |
 | `RABBITHOLE_DATA_DIR`      | `./burrow-data`    | Where the db, blobs, keys, and ctl socket live |
 
 All other settings (registration mode, quotas, telnet/finger, theme, etc.) are
 edited via the TOML file or at runtime with `burrow ctl config-set KEY VALUE`.
 Listener/data-dir changes require a restart; text/identity fields apply live.
+
+### Public WebSocket access
+
+The built-in WebSocket listener is plaintext and defaults to
+`127.0.0.1:4654`. Do not expose or port-forward it. Put an HTTPS-capable reverse
+proxy on the public interface, terminate `wss://` there, and proxy `/rhp` to
+`ws://127.0.0.1:4654/rhp`. In `burrow.toml`, declare the browser and discovery
+truth explicitly:
+
+```toml
+ws_addr = "127.0.0.1:4654"
+ws_allowed_origins = ["https://bbs.example"]
+ws_public_url = "wss://bbs.example/rhp"
+```
+
+Origins are exact scheme/host/effective-port matches; suffixes and wildcards
+are not accepted. A non-loopback `ws_addr` is refused unless
+`ws_allow_insecure_remote = true` (or the equivalent environment override) is
+set. That escape hatch exposes credentials and bearer tokens in transit; it is
+intended only for tightly controlled proxy/container topologies, never direct
+Internet publication.
 
 Useful commands against a running server (over its local ctl socket):
 
@@ -99,7 +121,7 @@ non-root `burrow` user with `/data` as a volume.
 ```sh
 docker build -t rabbithole/burrow:latest .
 docker run -d --name burrow \
-  -p 4653:4653/udp -p 4654:4654/tcp \
+  -p 4653:4653/udp \
   -v burrow-data:/data \
   -e RABBITHOLE_NAME="My Burrow" \
   rabbithole/burrow:latest

@@ -89,6 +89,9 @@ fn golden_matches() {
             path.display()
         )
     });
+    // Git may materialize text fixtures with CRLF on Windows. Registry
+    // semantics are line-based; checkout newline policy is not a wire change.
+    let expected = expected.replace("\r\n", "\n");
 
     assert_eq!(
         actual,

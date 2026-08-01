@@ -102,6 +102,7 @@ rustls-pki-types = "1"
 webpki-roots = "1"
 rcgen = "0.13"
 tokio-tungstenite = "0.26"
+url = "2.5"
 
 # crypto & identity
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }

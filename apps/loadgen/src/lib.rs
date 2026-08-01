@@ -22,7 +22,7 @@
 //!
 //! ```text
 //! warren-stampede \
-//!     --url ws://burrow.example.net:4654 \
+//!     --url wss://burrow.example.net/rhp \
 //!     --sessions 10000 --ramp-per-sec 200 --duration 600 \
 //!     --scenario mixed --guests --max-errors 500 --json > stampede.json
 //! ```
