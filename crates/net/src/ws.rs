@@ -66,10 +66,13 @@ fn parse_allowed_origins(origins: &[String]) -> Result<Vec<OriginId>, NetError> 
         .iter()
         .map(|origin| {
             parse_origin(origin).and_then(|parsed| {
-                if parsed.scheme == "https" || is_loopback_host(&parsed.host) {
+                if parsed.scheme == "https"
+                    || is_loopback_host(&parsed.host)
+                    || is_trusted_app_origin(&parsed)
+                {
                     Ok(parsed)
                 } else {
-                    Err("non-loopback allowed origins must use https")
+                    Err("non-loopback origins must use https or an exact supported Tauri origin")
                 }
             })
         })
@@ -135,6 +138,12 @@ fn validate_browser_origin(request: &Request, allowed: &[OriginId]) -> Result<()
         .ok()
         .and_then(|value| parse_origin(value).ok())
         .ok_or("invalid WebSocket Origin header")?;
+    if is_trusted_app_origin(&origin) {
+        return allowed
+            .contains(&origin)
+            .then_some(())
+            .ok_or("trusted app Origin is not allowlisted");
+    }
     if is_loopback_host(&origin.host) {
         let request_host = request
             .headers()
@@ -167,15 +176,26 @@ fn parse_origin(value: &str) -> Result<OriginId, &'static str> {
     }
     let scheme = origin
         .scheme_str()
-        .filter(|scheme| matches!(*scheme, "http" | "https"))
-        .ok_or("origin must use http or https")?
+        .filter(|scheme| matches!(*scheme, "http" | "https" | "tauri"))
+        .ok_or("origin must use http, https, or tauri")?
         .to_string();
     let authority = origin.authority().ok_or("origin has no authority")?;
     let host = authority.host().to_ascii_lowercase();
-    let port = authority
-        .port_u16()
-        .unwrap_or(if scheme == "https" { 443 } else { 80 });
+    let port = authority.port_u16().unwrap_or(match scheme.as_str() {
+        "https" => 443,
+        "http" => 80,
+        _ => 0,
+    });
     Ok(OriginId { scheme, host, port })
+}
+
+fn is_trusted_app_origin(origin: &OriginId) -> bool {
+    matches!(
+        (origin.scheme.as_str(), origin.host.as_str(), origin.port),
+        ("tauri", "localhost", 0)
+            | ("http", "tauri.localhost", 80)
+            | ("https", "tauri.localhost", 443)
+    )
 }
 
 fn authority_host(value: &str) -> Option<String> {
@@ -351,6 +371,23 @@ mod tests {
     }
 
     #[test]
+    fn tauri_origins_are_exact_and_must_be_explicitly_allowlisted() {
+        for origin in [
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "https://tauri.localhost",
+        ] {
+            let req = request("burrow.example", Some(origin));
+            assert!(validate_browser_origin(&req, &[]).is_err(), "{origin}");
+            let allowed = vec![parse_origin(origin).unwrap()];
+            assert!(validate_browser_origin(&req, &allowed).is_ok(), "{origin}");
+        }
+
+        assert!(parse_allowed_origins(&["tauri://evil.example".into()]).is_err());
+        assert!(parse_allowed_origins(&["http://tauri.localhost.evil".into()]).is_err());
+    }
+
+    #[test]
     fn public_origin_allowlist_includes_the_effective_port() {
         let allowed = vec![parse_origin("https://burrow.example:8443").unwrap()];
         let wrong_port = request("burrow.example:4654", Some("https://burrow.example"));
@@ -402,5 +439,28 @@ mod tests {
 
         assert!(connected.is_err());
         assert!(accept.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn handshake_accepts_explicit_tauri_platform_origins() {
+        for origin in ["tauri://localhost", "http://tauri.localhost"] {
+            let mut listener = WsListener::bind_with_allowed_origins(
+                "127.0.0.1:0".parse().unwrap(),
+                &[origin.to_string()],
+            )
+            .await
+            .unwrap();
+            let addr = listener.local_addr().unwrap();
+            let accept = tokio::spawn(async move { listener.accept().await });
+
+            let mut request = format!("ws://{addr}/rhp").into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("origin", HeaderValue::from_str(origin).unwrap());
+            let connected = tokio_tungstenite::connect_async(request).await;
+
+            assert!(connected.is_ok(), "{origin}");
+            assert!(accept.await.unwrap().is_ok(), "{origin}");
+        }
     }
 }

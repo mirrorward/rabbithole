@@ -64,13 +64,11 @@ fn advertised_addresses(cfg: &ServerConfig) -> Vec<String> {
         .filter_map(|(scheme, addr)| authority(host, addr).map(|a| format!("{scheme}://{a}")))
         .collect();
 
-    // Public WebSocket discovery comes only from the explicit proxy URL; a
-    // backend bind address cannot reveal its external scheme, host, port, or
-    // path. Keep the built-in loopback endpoint discoverable for local tools.
+    // WebSocket discovery comes only from the explicit proxy URL; a backend
+    // bind address cannot reveal its external scheme, host, port, or path and
+    // a loopback address in a remotely served descriptor is actively wrong.
     if !cfg.ws_public_url.trim().is_empty() {
         addresses.insert(1.min(addresses.len()), cfg.ws_public_url.trim().to_string());
-    } else if host.is_none() && cfg.ws_addr.ip().is_loopback() {
-        addresses.insert(1.min(addresses.len()), format!("ws://{}", cfg.ws_addr));
     }
     addresses
 }
@@ -188,17 +186,15 @@ mod tests {
 
     #[test]
     fn concrete_bind_ip_is_used_when_no_advertise_host() {
-        // Default advertise_host is empty, so the concrete bind IP is used.
+        // Default advertise_host is empty, so concrete non-WebSocket binds
+        // are used. WebSocket is never inferred from its backend bind.
         let c = ServerConfig {
             quic_addr: "127.0.0.1:4653".parse().unwrap(),
             ws_addr: "127.0.0.1:4654".parse().unwrap(),
             ws_public_url: String::new(),
             ..ServerConfig::default()
         };
-        assert_eq!(
-            advertised_addresses(&c),
-            vec!["quic://127.0.0.1:4653", "ws://127.0.0.1:4654"]
-        );
+        assert_eq!(advertised_addresses(&c), vec!["quic://127.0.0.1:4653"]);
     }
 
     #[test]

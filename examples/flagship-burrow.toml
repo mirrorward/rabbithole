@@ -87,8 +87,9 @@ advertise_host = "rabbithole.example"
 
 # Plaintext WebSocket backend. Keep loopback-only behind a WSS proxy. (restart)
 # ws_addr = "127.0.0.1:4654"
-# Exact browser origins accepted by the handshake (TOML-only).
-# ws_allowed_origins = ["https://bbs.example"]
+# Exact browser/app origins accepted by the handshake (TOML-only). Add the
+# Tauri values only when packaged desktop/mobile clients are supported.
+# ws_allowed_origins = ["https://bbs.example", "tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]
 # External discovery URL; never derived from the backend bind (TOML-only).
 # ws_public_url = "wss://bbs.example/rhp"
 # Break-glass only: permits a non-loopback plaintext bind. (restart)

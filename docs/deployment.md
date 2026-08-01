@@ -63,7 +63,14 @@ truth explicitly:
 
 ```toml
 ws_addr = "127.0.0.1:4654"
-ws_allowed_origins = ["https://bbs.example"]
+ws_allowed_origins = [
+  "https://bbs.example",
+  # Packaged Tauri clients; these exact custom-protocol origins are not
+  # general web origins and remain opt-in.
+  "tauri://localhost",
+  "http://tauri.localhost",
+  "https://tauri.localhost",
+]
 ws_public_url = "wss://bbs.example/rhp"
 ```
 
@@ -73,6 +80,29 @@ are not accepted. A non-loopback `ws_addr` is refused unless
 set. That escape hatch exposes credentials and bearer tokens in transit; it is
 intended only for tightly controlled proxy/container topologies, never direct
 Internet publication.
+
+For Docker, the proxy cannot reach a listener bound to loopback inside the
+burrow container. The checked-in `docker-compose.wss.yml` overlay therefore
+uses private Compose networks: burrow binds `0.0.0.0:4654` with the explicit
+acknowledgement, Caddy is the only other service, and port 4654 is never
+published on the host. Caddy also joins the edge network for ACME/TLS traffic.
+Edit `examples/container-wss.toml` and
+`examples/Caddyfile` to the same public DNS name, point DNS at the host, then:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.wss.yml config
+docker compose -f docker-compose.yml -f docker-compose.wss.yml up -d
+
+# Must fail: the plaintext backend is not host-published.
+! nc -z 127.0.0.1 4654
+
+# Must return the signed descriptor containing wss://YOUR-HOST/rhp.
+curl -fsS https://YOUR-HOST/.well-known/rabbithole/server
+```
+
+Complete the smoke by authenticating and resuming through
+`wss://YOUR-HOST/rhp` with the browser or `warren-stampede`; do not treat a
+successful TLS handshake alone as application authentication proof.
 
 Useful commands against a running server (over its local ctl socket):
 

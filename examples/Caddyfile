@@ -1,0 +1,10 @@
+# Replace burrow.example with the public DNS name, matching
+# container-wss.toml. Caddy obtains and renews the public certificate.
+burrow.example {
+	handle /rhp {
+		reverse_proxy burrow:4654
+	}
+	handle /.well-known/rabbithole/server {
+		reverse_proxy burrow:8080
+	}
+}

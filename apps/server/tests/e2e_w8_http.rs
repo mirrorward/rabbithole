@@ -422,6 +422,28 @@ async fn well_known_serves_a_signed_self_certifying_descriptor() {
 }
 
 #[tokio::test]
+async fn well_known_never_publishes_a_websocket_backend_bind() {
+    let work = tempfile::tempdir().unwrap();
+    let b = Burrow::start(http_config(work.path())).await.unwrap();
+    let addr = b.http_addr.expect("http enabled");
+
+    let (status, _, body) = request(addr, "GET", "/.well-known/rabbithole/server").await;
+    assert_eq!(status, 200);
+    let desc: rabbithole_federation::PeerDescriptor =
+        serde_json::from_slice(&body).expect("valid descriptor JSON");
+    assert!(
+        desc.body
+            .addresses
+            .iter()
+            .all(|address| !address.starts_with("ws://") && !address.starts_with("wss://")),
+        "WebSocket discovery must require ws_public_url: {:?}",
+        desc.body.addresses
+    );
+
+    b.shutdown().await;
+}
+
+#[tokio::test]
 async fn http_surface_is_off_by_default_and_static_off_without_web_root() {
     let work = tempfile::tempdir().unwrap();
 

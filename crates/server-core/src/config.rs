@@ -61,9 +61,11 @@ pub struct ServerConfig {
     /// listener. This exposes passwords and bearer tokens to the network and
     /// is therefore off by default.
     pub ws_allow_insecure_remote: bool,
-    /// Exact browser origins allowed to upgrade to the WebSocket transport,
-    /// e.g. `["https://bbs.example"]`. Loopback HTTP(S) origins are built in
-    /// for local development; public entries must use HTTPS. TOML-only.
+    /// Exact browser/app origins allowed to upgrade to the WebSocket
+    /// transport, e.g. `["https://bbs.example", "tauri://localhost"]`.
+    /// Loopback HTTP(S) origins are built in for local development; public web
+    /// entries must use HTTPS and trusted app-protocol entries are narrowly
+    /// validated. TOML-only.
     pub ws_allowed_origins: Vec<String>,
     /// Public WebSocket URL advertised in discovery, normally the `wss://`
     /// address of a TLS reverse proxy. Empty means no public WS advertisement.
