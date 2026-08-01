@@ -149,6 +149,23 @@ impl PeerRegistry {
             .unwrap_or(false)
     }
 
+    /// Run `action` only while this exact origin-key tuple remains approved.
+    /// The read guard prevents an operator revoke from interleaving with a
+    /// trust decision made after the peer has proved key possession.
+    pub fn while_approved_origin<T>(
+        &self,
+        key: &[u8; 32],
+        origin: &str,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let guard = self.inner.read();
+        let approved = guard
+            .get(key)
+            .map(|record| record.approved && record.origin.as_deref() == Some(origin))
+            .unwrap_or(false);
+        approved.then(action)
+    }
+
     /// Admin approval that durably binds the peer key to an immutable origin.
     pub fn approve_origin(&self, key: &[u8; 32], origin: String) -> bool {
         self.approve_with_origin(key, Some(origin))
@@ -198,19 +215,31 @@ impl PeerRegistry {
         }
     }
 
-    /// Mark an approved peer's session live.
-    pub fn set_connected(&self, key: [u8; 32], name: impl Into<String>, addr: Option<String>) {
-        let mut g = self.inner.write();
-        if let Some(rec) = g.get_mut(&key) {
-            rec.state = PeerState::Connected;
-            let name = name.into();
-            if !name.is_empty() {
-                rec.name = name;
-            }
-            if addr.is_some() {
-                rec.addr = addr;
-            }
+    /// Mark a session live only if the exact approved tuple still exists.
+    /// Returns false after revocation or an origin mismatch.
+    pub fn set_connected_if_approved_origin(
+        &self,
+        key: [u8; 32],
+        origin: &str,
+        name: impl Into<String>,
+        addr: Option<String>,
+    ) -> bool {
+        let mut guard = self.inner.write();
+        let Some(record) = guard.get_mut(&key) else {
+            return false;
+        };
+        if !record.approved || record.origin.as_deref() != Some(origin) {
+            return false;
         }
+        record.state = PeerState::Connected;
+        let name = name.into();
+        if !name.is_empty() {
+            record.name = name;
+        }
+        if addr.is_some() {
+            record.addr = addr;
+        }
+        true
     }
 
     /// Mark a peer's session down (keeps approval). No-op for pending peers.
@@ -319,7 +348,7 @@ mod tests {
         assert!(reg.pending().is_empty());
 
         // Session comes up, then drops.
-        reg.set_connected(key, "peer.example", None);
+        assert!(reg.set_connected_if_approved_origin(key, "peer.example", "peer.example", None));
         assert_eq!(reg.state(&key), Some(PeerState::Connected));
         reg.set_disconnected(&key);
         assert_eq!(reg.state(&key), Some(PeerState::Disconnected));
@@ -352,11 +381,70 @@ mod tests {
         let reg = PeerRegistry::new();
         let key = [5u8; 32];
         reg.seed_approved(key, "p", Some("p.example".into()));
-        reg.set_connected(key, "p", None);
+        assert!(reg.set_connected_if_approved_origin(key, "p.example", "p", None));
         // A fresh inbound handshake must not knock an approved peer to pending.
         reg.note_pending(key, "p", "p.example".into(), None);
         assert!(reg.is_approved(&key));
         assert_eq!(reg.state(&key), Some(PeerState::Connected));
         assert_eq!(reg.get(&key).unwrap().origin.as_deref(), Some("p.example"));
+    }
+
+    #[test]
+    fn conditional_connect_fails_after_revoke_or_origin_mismatch() {
+        let reg = PeerRegistry::new();
+        let key = [6u8; 32];
+        reg.seed_approved(key, "p", Some("p.example".into()));
+        assert!(!reg.set_connected_if_approved_origin(key, "victim.example", "p", None));
+        assert_eq!(reg.state(&key), Some(PeerState::Disconnected));
+
+        reg.revoke(&key);
+        assert!(!reg.set_connected_if_approved_origin(key, "p.example", "p", None));
+        assert_eq!(reg.state(&key), Some(PeerState::Pending));
+    }
+
+    #[test]
+    fn revoke_cannot_interleave_with_post_proof_trust_decision() {
+        use std::sync::{mpsc, Arc, Barrier};
+        use std::time::Duration;
+
+        let reg = Arc::new(PeerRegistry::new());
+        let key = [8u8; 32];
+        reg.seed_approved(key, "p", Some("p.example".into()));
+
+        let inside = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let auth = {
+            let reg = reg.clone();
+            let inside = inside.clone();
+            let release = release.clone();
+            std::thread::spawn(move || {
+                reg.while_approved_origin(&key, "p.example", || {
+                    inside.wait();
+                    release.wait();
+                })
+            })
+        };
+        inside.wait();
+
+        let (revoked_tx, revoked_rx) = mpsc::channel();
+        let revoke_started = Arc::new(Barrier::new(2));
+        let revoke = {
+            let reg = reg.clone();
+            let revoke_started = revoke_started.clone();
+            std::thread::spawn(move || {
+                revoke_started.wait();
+                revoked_tx.send(reg.revoke(&key)).unwrap();
+            })
+        };
+        revoke_started.wait();
+        assert!(
+            revoked_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "revoke must wait until the guarded trust decision completes"
+        );
+        release.wait();
+        assert_eq!(auth.join().unwrap(), Some(()));
+        assert!(revoked_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        revoke.join().unwrap();
+        assert!(!reg.set_connected_if_approved_origin(key, "p.example", "p", None));
     }
 }

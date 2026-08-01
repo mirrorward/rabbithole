@@ -17,7 +17,7 @@ use rabbithole_identity::{IdentityKey, PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 
 /// Domain separator for server descriptor signatures.
-pub const DESCRIPTOR_CONTEXT: &[u8] = b"rhp-fed-descriptor-v1";
+pub const DESCRIPTOR_CONTEXT: &[u8] = b"rhp-fed-descriptor-v2";
 
 /// Opening announcement a server sends when dialing a peer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +146,21 @@ fn signed_bytes(body: &DescriptorBody) -> Result<Vec<u8>, DescriptorError> {
 mod tests {
     use super::*;
 
+    #[derive(Serialize)]
+    struct LegacyDescriptorBody {
+        server_key: [u8; 32],
+        name: String,
+        addresses: Vec<String>,
+        features: Vec<String>,
+        issued_at: i64,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyPeerDescriptor {
+        body: LegacyDescriptorBody,
+        sig: Signature,
+    }
+
     fn body() -> DescriptorBody {
         DescriptorBody {
             server_key: [0u8; 32],
@@ -196,6 +211,42 @@ mod tests {
         let back = PeerDescriptor::from_bytes(&wire).unwrap();
         assert_eq!(back, desc);
         assert_eq!(back.verify(), Ok(()));
+    }
+
+    #[test]
+    fn descriptor_v1_body_is_not_decoded_as_v2() {
+        let key = IdentityKey::from_seed(&[3u8; 32]);
+        let body = LegacyDescriptorBody {
+            server_key: key.public().0,
+            name: "rabbithole.example".into(),
+            addresses: vec!["quic://rabbithole.example:4433".into()],
+            features: vec!["boards".into()],
+            issued_at: 1_700_000_000_000,
+        };
+        let mut signed = b"rhp-fed-descriptor-v1".to_vec();
+        signed.extend(postcard::to_allocvec(&body).unwrap());
+        let legacy = LegacyPeerDescriptor {
+            sig: key.sign(&signed),
+            body,
+        };
+        assert!(
+            PeerDescriptor::from_bytes(&postcard::to_allocvec(&legacy).unwrap()).is_none(),
+            "the origin-less v1 postcard shape must not be interpreted as v2"
+        );
+    }
+
+    #[test]
+    fn descriptor_v1_signature_context_is_rejected_by_v2() {
+        let key = IdentityKey::from_seed(&[3u8; 32]);
+        let mut body = body();
+        body.server_key = key.public().0;
+        let mut signed = b"rhp-fed-descriptor-v1".to_vec();
+        signed.extend(postcard::to_allocvec(&body).unwrap());
+        let descriptor = PeerDescriptor {
+            sig: key.sign(&signed),
+            body,
+        };
+        assert_eq!(descriptor.verify(), Err(DescriptorError::BadSignature));
     }
 
     #[test]

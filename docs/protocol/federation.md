@@ -98,6 +98,9 @@ A new peer origin/key tuple is **never trusted automatically**:
 - Approval is re-checked before every post-welcome frame and on a one-second
   lifecycle tick. `peer-revoke` therefore stops ingestion and closes an active
   session rather than waiting for reconnect.
+- A configured outbound peer is implicitly approved by `federation_peers`.
+  Remove it from configuration and restart before running `peer-revoke`; the
+  command refuses a contradictory revoke that the dialer would immediately undo.
 
 A background dialer re-checks configured `federation_peers` every 30 s and
 redials any without a live session.
@@ -147,7 +150,9 @@ self-certifying **`PeerDescriptor`** as JSON at
 is built from config — immutable federation origin, display name, advertised `scheme://host:port`
 endpoints (`quic`, `ws`, and `http`/`fed+quic` when enabled), feature tags per
 enabled surface, and a unix-ms `issued_at` — signed with the burrow's identity
-key over `rhp-fed-descriptor-v1 ‖ postcard(body)`. Anyone can fetch it and
+key over `rhp-fed-descriptor-v2 ‖ postcard(body)`. Descriptor v2 adds the
+immutable signed `origin`; v1 bodies are not decoded or accepted as v2. Anyone
+can fetch it and
 verify that the document is self-consistent: the signature is checked against
 the key the document names. Self-signature alone is **not** proof that the key
 owns the claimed origin; authoritative HTTPS retrieval or explicit operator

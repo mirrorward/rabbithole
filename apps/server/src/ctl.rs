@@ -549,10 +549,13 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
             if !rabbithole_federation::is_valid_server_name(&origin) {
                 return Err("origin must be a valid lowercase federation server name".into());
             }
-            shared
-                .fed_flood
-                .trust_operator(&origin, key)
-                .map_err(|e| e.to_string())?;
+            if let Some(existing) = shared.peers.get(&key).and_then(|peer| peer.origin) {
+                if existing != origin {
+                    return Err(format!(
+                        "peer key is already associated with origin {existing}; refusing an origin alias"
+                    ));
+                }
+            }
             let was_approved = shared.peers.is_approved_origin(&key, &origin);
             let existed = shared.peers.approve_origin(&key, origin.clone());
             if let Err(error) = crate::federation::persist_approved(shared) {
@@ -567,6 +570,17 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
         "peer-revoke" => {
             let key_hex = str_arg("key")?;
             let key = crate::federation::hex_key(&key_hex).ok_or("key must be 32-byte hex")?;
+            let known_origin = shared.peers.get(&key).and_then(|peer| peer.origin);
+            let configured = shared.config.read().federation_peers.iter().any(|peer| {
+                crate::federation::hex_key(&peer.key) == Some(key)
+                    || known_origin.as_deref() == Some(peer.origin.as_str())
+            });
+            if configured {
+                return Err(
+                    "peer is an implicitly approved federation_peers dial target; remove it from configuration and restart before revoking it"
+                        .into(),
+                );
+            }
             let existed = shared.peers.revoke(&key);
             crate::federation::persist_approved(shared).map_err(|e| e.to_string())?;
             audit("peer-revoke", key_hex.clone());

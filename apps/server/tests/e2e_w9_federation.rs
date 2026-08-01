@@ -17,7 +17,7 @@
 
 use burrow::federation::{dial_peer, DialOutcome, DialTarget};
 use burrow::Burrow;
-use rabbithole_server_core::{PeerState, ServerConfig};
+use rabbithole_server_core::{config::FederationPeer, PeerState, ServerConfig};
 use serde_json::json;
 
 fn fed_config(dir: &std::path::Path) -> ServerConfig {
@@ -145,6 +145,94 @@ async fn approved_peer_persists_across_restart() {
 
     a.shutdown().await;
     b2.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_peer_approval_persistence_leaves_no_origin_authority() {
+    let work = tempfile::tempdir().unwrap();
+    let b_dir = work.path().join("b");
+    let a = Burrow::start(fed_config(&work.path().join("a")))
+        .await
+        .unwrap();
+    let b = Burrow::start(fed_config(&b_dir)).await.unwrap();
+    let a_key = a.shared.server_key;
+    let a_origin = a.shared.origin_name();
+
+    dial_peer(a.shared.clone(), target_for(&b)).await.unwrap();
+    let approval_path = b_dir.join("federation").join("approved_peers.json");
+    std::fs::create_dir_all(&approval_path).unwrap();
+    let response = burrow::ctl::handle(
+        &b.shared,
+        &json!({
+            "cmd": "peer-approve",
+            "key": hex::encode(a_key),
+            "origin": a_origin,
+        }),
+    )
+    .await;
+    assert_eq!(
+        response["ok"],
+        json!(false),
+        "approval must fail: {response}"
+    );
+    assert!(!b.shared.peers.is_approved(&a_key));
+    assert_eq!(b.shared.fed_flood.resolve(&a.shared.origin_name()), None);
+
+    b.shutdown().await;
+    let b2 = Burrow::start(fed_config(&b_dir)).await.unwrap();
+    assert!(!b2.shared.peers.is_approved(&a_key));
+    assert_eq!(
+        b2.shared.fed_flood.resolve(&a.shared.origin_name()),
+        None,
+        "a failed peer approval must not authorize later relayed content after restart"
+    );
+
+    a.shutdown().await;
+    b2.shutdown().await;
+}
+
+#[tokio::test]
+async fn configured_peer_revoke_requires_config_removal_and_restart() {
+    let work = tempfile::tempdir().unwrap();
+    let data_dir = work.path().join("configured");
+    let key = [0x31u8; 32];
+    let mut config = fed_config(&data_dir);
+    config.federation_peers = vec![FederationPeer {
+        name: "configured-peer".into(),
+        origin: "configured.example".into(),
+        addr: "127.0.0.1:1".into(),
+        server_name: "localhost".into(),
+        key: hex::encode(key),
+        fingerprint: hex::encode([0x42u8; 32]),
+    }];
+
+    let server = Burrow::start(config.clone()).await.unwrap();
+    assert!(server
+        .shared
+        .peers
+        .is_approved_origin(&key, "configured.example"));
+    let response = burrow::ctl::handle(
+        &server.shared,
+        &json!({"cmd": "peer-revoke", "key": hex::encode(key)}),
+    )
+    .await;
+    assert_eq!(response["ok"], json!(false));
+    assert!(response["error"]
+        .as_str()
+        .unwrap()
+        .contains("remove it from configuration and restart"));
+    assert!(server
+        .shared
+        .peers
+        .is_approved_origin(&key, "configured.example"));
+    server.shutdown().await;
+
+    let restarted = Burrow::start(config).await.unwrap();
+    assert!(restarted
+        .shared
+        .peers
+        .is_approved_origin(&key, "configured.example"));
+    restarted.shutdown().await;
 }
 
 #[tokio::test]

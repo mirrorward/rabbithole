@@ -489,14 +489,14 @@ async fn serve_peer(mut conn: Box<dyn Connection>, shared: Arc<Shared>) -> Resul
         &hello.nonce,
         &listener_nonce,
     );
-    let approved = shared.peers.is_approved_origin(&dialer_key, &dialer_origin);
+    let approved_at_ack = shared.peers.is_approved_origin(&dialer_key, &dialer_origin);
     let ack = PeerHelloAck {
         server_key: my_key,
         server_name: shared.config.read().name,
         origin: listener_origin,
         protocol_version: FED_PROTOCOL,
         software: SOFTWARE.to_string(),
-        accepted: approved,
+        accepted: approved_at_ack,
     };
     conn.send(fed_frame(
         FrameKind::Reply,
@@ -517,14 +517,14 @@ async fn serve_peer(mut conn: Box<dyn Connection>, shared: Arc<Shared>) -> Resul
 
     // 4. Apply approval, update the registry, then send Welcome as a
     //    deterministic readiness signal.
-    let connected = if approved {
-        shared
-            .fed_flood
-            .trust_direct(&dialer_origin, dialer_key)
-            .context("peer origin conflicts with trusted provenance")?;
-        shared
-            .peers
-            .set_connected(dialer_key, dialer_name.clone(), Some(remote.clone()));
+    let connected = if authorize_authenticated_peer(
+        &shared.peers,
+        &shared.fed_flood,
+        dialer_key,
+        &dialer_origin,
+        &dialer_name,
+        &remote,
+    )? {
         tracing::info!(peer = %PublicKey(dialer_key).fingerprint(), %remote, "federation peer connected");
         true
     } else {
@@ -559,6 +559,26 @@ async fn serve_peer(mut conn: Box<dyn Connection>, shared: Arc<Shared>) -> Resul
     // dialer pulls; see `sync_catalogs`).
     run_peer_session(conn, dialer_key, dialer_origin, shared, true).await;
     Ok(())
+}
+
+/// Commit the inbound post-proof transition only while the exact tuple is
+/// still approved. The peer may have been revoked while the proof crossed the
+/// network, so the pre-Ack approval bit is deliberately not an input here.
+fn authorize_authenticated_peer(
+    peers: &rabbithole_server_core::PeerRegistry,
+    trusted_origins: &crate::fed_flood::FloodState,
+    key: [u8; 32],
+    origin: &str,
+    name: &str,
+    remote: &str,
+) -> Result<bool> {
+    let trusted =
+        peers.while_approved_origin(&key, origin, || trusted_origins.trust_direct(origin, key));
+    let Some(trusted) = trusted else {
+        return Ok(false);
+    };
+    trusted.context("peer origin conflicts with trusted provenance")?;
+    Ok(peers.set_connected_if_approved_origin(key, origin, name, Some(remote.to_string())))
 }
 
 /// The post-welcome session loop, shared by both the listener (`serve_peer`)
@@ -1289,9 +1309,14 @@ pub async fn dial_peer(shared: Arc<Shared>, target: DialTarget) -> Result<DialOu
             .fed_flood
             .trust_direct(&listener_origin, listener_key)
             .context("peer origin conflicts with trusted provenance")?;
-        shared
-            .peers
-            .set_connected(listener_key, listener_name.clone(), Some(remote));
+        if !shared.peers.set_connected_if_approved_origin(
+            listener_key,
+            &listener_origin,
+            listener_name.clone(),
+            Some(remote),
+        ) {
+            bail!("configured peer approval changed during authentication");
+        }
         tracing::info!(
             peer = %PublicKey(listener_key).fingerprint(),
             "federation dial established a session"
@@ -1397,7 +1422,7 @@ async fn federation_dialer(shared: Arc<Shared>) {
 async fn dial_configured_once(shared: &Arc<Shared>) {
     for peer in shared.config.read().federation_peers {
         let Some(target) = resolve_target(&peer) else {
-            tracing::warn!(addr = %peer.addr, "federation: skipping peer with bad key/fingerprint");
+            tracing::warn!(addr = %peer.addr, "federation: skipping peer with invalid origin, key, or fingerprint");
             continue;
         };
         // Skip peers we already hold a live session with.
@@ -1412,8 +1437,8 @@ async fn dial_configured_once(shared: &Arc<Shared>) {
     }
 }
 
-/// Build a [`DialTarget`] from a configured peer, or `None` if its key/
-/// fingerprint hex is malformed.
+/// Build a [`DialTarget`] from a configured peer, or `None` if its origin,
+/// key, or fingerprint is malformed.
 pub fn resolve_target(peer: &rabbithole_server_core::config::FederationPeer) -> Option<DialTarget> {
     let fingerprint = CertFingerprint::from_hex(peer.fingerprint.trim())?;
     let expected_key = if peer.key.trim().is_empty() {
@@ -1647,5 +1672,32 @@ mod provenance_tests {
             load_approved(dir.path()).is_empty(),
             "conflicting approval state must fail closed as a whole"
         );
+    }
+
+    #[test]
+    fn revoke_between_ack_and_proof_cannot_connect_or_pin() {
+        let peers = rabbithole_server_core::PeerRegistry::new();
+        let trusted = crate::fed_flood::FloodState::new();
+        let key = [0x51u8; 32];
+        peers.seed_approved(key, "peer", Some("peer.example".into()));
+
+        // The Ack may already have advertised acceptance when the operator
+        // revokes. The post-proof commit must consult current state instead.
+        assert!(peers.is_approved_origin(&key, "peer.example"));
+        peers.revoke(&key);
+        assert!(!authorize_authenticated_peer(
+            &peers,
+            &trusted,
+            key,
+            "peer.example",
+            "peer",
+            "127.0.0.1:4655",
+        )
+        .unwrap());
+        assert_eq!(
+            peers.state(&key),
+            Some(rabbithole_server_core::PeerState::Pending)
+        );
+        assert_eq!(trusted.resolve("peer.example"), None);
     }
 }

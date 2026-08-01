@@ -568,12 +568,20 @@ fn effective_origin(config: &ServerConfig) -> String {
 }
 
 fn validate_federation_policy(config: &ServerConfig) -> Result<()> {
-    if config.federation_enabled
-        && !rabbithole_federation::is_valid_server_name(&config.federation_origin)
-    {
+    if !config.federation_enabled {
+        return Ok(());
+    }
+    if !rabbithole_federation::is_valid_server_name(&config.federation_origin) {
         anyhow::bail!(
             "federation_origin must be set to an immutable lowercase federation server name before federation can be enabled"
         );
+    }
+    for (index, peer) in config.federation_peers.iter().enumerate() {
+        if !rabbithole_federation::is_valid_server_name(&peer.origin) {
+            anyhow::bail!(
+                "federation_peers[{index}].origin must be set to the peer's immutable lowercase federation origin; migrate this configured peer before starting"
+            );
+        }
     }
     Ok(())
 }
@@ -738,6 +746,25 @@ mod tests {
         assert!(validate_federation_policy(&config).is_ok());
         config.name = "A Different Display Name".into();
         assert_eq!(effective_origin(&config), "warren.example");
+    }
+
+    #[test]
+    fn federation_rejects_unmigrated_configured_peer_origins() {
+        let mut config = ServerConfig {
+            federation_enabled: true,
+            federation_origin: "warren.example".into(),
+            federation_peers: vec![rabbithole_server_core::config::FederationPeer {
+                name: "legacy-peer".into(),
+                ..Default::default()
+            }],
+            ..ServerConfig::default()
+        };
+        let error = validate_federation_policy(&config).unwrap_err().to_string();
+        assert!(error.contains("federation_peers[0].origin"));
+        assert!(error.contains("migrate"));
+
+        config.federation_peers[0].origin = "peer.example".into();
+        assert!(validate_federation_policy(&config).is_ok());
     }
 
     #[test]
