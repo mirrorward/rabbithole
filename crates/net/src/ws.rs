@@ -79,6 +79,9 @@ fn parse_allowed_origins(origins: &[String]) -> Result<Vec<OriginId>, NetError> 
 
 #[async_trait]
 impl Listener for WsListener {
+    // tungstenite's handshake callback requires its concrete HTTP response as
+    // the error type; boxing it would no longer satisfy `accept_hdr_async`.
+    #[allow(clippy::result_large_err)]
     async fn accept(&mut self) -> Result<Box<dyn Connection>, NetError> {
         let (stream, remote_addr) = self.listener.accept().await?;
         let allowed_origins = self.allowed_origins.clone();
