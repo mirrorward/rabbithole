@@ -95,7 +95,7 @@ Native transports and rate limiting are the only things on out of the box;
 | Surface | Default port | Enable key | Default |
 |---|---|---|---|
 | Native RHP over QUIC | 4653 (`quic_addr`) | (always on) | **on** |
-| Native RHP over WebSocket | 4654 (`ws_addr`) | (always on) | **on** |
+| Native RHP over WebSocket | 4654 (`ws_addr`) | (always on) | **loopback only** |
 | S2S federation (Tunnels) | 4655 (`federation_addr`) | `federation_enabled` | off |
 | Embedded HTTP + PWA | 8080 (`http_addr`) | `http_enabled` / `--http` | off |
 | Telnet BBS (+ doors, files) | 2323 (`telnet_addr`) | `telnet_enabled` | off |
@@ -116,7 +116,7 @@ Native transports and rate limiting are the only things on out of the box;
 
 ```console
 $ cargo run -p burrow -- run
-  INFO burrow: burrow is up quic=0.0.0.0:4653 ws=0.0.0.0:4654 fingerprint=<hex>
+  INFO burrow: burrow is up quic=0.0.0.0:4653 ws=127.0.0.1:4654 fingerprint=<hex>
 
 # Admin from another terminal (unix ctl socket, no network):
 $ burrow ctl account-create alice wonderland user
@@ -137,6 +137,13 @@ $ rabbit tail            # stream the lobby
 # QUIC with certificate pinning (fingerprint from `burrow ctl status`):
 $ rabbit login 127.0.0.1:4653 --fingerprint <hex> --server-name localhost --guest
 ```
+
+Raw `ws://` carries passwords, TOTP codes, and resume bearer tokens, so the
+built-in listener refuses non-loopback binds by default. Public browser access
+must terminate TLS as `wss://` at a reverse proxy, forward to the loopback
+listener, set an exact HTTPS `ws_allowed_origins` allowlist, and publish the
+external endpoint through `ws_public_url`. See
+[`docs/deployment.md`](docs/deployment.md#public-websocket-access).
 
 Back up and restore (the server must be **stopped** before a restore):
 

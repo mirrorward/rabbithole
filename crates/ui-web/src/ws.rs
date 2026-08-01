@@ -572,6 +572,18 @@ impl WsClient {
             let b = inner.borrow();
             (wire::normalize_ws_url(&b.endpoint), b.reconnect_attempt)
         };
+        let url = match url {
+            Ok(url) => url,
+            Err(error) => {
+                let mut b = inner.borrow_mut();
+                b.want_connected = false;
+                b.emit_conn(ConnState::Offline);
+                b.emit(Event::CommandFailed {
+                    detail: format!("unsafe WebSocket endpoint: {error}"),
+                });
+                return;
+            }
+        };
         // A first dial is "Connecting"; a redial after a drop is "Reconnecting".
         inner.borrow().emit_conn(if attempt == 0 {
             ConnState::Connecting

@@ -53,8 +53,24 @@ pub struct ServerConfig {
     pub advertise_host: String,
     /// QUIC listener (primary transport).
     pub quic_addr: SocketAddr,
-    /// WebSocket listener (fallback transport).
+    /// Plaintext WebSocket listener (fallback transport). This must remain
+    /// loopback-only unless `ws_allow_insecure_remote` is explicitly enabled;
+    /// public browser access belongs behind a WSS reverse proxy.
     pub ws_addr: SocketAddr,
+    /// Break-glass acknowledgement for a non-loopback plaintext WebSocket
+    /// listener. This exposes passwords and bearer tokens to the network and
+    /// is therefore off by default.
+    pub ws_allow_insecure_remote: bool,
+    /// Exact browser/app origins allowed to upgrade to the WebSocket
+    /// transport, e.g. `["https://bbs.example", "tauri://localhost"]`.
+    /// Loopback HTTP(S) origins are built in for local development; public web
+    /// entries must use HTTPS and trusted app-protocol entries are narrowly
+    /// validated. TOML-only.
+    pub ws_allowed_origins: Vec<String>,
+    /// Public WebSocket URL advertised in discovery, normally the `wss://`
+    /// address of a TLS reverse proxy. Empty means no public WS advertisement.
+    /// TOML-only; it is deliberately independent of the backend bind address.
+    pub ws_public_url: String,
     /// Where the database, blobs, keys, and ctl socket live.
     pub data_dir: PathBuf,
     /// Session token lifetime in seconds.
@@ -370,7 +386,10 @@ impl Default for ServerConfig {
             guest_enabled: true,
             advertise_host: String::new(),
             quic_addr: "0.0.0.0:4653".parse().expect("valid"),
-            ws_addr: "0.0.0.0:4654".parse().expect("valid"),
+            ws_addr: "127.0.0.1:4654".parse().expect("valid"),
+            ws_allow_insecure_remote: false,
+            ws_allowed_origins: Vec::new(),
+            ws_public_url: String::new(),
             data_dir: PathBuf::from("./burrow-data"),
             session_ttl_secs: 60 * 60 * 24 * 30, // 30 days
             chat_max_len: 4096,
@@ -525,6 +544,9 @@ impl ServerConfig {
         if let Some(v) = get("RABBITHOLE_WS_ADDR") {
             self.ws_addr = parse_addr("RABBITHOLE_WS_ADDR", &v)?;
         }
+        if let Some(v) = get("RABBITHOLE_WS_ALLOW_INSECURE_REMOTE") {
+            self.ws_allow_insecure_remote = parse_bool("RABBITHOLE_WS_ALLOW_INSECURE_REMOTE", &v)?;
+        }
         if let Some(v) = get("RABBITHOLE_DATA_DIR") {
             self.data_dir = PathBuf::from(v);
         }
@@ -540,6 +562,9 @@ impl ServerConfig {
             "guest_enabled" => self.guest_enabled.to_string(),
             "quic_addr" => self.quic_addr.to_string(),
             "ws_addr" => self.ws_addr.to_string(),
+            "ws_allow_insecure_remote" => self.ws_allow_insecure_remote.to_string(),
+            "ws_allowed_origins" => self.ws_allowed_origins.join(","),
+            "ws_public_url" => self.ws_public_url.clone(),
             "data_dir" => self.data_dir.display().to_string(),
             "session_ttl_secs" => self.session_ttl_secs.to_string(),
             "chat_max_len" => self.chat_max_len.to_string(),
@@ -1059,6 +1084,10 @@ impl ServerConfig {
                 self.ws_addr = parse_addr(key, value)?;
                 Ok(false)
             }
+            "ws_allow_insecure_remote" => {
+                self.ws_allow_insecure_remote = parse_bool(key, value)?;
+                Ok(false)
+            }
             "data_dir" => {
                 self.data_dir = PathBuf::from(value);
                 Ok(false)
@@ -1147,12 +1176,14 @@ mod tests {
             "RABBITHOLE_NAME" => Some("Wonderland".into()),
             "RABBITHOLE_GUEST_ENABLED" => Some("off".into()),
             "RABBITHOLE_QUIC_ADDR" => Some("127.0.0.1:9999".into()),
+            "RABBITHOLE_WS_ALLOW_INSECURE_REMOTE" => Some("true".into()),
             _ => None,
         })
         .unwrap();
         assert_eq!(cfg.name, "Wonderland");
         assert!(!cfg.guest_enabled);
         assert_eq!(cfg.quic_addr.port(), 9999);
+        assert!(cfg.ws_allow_insecure_remote);
 
         let bad = cfg.apply_env(|k| (k == "RABBITHOLE_GUEST_ENABLED").then(|| "maybe".into()));
         assert!(matches!(bad, Err(ConfigError::BadValue { .. })));
@@ -1430,6 +1461,8 @@ mod tests {
         let live = LiveConfig::new(ServerConfig::default());
         assert!(live.set_key("motd", "hi").unwrap());
         assert!(!live.set_key("quic_addr", "0.0.0.0:1").unwrap());
+        assert!(!live.set_key("ws_allow_insecure_remote", "true").unwrap());
+        assert_eq!(live.get_key("ws_allow_insecure_remote").unwrap(), "true");
         assert_eq!(live.get_key("motd").unwrap(), "hi");
         assert!(matches!(
             live.set_key("nope", "x"),

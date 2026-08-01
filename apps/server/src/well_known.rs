@@ -51,8 +51,7 @@ fn advertised_addresses(cfg: &ServerConfig) -> Vec<String> {
     let trimmed = cfg.advertise_host.trim();
     let host = (!trimmed.is_empty()).then_some(trimmed);
 
-    let mut surfaces: Vec<(&str, &SocketAddr)> =
-        vec![("quic", &cfg.quic_addr), ("ws", &cfg.ws_addr)];
+    let mut surfaces: Vec<(&str, &SocketAddr)> = vec![("quic", &cfg.quic_addr)];
     if cfg.http_enabled {
         surfaces.push(("http", &cfg.http_addr));
     }
@@ -60,10 +59,18 @@ fn advertised_addresses(cfg: &ServerConfig) -> Vec<String> {
         surfaces.push(("fed+quic", &cfg.federation_addr));
     }
 
-    surfaces
+    let mut addresses: Vec<String> = surfaces
         .into_iter()
         .filter_map(|(scheme, addr)| authority(host, addr).map(|a| format!("{scheme}://{a}")))
-        .collect()
+        .collect();
+
+    // WebSocket discovery comes only from the explicit proxy URL; a backend
+    // bind address cannot reveal its external scheme, host, port, or path and
+    // a loopback address in a remotely served descriptor is actively wrong.
+    if !cfg.ws_public_url.trim().is_empty() {
+        addresses.insert(1.min(addresses.len()), cfg.ws_public_url.trim().to_string());
+    }
+    addresses
 }
 
 /// `host:port` for an advertised address, or `None` when there is no usable
@@ -123,6 +130,7 @@ mod tests {
             advertise_host: "rabbithole.example".into(),
             quic_addr: "0.0.0.0:4653".parse().unwrap(),
             ws_addr: "0.0.0.0:4654".parse().unwrap(),
+            ws_public_url: "wss://rabbithole.example/rhp".into(),
             http_enabled: true,
             http_addr: "0.0.0.0:8080".parse().unwrap(),
             federation_enabled: true,
@@ -139,7 +147,7 @@ mod tests {
             addrs,
             vec![
                 "quic://rabbithole.example:4653",
-                "ws://rabbithole.example:4654",
+                "wss://rabbithole.example/rhp",
                 "http://rabbithole.example:8080",
                 "fed+quic://rabbithole.example:4655",
             ]
@@ -156,32 +164,37 @@ mod tests {
             addrs,
             vec![
                 "quic://rabbithole.example:4653",
-                "ws://rabbithole.example:4654"
+                "wss://rabbithole.example/rhp"
             ]
         );
     }
 
     #[test]
     fn wildcard_bind_without_advertise_host_omits_host_addresses() {
-        // Default config binds 0.0.0.0 and sets no advertise_host: a signed
-        // descriptor is still produced (key + features + freshness), but with
-        // no misleading 0.0.0.0 URLs.
-        let c = ServerConfig::default();
+        // Wildcard listeners with no advertise_host cannot produce a usable
+        // public address, and plaintext WebSocket is never advertised beyond
+        // loopback.
+        let c = ServerConfig {
+            quic_addr: "0.0.0.0:4653".parse().unwrap(),
+            ws_addr: "0.0.0.0:4654".parse().unwrap(),
+            ws_allow_insecure_remote: true,
+            ws_public_url: String::new(),
+            ..ServerConfig::default()
+        };
         assert!(advertised_addresses(&c).is_empty());
     }
 
     #[test]
     fn concrete_bind_ip_is_used_when_no_advertise_host() {
-        // Default advertise_host is empty, so the concrete bind IP is used.
+        // Default advertise_host is empty, so concrete non-WebSocket binds
+        // are used. WebSocket is never inferred from its backend bind.
         let c = ServerConfig {
             quic_addr: "127.0.0.1:4653".parse().unwrap(),
             ws_addr: "127.0.0.1:4654".parse().unwrap(),
+            ws_public_url: String::new(),
             ..ServerConfig::default()
         };
-        assert_eq!(
-            advertised_addresses(&c),
-            vec!["quic://127.0.0.1:4653", "ws://127.0.0.1:4654"]
-        );
+        assert_eq!(advertised_addresses(&c), vec!["quic://127.0.0.1:4653"]);
     }
 
     #[test]
@@ -189,12 +202,10 @@ mod tests {
         let c = ServerConfig {
             quic_addr: "[::1]:4653".parse().unwrap(),
             ws_addr: "[fe80::1]:4654".parse().unwrap(),
+            ws_public_url: String::new(),
             ..ServerConfig::default()
         };
-        assert_eq!(
-            advertised_addresses(&c),
-            vec!["quic://[::1]:4653", "ws://[fe80::1]:4654"]
-        );
+        assert_eq!(advertised_addresses(&c), vec!["quic://[::1]:4653"]);
     }
 
     #[test]

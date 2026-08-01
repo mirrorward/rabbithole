@@ -1423,10 +1423,20 @@ pub fn App() -> impl IntoView {
     // before <Router> mounts, so the URL is already `/lobby` when it reads it.
     #[cfg(target_arch = "wasm32")]
     {
-        let resumable: Vec<_> = crate::recent::load()
-            .into_iter()
-            .filter_map(|b| b.token.map(|t| (b.endpoint, t)))
-            .collect();
+        let recent = crate::recent::load();
+        let (resumable, blocked) = crate::recent::secure_resumable(&recent);
+        if !blocked.is_empty() {
+            app.toasts.update(|queue| {
+                queue.push(
+                    crate::toasts::ToastKind::Warn,
+                    format!(
+                        "Skipped {} saved plaintext remote connection{}; replace ws:// with wss:// to reconnect safely.",
+                        blocked.len(),
+                        if blocked.len() == 1 { "" } else { "s" }
+                    ),
+                );
+            });
+        }
         if !resumable.is_empty() {
             for (endpoint, token) in resumable {
                 app.reconnect_live(endpoint, token);

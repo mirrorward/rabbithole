@@ -11,7 +11,8 @@ uses — so what it measures is what real rabbits experience.
 warren-stampede --url ws://127.0.0.1:4654 --sessions 100 --duration 60 --scenario chat
 ```
 
-- `--url` — `ws://host:port` (WebSocket) or `host:port` (QUIC, with
+- `--url` — loopback `ws://host:port` or remote `wss://host` (WebSocket), or
+  `host:port` (QUIC, with
   `--fingerprint <hex>` and optionally `--server-name`).
 - `--sessions N` — concurrent session target.
 - `--ramp-per-sec R` — session start rate during ramp-up.
@@ -35,7 +36,7 @@ Raise the file-descriptor limit on both ends (`ulimit -n 65536`) and run:
 
 ```text
 warren-stampede \
-    --url ws://burrow.example.net:4654 \
+    --url wss://burrow.example.net/rhp \
     --sessions 10000 --ramp-per-sec 200 --duration 600 \
     --scenario mixed --guests --max-errors 500 --json > stampede.json
 ```

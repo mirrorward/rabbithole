@@ -7,7 +7,7 @@ Status: **Wave 0** — implemented in `crates/proto` (`frame.rs`, `codec.rs`).
 | Transport | Role | Delimiting |
 |---|---|---|
 | QUIC (quinn, TLS 1.3, ALPN `rhp/1`), default port **4653** | primary | 4-byte big-endian length prefix per frame on the control stream |
-| WebSocket (`/rhp` on the web port, default **4654**) | mandatory fallback (browsers, UDP-hostile networks) | one binary message = one frame, no prefix |
+| WebSocket (`/rhp`; plaintext backend defaults to loopback **4654**, public access requires WSS) | mandatory fallback (browsers, UDP-hostile networks) | one binary message = one frame, no prefix |
 
 On QUIC, the **first client-opened bidirectional stream is the control
 stream**. Server→client push streams and per-transfer bulk streams are added

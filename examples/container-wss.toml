@@ -1,0 +1,15 @@
+# Secure Docker WSS topology used by docker-compose.wss.yml.
+# Replace every burrow.example value before starting the stack.
+ws_addr = "0.0.0.0:4654"
+ws_allow_insecure_remote = true
+ws_allowed_origins = [
+  "https://burrow.example",
+  "tauri://localhost",
+  "http://tauri.localhost",
+  "https://tauri.localhost",
+]
+ws_public_url = "wss://burrow.example/rhp"
+
+# Serve only the signed discovery descriptor through the Caddy route above.
+http_enabled = true
+http_addr = "0.0.0.0:8080"

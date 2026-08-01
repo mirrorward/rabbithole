@@ -1,0 +1,45 @@
+# Production WSS overlay. Edit examples/container-wss.toml and
+# examples/Caddyfile to use the same public hostname, then run:
+#   docker compose -f docker-compose.yml -f docker-compose.wss.yml up -d
+services:
+  burrow:
+    command: ["--config", "/etc/rabbithole/burrow-wss.toml", "run"]
+    environment:
+      # Override the base Compose loopback environment value. Port 4654 is
+      # still private because it has no host `ports` publication.
+      RABBITHOLE_WS_ADDR: "0.0.0.0:4654"
+      RABBITHOLE_WS_ALLOW_INSECURE_REMOTE: "true"
+    expose:
+      - "4654" # private Docker network only; never host-published
+      - "8080" # signed descriptor, reachable only through Caddy
+    volumes:
+      - ./examples/container-wss.toml:/etc/rabbithole/burrow-wss.toml:ro
+    networks:
+      - edge
+      - wss-backend
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      - burrow
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+    volumes:
+      - ./examples/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - edge
+      - wss-backend
+
+networks:
+  edge:
+  wss-backend:
+    internal: true
+
+volumes:
+  caddy-data:
+  caddy-config:

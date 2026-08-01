@@ -17,6 +17,8 @@ use rabbithole_proto::{
     Hello, HelloAck, Message, RequestId,
 };
 
+use crate::api::normalize_secure_ws_endpoint;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("network: {0}")]
@@ -31,6 +33,8 @@ pub enum ClientError {
     UnexpectedReply { family: u8, message_type: u16 },
     #[error("bad fingerprint: {0}")]
     BadFingerprint(String),
+    #[error("unsafe WebSocket endpoint: {0}")]
+    UnsafeWebSocket(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("integrity check failed: transferred bytes do not match the file's hash")]
@@ -120,6 +124,8 @@ impl Client {
         let pubkey = identity.map(|k| k.public().0);
         let transport: Box<dyn Transport> =
             if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
+                normalize_secure_ws_endpoint(endpoint)
+                    .map_err(|error| ClientError::UnsafeWebSocket(error.to_string()))?;
                 Box::new(WsTransport)
             } else {
                 let fp_hex = fingerprint

@@ -595,16 +595,10 @@ pub fn command_to_frame(command: &Command, id: RequestId) -> Result<Option<Frame
 
 /// Normalise a connection endpoint into a WebSocket URL.
 ///
-/// An endpoint that already carries a `ws://`/`wss://` scheme is used verbatim;
-/// a bare `host:port` (the rabbit-link form) defaults to the plaintext `ws://`
-/// scheme. TLS selection (`wss://`) is the caller's decision.
-pub fn normalize_ws_url(endpoint: &str) -> String {
-    let e = endpoint.trim();
-    if e.starts_with("ws://") || e.starts_with("wss://") {
-        e.to_string()
-    } else {
-        format!("ws://{e}")
-    }
+/// Plaintext is permitted only for loopback development. Bare remote targets
+/// become `wss://`; an explicit remote `ws://` is rejected.
+pub fn normalize_ws_url(endpoint: &str) -> Result<String, rabbithole_core::api::WsEndpointError> {
+    rabbithole_core::api::normalize_secure_ws_endpoint(endpoint)
 }
 
 /// Map an inbound RHP [`Frame`] to the api [`Event`]s it produces.
@@ -1764,10 +1758,16 @@ mod tests {
 
     #[test]
     fn normalize_url_adds_scheme_when_missing() {
-        assert_eq!(normalize_ws_url("host:9000"), "ws://host:9000");
-        assert_eq!(normalize_ws_url("ws://host:9000"), "ws://host:9000");
-        assert_eq!(normalize_ws_url("wss://host:9000"), "wss://host:9000");
-        assert_eq!(normalize_ws_url("  host:1  "), "ws://host:1");
+        assert_eq!(normalize_ws_url("host:9000").unwrap(), "wss://host:9000");
+        assert!(normalize_ws_url("ws://host:9000").is_err());
+        assert_eq!(
+            normalize_ws_url("wss://host:9000").unwrap(),
+            "wss://host:9000"
+        );
+        assert_eq!(
+            normalize_ws_url("  localhost:1  ").unwrap(),
+            "ws://localhost:1"
+        );
     }
 
     #[test]

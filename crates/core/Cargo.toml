@@ -15,6 +15,7 @@ ed25519-dalek = { version = "2", default-features = false }
 rand_core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+url.workspace = true
 
 # native (non-wasm) session driver
 rabbithole-net = { workspace = true, optional = true }

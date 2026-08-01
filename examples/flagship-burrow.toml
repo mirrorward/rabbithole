@@ -85,8 +85,15 @@ advertise_host = "rabbithole.example"
 # QUIC listener (primary transport, TLS 1.3, fingerprint-pinned). (restart)
 # quic_addr = "0.0.0.0:4653"
 
-# WebSocket listener (fallback transport; also what the web SPA speaks). (restart)
-# ws_addr = "0.0.0.0:4654"
+# Plaintext WebSocket backend. Keep loopback-only behind a WSS proxy. (restart)
+# ws_addr = "127.0.0.1:4654"
+# Exact browser/app origins accepted by the handshake (TOML-only). Add the
+# Tauri values only when packaged desktop/mobile clients are supported.
+# ws_allowed_origins = ["https://bbs.example", "tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]
+# External discovery URL; never derived from the backend bind (TOML-only).
+# ws_public_url = "wss://bbs.example/rhp"
+# Break-glass only: permits a non-loopback plaintext bind. (restart)
+# ws_allow_insecure_remote = false
 
 
 # -----------------------------------------------------------------------------

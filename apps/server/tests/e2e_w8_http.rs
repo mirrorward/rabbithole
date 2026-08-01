@@ -343,6 +343,7 @@ async fn well_known_serves_a_signed_self_certifying_descriptor() {
     let work = tempfile::tempdir().unwrap();
     let b = Burrow::start(ServerConfig {
         advertise_host: "warren.test".into(),
+        ws_public_url: "wss://warren.test/rhp".into(),
         ..http_config(work.path())
     })
     .await
@@ -367,20 +368,24 @@ async fn well_known_serves_a_signed_self_certifying_descriptor() {
     );
 
     assert_eq!(desc.body.name, "Warren Web");
-    // advertise_host drives the host of every advertised endpoint (the port
-    // is the configured one — here the harness's ephemeral :0, so match on
-    // scheme+host only).
-    for scheme in [
-        "quic://warren.test:",
-        "ws://warren.test:",
-        "http://warren.test:",
-    ] {
+    // advertise_host drives the host-based QUIC/HTTP surfaces (with the
+    // harness's ephemeral :0); WebSocket comes only from its explicit public
+    // WSS URL because the plaintext backend bind is not publication truth.
+    for scheme in ["quic://warren.test:", "http://warren.test:"] {
         assert!(
             desc.body.addresses.iter().any(|a| a.starts_with(scheme)),
             "{scheme} not advertised: {:?}",
             desc.body.addresses
         );
     }
+    assert!(
+        desc.body
+            .addresses
+            .iter()
+            .any(|address| address == "wss://warren.test/rhp"),
+        "explicit WSS URL not advertised: {:?}",
+        desc.body.addresses
+    );
     // Core features are always present; guests are on by default.
     for tag in ["boards", "chat", "dm", "files", "swarm", "guest"] {
         assert!(
@@ -411,6 +416,28 @@ async fn well_known_serves_a_signed_self_certifying_descriptor() {
             .parse::<usize>()
             .unwrap()
             > 0
+    );
+
+    b.shutdown().await;
+}
+
+#[tokio::test]
+async fn well_known_never_publishes_a_websocket_backend_bind() {
+    let work = tempfile::tempdir().unwrap();
+    let b = Burrow::start(http_config(work.path())).await.unwrap();
+    let addr = b.http_addr.expect("http enabled");
+
+    let (status, _, body) = request(addr, "GET", "/.well-known/rabbithole/server").await;
+    assert_eq!(status, 200);
+    let desc: rabbithole_federation::PeerDescriptor =
+        serde_json::from_slice(&body).expect("valid descriptor JSON");
+    assert!(
+        desc.body
+            .addresses
+            .iter()
+            .all(|address| !address.starts_with("ws://") && !address.starts_with("wss://")),
+        "WebSocket discovery must require ws_public_url: {:?}",
+        desc.body.addresses
     );
 
     b.shutdown().await;

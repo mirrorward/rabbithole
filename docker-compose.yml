@@ -8,18 +8,17 @@ services:
     restart: unless-stopped
     ports:
       - "4653:4653/udp"   # QUIC — primary transport
-      - "4654:4654/tcp"   # WebSocket — fallback transport
     volumes:
       - burrow-data:/data
     environment:
       # All keys below are real RABBITHOLE_* overrides read by
-      # crates/server-core/src/config.rs. Only these seven exist.
+      # crates/server-core/src/config.rs. Only these eight exist.
       RABBITHOLE_NAME: "My Burrow"
       RABBITHOLE_MOTD: "Welcome down the rabbit hole."
       # RABBITHOLE_AGREEMENT: "You must accept the rules to participate."
       RABBITHOLE_GUEST_ENABLED: "true"
       RABBITHOLE_QUIC_ADDR: "0.0.0.0:4653"
-      RABBITHOLE_WS_ADDR: "0.0.0.0:4654"
+      RABBITHOLE_WS_ADDR: "127.0.0.1:4654"
       RABBITHOLE_DATA_DIR: "/data"
 
 volumes:
