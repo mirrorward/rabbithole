@@ -47,7 +47,13 @@ pub fn native_available() -> bool {
 /// Invoke the native `swarm_start_download` command: fetch content `root_hex`
 /// (`size` bytes) named `name` from the swarm. Fire-and-forget — progress is
 /// delivered to the [`install_swarm_listener`] callback.
-pub fn start_swarm_download(app: AppState, transfer_id: u64, root_hex: &str, size: u64, name: &str) {
+pub fn start_swarm_download(
+    app: AppState,
+    transfer_id: u64,
+    root_hex: &str,
+    size: u64,
+    name: &str,
+) {
     let Some(b) = bridge() else { return };
     let Some(invoke) = method(&b, "invoke") else {
         return;
@@ -59,7 +65,11 @@ pub fn start_swarm_download(app: AppState, transfer_id: u64, root_hex: &str, siz
         &JsValue::from_str("transferId"),
         &JsValue::from_f64(transfer_id as f64),
     );
-    let _ = js_sys::Reflect::set(&args, &JsValue::from_str("rootHex"), &JsValue::from_str(root_hex));
+    let _ = js_sys::Reflect::set(
+        &args,
+        &JsValue::from_str("rootHex"),
+        &JsValue::from_str(root_hex),
+    );
     let _ = js_sys::Reflect::set(
         &args,
         &JsValue::from_str("size"),

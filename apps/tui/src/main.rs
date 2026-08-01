@@ -420,10 +420,8 @@ fn handle_radio_key(app: &mut App, key: KeyEvent, ctrl: bool) {
         KeyCode::Enter | KeyCode::Char('p') => {
             derive_stream_url(app);
         }
-        KeyCode::Char('o') => {
-            if derive_stream_url(app) {
-                launch_player(app);
-            }
+        KeyCode::Char('o') if derive_stream_url(app) => {
+            launch_player(app);
         }
         _ => {}
     }

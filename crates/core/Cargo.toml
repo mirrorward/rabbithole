@@ -35,5 +35,11 @@ native = [
     "dep:blake3",
 ]
 
+# `rabbithole-core` is checked directly for wasm in CI, before the web crate's
+# target dependencies can enable getrandom's browser backend for the shared
+# crypto dependency graph.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
 [dev-dependencies]
 rand.workspace = true

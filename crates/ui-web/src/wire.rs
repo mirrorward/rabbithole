@@ -910,7 +910,9 @@ pub fn swarm_event_to_file_events(ev: &SwarmWireEvent, size: u64) -> Vec<FileEve
         // Done is the only completion signal. A TransferOpened with
         // server_have == size is the reducer's "done" shape, and record_transfer
         // upserts by id, so this is idempotent with a prior last-Chunk.
-        SwarmWireEvent::Done { transfer_id, bytes, .. } => vec![FileEvent::TransferOpened {
+        SwarmWireEvent::Done {
+            transfer_id, bytes, ..
+        } => vec![FileEvent::TransferOpened {
             transfer_id: *transfer_id,
             size: *bytes,
             server_have: *bytes,
@@ -1315,8 +1317,16 @@ mod tests {
                 resumed.apply(&fe);
             }
         }
-        let t = resumed.transfers.iter().find(|t| t.id == 7).expect("transfer exists");
-        assert_eq!(t.status, crate::files::TransferStatus::Done, "resume-only path completes");
+        let t = resumed
+            .transfers
+            .iter()
+            .find(|t| t.id == 7)
+            .expect("transfer exists");
+        assert_eq!(
+            t.status,
+            crate::files::TransferStatus::Done,
+            "resume-only path completes"
+        );
 
         // The whole sequence — Opened then every unit — drives a Transfer to
         // 100% through the real reducer, exactly as a WS ranged transfer would.
@@ -1336,7 +1346,11 @@ mod tests {
                 st.apply(&fe);
             }
         }
-        let t = st.transfers.iter().find(|t| t.id == 7).expect("transfer created");
+        let t = st
+            .transfers
+            .iter()
+            .find(|t| t.id == 7)
+            .expect("transfer created");
         assert_eq!(t.done, size, "reassembled progress reaches full size");
         assert_eq!(t.status, crate::files::TransferStatus::Done);
     }
@@ -1659,7 +1673,8 @@ mod tests {
 
     #[test]
     fn presence_set_request_builds_a_decodable_frame() {
-        let frame = presence_set_request(PresenceState::Away, Some("brb".into()), RequestId(1)).unwrap();
+        let frame =
+            presence_set_request(PresenceState::Away, Some("brb".into()), RequestId(1)).unwrap();
         let msg = frame.decode::<PresenceSet>().unwrap().unwrap();
         assert_eq!(msg.state, PresenceState::Away);
         assert_eq!(msg.status.as_deref(), Some("brb"));

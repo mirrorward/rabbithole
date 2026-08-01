@@ -501,17 +501,15 @@ mod tests {
             size: body.len() as u64,
             done: vec![0, UNIT_SIZE, 2 * UNIT_SIZE],
         };
-        std::fs::write(
-            rhstate_path(&dest),
-            postcard::to_allocvec(&state).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(rhstate_path(&dest), postcard::to_allocvec(&state).unwrap()).unwrap();
 
         // The poisoned resume fails its whole-file verify, but self-heals: state
         // + dest are removed, so a follow-up fetch re-downloads and succeeds.
-        assert!(fetch_swarm_resumable(&sources, &token, root, body.len() as u64, &dest)
-            .await
-            .is_err());
+        assert!(
+            fetch_swarm_resumable(&sources, &token, root, body.len() as u64, &dest)
+                .await
+                .is_err()
+        );
         assert!(!rhstate_path(&dest).exists(), "poisoned state removed");
         fetch_swarm_resumable(&sources, &token, root, body.len() as u64, &dest)
             .await

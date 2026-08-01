@@ -87,10 +87,12 @@ pub mod clock;
 pub mod components;
 pub mod conn;
 pub mod files;
+pub mod identity;
 pub mod packs;
 pub mod palette;
 pub mod pwa;
 pub mod radio;
+pub mod recent;
 pub mod scroll;
 pub mod server_theme;
 pub mod servers;
@@ -99,8 +101,6 @@ pub mod syndication_admin;
 pub mod theme_css;
 pub mod theme_editor;
 pub mod toasts;
-pub mod identity;
-pub mod recent;
 pub mod wire;
 
 /// Browser WebSocket transport (`wasm32-unknown-unknown` only).

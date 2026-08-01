@@ -352,7 +352,8 @@ impl WsClient {
     ) {
         let mut b = self.inner.borrow_mut();
         let id = b.next_request_id();
-        if let Ok(bytes) = wire::presence_set_request(state, status, id).and_then(|f| encode_frame(&f))
+        if let Ok(bytes) =
+            wire::presence_set_request(state, status, id).and_then(|f| encode_frame(&f))
         {
             Self::write(&mut b, &bytes);
         }

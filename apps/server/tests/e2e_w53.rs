@@ -264,7 +264,11 @@ async fn who_list_carries_the_verified_pubkey() {
     let who = keyed.who().await.unwrap();
     let keyed_row = who.iter().find(|u| u.screen_name == "keyed").unwrap();
     let bare_row = who.iter().find(|u| u.screen_name == "bare").unwrap();
-    assert_eq!(keyed_row.pubkey, Some(expected), "verified session carries its key");
+    assert_eq!(
+        keyed_row.pubkey,
+        Some(expected),
+        "verified session carries its key"
+    );
     assert_eq!(bare_row.pubkey, None, "handle-only session has no key");
 
     burrow.shutdown().await;
@@ -357,9 +361,19 @@ async fn proof_over_wrong_channel_binder_is_rejected() {
     )
     .await
     .unwrap();
-    let ack: HelloAck = conn.recv().await.unwrap().unwrap().decode().unwrap().unwrap();
+    let ack: HelloAck = conn
+        .recv()
+        .await
+        .unwrap()
+        .unwrap()
+        .decode()
+        .unwrap()
+        .unwrap();
     let nonce = ack.challenge.expect("challenged");
-    let sig = key.sign(&key_auth_message(&wrong_binder, &nonce)).0.to_vec();
+    let sig = key
+        .sign(&key_auth_message(&wrong_binder, &nonce))
+        .0
+        .to_vec();
     conn.send(Frame::request(RequestId(2), &KeyProof::new(sig)).unwrap())
         .await
         .unwrap();
@@ -374,7 +388,10 @@ async fn proof_over_wrong_channel_binder_is_rejected() {
     watcher.expect_welcome().await.unwrap();
     let who = watcher.who().await.unwrap();
     let victim = who.iter().find(|u| u.screen_name == "victim").unwrap();
-    assert_eq!(victim.pubkey, None, "a proof over the wrong channel binder is rejected");
+    assert_eq!(
+        victim.pubkey, None,
+        "a proof over the wrong channel binder is rejected"
+    );
 
     burrow.shutdown().await;
 }
@@ -423,11 +440,9 @@ async fn unproven_claimed_pubkey_is_not_surfaced() {
         .await
         .unwrap();
     let _ = conn.recv().await.unwrap(); // ack (verification failed internally)
-    conn.send(
-        Frame::request(RequestId(3), &AuthPassword::new("mallory", "pw-pw-pw")).unwrap(),
-    )
-    .await
-    .unwrap();
+    conn.send(Frame::request(RequestId(3), &AuthPassword::new("mallory", "pw-pw-pw")).unwrap())
+        .await
+        .unwrap();
     // Drain the AuthOk reply so mallory is fully authenticated + joined to
     // presence before we query the roster (avoids a join race).
     let _ = conn.recv().await.unwrap();
@@ -444,7 +459,10 @@ async fn unproven_claimed_pubkey_is_not_surfaced() {
     good.expect_welcome().await.unwrap();
     let who = good.who().await.unwrap();
     let mallory = who.iter().find(|u| u.screen_name == "mallory").unwrap();
-    assert_eq!(mallory.pubkey, None, "an unproven claimed key is never surfaced");
+    assert_eq!(
+        mallory.pubkey, None,
+        "an unproven claimed key is never surfaced"
+    );
 
     burrow.shutdown().await;
 }
@@ -523,16 +541,29 @@ async fn multi_source_swarm_fetch_via_coordinator() {
             })
         })
         .collect();
-    assert_eq!(sources.len(), 3, "the coordinator returned all three dialable peers");
+    assert_eq!(
+        sources.len(),
+        3,
+        "the coordinator returned all three dialable peers"
+    );
     let ticket = bob.swarm_ticket(root).await.unwrap();
 
     let dest = work.path().join("fetched.bin");
-    let report =
-        rabbithole_swarm::fetch_swarm_resumable(&sources, &ticket.token, root, body.len() as u64, &dest)
-            .await
-            .unwrap();
+    let report = rabbithole_swarm::fetch_swarm_resumable(
+        &sources,
+        &ticket.token,
+        root,
+        body.len() as u64,
+        &dest,
+    )
+    .await
+    .unwrap();
     assert_eq!(report.bytes, body.len() as u64);
-    assert_eq!(std::fs::read(&dest).unwrap(), body, "multi-source bytes verified");
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        body,
+        "multi-source bytes verified"
+    );
     // Every one of the four units was served exactly once across the swarm.
     let total: u64 = report.per_source.iter().map(|(_, n)| n).sum();
     assert_eq!(total, 4, "each unit served once: {:?}", report.per_source);

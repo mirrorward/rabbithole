@@ -2797,6 +2797,7 @@ version = "0.154.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
+ "getrandom 0.2.17",
  "postcard",
  "rabbithole-e2ee",
  "rabbithole-identity",
