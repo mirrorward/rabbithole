@@ -280,6 +280,11 @@ pub const STYLESHEET: &str = "\
 .rh-welcome-body{margin:0 0 .7rem;white-space:pre-wrap;max-width:70ch;line-height:1.5}\
 .rh-welcome-actions{display:flex;justify-content:flex-end}\
 .rh-person-idkey{color:var(--rh-muted);cursor:help;font-size:.9em}\
+.rh-mark{flex:none;display:inline-flex;line-height:0;border-radius:5px;overflow:hidden}\
+.rh-mark svg{display:block}\
+.rh-who-row{display:flex;align-items:center;gap:.5rem}\
+.rh-line-mark{vertical-align:-.3em;margin-right:.35rem}\
+.rh-you-mark{flex:none;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px color-mix(in srgb,var(--rh-text) 18%,transparent)}\
 .rh-chat-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.35rem;min-height:60%;padding:var(--rh-space-6);text-align:center;animation:rh-fade-up .3s ease both}\
 .rh-chat-empty-mark{font-size:2rem;color:var(--rh-accent);opacity:.7;line-height:1}\
 .rh-chat-empty-title{font-weight:700;margin:.3rem 0 0}\
@@ -427,7 +432,6 @@ pub const STYLESHEET: &str = "\
 .rh-who ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.1rem}\
 .rh-who li{display:flex;align-items:center;gap:.55rem;padding:.4rem .5rem;border-radius:var(--rh-radius);font-size:var(--rh-font-sm);transition:background-color .12s ease}\
 .rh-who li:hover{background:color-mix(in srgb,var(--rh-text) 6%,transparent)}\
-.rh-who li::before{content:'';flex:none;width:1.6rem;height:1.6rem;border-radius:var(--rh-radius-full);background:linear-gradient(135deg,color-mix(in srgb,var(--rh-accent) 75%,var(--rh-surface)),color-mix(in srgb,var(--rh-accent) 30%,var(--rh-surface)));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--rh-text) 10%,transparent)}\
 .rh-panel{flex:1;padding:var(--rh-space-5);overflow-y:auto;min-width:0}\
 .rh-panel-title{font-size:var(--rh-font-xs);text-transform:uppercase;letter-spacing:.06em;font-weight:700;color:var(--rh-muted);margin:.2rem 0 var(--rh-space-4)}\
 .rh-tree{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--rh-space-2)}\

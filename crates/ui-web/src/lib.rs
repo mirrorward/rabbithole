@@ -82,6 +82,7 @@ pub mod a11y;
 pub mod admin;
 pub mod app;
 pub mod art;
+pub mod avatar;
 pub mod client;
 pub mod clock;
 pub mod components;

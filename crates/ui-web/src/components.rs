@@ -180,8 +180,13 @@ pub fn People() -> impl IntoView {
                                         >"\u{26bf}"</span>
                                     }
                                 });
+                                let mark = crate::avatar::mark_svg(
+                                    &crate::avatar::seed_for(p.key.as_deref(), &p.screen_name),
+                                    24,
+                                );
                                 view! {
                                     <li class="rh-person">
+                                        <span class="rh-mark" inner_html=mark></span>
                                         <span class=dot aria-hidden="true"></span>
                                         <span class="rh-person-name">{p.screen_name}</span>
                                         {idkey}
@@ -355,10 +360,12 @@ pub fn You() -> impl IntoView {
                     }
                 >
                     {move || app.you.get().map(|you| {
-                        let initials = you.fingerprint.chars().take(2).collect::<String>();
+                        // Your own warren mark — the same face everyone else
+                        // sees beside your name, seeded by your identity key.
+                        let mark = crate::avatar::mark_svg(&you.public_hex, 56);
                         view! {
                             <div class="rh-you">
-                                <div class="rh-you-badge" aria-hidden="true">{initials}</div>
+                                <div class="rh-you-mark rh-mark" inner_html=mark></div>
                                 <div class="rh-you-fields">
                                     <div class="rh-you-row">
                                         <span class="rh-you-label">"Fingerprint"</span>
@@ -851,8 +858,16 @@ pub fn WhoList() -> impl IntoView {
                             PresenceState::Idle => "rh-pres idle",
                             _ => "rh-pres off",
                         };
+                        // A warren mark: the pixel face that makes a name
+                        // recognisable at a glance (Hotline's user icon, derived
+                        // from the person's identity rather than picked).
+                        let mark = crate::avatar::mark_svg(
+                            &crate::avatar::seed_for(p.key.as_deref(), &p.screen_name),
+                            22,
+                        );
                         view! {
                             <li class="rh-who-row">
+                                <span class="rh-mark" inner_html=mark></span>
                                 <span class=dot aria-hidden="true"></span>
                                 {p.screen_name}
                             </li>
@@ -988,6 +1003,13 @@ pub fn Lobby() -> impl IntoView {
                             key=|(i, _, _)| *i
                             children=move |(_, line, head)| view! {
                                 <li class=if head { "rh-line rh-line-head" } else { "rh-line rh-line-cont" }>
+                                    // The speaker's warren mark opens each burst,
+                                    // so you know who is talking before you read
+                                    // the name — Hotline's user icon, in chat.
+                                    {head.then(|| {
+                                        let mark = crate::avatar::mark_svg(&line.from, 20);
+                                        view! { <span class="rh-mark rh-line-mark" inner_html=mark></span> }
+                                    })}
                                     {head.then(|| view! {
                                         <span class="rh-from">{line.from.clone()}</span>
                                     })}
