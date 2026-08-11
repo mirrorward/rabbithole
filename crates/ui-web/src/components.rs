@@ -1205,7 +1205,11 @@ pub fn BoardView() -> impl IntoView {
                 <Show
                     when=move || state.with(|s| s.selected_thread.is_some())
                     fallback=|| view! {
-                        <p class="rh-empty">"Select a thread to read."</p>
+                        <EmptyState
+                            mark="\u{270e}"
+                            title="Nothing open"
+                            sub="Pick a thread on the left to read it."
+                        />
                     }
                 >
                     <div class="rh-posts">
@@ -1348,7 +1352,11 @@ pub fn Dms() -> impl IntoView {
                 <Show
                     when=move || state.with(|s| s.selected_dm.is_some())
                     fallback=|| view! {
-                        <p class="rh-empty">"Select a conversation."</p>
+                        <EmptyState
+                            mark="\u{2709}"
+                            title="No conversation open"
+                            sub="Choose someone on the left, or start a new one below."
+                        />
                     }
                 >
                     <div
@@ -1528,7 +1536,11 @@ pub fn Directory() -> impl IntoView {
                         state.with(|s| s.active_member().is_some() || s.selected_profile.is_some())
                     }
                     fallback=|| view! {
-                        <p class="rh-empty">"Select a member to view their profile."</p>
+                        <EmptyState
+                            mark="\u{263a}"
+                            title="No one selected"
+                            sub="Pick a member to see their profile card."
+                        />
                     }
                 >
                     {move || state.with(|s| {
@@ -1767,7 +1779,11 @@ fn FolderBrowser() -> impl IntoView {
         </div>
         <h2 class="rh-visually-hidden">"Folder contents"</h2>
         <Show when=move || files.with(|f| f.nodes.is_empty()) fallback=|| ()>
-            <p class="rh-empty">"This folder is empty."</p>
+            <EmptyState
+                mark="\u{2750}"
+                title="Nothing in here"
+                sub="This folder has no files yet."
+            />
         </Show>
         <ul class="rh-tree">
             <For
@@ -1827,7 +1843,13 @@ fn FileDetail() -> impl IntoView {
     view! {
         <Show
             when=move || files.with(|f| f.selected_node().is_some())
-            fallback=|| view! { <p class="rh-empty">"Select a file to see its details."</p> }
+            fallback=|| view! {
+                <EmptyState
+                    mark="\u{2750}"
+                    title="No file selected"
+                    sub="Choose a file to see its details."
+                />
+            }
         >
             {move || {
                 files.with(|f| {
