@@ -489,6 +489,7 @@ impl AppState {
         // to us never raises a notification about ourselves.
         let my_handle = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
         let notify_handle = my_handle.clone();
+        let dm_handle = my_handle.clone();
         let notify_name = self.focused().name;
         self.focused().ws.update_value(|ws| {
             ws.on_event(std::rc::Rc::new(move |event| {
@@ -564,6 +565,7 @@ impl AppState {
                             crate::notify::notify(
                                 crate::notify::notification_title(from, &burrow),
                                 crate::notify::notification_body(text),
+                                crate::notify::TAG_CHAT,
                             );
                         }
                     }
@@ -638,6 +640,21 @@ impl AppState {
                 })
             }));
             ws.on_dm_received(std::rc::Rc::new(move |(peer, msg)| {
+                // A DM is addressed to you personally — notify when away, with
+                // its own title and tag so it never reads (or collapses) as room
+                // chatter. Same policy as the lobby: silent while you're looking.
+                let me = dm_handle.borrow().clone();
+                if crate::notify::should_notify(
+                    crate::notify::window_focused(),
+                    &msg.from,
+                    &me,
+                ) {
+                    crate::notify::notify(
+                        crate::notify::dm_notification_title(&msg.from),
+                        crate::notify::notification_body(&msg.text),
+                        crate::notify::TAG_DM,
+                    );
+                }
                 state.update(|s| s.receive_dm(&peer, msg))
             }));
             ws.on_file_event(std::rc::Rc::new(move |event| {

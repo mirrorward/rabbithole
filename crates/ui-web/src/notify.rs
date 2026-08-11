@@ -48,6 +48,18 @@ pub fn notification_title(from: &str, burrow: &str) -> String {
     }
 }
 
+/// The title for a direct message — named as such, because a DM is addressed to
+/// you personally and shouldn't read like room chatter. Pure — host-tested.
+pub fn dm_notification_title(from: &str) -> String {
+    format!("{from} \u{00b7} direct message")
+}
+
+/// Notification tag for room chat: repeats collapse into one slot.
+pub const TAG_CHAT: &str = "rabbithole-chat";
+/// Notification tag for DMs — separate from chat, so a direct message never
+/// silently replaces (or is replaced by) a lobby notification.
+pub const TAG_DM: &str = "rabbithole-dm";
+
 #[cfg(target_arch = "wasm32")]
 mod browser {
     use wasm_bindgen::JsValue;
@@ -65,10 +77,10 @@ mod browser {
     /// called when a message really arrived while the user was away). A denied
     /// permission is respected silently — the browser remembers it, and we never
     /// re-prompt.
-    pub fn notify(title: String, body: String) {
+    pub fn notify(title: String, body: String, tag: &'static str) {
         use wasm_bindgen_futures::{spawn_local, JsFuture};
         match web_sys::Notification::permission() {
-            web_sys::NotificationPermission::Granted => show(&title, &body),
+            web_sys::NotificationPermission::Granted => show(&title, &body, tag),
             web_sys::NotificationPermission::Denied => {}
             // Default (not yet asked): ask now — in context, with a real message
             // waiting — and show it only if the user says yes.
@@ -79,7 +91,7 @@ mod browser {
                 spawn_local(async move {
                     if let Ok(result) = JsFuture::from(promise).await {
                         if result == JsValue::from_str("granted") {
-                            show(&title, &body);
+                            show(&title, &body, tag);
                         }
                     }
                 });
@@ -87,12 +99,12 @@ mod browser {
         }
     }
 
-    fn show(title: &str, body: &str) {
+    fn show(title: &str, body: &str, tag: &str) {
         let opts = web_sys::NotificationOptions::new();
         opts.set_body(body);
-        // Collapse repeats from the same burrow into one notification slot
-        // rather than stacking a tower of them.
-        opts.set_tag("rabbithole-chat");
+        // Collapse repeats of the same kind into one notification slot rather
+        // than stacking a tower of them (chat and DMs use separate tags).
+        opts.set_tag(tag);
         let _ = web_sys::Notification::new_with_options(title, &opts);
     }
 }
@@ -126,6 +138,14 @@ mod tests {
         assert!(body.ends_with('\u{2026}'));
         // A short line is untouched (no stray ellipsis).
         assert!(!notification_body("short").ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn a_dm_is_titled_as_a_direct_message() {
+        // A DM is addressed to you personally — it must not read like room chat,
+        // and it uses its own tag so it never collapses a lobby notification.
+        assert_eq!(dm_notification_title("alice"), "alice · direct message");
+        assert_ne!(TAG_DM, TAG_CHAT);
     }
 
     #[test]
