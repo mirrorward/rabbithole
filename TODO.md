@@ -100,6 +100,9 @@ where headless-verifiable, tested:
   round-trip, which needs `cargo tauri dev` on a real machine.
 - **Verified identity** across proto/server/web/CLI, hardened against relay.
 - **An adversarial review** (13 fixes) + a security-review relay fix.
+- **Burrow news** — the server's `WelcomeScreen` renders as a permanent panel at the
+  top of the lobby (it used to be nested inside the dismissible welcome sheet, so a
+  burrow with no MOTD showed no news at all). The sheet is now agreement-only.
 
 **Needs the user's machine (can't verify headlessly here):** running the desktop app
 (`cd apps/desktop && cargo tauri dev`, watch the console for the `[rh-native]` bridge

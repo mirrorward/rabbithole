@@ -2,9 +2,11 @@
 //!
 //! Hotline's little sounds are muscle memory for anyone who used it, and they
 //! are also the easiest thing in a chat app to make obnoxious. So the rules are
-//! strict and the same as [`crate::notify`]'s, plus an explicit opt-in:
+//! strict and the same as [`crate::notify`]'s:
 //!
-//! * **Off by default.** Nothing ever makes noise until the user turns it on.
+//! * **On by default**, because a chat app that never makes a sound reads as
+//!   broken — but every rule below still applies, and one click turns it off
+//!   for good (the stored preference always wins over the default).
 //! * **Only when you're away.** If the window is focused you can see the message;
 //!   a sound would be pure noise.
 //! * **Never for your own actions** — your sent line echoing back is not news.
@@ -60,12 +62,13 @@ mod browser {
         web_sys::window()?.local_storage().ok()?
     }
 
-    /// Is sound turned on? Off unless the user explicitly enabled it.
+    /// Is sound turned on? On by default; the stored preference wins once the
+    /// user has expressed one either way.
     pub fn enabled() -> bool {
         storage()
             .and_then(|s| s.get_item(STORAGE_KEY).ok().flatten())
             .map(|v| v == "1")
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     /// Persist the opt-in.
@@ -112,8 +115,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sound_is_off_until_enabled() {
-        // The whole point: silence unless the user asked for it.
+    fn the_enable_flag_gates_every_chime() {
+        // On by default, but one toggle is still absolute silence.
         assert!(!should_chime(false, false, "alice", "bob"));
         assert!(should_chime(true, false, "alice", "bob"));
     }

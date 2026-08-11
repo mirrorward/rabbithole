@@ -161,7 +161,7 @@ impl AppState {
             #[cfg(target_arch = "wasm32")]
             sound_on: create_rw_signal(crate::sound::enabled()),
             #[cfg(not(target_arch = "wasm32"))]
-            sound_on: create_rw_signal(false),
+            sound_on: create_rw_signal(true),
             admin: create_rw_signal(AdminState::default()),
             syndication: create_rw_signal(SynAdminState::default()),
             palette_open: create_rw_signal(false),

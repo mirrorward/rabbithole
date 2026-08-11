@@ -278,7 +278,11 @@ pub const STYLESHEET: &str = "\
 .rh-welcome-x:hover{background:color-mix(in srgb,var(--rh-text) 8%,transparent);color:var(--rh-text)}\
 .rh-welcome-motd{color:var(--rh-muted);margin:0 0 .5rem;font-style:italic}\
 .rh-welcome-body{margin:0 0 .7rem;white-space:pre-wrap;max-width:70ch;line-height:1.5}\
-.rh-front{display:flex;flex-direction:column;gap:.4rem;margin:.1rem 0 .7rem;padding-top:.55rem;border-top:1px solid color-mix(in srgb,var(--rh-accent) 22%,transparent)}\
+.rh-front{display:flex;flex-direction:column;gap:.4rem;margin:0 0 .6rem;padding:.6rem .75rem .7rem;border:1px solid color-mix(in srgb,var(--rh-accent) 20%,transparent);border-radius:var(--rh-radius);background:color-mix(in srgb,var(--rh-accent) 5%,var(--rh-surface))}\
+.rh-front-head{display:flex;align-items:baseline;gap:.5rem;margin-bottom:.15rem}\
+.rh-front-eyebrow{font-size:var(--rh-font-xs,.72rem);text-transform:uppercase;letter-spacing:.08em;font-weight:700;color:var(--rh-accent)}\
+.rh-front-where{font-size:var(--rh-font-xs,.72rem);color:var(--rh-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+.rh-front-motd{margin:0;line-height:1.5;max-width:70ch;white-space:pre-wrap}\
 .rh-front-label{font-size:var(--rh-font-xs,.72rem);text-transform:uppercase;letter-spacing:.05em;color:var(--rh-accent);font-weight:700}\
 .rh-front-featured{display:flex;flex-direction:column;gap:.15rem}\
 .rh-front-title{margin:0;font-weight:700}\

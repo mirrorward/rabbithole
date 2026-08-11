@@ -350,7 +350,13 @@ fn FrontPage() -> impl IntoView {
     let widgets = move || app.focused_tracked().state.with(|s| s.front_page.clone());
     view! {
         <Show when=move || !widgets().is_empty() fallback=|| ()>
-            <div class="rh-front">
+            <section class="rh-front" aria-label="Burrow news">
+                <header class="rh-front-head">
+                    <span class="rh-front-eyebrow">"News"</span>
+                    <span class="rh-front-where">
+                        {move || app.focused().name.get().unwrap_or_else(|| "this burrow".into())}
+                    </span>
+                </header>
                 {move || {
                     widgets()
                         .into_iter()
@@ -383,12 +389,18 @@ fn FrontPage() -> impl IntoView {
                                 <p class="rh-front-ticker">{text}</p>
                             }
                             .into_view(),
-                            // The MOTD already headlines the sheet above.
+                            // The sheet shows this too, on arrival — but the
+                            // sheet is dismissible and this panel is not, so the
+                            // MOTD has to live here to survive the dismissal.
+                            WelcomeWidget::Motd(text) => view! {
+                                <p class="rh-front-motd">{text}</p>
+                            }
+                            .into_view(),
                             _ => ().into_view(),
                         })
                         .collect_view()
                 }}
-            </div>
+            </section>
         </Show>
     }
 }
@@ -401,7 +413,15 @@ pub fn WelcomeSheet() -> impl IntoView {
     let app = expect_context::<AppState>();
     // Reactive over the focused session so switching burrows shows that burrow's
     // welcome (or nothing).
-    let welcome = move || app.focused_tracked().state.with(|s| s.welcome.clone());
+    // Only an *agreement* earns a sheet. The MOTD used to headline it too, but
+    // the news panel in the lobby now carries that permanently, so a sheet for
+    // it would just say the same thing twice and ask you to dismiss it.
+    let welcome = move || {
+        app.focused_tracked()
+            .state
+            .with(|s| s.welcome.clone())
+            .filter(|w| w.agreement.is_some())
+    };
     let dismiss = move |_| {
         app.focused().state.update(|s| s.dismiss_welcome());
     };
@@ -432,9 +452,6 @@ pub fn WelcomeSheet() -> impl IntoView {
                             })
                         })}
                         <p class="rh-welcome-body">{body}</p>
-                        // The burrow's front page: what this place wants you to
-                        // see on arrival — Hotline's server news, reinterpreted.
-                        <FrontPage/>
                         <div class="rh-welcome-actions">
                             <button class="rh-btn" on:click=dismiss>
                                 {if has_agreement { "Accept & enter" } else { "Got it" }}
@@ -1061,6 +1078,10 @@ pub fn Lobby() -> impl IntoView {
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Lobby"</h1>
             <section class="rh-chat" aria-label="Lobby chat">
+                // The burrow's news, where you actually land. It used to live
+                // only inside the welcome sheet, so a burrow with no MOTD showed
+                // no news at all — and dismissing the sheet lost it for good.
+                <FrontPage/>
                 // role=log: an implicitly polite live region — new messages
                 // are announced without moving focus off the compose box.
                 <div
