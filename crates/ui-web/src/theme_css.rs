@@ -287,6 +287,7 @@ pub const STYLESHEET: &str = "\
 .rh-front-ticker{margin:.1rem 0 0;font-size:var(--rh-font-sm);font-style:italic;color:var(--rh-accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
 .rh-welcome-actions{display:flex;justify-content:flex-end}\
 .rh-person-idkey{color:var(--rh-muted);cursor:help;font-size:.9em}\
+.rh-pip{display:inline-flex;align-items:center;justify-content:center;min-width:1.05rem;height:1.05rem;padding:0 .25rem;border-radius:999px;background:var(--rh-accent);color:var(--rh-bg);font-size:.65rem;font-weight:700;line-height:1;vertical-align:.05em;font-variant-numeric:tabular-nums}\
 .rh-threadtable .rh-thread-link{display:flex;flex-direction:column;align-items:flex-start;gap:.1rem;width:100%;padding:.4rem .6rem;text-align:left;background:transparent;border:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent);cursor:pointer;font:inherit;color:inherit}\
 .rh-thread-meta{font-size:var(--rh-font-sm);color:var(--rh-muted);display:flex;align-items:center;gap:.35rem}\
 .rh-dot-sep{opacity:.55}\
@@ -361,7 +362,7 @@ pub const STYLESHEET: &str = "\
 .rh-live-slot{order:6}\
 .rh-theme-menu{order:8;display:inline-flex;gap:.35rem;align-items:center}\
 .rh-nav{order:7;display:flex;gap:.15rem;align-items:center}\
-.rh-nav a,.rh-nav .rh-nav-item{color:var(--rh-muted);text-decoration:none;font-size:var(--rh-font-sm);font-weight:500;padding:.35rem .7rem;border-radius:var(--rh-radius-full);transition:background-color .15s ease,color .15s ease;border-bottom:0}\
+.rh-nav a,.rh-nav .rh-nav-item{color:var(--rh-muted);display:inline-flex;align-items:center;gap:.3rem;white-space:nowrap;text-decoration:none;font-size:var(--rh-font-sm);font-weight:500;padding:.35rem .7rem;border-radius:var(--rh-radius-full);transition:background-color .15s ease,color .15s ease;border-bottom:0}\
 .rh-nav a:hover,.rh-nav .rh-nav-item:hover{color:var(--rh-text);background:color-mix(in srgb,var(--rh-text) 7%,transparent)}\
 .rh-nav a.active,.rh-nav a[aria-current=page],.rh-nav .rh-nav-item.active{color:var(--rh-accent);background:color-mix(in srgb,var(--rh-accent) 14%,transparent)}\
 .rh-btn{font:inherit;font-weight:600;cursor:pointer;border:1px solid transparent;background:var(--rh-accent);color:var(--rh-bg);border-radius:var(--rh-radius);padding:.5rem .9rem;line-height:1.2;display:inline-flex;align-items:center;gap:.4rem;transition:transform .12s ease,box-shadow .15s ease,background-color .15s ease;box-shadow:var(--rh-shadow-1)}\

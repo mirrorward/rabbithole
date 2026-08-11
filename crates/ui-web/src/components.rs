@@ -138,11 +138,32 @@ pub fn ThemeToggle() -> impl IntoView {
 pub fn Nav() -> impl IntoView {
     let app = expect_context::<AppState>();
     let is_admin = app.focused().is_admin;
+    let state = app.focused().state;
+    // Unread pips: the counts the wire has always carried, summed per section.
+    // A pip says "something happened here" without shouting a number in a nav.
+    let dm_unread = move || state.with(|s| s.dm_threads.iter().map(|t| t.unread).sum::<u64>());
+    let board_unread = move || state.with(|s| s.boards.iter().map(|b| b.unread).sum::<u64>());
     view! {
         <nav class="rh-nav" aria-label="Primary">
             <A href="/lobby">"Lobby"</A>
-            <A href="/boards">"Boards"</A>
-            <A href="/dms">"DMs"</A>
+            <A href="/boards">
+                "Boards"
+                <Show when=move || { board_unread() > 0 } fallback=|| ()>
+                    <span
+                        class="rh-pip"
+                        aria-label=move || format!("{} unread", board_unread())
+                    >{move || crate::state::unread_badge(board_unread() as usize)}</span>
+                </Show>
+            </A>
+            <A href="/dms">
+                "DMs"
+                <Show when=move || { dm_unread() > 0 } fallback=|| ()>
+                    <span
+                        class="rh-pip"
+                        aria-label=move || format!("{} unread", dm_unread())
+                    >{move || crate::state::unread_badge(dm_unread() as usize)}</span>
+                </Show>
+            </A>
             <A href="/directory">"Directory"</A>
             <A href="/files">"Files"</A>
             <A href="/radio">"Radio"</A>

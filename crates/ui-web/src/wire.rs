@@ -255,6 +255,7 @@ pub fn frame_to_boards(frame: &Frame) -> Option<Vec<crate::state::Board>> {
                 slug: b.slug,
                 name: b.title,
                 description: b.description,
+                unread: b.unread,
             })
             .collect(),
     )
@@ -385,6 +386,7 @@ pub fn frame_to_dm_threads(frame: &Frame) -> Option<Vec<crate::state::DmThread>>
                 id: t.with.clone(),
                 peer: t.with,
                 messages: Vec::new(),
+                unread: t.unread,
             })
             .collect(),
     )

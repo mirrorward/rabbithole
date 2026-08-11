@@ -61,6 +61,8 @@ pub struct Board {
     pub name: String,
     /// One-line description shown in the tree.
     pub description: String,
+    /// Unread posts in this board (the wire has always carried this).
+    pub unread: u64,
 }
 
 /// A discussion thread within a [`Board`].
@@ -118,6 +120,8 @@ pub struct DmThread {
     pub peer: String,
     /// Messages, oldest first.
     pub messages: Vec<DmMessage>,
+    /// Unread messages in this conversation (from the wire).
+    pub unread: u64,
 }
 
 /// A member's full profile card (from a live `ProfileGet`), richer than the
@@ -436,7 +440,12 @@ impl UiState {
                 id: id.to_string(),
                 peer: id.to_string(),
                 messages: Vec::new(),
+                unread: 0,
             });
+        }
+        // Opening a conversation is reading it.
+        if let Some(t) = self.dm_threads.iter_mut().find(|t| t.id == id) {
+            t.unread = 0;
         }
         self.selected_dm = Some(id.to_string());
     }
@@ -460,12 +469,21 @@ impl UiState {
     /// Fold a live-received DM from `peer`: append to the existing conversation,
     /// or start one (so a first-contact message surfaces immediately).
     pub fn receive_dm(&mut self, peer: &str, msg: DmMessage) {
+        // A message you're not currently looking at is unread — that's what
+        // drives the DMs nav pip.
+        let open = self.selected_dm.as_deref() == Some(peer);
         match self.dm_threads.iter_mut().find(|t| t.peer == peer) {
-            Some(t) => t.messages.push(msg),
+            Some(t) => {
+                t.messages.push(msg);
+                if !open {
+                    t.unread += 1;
+                }
+            }
             None => self.dm_threads.push(DmThread {
                 id: peer.to_string(),
                 peer: peer.to_string(),
                 messages: vec![msg],
+                unread: if open { 0 } else { 1 },
             }),
         }
     }
@@ -623,6 +641,32 @@ mod tests {
         assert!(!s.loading.threads);
         s.open_thread("t1".into(), vec![]);
         assert!(!s.loading.posts);
+    }
+
+    #[test]
+    fn dm_unread_tracks_what_you_have_not_looked_at() {
+        let mut s = UiState::default();
+        let msg = |t: &str| DmMessage {
+            from: "alice".into(),
+            text: t.into(),
+            at_unix_ms: 0,
+        };
+        // A first-contact message you aren't viewing arrives unread.
+        s.receive_dm("alice", msg("hello?"));
+        assert_eq!(s.dm_threads[0].unread, 1);
+        // More messages keep stacking up while you're elsewhere.
+        s.receive_dm("alice", msg("still there?"));
+        assert_eq!(s.dm_threads[0].unread, 2);
+        // Opening the conversation is reading it.
+        s.select_dm("alice");
+        assert_eq!(s.dm_threads[0].unread, 0);
+        // A message that lands while you ARE looking stays read.
+        s.receive_dm("alice", msg("oh hi"));
+        assert_eq!(s.dm_threads[0].unread, 0, "no pip for what you're watching");
+        // …but one for a different peer does not.
+        s.receive_dm("bob", msg("psst"));
+        let bob = s.dm_threads.iter().find(|t| t.peer == "bob").unwrap();
+        assert_eq!(bob.unread, 1);
     }
 
     #[test]
@@ -945,11 +989,13 @@ mod tests {
                 id: "a".into(),
                 peer: "alice".into(),
                 messages: vec![],
+                unread: 0,
             },
             DmThread {
                 id: "b".into(),
                 peer: "bob".into(),
                 messages: vec![],
+                unread: 0,
             },
         ]);
         s.select_dm("b");
@@ -974,6 +1020,7 @@ mod tests {
             id: "a".into(),
             peer: "alice".into(),
             messages: vec![],
+            unread: 0,
         }]);
         s.append_dm(
             "missing",

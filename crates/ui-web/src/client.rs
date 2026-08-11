@@ -183,11 +183,13 @@ impl MockClient {
                 slug: "general".to_string(),
                 name: "General".to_string(),
                 description: "Warren-wide chatter and announcements.".to_string(),
+                unread: 3,
             },
             Board {
                 slug: "tech".to_string(),
                 name: "Tech Talk".to_string(),
                 description: "Protocols, clients and self-hosting.".to_string(),
+                unread: 0,
             },
         ]
     }
@@ -294,6 +296,7 @@ impl MockClient {
                         at_unix_ms: now - 8 * 60_000,
                     },
                 ],
+                unread: 2,
             },
             DmThread {
                 id: "bob".to_string(),
@@ -303,6 +306,7 @@ impl MockClient {
                     text: "ping me when you're around".to_string(),
                     at_unix_ms: now - 25 * 60_000,
                 }],
+                unread: 0,
             },
         ]
     }
