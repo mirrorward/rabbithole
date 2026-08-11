@@ -1707,7 +1707,7 @@ pub fn Files() -> impl IntoView {
                     <FolderBrowser/>
                 </Show>
             </section>
-            <section class="rh-panel" aria-label="File details and transfers">
+            <section class="rh-panel rh-file-detail" aria-label="File details and transfers">
                 <FileDetail/>
                 <TransferQueue/>
             </section>
@@ -1758,6 +1758,21 @@ fn AreaList() -> impl IntoView {
 fn FolderBrowser() -> impl IntoView {
     let app = expect_context::<AppState>();
     let files = app.focused().files;
+    // Type-to-filter state, and the rows that survive it. Folders always show:
+    // filtering shouldn't strand you with no way back down the tree.
+    let filter = create_rw_signal(String::new());
+    let visible = move || {
+        let q = filter.get();
+        files.with(|f| {
+            f.nodes
+                .iter()
+                .filter(|n| {
+                    n.kind == KIND_FOLDER || crate::files::node_matches(&n.name, &n.uploader, &q)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    };
 
     let leave = move |_| {
         files.update(|f| {
@@ -1800,6 +1815,16 @@ fn FolderBrowser() -> impl IntoView {
             </button>
         </div>
         <h2 class="rh-visually-hidden">"Folder contents"</h2>
+        // Type-to-filter over the current folder — the fastest way through a
+        // busy library, matching on name or uploader.
+        <input
+            class="rh-input rh-file-filter"
+            type="search"
+            placeholder="Filter this folder\u{2026}"
+            aria-label="Filter files by name or uploader"
+            prop:value=filter
+            on:input=move |ev| filter.set(event_target_value(&ev))
+        />
         <Show when=move || files.with(|f| f.nodes.is_empty()) fallback=|| ()>
             <EmptyState
                 mark="\u{2750}"
@@ -1807,22 +1832,47 @@ fn FolderBrowser() -> impl IntoView {
                 sub="This folder has no files yet."
             />
         </Show>
-        <ul class="rh-tree">
+        // A dense columnar table (name · size · kind · uploader · added), the
+        // Hotline file browser reinterpreted — not a card gallery.
+        <Show when=move || !visible().is_empty() fallback=|| ()>
+            <div class="rh-filetable-head" aria-hidden="true">
+                <span class="rh-fcol-name">"Name"</span>
+                <span class="rh-fcol-size">"Size"</span>
+                <span class="rh-fcol-kind">"Kind"</span>
+                <span class="rh-fcol-who">"Uploader"</span>
+                <span class="rh-fcol-when">"Added"</span>
+            </div>
+        </Show>
+        <Show
+            when=move || files.with(|f| !f.nodes.is_empty()) && visible().is_empty()
+            fallback=|| ()
+        >
+            <p class="rh-empty">"Nothing matches that filter."</p>
+        </Show>
+        <ul class="rh-tree rh-filetable">
             <For
-                each=move || files.with(|f| f.nodes.clone())
+                each=visible
                 key=|n| n.id
                 children=move |n| {
                     let id = n.id;
                     let is_folder = n.kind == KIND_FOLDER;
                     let name = n.name.clone();
                     let icon = if is_folder { "\u{1F4C1}" } else { "\u{1F4C4}" };
-                    // The kind emoji is decorative: folders already say
-                    // "Folder" in their meta text, files show a size.
-                    let meta = if is_folder {
-                        node_kind_label(n.kind).to_string()
+                    let size = if is_folder {
+                        "\u{2014}".to_string()
                     } else {
                         human_size(n.size)
                     };
+                    let kind = node_kind_label(n.kind).to_string();
+                    let who = if n.uploader.is_empty() {
+                        "\u{2014}".to_string()
+                    } else {
+                        n.uploader.clone()
+                    };
+                    let when = crate::files::relative_day(
+                        n.created_at_unix,
+                        crate::clock::now_ms() / 1000,
+                    );
                     let selected = move || files.with(|f| f.selected == Some(id));
                     let class = move || {
                         if selected() {
@@ -1845,9 +1895,14 @@ fn FolderBrowser() -> impl IntoView {
                                 aria-current=move || selected().then_some("true")
                                 on:click=on_click
                             >
-                                <span class="rh-file-icon" aria-hidden="true">{icon}</span>
-                                <span class="rh-file-name">{n.name.clone()}</span>
-                                <span class="rh-file-meta">{meta}</span>
+                                <span class="rh-fcol-name">
+                                    <span class="rh-file-icon" aria-hidden="true">{icon}</span>
+                                    <span class="rh-file-name">{n.name.clone()}</span>
+                                </span>
+                                <span class="rh-fcol-size">{size}</span>
+                                <span class="rh-fcol-kind">{kind}</span>
+                                <span class="rh-fcol-who">{who}</span>
+                                <span class="rh-fcol-when">{when}</span>
                             </button>
                         </li>
                     }

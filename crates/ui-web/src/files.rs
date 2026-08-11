@@ -254,6 +254,40 @@ pub fn join_path(segments: &[String]) -> Option<String> {
 }
 
 /// A short, human-readable label for a [`FileNodeView::kind`].
+/// Does a file row match a type-to-filter query? Case-insensitive substring over
+/// the name and the uploader — the two things you actually squint for in a busy
+/// library. An empty query matches everything. Pure — host-tested.
+pub fn node_matches(name: &str, uploader: &str, query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return true;
+    }
+    name.to_lowercase().contains(&q) || uploader.to_lowercase().contains(&q)
+}
+
+/// A compact "when was this added" for a dense table: today/yesterday, then days,
+/// then weeks, months, years. `created_at_unix` and `now_unix` are seconds; a
+/// zero or future timestamp reads as "—" rather than a lie. Pure — host-tested.
+pub fn relative_day(created_at_unix: i64, now_unix: i64) -> String {
+    if created_at_unix <= 0 {
+        return "\u{2014}".to_string();
+    }
+    let secs = now_unix - created_at_unix;
+    if secs < 0 {
+        return "\u{2014}".to_string();
+    }
+    const DAY: i64 = 86_400;
+    let days = secs / DAY;
+    match days {
+        0 => "today".to_string(),
+        1 => "yesterday".to_string(),
+        2..=6 => format!("{days}d ago"),
+        7..=27 => format!("{}w ago", days / 7),
+        28..=364 => format!("{}mo ago", days / 30),
+        _ => format!("{}y ago", days / 365),
+    }
+}
+
 pub fn node_kind_label(kind: u8) -> &'static str {
     match kind {
         KIND_FOLDER => "folder",
@@ -396,6 +430,32 @@ mod tests {
         s.apply(&FileEvent::Failed("boom".into()));
         assert_eq!(s.transfers[0].status, TransferStatus::Failed);
         assert!(s.status.contains("boom"));
+    }
+
+    #[test]
+    fn filter_matches_name_or_uploader_case_insensitively() {
+        assert!(node_matches("Cool Demo.zip", "rabbit", ""), "empty query matches all");
+        assert!(node_matches("Cool Demo.zip", "rabbit", "demo"));
+        assert!(node_matches("Cool Demo.zip", "rabbit", "DEMO"), "case-insensitive");
+        assert!(node_matches("Cool Demo.zip", "rabbit", "  demo "), "query is trimmed");
+        // You often squint for who uploaded it, not just the filename.
+        assert!(node_matches("Cool Demo.zip", "rabbit", "rabb"));
+        assert!(!node_matches("Cool Demo.zip", "rabbit", "mp3"));
+    }
+
+    #[test]
+    fn relative_day_reads_naturally_and_never_lies() {
+        const DAY: i64 = 86_400;
+        let now = 1_000 * DAY;
+        assert_eq!(relative_day(now, now), "today");
+        assert_eq!(relative_day(now - DAY, now), "yesterday");
+        assert_eq!(relative_day(now - 3 * DAY, now), "3d ago");
+        assert_eq!(relative_day(now - 14 * DAY, now), "2w ago");
+        assert_eq!(relative_day(now - 60 * DAY, now), "2mo ago");
+        assert_eq!(relative_day(now - 800 * DAY, now), "2y ago");
+        // Unknown or future timestamps show an em dash rather than inventing one.
+        assert_eq!(relative_day(0, now), "\u{2014}");
+        assert_eq!(relative_day(now + DAY, now), "\u{2014}");
     }
 
     #[test]
