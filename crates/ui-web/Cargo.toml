@@ -71,6 +71,11 @@ web-sys = { workspace = true, features = [
     # Auto-reconnect on load (`src/app.rs`): history.replaceState to land in the
     # lobby (not the login screen) after restoring persisted burrow sessions.
     "History",
+    # Desktop notifications for messages that arrive while away (`src/notify.rs`):
+    # permission is requested in context, never on load.
+    "Notification",
+    "NotificationOptions",
+    "NotificationPermission",
     "console",
 ] }
 gloo-timers.workspace = true

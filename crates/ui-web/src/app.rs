@@ -485,6 +485,11 @@ impl AppState {
         // rather than leaving the burrow connected-but-unauthenticated forever.
         let authed = std::rc::Rc::new(std::cell::Cell::new(false));
         let resuming = matches!(auth, AuthMethod::Resume { .. });
+        // Our own handle on this burrow (from AuthOk), so a chat line echoed back
+        // to us never raises a notification about ourselves.
+        let my_handle = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let notify_handle = my_handle.clone();
+        let notify_name = self.focused().name;
         self.focused().ws.update_value(|ws| {
             ws.on_event(std::rc::Rc::new(move |event| {
                 match &event {
@@ -531,6 +536,7 @@ impl AppState {
                     }
                     Event::Authenticated { token, screen_name } => {
                         authed.set(true);
+                        *my_handle.borrow_mut() = screen_name.clone();
                         // Persist the session so a reload auto-reconnects: the
                         // handle (from the persona) + the resume token (empty for
                         // guests → cleared). Never the password.
@@ -541,6 +547,24 @@ impl AppState {
                         // sources + tickets and fetch multi-source. No-op on web.
                         if crate::native::native_available() {
                             crate::native::connect_native(&ep, token);
+                        }
+                    }
+                    Event::ChatMessage { from, text, .. } => {
+                        // Someone spoke. If the window isn't focused (and it
+                        // wasn't us), raise an OS notification — the loudest
+                        // level of the unread story, above the rail badge and
+                        // the tab title. Permission is asked here, in context.
+                        let me = notify_handle.borrow().clone();
+                        if crate::notify::should_notify(
+                            crate::notify::window_focused(),
+                            from,
+                            &me,
+                        ) {
+                            let burrow = notify_name.get_untracked().unwrap_or_default();
+                            crate::notify::notify(
+                                crate::notify::notification_title(from, &burrow),
+                                crate::notify::notification_body(text),
+                            );
                         }
                     }
                     Event::CommandFailed { .. } if resuming && !authed.get() => {
