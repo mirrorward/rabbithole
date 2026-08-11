@@ -864,6 +864,8 @@ impl AppState {
                     board,
                     title: subject,
                     author: "you".to_string(),
+                    replies: 0,
+                    last_activity_unix_ms: crate::clock::now_ms(),
                 },
             );
         });

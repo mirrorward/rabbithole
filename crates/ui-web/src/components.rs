@@ -1223,7 +1223,11 @@ pub fn BoardView() -> impl IntoView {
                 >
                     <p class="rh-empty">"No threads yet \u{2014} start the first one below."</p>
                 </Show>
-                <ul class="rh-tree">
+                // The thread list is a navigation index beside the reader, not
+                // the main content — so it stays a narrow column with a dense
+                // two-line row (subject, then author · replies · activity)
+                // rather than a squeezed table.
+                <ul class="rh-tree rh-threadtable">
                     <For
                         each=move || state.with(|s| s.threads.clone())
                         key=|t| t.id.clone()
@@ -1250,7 +1254,16 @@ pub fn BoardView() -> impl IntoView {
                                         on:click=move |_| app.open_thread(id.clone())
                                     >
                                         <span class="rh-thread-title">{t.title}</span>
-                                        <span class="rh-thread-author">"by "{t.author}</span>
+                                        <span class="rh-thread-meta">
+                                            {t.author}
+                                            <span class="rh-dot-sep" aria-hidden="true">"\u{00b7}"</span>
+                                            {format!("{} {}", t.replies, if t.replies == 1 { "reply" } else { "replies" })}
+                                            <span class="rh-dot-sep" aria-hidden="true">"\u{00b7}"</span>
+                                            {crate::files::relative_day(
+                                                t.last_activity_unix_ms / 1000,
+                                                crate::clock::now_ms() / 1000,
+                                            )}
+                                        </span>
                                     </button>
                                 </li>
                             }

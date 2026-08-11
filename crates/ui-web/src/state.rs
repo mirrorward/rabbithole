@@ -75,6 +75,10 @@ pub struct Thread {
     pub title: String,
     /// Handle of the thread starter.
     pub author: String,
+    /// Replies under the root post (the wire has always carried this).
+    pub replies: u64,
+    /// When the thread last moved, unix milliseconds (0 = unknown).
+    pub last_activity_unix_ms: i64,
 }
 
 /// A single post inside a [`Thread`].
@@ -718,6 +722,8 @@ mod tests {
             id: "1".into(),
             board: "general".into(),
             title: "hello".into(),
+            replies: 0,
+            last_activity_unix_ms: 0,
             author: "rabbit".into(),
         }];
         s.select_board("general", threads.clone());

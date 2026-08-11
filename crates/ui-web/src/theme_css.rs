@@ -287,6 +287,12 @@ pub const STYLESHEET: &str = "\
 .rh-front-ticker{margin:.1rem 0 0;font-size:var(--rh-font-sm);font-style:italic;color:var(--rh-accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
 .rh-welcome-actions{display:flex;justify-content:flex-end}\
 .rh-person-idkey{color:var(--rh-muted);cursor:help;font-size:.9em}\
+.rh-threadtable .rh-thread-link{display:flex;flex-direction:column;align-items:flex-start;gap:.1rem;width:100%;padding:.4rem .6rem;text-align:left;background:transparent;border:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent);cursor:pointer;font:inherit;color:inherit}\
+.rh-thread-meta{font-size:var(--rh-font-sm);color:var(--rh-muted);display:flex;align-items:center;gap:.35rem}\
+.rh-dot-sep{opacity:.55}\
+.rh-threadtable .rh-thread-title{font-weight:600;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+.rh-threadtable .rh-thread-link:hover{background:color-mix(in srgb,var(--rh-text) 5%,transparent)}\
+.rh-threadtable .rh-thread-link.active{background:color-mix(in srgb,var(--rh-accent) 14%,transparent)}\
 .rh-filetable-head,.rh-filetable .rh-file-link{display:grid;grid-template-columns:minmax(0,1fr) 5.5rem 5rem 8rem 6rem;gap:var(--rh-space-3);align-items:center}\
 .rh-filetable-head{padding:.3rem .6rem;font-size:var(--rh-font-xs,.72rem);text-transform:uppercase;letter-spacing:.04em;color:var(--rh-muted);border-bottom:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent)}\
 .rh-filetable .rh-file-link{width:100%;min-height:30px;padding:.25rem .6rem;text-align:left;background:transparent;border:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent);cursor:pointer;font:inherit;color:inherit}\

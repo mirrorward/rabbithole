@@ -332,6 +332,8 @@ pub fn frame_to_threads(frame: &Frame) -> Option<Vec<crate::state::Thread>> {
                 board: t.root.board,
                 title: t.root.subject,
                 author: t.root.author,
+                replies: t.replies,
+                last_activity_unix_ms: t.last_activity_unix_ms,
             })
             .collect(),
     )

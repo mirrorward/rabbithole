@@ -199,18 +199,24 @@ impl MockClient {
                 board: "general".to_string(),
                 title: "Warren rules & etiquette".to_string(),
                 author: "rabbit".to_string(),
+                replies: 12,
+                last_activity_unix_ms: crate::clock::now_ms() - 2 * 3_600_000,
             },
             Thread {
                 id: "t2".to_string(),
                 board: "general".to_string(),
                 title: "Introduce yourself".to_string(),
                 author: "alice".to_string(),
+                replies: 34,
+                last_activity_unix_ms: crate::clock::now_ms() - 26 * 3_600_000,
             },
             Thread {
                 id: "t3".to_string(),
                 board: "tech".to_string(),
                 title: "Running your own burrow".to_string(),
                 author: "bob".to_string(),
+                replies: 3,
+                last_activity_unix_ms: crate::clock::now_ms() - 5 * 86_400_000,
             },
         ]
     }
