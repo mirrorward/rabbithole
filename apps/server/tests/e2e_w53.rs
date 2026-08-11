@@ -224,6 +224,58 @@ async fn full_peer_to_peer_fetch_via_the_coordinator() {
     burrow.shutdown().await;
 }
 
+/// The desktop app's native swarm core opens its **own** connection to a burrow
+/// and resumes with the token the webview's session received — two live sessions
+/// on one token — then uses privileged swarm calls. This pins that contract: if
+/// resume tokens ever became single-use or session-bound, the native download
+/// path would silently break (the core would connect but be unauthenticated).
+#[tokio::test]
+async fn resume_token_authorizes_a_second_concurrent_session() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("alice", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    let url = format!("ws://127.0.0.1:{}", burrow.ws_addr.port());
+
+    // Session 1 — the webview's WebSocket session. Kept OPEN throughout.
+    let mut webview = Client::connect(&url, None, None, "e2e-webview", "0")
+        .await
+        .unwrap();
+    let ok = webview.auth_password("alice", "pw-pw-pw").await.unwrap();
+    webview.expect_welcome().await.unwrap();
+    let token = ok.token.clone();
+    assert!(!token.is_empty(), "a password login yields a resume token");
+
+    // Session 2 — the native swarm core, a separate connection resuming the same
+    // token while session 1 is still live (exactly what connect_native does).
+    let mut native = Client::connect(&url, None, None, "rabbithole-desktop", "0")
+        .await
+        .unwrap();
+    native.auth_resume(&token, 0).await.unwrap();
+    native.expect_welcome().await.unwrap();
+
+    // The resumed session must be able to make the PRIVILEGED swarm calls the
+    // download path needs — not merely be connected.
+    let list = native.swarm_find([9u8; 32]).await.unwrap();
+    assert_eq!(list.root, [9u8; 32], "swarm_find answered the native session");
+    native.swarm_ticket([9u8; 32]).await.unwrap();
+
+    // And session 1 is unharmed by session 2's resume.
+    let who = webview.who().await.unwrap();
+    assert!(
+        who.iter().any(|u| u.screen_name == "alice"),
+        "the webview session still works after the native core resumed"
+    );
+
+    burrow.shutdown().await;
+}
+
 /// A client that presents a portable identity AND proves possession (signs the
 /// server's challenge nonce) is surfaced in the who-list with its key; a
 /// handle-only client shows `None`. The verified half of key-based People de-dup,
