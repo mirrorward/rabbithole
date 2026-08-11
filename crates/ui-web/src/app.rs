@@ -735,6 +735,8 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         if self.focused().live.get_untracked() {
             // Live: request over the socket; the reply folds through the sink.
+            // Mark it in flight so the view shows a skeleton, not "no boards yet".
+            self.focused().state.update(|s| s.loading.boards = true);
             self.focused().ws.update_value(|c| c.request_boards());
             return;
         }
@@ -747,9 +749,11 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         if self.focused().live.get_untracked() {
             // Reset the board view; the thread list arrives via the sink.
-            self.focused()
-                .state
-                .update(|s| s.select_board(slug, Vec::new()));
+            // (select_board clears the flag, so raise it after.)
+            self.focused().state.update(|s| {
+                s.select_board(slug, Vec::new());
+                s.loading.threads = true;
+            });
             self.focused().ws.update_value(|c| c.request_threads(slug));
             return;
         }
@@ -766,9 +770,10 @@ impl AppState {
             // Open the thread immediately; its posts stream in via the sink.
             // The live thread id is the root post's hex id.
             let root = crate::wire::hex_to_id(&id);
-            self.focused()
-                .state
-                .update(|s| s.open_thread(id, Vec::new()));
+            self.focused().state.update(|s| {
+                s.open_thread(id, Vec::new());
+                s.loading.posts = true;
+            });
             if let Some(root) = root {
                 self.focused().ws.update_value(|c| c.request_posts(root));
             }
@@ -872,6 +877,7 @@ impl AppState {
     pub fn load_dms(&self) {
         #[cfg(target_arch = "wasm32")]
         if self.focused().live.get_untracked() {
+            self.focused().state.update(|s| s.loading.dms = true);
             self.focused().ws.update_value(|c| c.request_dm_threads());
             return;
         }
@@ -926,6 +932,7 @@ impl AppState {
     pub fn load_members(&self) {
         #[cfg(target_arch = "wasm32")]
         if self.focused().live.get_untracked() {
+            self.focused().state.update(|s| s.loading.members = true);
             self.focused().ws.update_value(|c| c.request_directory(""));
             return;
         }

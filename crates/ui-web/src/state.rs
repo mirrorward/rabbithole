@@ -299,6 +299,22 @@ pub struct UiState {
     pub selected_profile: Option<MemberProfile>,
     /// Handle of the member whose profile card is shown, if any.
     pub selected_member: Option<String>,
+    /// Which list requests are in flight — so a view shows a skeleton instead of
+    /// falsely claiming "nothing here" while data is still on the wire.
+    pub loading: Loading,
+}
+
+/// In-flight list requests. A view distinguishes three states with this:
+/// *loading* (skeleton), *loaded and empty* (the warm empty state), and
+/// *loaded with rows*. Without it, a live burrow briefly reads as "no boards
+/// yet" the moment you open Boards — a lie that then flickers into content.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Loading {
+    pub boards: bool,
+    pub threads: bool,
+    pub posts: bool,
+    pub members: bool,
+    pub dms: bool,
 }
 
 impl UiState {
@@ -378,6 +394,7 @@ impl UiState {
     /// Replace the board tree (from a client snapshot).
     pub fn set_boards(&mut self, boards: Vec<Board>) {
         self.boards = boards;
+        self.loading.boards = false;
     }
 
     /// Select a board: record the slug, load its threads and reset any open
@@ -387,17 +404,20 @@ impl UiState {
         self.threads = threads;
         self.selected_thread = None;
         self.posts.clear();
+        self.loading.threads = false;
     }
 
     /// Open a thread within the selected board and load its posts.
     pub fn open_thread(&mut self, id: String, posts: Vec<Post>) {
         self.selected_thread = Some(id);
         self.posts = posts;
+        self.loading.posts = false;
     }
 
     /// Replace the DM conversation list (from a client snapshot).
     pub fn set_dm_threads(&mut self, threads: Vec<DmThread>) {
         self.dm_threads = threads;
+        self.loading.dms = false;
     }
 
     /// Select a DM conversation by id, creating an empty one if the peer isn't
@@ -451,6 +471,7 @@ impl UiState {
     /// Replace the member directory (from a client snapshot).
     pub fn set_members(&mut self, members: Vec<Member>) {
         self.members = members;
+        self.loading.members = false;
     }
 
     /// Update the directory search query.
@@ -565,6 +586,35 @@ mod tests {
         assert_eq!(s.messages[0].from, "alice");
         assert_eq!(s.messages[1].text, "yo");
         assert_eq!(s.messages[0].at_unix_ms, 1_000);
+    }
+
+    #[test]
+    fn loading_flags_clear_when_data_lands() {
+        let mut s = UiState::default();
+        // Nothing in flight by default: a view would show its empty state.
+        assert!(!s.loading.boards && !s.loading.members && !s.loading.dms);
+        // A request is raised while the reply is on the wire — the view shows a
+        // skeleton, NOT "no boards yet" (the bug this models away).
+        s.loading.boards = true;
+        s.loading.members = true;
+        s.loading.threads = true;
+        s.loading.posts = true;
+        s.loading.dms = true;
+        // Each setter clears exactly its own flag as the data lands.
+        s.set_boards(vec![]);
+        assert!(
+            !s.loading.boards,
+            "boards cleared on arrival (even when empty)"
+        );
+        assert!(s.loading.members, "other requests still in flight");
+        s.set_members(vec![]);
+        assert!(!s.loading.members);
+        s.set_dm_threads(vec![]);
+        assert!(!s.loading.dms);
+        s.select_board("general", vec![]);
+        assert!(!s.loading.threads);
+        s.open_thread("t1".into(), vec![]);
+        assert!(!s.loading.posts);
     }
 
     #[test]

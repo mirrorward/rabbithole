@@ -864,6 +864,30 @@ pub fn WhoList() -> impl IntoView {
     }
 }
 
+/// Placeholder rows shown while a list request is in flight, so a view never
+/// claims "nothing here" for data that is merely still on the wire. Shimmering
+/// bars of varied width read as "content is coming" without pretending to be
+/// content (aria-hidden + a busy status for assistive tech).
+#[component]
+fn Skeleton(
+    /// How many placeholder rows to draw.
+    #[prop(default = 3)]
+    rows: usize,
+) -> impl IntoView {
+    // Varied widths so the placeholder reads as text, not a progress bar.
+    let widths = ["78%", "56%", "67%", "45%", "72%"];
+    view! {
+        <div class="rh-skeleton" role="status" aria-label="Loading\u{2026}">
+            {(0..rows)
+                .map(|i| {
+                    let w = widths[i % widths.len()];
+                    view! { <div class="rh-skeleton-row" aria-hidden="true" style=format!("width:{w}")></div> }
+                })
+                .collect_view()}
+        </div>
+    }
+}
+
 /// A friendly centered empty state for a panel with nothing to show yet: a
 /// quiet decorative mark, a headline, and a warmer line of guidance. Reuses
 /// the lobby's `.rh-chat-empty` styling so every view's "nothing here" moment
@@ -1024,7 +1048,15 @@ pub fn Boards() -> impl IntoView {
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <section class="rh-panel">
                 <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">"Boards"</h1>
-                <Show when=move || state.with(|s| s.boards.is_empty()) fallback=|| ()>
+                // Loading vs. genuinely empty: a skeleton while the board list is
+                // in flight, the warm empty state only once it has actually arrived.
+                <Show when=move || state.with(|s| s.loading.boards) fallback=|| ()>
+                    <Skeleton rows=3/>
+                </Show>
+                <Show
+                    when=move || state.with(|s| !s.loading.boards && s.boards.is_empty())
+                    fallback=|| ()
+                >
                     <EmptyState
                         mark="\u{270e}"
                         title="No boards yet"
@@ -1104,7 +1136,13 @@ pub fn BoardView() -> impl IntoView {
             <section class="rh-panel rh-threads" aria-label="Threads">
                 <A href="/boards" class="rh-back">"\u{2190} All boards"</A>
                 <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">{board_name}</h1>
-                <Show when=move || state.with(|s| s.threads.is_empty()) fallback=|| ()>
+                <Show when=move || state.with(|s| s.loading.threads) fallback=|| ()>
+                    <Skeleton rows=3/>
+                </Show>
+                <Show
+                    when=move || state.with(|s| !s.loading.threads && s.threads.is_empty())
+                    fallback=|| ()
+                >
                     <p class="rh-empty">"No threads yet \u{2014} start the first one below."</p>
                 </Show>
                 <ul class="rh-tree">
@@ -1255,7 +1293,13 @@ pub fn Dms() -> impl IntoView {
             </h1>
             <aside class="rh-who">
                 <h2>"Conversations"</h2>
-                <Show when=move || state.with(|s| s.dm_threads.is_empty()) fallback=|| ()>
+                <Show when=move || state.with(|s| s.loading.dms) fallback=|| ()>
+                    <Skeleton rows=3/>
+                </Show>
+                <Show
+                    when=move || state.with(|s| !s.loading.dms && s.dm_threads.is_empty())
+                    fallback=|| ()
+                >
                     <p class="rh-empty">"No conversations yet \u{2014} message a handle below."</p>
                 </Show>
                 <form class="rh-dm-start" on:submit=start>
@@ -1425,7 +1469,10 @@ pub fn Directory() -> impl IntoView {
                     // differently: the first is about the burrow, the second
                     // about the query.
                     {move || state.with(|s| {
-                        if s.members.is_empty() {
+                        if s.loading.members {
+                            // Still on the wire — don't claim the burrow is empty.
+                            view! { <Skeleton rows=4/> }.into_view()
+                        } else if s.members.is_empty() {
                             view! {
                                 <EmptyState
                                     mark="\u{263a}"
