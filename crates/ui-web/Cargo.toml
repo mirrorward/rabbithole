@@ -76,6 +76,16 @@ web-sys = { workspace = true, features = [
     "Notification",
     "NotificationOptions",
     "NotificationPermission",
+    # Chimes (`src/sound.rs`): short synthesised tones, no audio assets.
+    "AudioContext",
+    "BaseAudioContext",
+    "AudioNode",
+    "AudioParam",
+    "AudioDestinationNode",
+    "AudioScheduledSourceNode",
+    "OscillatorNode",
+    "OscillatorType",
+    "GainNode",
     "console",
 ] }
 gloo-timers.workspace = true

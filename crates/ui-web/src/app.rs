@@ -97,6 +97,8 @@ pub struct AppState {
     /// The portable identity (public face), set once at launch. `None` until
     /// loaded (and always `None` in host tests, which have no browser storage).
     pub you: RwSignal<Option<crate::identity::You>>,
+    /// Chimes on/off (persisted; off until the user opts in).
+    pub sound_on: RwSignal<bool>,
     /// The web-admin model, folded from admin events.
     pub admin: RwSignal<AdminState>,
     /// The Syndication & Gateways panel model, folded from paired config
@@ -156,6 +158,10 @@ impl AppState {
             focused_id: create_rw_signal(ServerId::local()),
             presence: create_rw_signal(rabbithole_proto::presence::PresenceState::Online),
             you: create_rw_signal(None),
+            #[cfg(target_arch = "wasm32")]
+            sound_on: create_rw_signal(crate::sound::enabled()),
+            #[cfg(not(target_arch = "wasm32"))]
+            sound_on: create_rw_signal(false),
             admin: create_rw_signal(AdminState::default()),
             syndication: create_rw_signal(SynAdminState::default()),
             palette_open: create_rw_signal(false),
@@ -490,6 +496,8 @@ impl AppState {
         let my_handle = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
         let notify_handle = my_handle.clone();
         let dm_handle = my_handle.clone();
+        let sound_on = self.sound_on;
+        let dm_sound_on = self.sound_on;
         let notify_name = self.focused().name;
         self.focused().ws.update_value(|ws| {
             ws.on_event(std::rc::Rc::new(move |event| {
@@ -559,17 +567,22 @@ impl AppState {
                         // level of the unread story, above the rail badge and
                         // the tab title. Permission is asked here, in context.
                         let me = notify_handle.borrow().clone();
-                        if crate::notify::should_notify(
-                            crate::notify::window_focused(),
-                            from,
-                            &me,
-                        ) {
+                        let focused = crate::notify::window_focused();
+                        if crate::notify::should_notify(focused, from, &me) {
                             let burrow = notify_name.get_untracked().unwrap_or_default();
                             crate::notify::notify(
                                 crate::notify::notification_title(from, &burrow),
                                 crate::notify::notification_body(text),
                                 crate::notify::TAG_CHAT,
                             );
+                        }
+                        if crate::sound::should_chime(
+                            sound_on.get_untracked(),
+                            focused,
+                            from,
+                            &me,
+                        ) {
+                            crate::sound::play(crate::sound::Chime::Chat);
                         }
                     }
                     Event::CommandFailed { .. } if resuming && !authed.get() => {
@@ -650,16 +663,21 @@ impl AppState {
                 // its own title and tag so it never reads (or collapses) as room
                 // chatter. Same policy as the lobby: silent while you're looking.
                 let me = dm_handle.borrow().clone();
-                if crate::notify::should_notify(
-                    crate::notify::window_focused(),
-                    &msg.from,
-                    &me,
-                ) {
+                let focused = crate::notify::window_focused();
+                if crate::notify::should_notify(focused, &msg.from, &me) {
                     crate::notify::notify(
                         crate::notify::dm_notification_title(&msg.from),
                         crate::notify::notification_body(&msg.text),
                         crate::notify::TAG_DM,
                     );
+                }
+                if crate::sound::should_chime(
+                    dm_sound_on.get_untracked(),
+                    focused,
+                    &msg.from,
+                    &me,
+                ) {
+                    crate::sound::play(crate::sound::Chime::Dm);
                 }
                 state.update(|s| s.receive_dm(&peer, msg))
             }));

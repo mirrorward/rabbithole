@@ -72,6 +72,34 @@ pub fn ThemeToggle() -> impl IntoView {
     };
     view! {
         <span class="rh-theme-menu">
+            // Chimes: off until asked for, and silent whenever the window is
+            // focused (see crate::sound). A quiet toggle, not a settings page.
+            <button
+                class="rh-btn ghost rh-sound-toggle"
+                aria-pressed=move || app.sound_on.get().to_string()
+                title=move || {
+                    if app.sound_on.get() {
+                        "Chimes on \u{2014} click to silence"
+                    } else {
+                        "Chimes off \u{2014} click to hear new messages while away"
+                    }
+                }
+                on:click=move |_| {
+                    let on = !app.sound_on.get_untracked();
+                    app.sound_on.set(on);
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        crate::sound::set_enabled(on);
+                        // Play the DM voice once on enable, so the user hears
+                        // exactly what they just signed up for.
+                        if on {
+                            crate::sound::play(crate::sound::Chime::Dm);
+                        }
+                    }
+                }
+            >
+                {move || if app.sound_on.get() { "\u{1F514}" } else { "\u{1F515}" }}
+            </button>
             <Show when=move || server_name().is_some() fallback=|| ()>
                 <button
                     class=server_class

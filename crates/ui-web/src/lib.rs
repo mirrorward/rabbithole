@@ -98,6 +98,7 @@ pub mod recent;
 pub mod scroll;
 pub mod server_theme;
 pub mod servers;
+pub mod sound;
 pub mod state;
 pub mod syndication_admin;
 pub mod theme_css;
