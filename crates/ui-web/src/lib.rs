@@ -88,6 +88,7 @@ pub mod clock;
 pub mod components;
 pub mod conn;
 pub mod files;
+pub mod icons;
 pub mod identity;
 pub mod notify;
 pub mod packs;

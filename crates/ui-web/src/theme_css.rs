@@ -372,6 +372,15 @@ pub const STYLESHEET: &str = "\
 .rh-nav a,.rh-nav .rh-nav-item{color:var(--rh-muted);display:inline-flex;align-items:center;gap:.3rem;white-space:nowrap;text-decoration:none;font-size:var(--rh-font-sm);font-weight:500;padding:.35rem .7rem;border-radius:var(--rh-radius-full);transition:background-color .15s ease,color .15s ease;border-bottom:0}\
 .rh-nav a:hover,.rh-nav .rh-nav-item:hover{color:var(--rh-text);background:color-mix(in srgb,var(--rh-text) 7%,transparent)}\
 .rh-nav a.active,.rh-nav a[aria-current=page],.rh-nav .rh-nav-item.active{color:var(--rh-accent);background:color-mix(in srgb,var(--rh-accent) 14%,transparent)}\
+.rh-subnav{flex:none;width:11.5rem;display:flex;flex-direction:column;gap:1px;padding:var(--rh-space-3) var(--rh-space-2);overflow-y:auto;background:color-mix(in srgb,var(--rh-accent) 3%,var(--rh-surface));border-right:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent);-webkit-user-select:none;user-select:none}\
+.rh-subnav-link{display:flex;align-items:center;gap:var(--rh-space-2);padding:.4rem .55rem;border-radius:var(--rh-radius);color:var(--rh-muted);text-decoration:none;font-size:var(--rh-font-sm);font-weight:500;white-space:nowrap;border-bottom:0;transition:background-color .13s ease,color .13s ease}\
+.rh-subnav-link:hover{color:var(--rh-text);background:color-mix(in srgb,var(--rh-text) 6%,transparent)}\
+.rh-subnav-link[aria-current=page]{color:var(--rh-accent);background:color-mix(in srgb,var(--rh-accent) 13%,transparent);font-weight:650}\
+.rh-subnav-icon{flex:none;display:grid;place-items:center;width:18px;height:18px;opacity:.85}\
+.rh-subnav-link[aria-current=page] .rh-subnav-icon{opacity:1}\
+.rh-subnav-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}\
+.rh-subnav .rh-pip{flex:none}\
+.rh-subnav-rule{height:1px;margin:var(--rh-space-2) .55rem;background:color-mix(in srgb,var(--rh-text) 10%,transparent)}\
 .rh-btn{font:inherit;font-weight:600;cursor:pointer;border:1px solid transparent;background:var(--rh-accent);color:var(--rh-bg);border-radius:var(--rh-radius);padding:.5rem .9rem;line-height:1.2;display:inline-flex;align-items:center;gap:.4rem;transition:transform .12s ease,box-shadow .15s ease,background-color .15s ease;box-shadow:var(--rh-shadow-1)}\
 .rh-btn:hover{background:color-mix(in srgb,var(--rh-accent) 88%,var(--rh-text));box-shadow:var(--rh-shadow-2);transform:translateY(-1px)}\
 .rh-btn:active{transform:translateY(0);box-shadow:var(--rh-shadow-1)}\
@@ -555,7 +564,7 @@ pub const STYLESHEET: &str = "\
 .rh-scroll::-webkit-scrollbar-thumb,.rh-panel::-webkit-scrollbar-thumb,.rh-who::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--rh-text) 18%,transparent);border-radius:var(--rh-radius-full);border:3px solid transparent;background-clip:padding-box}\
 .rh-scroll::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--rh-text) 30%,transparent);background-clip:padding-box}\
 @media (max-width:720px){.rh-header{display:grid;grid-template-columns:minmax(0,1fr) auto auto;grid-template-areas:\"title dot presence\" \"live live theme\" \"nav nav nav\";align-items:center;padding:var(--rh-space-2) var(--rh-space-3);min-height:0;gap:var(--rh-space-2)}.rh-header .rh-title{grid-area:title;font-size:var(--rh-font-size);min-width:0;overflow:hidden}.rh-dot{grid-area:dot}.rh-presence{grid-area:presence;justify-self:end;padding:.25rem .4rem;font-size:var(--rh-font-xs)}.rh-live-slot{grid-area:live;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}\
-.rh-live-slot .rh-radio-now{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.rh-nav{grid-area:nav;min-width:0;overflow-x:auto;padding-bottom:.15rem}.rh-theme-menu{grid-area:theme;justify-self:end}.rh-theme-menu button{padding:.25rem .5rem;font-size:var(--rh-font-xs)}.rh-status,.rh-kbd-jump,.rh-spacer{display:none}.rh-conn{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}.rh-toasts{top:6.4rem}.rh-body{flex-direction:column}.rh-who,.rh-threads,.rh-members,.rh-files,.rh-stations{max-width:none;width:auto;border-right:0;border-left:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-who{max-height:35vh}.rh-chat{min-height:0}.rh-filetable-head,.rh-filetable .rh-file-link{grid-template-columns:minmax(0,1fr) 5rem}.rh-fcol-kind,.rh-fcol-who,.rh-fcol-when{display:none}.rh-scroll{padding:var(--rh-space-3)}.rh-compose{padding:var(--rh-space-2) var(--rh-space-3)}.rh-compose .rh-input{min-width:0}.rh-compose .rh-btn{padding-left:var(--rh-space-4);padding-right:var(--rh-space-4)}.rh-present{order:-1;display:flex;align-items:center;gap:var(--rh-space-2);padding:.4rem var(--rh-space-3);max-height:none}.rh-present h2{margin:0;flex:none}.rh-present ul{flex-direction:row;flex:1;min-width:0;overflow-x:auto;gap:.4rem;padding-bottom:.15rem}.rh-present li{flex:none;white-space:nowrap}.rh-reader{min-height:14rem}.rh-login{margin:var(--rh-space-6) var(--rh-space-4)}}\
+.rh-live-slot .rh-radio-now{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.rh-nav{grid-area:nav;min-width:0;overflow-x:auto;padding-bottom:.15rem}.rh-subnav{position:fixed;left:0;right:0;bottom:0;z-index:30;width:auto;flex-direction:row;gap:0;padding:.3rem var(--rh-space-2) calc(.3rem + env(safe-area-inset-bottom));overflow-x:auto;overflow-y:hidden;border-right:0;border-top:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);background:color-mix(in srgb,var(--rh-surface) 92%,transparent);backdrop-filter:saturate(1.4) blur(14px);-webkit-backdrop-filter:saturate(1.4) blur(14px)}.rh-subnav-link{flex:none;flex-direction:column;gap:.1rem;padding:.3rem .6rem;font-size:var(--rh-font-xs);min-width:3.7rem;justify-content:center}.rh-subnav-label{flex:none}.rh-subnav-rule{display:none}.rh-subnav .rh-pip{position:absolute;top:.15rem;right:.5rem}.rh-subnav-link{position:relative}.rh-shell-main{padding-bottom:3.6rem}.rh-theme-menu{grid-area:theme;justify-self:end}.rh-theme-menu button{padding:.25rem .5rem;font-size:var(--rh-font-xs)}.rh-status,.rh-kbd-jump,.rh-spacer{display:none}.rh-conn{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}.rh-toasts{top:6.4rem}.rh-body{flex-direction:column}.rh-who,.rh-threads,.rh-members,.rh-files,.rh-stations{max-width:none;width:auto;border-right:0;border-left:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-who{max-height:35vh}.rh-chat{min-height:0}.rh-filetable-head,.rh-filetable .rh-file-link{grid-template-columns:minmax(0,1fr) 5rem}.rh-fcol-kind,.rh-fcol-who,.rh-fcol-when{display:none}.rh-scroll{padding:var(--rh-space-3)}.rh-compose{padding:var(--rh-space-2) var(--rh-space-3)}.rh-compose .rh-input{min-width:0}.rh-compose .rh-btn{padding-left:var(--rh-space-4);padding-right:var(--rh-space-4)}.rh-present{order:-1;display:flex;align-items:center;gap:var(--rh-space-2);padding:.4rem var(--rh-space-3);max-height:none}.rh-present h2{margin:0;flex:none}.rh-present ul{flex-direction:row;flex:1;min-width:0;overflow-x:auto;gap:.4rem;padding-bottom:.15rem}.rh-present li{flex:none;white-space:nowrap}.rh-reader{min-height:14rem}.rh-login{margin:var(--rh-space-6) var(--rh-space-4)}}\
 @keyframes rh-shimmer{0%{background-position:-180% 0}100%{background-position:180% 0}}\
 .rh-skeleton{display:flex;flex-direction:column;gap:.55rem;padding:var(--rh-space-4)}\
 .rh-skeleton-row{height:.85rem;border-radius:var(--rh-radius-full,999px);background:linear-gradient(90deg,color-mix(in srgb,var(--rh-text) 7%,transparent) 25%,color-mix(in srgb,var(--rh-text) 13%,transparent) 50%,color-mix(in srgb,var(--rh-text) 7%,transparent) 75%);background-size:180% 100%;animation:rh-shimmer 1.35s ease-in-out infinite}\
@@ -888,6 +897,28 @@ mod tests {
         // Belt-and-braces textual checks mirroring the markup rules: CSS
         // cannot set tabindex, but it can break keyboard UX with these.
         assert!(!STYLESHEET.contains("pointer-events:none"));
-        assert!(!STYLESHEET.contains("user-select:none"));
+    }
+
+    #[test]
+    fn only_chrome_is_unselectable_never_content() {
+        // Native apps don't let you drag-select the sidebar, and a web app that
+        // does feels like a web page. But `user-select:none` on anything a user
+        // might want to *copy* — a message, a filename, a fingerprint — is a
+        // real harm, so it's allowed only on navigation furniture.
+        const CHROME: [&str; 4] = [".rh-subnav", ".rh-rail", ".rh-header", ".rh-tabs"];
+        for rule in STYLESHEET.split('}') {
+            let Some((head, decls)) = rule.rsplit_once('{') else {
+                continue;
+            };
+            if !decls.contains("user-select:none") {
+                continue;
+            }
+            // `head` may still carry an enclosing `@media (...){`.
+            let selector = head.rsplit('{').next().unwrap_or_default().trim();
+            assert!(
+                CHROME.iter().any(|c| selector.starts_with(c)),
+                "`user-select:none` on `{selector}` — that's content, not chrome"
+            );
+        }
     }
 }

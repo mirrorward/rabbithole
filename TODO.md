@@ -100,6 +100,9 @@ where headless-verifiable, tested:
   round-trip, which needs `cargo tauri dev` on a real machine.
 - **Verified identity** across proto/server/web/CLI, hardened against relay.
 - **An adversarial review** (13 fixes) + a security-review relay fix.
+- **Left section sidebar** — the nav moved out of the header (nine destinations plus
+  title, status, radio, ⌘K, presence and theme in one row ran off the window) into a
+  vertical sidebar with icons, and a fixed bottom tab bar on phones.
 - **Burrow news** — the server's `WelcomeScreen` renders as a permanent panel at the
   top of the lobby (it used to be nested inside the dismissible welcome sheet, so a
   burrow with no MOTD showed no news at all). The sheet is now agreement-only.

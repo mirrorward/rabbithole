@@ -130,10 +130,21 @@ pub fn ThemeToggle() -> impl IntoView {
     }
 }
 
-/// The primary section links. Rendered inside the [`StatusBar`], they preserve
-/// the shared session (context) while switching routes. The router's
-/// [`A`] stamps `aria-current="page"` on the active link, and the stylesheet
-/// keys the active style off that attribute.
+/// The primary section links, as a **left sidebar**.
+///
+/// This used to be a row of pills in the header, next to the burrow title, the
+/// connection state, the now-playing slot, the ⌘K button, presence and the
+/// theme control. Nine destinations plus all of that in one 3.5rem strip meant
+/// the right end simply ran off the window.
+///
+/// A vertical column fixes it structurally rather than by shrinking type: rows
+/// grow downward, where there is room, so a tenth section costs nothing. It
+/// also matches how every desktop app of this shape is laid out — rail, then
+/// sidebar, then content — and gives each section an icon and a place for its
+/// unread pip that isn't the middle of a sentence.
+///
+/// Rendered once by the shell (not per route), so switching sections doesn't
+/// tear it down and rebuild it.
 #[component]
 pub fn Nav() -> impl IntoView {
     let app = expect_context::<AppState>();
@@ -144,35 +155,52 @@ pub fn Nav() -> impl IntoView {
     let dm_unread = move || state.with(|s| s.dm_threads.iter().map(|t| t.unread).sum::<u64>());
     let board_unread = move || state.with(|s| s.boards.iter().map(|b| b.unread).sum::<u64>());
     view! {
-        <nav class="rh-nav" aria-label="Primary">
-            <A href="/lobby">"Lobby"</A>
-            <A href="/boards">
-                "Boards"
-                <Show when=move || { board_unread() > 0 } fallback=|| ()>
-                    <span
-                        class="rh-pip"
-                        aria-label=move || format!("{} unread", board_unread())
-                    >{move || crate::state::unread_badge(board_unread() as usize)}</span>
-                </Show>
-            </A>
-            <A href="/dms">
-                "DMs"
-                <Show when=move || { dm_unread() > 0 } fallback=|| ()>
-                    <span
-                        class="rh-pip"
-                        aria-label=move || format!("{} unread", dm_unread())
-                    >{move || crate::state::unread_badge(dm_unread() as usize)}</span>
-                </Show>
-            </A>
-            <A href="/directory">"Directory"</A>
-            <A href="/files">"Files"</A>
-            <A href="/radio">"Radio"</A>
-            <A href="/servers">"Servers"</A>
-            <A href="/art">"Art"</A>
+        <nav class="rh-subnav" aria-label="Primary">
+            <NavLink path="/lobby" label="Lobby" unread=None/>
+            <NavLink path="/boards" label="Boards" unread=Some(Signal::derive(board_unread))/>
+            <NavLink path="/dms" label="DMs" unread=Some(Signal::derive(dm_unread))/>
+            <NavLink path="/directory" label="Directory" unread=None/>
+            <NavLink path="/files" label="Files" unread=None/>
+            <NavLink path="/radio" label="Radio" unread=None/>
+            <NavLink path="/art" label="Art" unread=None/>
+            <div class="rh-subnav-rule" aria-hidden="true"></div>
+            // Beyond this burrow: the warren-wide destinations.
+            <NavLink path="/servers" label="Servers" unread=None/>
             <Show when=move || is_admin.get() fallback=|| ()>
-                <A href="/admin">"Admin"</A>
+                <NavLink path="/admin" label="Admin" unread=None/>
             </Show>
         </nav>
+    }
+}
+
+/// One sidebar row: icon, label, and an optional unread pip. Split out so the
+/// nav reads as a list of destinations instead of a wall of markup.
+#[component]
+fn NavLink(
+    /// Route to link to; also selects the icon.
+    path: &'static str,
+    /// Visible text — and, since the icon is `aria-hidden`, the accessible name.
+    label: &'static str,
+    /// Unread count for this section, if it has one. A `Signal` rather than a
+    /// closure because it's `Copy`: the pip's three reactive readers each need
+    /// their own handle. Passed explicitly (not an optional prop) so every call
+    /// site states whether it tracks unread.
+    unread: Option<Signal<u64>>,
+) -> impl IntoView {
+    let icon = crate::icons::section_icon(path);
+    view! {
+        <A href=path class="rh-subnav-link">
+            <span class="rh-subnav-icon" inner_html=icon></span>
+            <span class="rh-subnav-label">{label}</span>
+            {unread.map(|n| view! {
+                <Show when=move || { n.get() > 0 } fallback=|| ()>
+                    <span
+                        class="rh-pip"
+                        aria-label=move || format!("{} unread", n.get())
+                    >{move || crate::state::unread_badge(n.get() as usize)}</span>
+                </Show>
+            })}
+        </A>
     }
 }
 
@@ -594,7 +622,6 @@ pub fn StatusBar() -> impl IntoView {
                     <A href="/radio" class="rh-radio-now">{now_playing}</A>
                 </Show>
             </span>
-            <Nav/>
             <button
                 type="button"
                 class="rh-kbd-jump"

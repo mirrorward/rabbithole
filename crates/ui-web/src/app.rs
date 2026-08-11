@@ -16,7 +16,7 @@ use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
     Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby, Login,
-    People, Radio, ServerBrowser, Toasts, Transfers, WelcomeSheet, You,
+    Nav, People, Radio, ServerBrowser, Toasts, Transfers, WelcomeSheet, You,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -1553,6 +1553,7 @@ pub fn App() -> impl IntoView {
                 <Toasts/>
                 <div class="rh-shell">
                     <BurrowRail/>
+                    <SideNav/>
                     <div class="rh-shell-main">
                         <WelcomeSheet/>
                         {move || {
@@ -1584,6 +1585,20 @@ pub fn App() -> impl IntoView {
                 </div>
             </div>
         </Router>
+    }
+}
+
+/// The section sidebar, mounted once by the shell. Hidden on the connect screen
+/// (route `/`), which is a full-bleed form with nowhere to navigate to yet —
+/// the same rule the burrow rail follows.
+#[component]
+fn SideNav() -> impl IntoView {
+    let location = leptos_router::use_location();
+    let on_login = move || location.pathname.get() == "/";
+    view! {
+        <Show when=move || { !on_login() } fallback=|| ()>
+            <Nav/>
+        </Show>
     }
 }
 
