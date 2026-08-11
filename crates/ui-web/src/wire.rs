@@ -157,6 +157,26 @@ pub fn key_proof_frame(signature: Vec<u8>) -> Result<Frame, ProtoError> {
     )
 }
 
+/// Request the burrow's **front page** — the operator-curated welcome screen
+/// (MOTD, featured item, who's on now, unread DMs, a news ticker). Hotline's
+/// server news page: the moment of arriving somewhere specific.
+pub fn welcome_screen_request(id: RequestId) -> Result<Frame, ProtoError> {
+    Frame::request(id, &rabbithole_proto::welcome::WelcomeScreenRequest)
+}
+
+/// Decode a [`WelcomeScreen`](rabbithole_proto::welcome::WelcomeScreen) reply
+/// into its widgets, if this frame is one.
+pub fn frame_to_front_page(
+    frame: &Frame,
+) -> Option<Vec<rabbithole_proto::welcome::WelcomeWidget>> {
+    Some(
+        frame
+            .decode::<rabbithole_proto::welcome::WelcomeScreen>()?
+            .ok()?
+            .widgets,
+    )
+}
+
 /// Build a keepalive [`Ping`] request frame.
 pub fn ping_request(id: RequestId) -> Result<Frame, ProtoError> {
     Frame::request(id, &Ping)

@@ -278,6 +278,13 @@ pub const STYLESHEET: &str = "\
 .rh-welcome-x:hover{background:color-mix(in srgb,var(--rh-text) 8%,transparent);color:var(--rh-text)}\
 .rh-welcome-motd{color:var(--rh-muted);margin:0 0 .5rem;font-style:italic}\
 .rh-welcome-body{margin:0 0 .7rem;white-space:pre-wrap;max-width:70ch;line-height:1.5}\
+.rh-front{display:flex;flex-direction:column;gap:.4rem;margin:.1rem 0 .7rem;padding-top:.55rem;border-top:1px solid color-mix(in srgb,var(--rh-accent) 22%,transparent)}\
+.rh-front-label{font-size:var(--rh-font-xs,.72rem);text-transform:uppercase;letter-spacing:.05em;color:var(--rh-accent);font-weight:700}\
+.rh-front-featured{display:flex;flex-direction:column;gap:.15rem}\
+.rh-front-title{margin:0;font-weight:700}\
+.rh-front-body{margin:0;color:var(--rh-muted);max-width:62ch;line-height:1.45}\
+.rh-front-line{margin:0;font-size:var(--rh-font-sm);color:var(--rh-muted)}\
+.rh-front-ticker{margin:.1rem 0 0;font-size:var(--rh-font-sm);font-style:italic;color:var(--rh-accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
 .rh-welcome-actions{display:flex;justify-content:flex-end}\
 .rh-person-idkey{color:var(--rh-muted);cursor:help;font-size:.9em}\
 .rh-filetable-head,.rh-filetable .rh-file-link{display:grid;grid-template-columns:minmax(0,1fr) 5.5rem 5rem 8rem 6rem;gap:var(--rh-space-3);align-items:center}\

@@ -291,6 +291,59 @@ pub fn Transfers() -> impl IntoView {
     }
 }
 
+/// The burrow's **front page** — the operator-curated welcome screen the server
+/// has always been able to send (`WelcomeScreen`) and the client never asked
+/// for. Hotline's server news page: who's on, what's featured, the ticker.
+#[component]
+fn FrontPage() -> impl IntoView {
+    use rabbithole_proto::welcome::WelcomeWidget;
+    let app = expect_context::<AppState>();
+    let widgets = move || app.focused_tracked().state.with(|s| s.front_page.clone());
+    view! {
+        <Show when=move || !widgets().is_empty() fallback=|| ()>
+            <div class="rh-front">
+                {move || {
+                    widgets()
+                        .into_iter()
+                        .map(|w| match w {
+                            WelcomeWidget::Featured { title, body } => view! {
+                                <div class="rh-front-featured">
+                                    <span class="rh-front-label">"Featured"</span>
+                                    <p class="rh-front-title">{title}</p>
+                                    <p class="rh-front-body">{body}</p>
+                                </div>
+                            }
+                            .into_view(),
+                            WelcomeWidget::OnlineNow { count, sample } => {
+                                let who = sample.join(", ");
+                                let line = if who.is_empty() {
+                                    format!("{count} here now")
+                                } else {
+                                    format!("{count} here now \u{2014} {who}")
+                                };
+                                view! { <p class="rh-front-line">"\u{25cf} "{line}</p> }.into_view()
+                            }
+                            WelcomeWidget::UnreadDms(n) => view! {
+                                <p class="rh-front-line">
+                                    "\u{2709} "
+                                    {format!("{n} conversation{} waiting", if n == 1 { "" } else { "s" })}
+                                </p>
+                            }
+                            .into_view(),
+                            WelcomeWidget::Ticker(text) => view! {
+                                <p class="rh-front-ticker">{text}</p>
+                            }
+                            .into_view(),
+                            // The MOTD already headlines the sheet above.
+                            _ => ().into_view(),
+                        })
+                        .collect_view()
+                }}
+            </div>
+        </Show>
+    }
+}
+
 /// A non-modal **welcome sheet**: the focused burrow's message of the day and,
 /// when the server gates participation, its agreement to accept. Slides in on
 /// connect and dismisses without blocking the rest of the app.
@@ -330,6 +383,9 @@ pub fn WelcomeSheet() -> impl IntoView {
                             })
                         })}
                         <p class="rh-welcome-body">{body}</p>
+                        // The burrow's front page: what this place wants you to
+                        // see on arrival — Hotline's server news, reinterpreted.
+                        <FrontPage/>
                         <div class="rh-welcome-actions">
                             <button class="rh-btn" on:click=dismiss>
                                 {if has_agreement { "Accept & enter" } else { "Got it" }}

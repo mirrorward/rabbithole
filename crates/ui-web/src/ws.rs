@@ -73,6 +73,9 @@ pub type NoticeSink = Rc<dyn Fn(NoticeRoute)>;
 /// [`WhoList`](rabbithole_proto::presence::WhoList) reply). The core [`Event`]
 /// enum has no roster variant, so this rides its own sink like FILE/notices.
 pub type WhoSink = Rc<dyn Fn(Vec<crate::state::Presence>)>;
+
+/// Receives the burrow's front page (welcome-screen widgets) once per session.
+pub type FrontPageSink = Rc<dyn Fn(Vec<rabbithole_proto::welcome::WelcomeWidget>)>;
 /// A sink the transport pushes live roster deltas into (join/leave), keeping
 /// the presence list fresh between full [`WhoSink`] snapshots.
 pub type PresenceSink = Rc<dyn Fn(PresenceDelta)>;
@@ -116,6 +119,7 @@ struct Inner {
     file_sink: Option<FileSink>,
     notice_sink: Option<NoticeSink>,
     who_sink: Option<WhoSink>,
+    front_page_sink: Option<FrontPageSink>,
     presence_sink: Option<PresenceSink>,
     board_sink: Option<BoardSink>,
     thread_sink: Option<ThreadSink>,
@@ -178,6 +182,12 @@ impl Inner {
     fn emit_notice(&self, route: NoticeRoute) {
         if let Some(sink) = &self.notice_sink {
             sink(route);
+        }
+    }
+
+    fn emit_front_page(&self, widgets: Vec<rabbithole_proto::welcome::WelcomeWidget>) {
+        if let Some(sink) = &self.front_page_sink {
+            sink(widgets);
         }
     }
 
@@ -266,6 +276,7 @@ impl WsClient {
                 file_sink: None,
                 notice_sink: None,
                 who_sink: None,
+            front_page_sink: None,
                 presence_sink: None,
                 board_sink: None,
                 thread_sink: None,
@@ -324,6 +335,20 @@ impl WsClient {
 
     /// Register the roster sink (present-user screen names from a `WhoList`
     /// reply). The most recent registration wins.
+    /// Register the front-page sink (the burrow's welcome screen).
+    pub fn on_front_page(&mut self, sink: FrontPageSink) {
+        self.inner.borrow_mut().front_page_sink = Some(sink);
+    }
+
+    /// Ask the burrow for its front page — sent once the session is authenticated.
+    pub fn request_front_page(&self) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) = wire::welcome_screen_request(id).and_then(|f| encode_frame(&f)) {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
     pub fn on_who(&mut self, sink: WhoSink) {
         self.inner.borrow_mut().who_sink = Some(sink);
     }
@@ -680,6 +705,9 @@ impl WsClient {
                         }
                         if let Some(route) = wire::frame_to_notice_route(&frame) {
                             b.emit_notice(route);
+                        }
+                        if let Some(widgets) = wire::frame_to_front_page(&frame) {
+                            b.emit_front_page(widgets);
                         }
                         if let Some(roster) = wire::frame_to_who(&frame) {
                             b.emit_who(roster);

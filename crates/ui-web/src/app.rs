@@ -529,6 +529,9 @@ impl AppState {
                                     c.dispatch(cmd);
                                     // Pull the initial roster once signed in.
                                     c.request_who();
+                                    // …and the burrow's front page (its welcome
+                                    // screen: featured item, who's on, ticker).
+                                    c.request_front_page();
                                     // This burrow inherits the user's current status.
                                     c.set_presence(presence.get_untracked(), None);
                                 });
@@ -601,6 +604,9 @@ impl AppState {
                     });
                 }
                 state.update(|s| s.set_conn(c));
+            }));
+            ws.on_front_page(std::rc::Rc::new(move |widgets| {
+                state.update(|s| s.front_page = widgets)
             }));
             ws.on_who(std::rc::Rc::new(move |roster| {
                 state.update(|s| s.who = roster)

@@ -270,6 +270,10 @@ pub struct UiState {
     pub server_name: String,
     /// One-line status shown in the header bar.
     pub status: String,
+    /// The burrow's front page: the operator-curated welcome-screen widgets
+    /// (featured item, who's on now, unread DMs, ticker). Empty until the
+    /// `WelcomeScreen` reply lands.
+    pub front_page: Vec<rabbithole_proto::welcome::WelcomeWidget>,
     /// The burrow's post-auth welcome (message of the day + optional agreement),
     /// shown as a non-modal sheet until dismissed/accepted. `None` once handled.
     pub welcome: Option<Welcome>,
