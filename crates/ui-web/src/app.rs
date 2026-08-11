@@ -536,6 +536,12 @@ impl AppState {
                         // guests → cleared). Never the password.
                         crate::recent::remember(&ep, screen_name);
                         crate::recent::remember_token(&ep, token);
+                        // In the desktop shell, give the in-process swarm core its
+                        // own session to this burrow so downloads can resolve
+                        // sources + tickets and fetch multi-source. No-op on web.
+                        if crate::native::native_available() {
+                            crate::native::connect_native(&ep, token);
+                        }
                     }
                     Event::CommandFailed { .. } if resuming && !authed.get() => {
                         // An expired/invalid resume token: drop the dead token so

@@ -44,6 +44,37 @@ pub fn native_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Open the native core's own session to `endpoint` (the in-process RHP client
+/// that swarm downloads run on). The webview's WebSocket session is separate —
+/// the native core needs its own connection to ask "who has this blob?" and to
+/// get a capability ticket. Called once per burrow after the SPA authenticates;
+/// failures are non-fatal (downloads then fall back to the WS inline path).
+pub fn connect_native(endpoint: &str, token: &str) {
+    let Some(b) = bridge() else { return };
+    let Some(invoke) = method(&b, "invoke") else {
+        return;
+    };
+    let args = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &args,
+        &JsValue::from_str("endpoint"),
+        &JsValue::from_str(endpoint),
+    );
+    // The SPA dials over ws://, which needs no pinned cert fingerprint.
+    let _ = js_sys::Reflect::set(&args, &JsValue::from_str("fingerprint"), &JsValue::NULL);
+    // The resume token authenticates the native session onto the same account.
+    let _ = js_sys::Reflect::set(&args, &JsValue::from_str("token"), &JsValue::from_str(token));
+    if let Ok(ret) = invoke.call2(&b, &JsValue::from_str("connect_native"), &args) {
+        if let Ok(promise) = ret.dyn_into::<js_sys::Promise>() {
+            spawn_local(async move {
+                // Settle the promise; a failure just means swarm downloads are
+                // unavailable for this burrow (the WS path still works).
+                let _ = JsFuture::from(promise).await;
+            });
+        }
+    }
+}
+
 /// Invoke the native `swarm_start_download` command: fetch content `root_hex`
 /// (`size` bytes) named `name` from the swarm. Fire-and-forget — progress is
 /// delivered to the [`install_swarm_listener`] callback.

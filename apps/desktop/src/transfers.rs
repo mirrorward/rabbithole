@@ -32,14 +32,21 @@ pub fn native_available() -> bool {
 }
 
 /// Open a native RHP session to `endpoint` (QUIC needs `fingerprint`; `ws://` /
-/// `wss://` don't), stored for subsequent swarm downloads.
+/// `wss://` don't) and authenticate it, stored for subsequent swarm downloads.
+///
+/// The webview's WebSocket session and this in-process session are separate
+/// connections; the swarm core needs its own authenticated session because
+/// `swarm_find` / `swarm_ticket` are privileged. The caller passes the resume
+/// `token` it received from its own `AuthOk`, so the native session lands on the
+/// same account without re-prompting for a password.
 #[tauri::command]
 pub async fn connect_native(
     state: State<'_, TransfersManager>,
     endpoint: String,
     fingerprint: Option<String>,
+    token: Option<String>,
 ) -> Result<(), String> {
-    let client = Client::connect(
+    let mut client = Client::connect(
         &endpoint,
         None,
         fingerprint.as_deref(),
@@ -48,6 +55,26 @@ pub async fn connect_native(
     )
     .await
     .map_err(|e| e.to_string())?;
+    // Resume the caller's session so this client is authenticated. Without a
+    // token (guest sessions aren't resumable) the swarm commands will fail
+    // later with a clear error rather than silently misbehaving here.
+    let authed = if let Some(token) = token.as_deref().filter(|t| !t.is_empty()) {
+        client
+            .auth_resume(token, 0)
+            .await
+            .map_err(|e| format!("native session resume failed: {e}"))?;
+        client
+            .expect_welcome()
+            .await
+            .map_err(|e| format!("native session welcome failed: {e}"))?;
+        true
+    } else {
+        false
+    };
+    eprintln!(
+        "[rh-swarm] native core connected to {endpoint} (authenticated: {authed}) — swarm downloads {}",
+        if authed { "ready" } else { "unavailable (no resume token; guest?)" }
+    );
     *state.client.lock().await = Some(client);
     Ok(())
 }
@@ -76,6 +103,7 @@ pub async fn swarm_start_download(
     let root = parse_root(&root_hex)?;
     let dir = app.path().download_dir().map_err(|e| e.to_string())?;
     let dest = dir.join(sanitize_name(&name));
+    eprintln!("[rh-swarm] swarm_start_download: transfer={transfer_id} root={root_hex} size={size} name={name:?}");
     let mut guard = state.client.lock().await;
     let client = guard.as_mut().ok_or("not connected to a burrow")?;
     run_swarm_download(client, root, size, &dest, move |event| {
