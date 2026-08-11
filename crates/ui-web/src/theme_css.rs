@@ -302,6 +302,9 @@ pub const STYLESHEET: &str = "\
 .rh-fcol-name{display:flex;align-items:center;gap:.45rem;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
 .rh-fcol-size,.rh-fcol-kind,.rh-fcol-who,.rh-fcol-when{font-size:var(--rh-font-sm);color:var(--rh-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
 .rh-fcol-size{text-align:right;font-variant-numeric:tabular-nums}\
+.rh-dropzone{display:flex;flex-direction:column;gap:var(--rh-space-3);flex:1;min-height:0;border-radius:var(--rh-radius-lg);transition:background-color .15s ease,box-shadow .15s ease}\
+.rh-dropzone.dragging{background:color-mix(in srgb,var(--rh-accent) 8%,transparent);box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--rh-accent) 45%,transparent)}\
+.rh-toolbar-hint{font-size:var(--rh-font-sm);color:var(--rh-muted)}\
 .rh-file-filter{width:100%;margin:.35rem 0 .5rem}\
 .rh-mark{flex:none;display:inline-flex;line-height:0;border-radius:5px;overflow:hidden}\
 .rh-mark svg{display:block}\

@@ -76,6 +76,12 @@ web-sys = { workspace = true, features = [
     "Notification",
     "NotificationOptions",
     "NotificationPermission",
+    # Drag-and-drop + file-picker uploads (`src/upload.rs`).
+    "File",
+    "FileList",
+    "DataTransfer",
+    "DragEvent",
+    "HtmlInputElement",
     # Chimes (`src/sound.rs`): short synthesised tones, no audio assets.
     "AudioContext",
     "BaseAudioContext",

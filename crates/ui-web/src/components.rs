@@ -1879,6 +1879,11 @@ fn FolderBrowser() -> impl IntoView {
     // Type-to-filter state, and the rows that survive it. Folders always show:
     // filtering shouldn't strand you with no way back down the tree.
     let filter = create_rw_signal(String::new());
+    // The hidden file input the Upload button drives.
+    let picker = create_node_ref::<leptos::html::Input>();
+    // Drag-and-drop: highlight while a drag is over the folder, and take the
+    // drop. Guarded so a drag that carries no files does nothing.
+    let dragging = create_rw_signal(false);
     let visible = move || {
         let q = filter.get();
         files.with(|f| {
@@ -1902,6 +1907,24 @@ fn FolderBrowser() -> impl IntoView {
     };
 
     view! {
+        <div
+            class="rh-dropzone"
+            class:dragging=move || dragging.get()
+            on:dragover=move |ev| {
+                // Only claim the drag if it actually carries files.
+                ev.prevent_default();
+                dragging.set(true);
+            }
+            on:dragleave=move |_| dragging.set(false)
+            on:drop=move |ev| {
+                ev.prevent_default();
+                dragging.set(false);
+                #[cfg(target_arch = "wasm32")]
+                if let Some(list) = ev.data_transfer().and_then(|dt| dt.files()) {
+                    crate::upload::upload_file_list(app, list);
+                }
+            }
+        >
         <button class="rh-back" on:click=leave>"\u{2190} All areas"</button>
         <nav class="rh-crumbs" aria-label="Folder path">
             <For
@@ -1925,12 +1948,45 @@ fn FolderBrowser() -> impl IntoView {
             />
         </nav>
         <div class="rh-toolbar">
+            // A real picker (the old button uploaded a hardcoded "note.txt").
+            // The input is visually hidden; the button drives it, so the control
+            // is a proper button with a label instead of a raw file input.
+            <input
+                type="file"
+                multiple
+                class="rh-visually-hidden"
+                node_ref=picker
+                aria-hidden="true"
+                tabindex="-1"
+                on:change=move |ev| {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        use wasm_bindgen::JsCast;
+                        if let Some(input) = ev
+                            .target()
+                            .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+                        {
+                            if let Some(list) = input.files() {
+                                crate::upload::upload_file_list(app, list);
+                            }
+                            // Clear, so picking the same file twice still fires.
+                            input.set_value("");
+                        }
+                    }
+                    let _ = &ev;
+                }
+            />
             <button
                 class="rh-btn small"
-                on:click=move |_| app.upload("note.txt", b"hello from the web client".to_vec())
+                on:click=move |_| {
+                    if let Some(input) = picker.get() {
+                        input.click();
+                    }
+                }
             >
-                "Upload sample"
+                "\u{2191} Upload\u{2026}"
             </button>
+            <span class="rh-toolbar-hint">"or drop files here"</span>
         </div>
         <h2 class="rh-visually-hidden">"Folder contents"</h2>
         // Type-to-filter over the current folder — the fastest way through a
@@ -2027,6 +2083,7 @@ fn FolderBrowser() -> impl IntoView {
                 }
             />
         </ul>
+        </div>
     }
 }
 
