@@ -1439,3 +1439,16 @@
 {"ts":"2026-08-11T23:12:44.390Z","cmd":"screenshot","args":"/private/tmp/phone.png","origin":"http://127.0.0.1:8081/lobby","durationMs":36,"status":"ok","hasCookies":false,"mode":"launched"}
 {"ts":"2026-08-11T23:12:44.432Z","cmd":"js","args":"JSON.stringify({navPos: getComputedStyle(document.querySelector('.rh-subnav')).position, bottom: document.querySelector('.rh-subnav').getBoundingClientRect().bottom, vh: innerHeight})","origin":"http://127.0.0.1:8081/lobby","durationMs":1,"status":"ok","hasCookies":false,"mode":"launched"}
 {"ts":"2026-08-11T23:13:08.927Z","cmd":"viewport","args":"1280x820","origin":"http://127.0.0.1:8081/lobby","durationMs":2,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-11T23:16:49.995Z","cmd":"viewport","args":"900x520","origin":"http://127.0.0.1:8081/lobby","durationMs":2,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-11T23:16:50.091Z","cmd":"goto","args":"file:///private/tmp/sprites.html","origin":"file:///private/tmp/sprites.html","durationMs":55,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-11T23:16:51.288Z","cmd":"screenshot","args":"/private/tmp/sprites.png","origin":"file:///private/tmp/sprites.html","durationMs":62,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-11T23:18:00.011Z","cmd":"goto","args":"file:///private/tmp/sprites.html","origin":"file:///private/tmp/sprites.html","durationMs":7,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-11T23:18:01.086Z","cmd":"screenshot","args":"/private/tmp/sprites2.png","origin":"file:///private/tmp/sprites.html","durationMs":22,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-11T23:18:35.435Z","cmd":"goto","args":"file:///private/tmp/sprites.html","origin":"file:///private/tmp/sprites.html","durationMs":7,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-11T23:18:36.530Z","cmd":"screenshot","args":"/private/tmp/sprites3.png","origin":"file:///private/tmp/sprites.html","durationMs":32,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-11T23:19:29.762Z","cmd":"goto","args":"file:///private/tmp/sprites.html","origin":"file:///private/tmp/sprites.html","durationMs":5,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-11T23:19:30.846Z","cmd":"screenshot","args":"/private/tmp/sprites4.png","origin":"file:///private/tmp/sprites.html","durationMs":29,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-11T23:20:13.753Z","cmd":"viewport","args":"1280x820","origin":"file:///private/tmp/sprites.html","durationMs":3,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-11T23:20:13.847Z","cmd":"goto","args":"http://127.0.0.1:8081/","origin":"http://127.0.0.1:8081/","durationMs":56,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-11T23:20:17.906Z","cmd":"js","args":"JSON.stringify({marks: document.querySelectorAll('.rh-present svg[viewBox=\"0 0 8 8\"]').length, url: location.pathname})","origin":"http://127.0.0.1:8081/lobby","durationMs":1,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-11T23:20:18.001Z","cmd":"screenshot","args":"--selector .rh-present /private/tmp/roster.png","origin":"http://127.0.0.1:8081/lobby","durationMs":58,"status":"ok","hasCookies":false,"mode":"launched"}

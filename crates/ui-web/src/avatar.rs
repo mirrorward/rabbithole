@@ -1,106 +1,265 @@
-//! **Warren marks** — a deterministic pixel icon for every person.
+//! **Warren marks** — the little picture beside your name.
 //!
-//! Hotline's most-loved detail was the user icon: a little pixel creature beside
-//! every name, so you knew who was talking before you read the handle. We keep
-//! that soul without asking anyone to pick from a sprite sheet: a mark is derived
-//! from the person's identity, so it is stable everywhere they appear and
-//! identical for everyone looking at them.
+//! Hotline gave every user an icon from a library of hand-drawn pictures: a
+//! fish, a skull, a cat. Half the personality of a server was reading the
+//! roster. That's the thing worth keeping, and it's the thing a hash-shaped
+//! blob can't do — procedural identicons are *distinct*, but nobody has ever
+//! said "the one with the orange squiggle" and been understood.
 //!
-//! The seed is the **verified identity key** when the burrow reports one (so the
-//! same human wears the same face across burrows, even under different handles),
-//! else the handle. Pairs with the People view's key-based coalescing.
+//! So this is a drawn set, not a generated one: sixteen 8×8 sprites, each a
+//! silhouette that survives being 20px tall in a chat line. Which one you get
+//! is derived from your identity, so it's stable across sessions and devices
+//! without anything being stored, and it's *your* mark on every burrow you
+//! join. Two people can share a sprite; the colour and the name beside it are
+//! what separate them.
 //!
-//! Pure and host-tested: the grid and colour are a function of the seed alone.
-//! Only the SVG string is consumed by the view layer.
+//! The whole module is pure and host-tested — the sprites, the assignment, and
+//! the SVG — because an avatar that changes between renders would quietly break
+//! the one property it exists to provide.
 
-/// A person's pixel mark: a 5×5 grid (mirrored left-to-right, so it reads as a
-/// face/creature rather than noise) plus a palette colour.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Mark {
-    /// Row-major 5×5 cells; `true` = filled.
-    pub cells: [[bool; 5]; 5],
-    /// Index into [`PALETTE`].
-    pub color: usize,
-}
-
-/// Curated mark colours — warm and cool tones chosen to sit on both the light
-/// and dark grounds without vibrating, and to stay distinct from the accent
-/// (which the UI reserves for *your* actions).
+/// Colours a mark can be drawn in. Mid-tone on purpose: each has to stay legible
+/// on both a near-white and a near-black background, since a burrow's theme pack
+/// can put either behind it.
 pub const PALETTE: [&str; 8] = [
-    "#c2643c", // ember
+    "#c2643c", // clay
     "#3f8f6f", // moss
     "#4a6fa5", // slate blue
-    "#9a5b9c", // heather
+    "#9a5b9c", // plum
     "#b08434", // brass
     "#4d8f97", // teal
     "#a85566", // rose
     "#6b7f3a", // olive
 ];
 
-/// Build the mark for a seed (an identity key hex, or a handle).
+/// The sprite library. `#` is the mark's colour, `o` a dark detail (eyes,
+/// mouths), `*` a light one (a highlight, a glint), `.` is empty.
 ///
-/// The grid is symmetric: columns 0–2 come from the hash, columns 3–4 mirror
-/// columns 1–0. Fill density is nudged toward the middle so marks never come out
-/// blank or solid — both extremes are unrecognisable.
-pub fn mark(seed: &str) -> Mark {
-    let digest = blake3::hash(seed.trim().to_lowercase().as_bytes());
-    let bytes = digest.as_bytes();
+/// Drawn small deliberately: at 8×8 you can only state the silhouette, which is
+/// exactly what reads at 20px in a chat line. Detail added here disappears at
+/// the size it's actually used.
+const GLYPHS: [(&str, [&str; 8]); 16] = [
+    (
+        "rabbit",
+        [
+            ".#....#.", ".##..##.", ".##..##.", "..####..", ".#o##o#.", ".######.", ".#.##.#.",
+            "..####..",
+        ],
+    ),
+    (
+        "cat",
+        [
+            "#......#", "##....##", "########", "#o####o#", "##.##.##", "#..oo..#", "#.####.#",
+            ".######.",
+        ],
+    ),
+    (
+        "fox",
+        [
+            "#......#", "##....##", "########", "#o####o#", "########", ".#o##o#.", "..#oo#..",
+            "...##...",
+        ],
+    ),
+    (
+        "owl",
+        [
+            ".#....#.", ".######.", "#**##**#", "#*o##o*#", "##o##o##", "#.####.#", ".######.", "..#..#..",
+        ],
+    ),
+    (
+        "frog",
+        [
+            ".##..##.", "#oo##oo#", "########", "########", "#.####.#", ".######.", "##....##",
+            "#......#",
+        ],
+    ),
+    (
+        "fish",
+        [
+            "........", "..###...", ".#####.#", "#o######", "#o######", ".#####.#", "..###...",
+            "........",
+        ],
+    ),
+    (
+        "bee",
+        [
+            "..o..o..", "*.####.*", "**####**", "..oooo..", "..####..", "..oooo..", "..####..", "...##...",
+        ],
+    ),
+    (
+        "bird",
+        [
+            "........", "##....##", ".##..##.", "..####..", "...##...", "........", "........", "........",
+        ],
+    ),
+    (
+        "mushroom",
+        [
+            "..####..", ".#*##*#.", "########", "#*####*#", ".######.", "...##...", "...##...", "..####..",
+        ],
+    ),
+    (
+        "heart",
+        [
+            ".##..##.", "########", "########", "########", ".######.", "..####..", "...##...", "........",
+        ],
+    ),
+    (
+        "moon",
+        [
+            "..####..", ".#####..", "####....", "####....", "####....", "####....", ".#####..",
+            "..####..",
+        ],
+    ),
+    (
+        "star",
+        [
+            "...##...", "...##...", "..####..", "########", "########", "..####..", "...##...", "...##...",
+        ],
+    ),
+    (
+        "key",
+        [
+            ".####...", "#o..o#..", "#....#..", ".####...", "..##....", "..###...", "..##....",
+            "..###...",
+        ],
+    ),
+    (
+        "rocket",
+        [
+            "...##...", "..####..", "..#oo#..", "..####..", ".######.", "#.####.#", "#..##..#",
+            "..#..#..",
+        ],
+    ),
+    (
+        "crown",
+        [
+            "........", "#..##..#", "##.##.##", "########", "########", "#*#**#*#", "########", "........",
+        ],
+    ),
+    (
+        "ghost",
+        [
+            "..####..", ".######.", "#o####o#", "#o####o#", "########", "########", "########",
+            "#.#.#.#.",
+        ],
+    ),
+];
 
-    let mut cells = [[false; 5]; 5];
-    // 15 decisions (5 rows × 3 columns), one byte each — plenty of entropy.
-    for (row, cells_row) in cells.iter_mut().enumerate() {
-        for col in 0..3 {
-            let b = bytes[row * 3 + col];
-            // Bias the centre column slightly denser: it forms the spine, which
-            // keeps a mark reading as a figure rather than two loose halves.
-            let threshold = if col == 2 { 140 } else { 128 };
-            let on = b < threshold;
-            cells_row[col] = on;
-            // Mirror: col 0 -> 4, col 1 -> 3 (col 2 is the axis).
-            if col < 2 {
-                cells_row[4 - col] = on;
-            }
-        }
-    }
+/// Which sprite, in which colour, someone gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mark {
+    /// Index into [`GLYPHS`].
+    pub glyph: usize,
+    /// Index into [`PALETTE`].
+    pub color: usize,
+}
 
-    // Guard the degenerate extremes: an all-empty or all-full mark identifies
-    // no one. Flip the centre cell of the middle row to break the tie.
-    let filled = cells.iter().flatten().filter(|c| **c).count();
-    if filled == 0 || filled == 25 {
-        cells[2][2] = filled == 0;
-    }
-
-    Mark {
-        cells,
-        color: (bytes[31] as usize) % PALETTE.len(),
+impl Mark {
+    /// The sprite's name — "rabbit", "owl". Useful for a label, and for the
+    /// picker, where people choose by name.
+    pub fn name(&self) -> &'static str {
+        GLYPHS[self.glyph].0
     }
 }
 
-/// Render a mark as a self-contained inline SVG at `size` px — crisp at any
-/// scale, no image requests, and it inherits nothing from the page so it looks
-/// the same in both themes.
+/// How many sprites there are. Public so a picker can enumerate them without
+/// reaching into the table.
+pub const GLYPH_COUNT: usize = GLYPHS.len();
+
+/// The name of sprite `i`, wrapping if out of range.
+pub fn glyph_name(i: usize) -> &'static str {
+    GLYPHS[i % GLYPH_COUNT].0
+}
+
+/// The mark for a seed. Deterministic: the same identity always draws the same
+/// sprite in the same colour, on every device, with nothing persisted.
+pub fn mark(seed: &str) -> Mark {
+    let h = blake3::hash(seed.trim().to_lowercase().as_bytes());
+    let b = h.as_bytes();
+    // Separate bytes for sprite and colour so two people sharing a sprite are
+    // unlikely to also share its colour.
+    Mark {
+        glyph: b[0] as usize % GLYPH_COUNT,
+        color: b[1] as usize % PALETTE.len(),
+    }
+}
+
+/// Render a mark as a self-contained inline SVG, `size` pixels square.
+///
+/// Every pixel is its own `<rect>` — 64 at most, cheaper than the string
+/// concatenation around it — and `shape-rendering=crispEdges` keeps the grid
+/// from being antialiased into mush at small sizes. `aria-hidden` because the
+/// name always sits beside it; an avatar announced to a screen reader is noise.
 pub fn mark_svg(seed: &str, size: u32) -> String {
     let m = mark(seed);
-    let colour = PALETTE[m.color];
-    let mut rects = String::new();
-    for (row, cells_row) in m.cells.iter().enumerate() {
-        for (col, on) in cells_row.iter().enumerate() {
-            if *on {
-                rects.push_str(&format!(r#"<rect x="{col}" y="{row}" width="1" height="1"/>"#));
-            }
+    glyph_svg(m.glyph, m.color, size)
+}
+
+/// Render sprite `i` in colour `c`. Both indices wrap, so a stored choice from
+/// a future build with more sprites degrades to a real mark instead of a panic.
+pub fn glyph_svg(i: usize, c: usize, size: u32) -> String {
+    let color = PALETTE[c % PALETTE.len()];
+    let (dark, light) = (shade(color, 0.45), tint(color, 0.62));
+    let rows = &GLYPHS[i % GLYPH_COUNT].1;
+    let mut out = format!(
+        "<svg viewBox=\"0 0 8 8\" width=\"{size}\" height=\"{size}\" \
+         shape-rendering=\"crispEdges\" aria-hidden=\"true\" focusable=\"false\">\
+         <rect width=\"8\" height=\"8\" rx=\"1.6\" fill=\"{color}\" fill-opacity=\".16\"/>"
+    );
+    for (y, row) in rows.iter().enumerate() {
+        for (x, cell) in row.chars().enumerate() {
+            let fill = match cell {
+                '#' => color,
+                'o' => dark.as_str(),
+                '*' => light.as_str(),
+                _ => continue,
+            };
+            out.push_str(&format!(
+                "<rect x=\"{x}\" y=\"{y}\" width=\"1\" height=\"1\" fill=\"{fill}\"/>"
+            ));
         }
     }
+    out.push_str("</svg>");
+    out
+}
+
+/// Darken a `#rrggbb` toward black. Used for eyes and mouths, so they read as
+/// detail *within* the mark rather than as a second colour.
+fn shade(hex: &str, factor: f32) -> String {
+    let (r, g, b) = rgb(hex);
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 5 5" width="{size}" height="{size}" role="img" aria-hidden="true" shape-rendering="crispEdges"><rect width="5" height="5" rx="1.1" fill="{colour}" opacity="0.16"/><g fill="{colour}">{rects}</g></svg>"#
+        "#{:02x}{:02x}{:02x}",
+        (r as f32 * factor) as u8,
+        (g as f32 * factor) as u8,
+        (b as f32 * factor) as u8
     )
 }
 
-/// The seed for a person: their verified identity key when the burrow reports
-/// one (stable across burrows and handle changes), else their handle.
+/// Lighten a `#rrggbb` toward white, for highlights.
+fn tint(hex: &str, factor: f32) -> String {
+    let (r, g, b) = rgb(hex);
+    let up = |c: u8| (c as f32 + (255.0 - c as f32) * factor) as u8;
+    format!("#{:02x}{:02x}{:02x}", up(r), up(g), up(b))
+}
+
+/// Split `#rrggbb` into components. Only ever called on [`PALETTE`] entries,
+/// which a test pins to that exact shape.
+fn rgb(hex: &str) -> (u8, u8, u8) {
+    let h = hex.trim_start_matches('#');
+    let p = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0);
+    (p(0), p(2), p(4))
+}
+
+/// The seed to draw someone's mark from: their verified identity key when they
+/// have one, else their handle.
+///
+/// Keying on the identity means your mark follows you across burrows and
+/// survives a rename — and that someone taking your handle on another server
+/// doesn't inherit your face.
 pub fn seed_for(key: Option<&str>, handle: &str) -> String {
     match key {
-        Some(k) if !k.is_empty() => k.to_string(),
-        _ => handle.to_string(),
+        Some(k) if !k.trim().is_empty() => k.trim().to_lowercase(),
+        _ => handle.trim().to_lowercase(),
     }
 }
 
@@ -108,79 +267,110 @@ pub fn seed_for(key: Option<&str>, handle: &str) -> String {
 mod tests {
     use super::*;
 
-    fn filled(m: &Mark) -> usize {
-        m.cells.iter().flatten().filter(|c| **c).count()
-    }
-
     #[test]
-    fn marks_are_deterministic_and_case_insensitive() {
-        // The same person always wears the same face, everywhere.
-        assert_eq!(mark("alice"), mark("alice"));
-        assert_eq!(mark("Alice"), mark("alice"), "handle case doesn't change it");
-        assert_eq!(mark(" alice "), mark("alice"), "whitespace doesn't either");
-        // Different people look different.
-        assert_ne!(mark("alice"), mark("bob"));
-    }
-
-    #[test]
-    fn marks_are_mirror_symmetric() {
-        for who in ["alice", "bob", "carol", "the rabbit", ""] {
-            let m = mark(who);
-            for row in 0..5 {
-                assert_eq!(m.cells[row][0], m.cells[row][4], "{who}: col 0/4 mirror");
-                assert_eq!(m.cells[row][1], m.cells[row][3], "{who}: col 1/3 mirror");
+    fn every_sprite_is_a_well_formed_eight_by_eight() {
+        for (name, rows) in GLYPHS {
+            assert_eq!(rows.len(), 8, "{name} is not 8 rows");
+            for (y, row) in rows.iter().enumerate() {
+                assert_eq!(row.chars().count(), 8, "{name} row {y} is not 8 cells: {row:?}");
+                for c in row.chars() {
+                    assert!(
+                        matches!(c, '.' | '#' | 'o' | '*'),
+                        "{name} row {y} has an unknown cell {c:?}"
+                    );
+                }
             }
         }
     }
 
     #[test]
-    fn marks_are_never_blank_or_solid() {
-        // A blank or solid mark identifies nobody — check a broad sample.
-        for i in 0..500 {
-            let m = mark(&format!("user{i}"));
-            let n = filled(&m);
-            assert!(n > 0 && n < 25, "user{i} produced a degenerate mark ({n} cells)");
+    fn no_sprite_is_blank_solid_or_a_duplicate() {
+        // A blank sprite is an invisible user; a solid one is a colour swatch;
+        // a duplicate claims two people differ when they don't.
+        let mut seen: Vec<&[&str; 8]> = Vec::new();
+        for (name, rows) in &GLYPHS {
+            let filled = rows.iter().flat_map(|r| r.chars()).filter(|c| *c != '.').count();
+            assert!(filled > 8, "{name} is nearly blank ({filled} cells)");
+            assert!(filled < 60, "{name} is nearly solid ({filled} cells)");
+            assert!(!seen.contains(&rows), "{name} duplicates another sprite");
+            seen.push(rows);
         }
+        assert_eq!(GLYPH_COUNT, 16);
     }
 
     #[test]
-    fn marks_spread_across_the_palette() {
-        // All eight colours should show up over a realistic population.
-        let mut seen = [false; PALETTE.len()];
-        for i in 0..400 {
-            seen[mark(&format!("user{i}")).color] = true;
+    fn every_sprite_has_a_distinct_name() {
+        let mut names: Vec<&str> = GLYPHS.iter().map(|(n, _)| *n).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "two sprites share a name");
+    }
+
+    #[test]
+    fn a_mark_is_stable_and_case_insensitive() {
+        // The whole point of deriving it: no storage, same face everywhere.
+        assert_eq!(mark("alice"), mark("alice"));
+        assert_eq!(mark("Alice"), mark("alice"));
+        assert_eq!(mark(" alice "), mark("alice"));
+        assert_eq!(mark_svg("alice", 24), mark_svg("alice", 24));
+    }
+
+    #[test]
+    fn marks_spread_across_the_whole_library() {
+        // A hash that favoured a few sprites would make the roster look like
+        // everyone picked the same one.
+        let mut glyphs = [0usize; GLYPH_COUNT];
+        let mut colors = [0usize; PALETTE.len()];
+        for i in 0..600 {
+            let m = mark(&format!("user{i}"));
+            glyphs[m.glyph] += 1;
+            colors[m.color] += 1;
         }
-        assert!(seen.iter().all(|s| *s), "every palette colour is reachable");
+        assert!(glyphs.iter().all(|n| *n > 0), "some sprite is never chosen: {glyphs:?}");
+        assert!(colors.iter().all(|n| *n > 0), "some colour is never chosen: {colors:?}");
     }
 
     #[test]
     fn the_identity_key_wins_over_the_handle() {
-        // The same human under two handles keeps one face when their key is known…
-        let k = Some("deadbeef");
-        assert_eq!(
-            mark(&seed_for(k, "rabbit")),
-            mark(&seed_for(k, "mr_rabbit"))
-        );
-        // …and two strangers sharing a handle look different when keyed.
-        assert_ne!(
-            mark(&seed_for(Some("aaaa"), "rabbit")),
-            mark(&seed_for(Some("bbbb"), "rabbit"))
-        );
-        // Unkeyed people fall back to the handle.
-        assert_eq!(mark(&seed_for(None, "rabbit")), mark("rabbit"));
-        assert_eq!(mark(&seed_for(Some(""), "rabbit")), mark("rabbit"));
+        // Your mark follows your key, so a rename keeps your face and someone
+        // else taking your handle elsewhere doesn't get it.
+        assert_eq!(seed_for(Some("ABCD"), "alice"), "abcd");
+        assert_eq!(seed_for(None, "Alice"), "alice");
+        assert_eq!(seed_for(Some("  "), "alice"), "alice", "a blank key is no key");
     }
 
     #[test]
-    fn svg_is_self_contained_and_sized() {
-        let svg = mark_svg("alice", 24);
-        assert!(svg.starts_with("<svg"));
-        assert!(svg.contains(r#"width="24""#) && svg.contains(r#"height="24""#));
-        assert!(svg.contains(r#"viewBox="0 0 5 5""#));
-        // No external references — nothing to fetch, nothing to leak.
-        assert!(!svg.contains("http://") || svg.contains("www.w3.org/2000/svg"));
-        assert!(!svg.contains("<image"));
-        // Decorative: the name beside it carries the meaning for screen readers.
-        assert!(svg.contains(r#"aria-hidden="true""#));
+    fn the_svg_is_self_contained_and_silent_to_screen_readers() {
+        let svg = mark_svg("alice", 28);
+        assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"));
+        assert!(!svg.contains("http") && !svg.contains("<image"), "reaches off-page");
+        assert!(svg.contains("aria-hidden=\"true\""), "the name beside it is the label");
+        assert!(svg.contains("width=\"28\" height=\"28\""));
+        assert!(svg.contains("crispEdges"), "8x8 art must not be blurred");
+    }
+
+    #[test]
+    fn the_picker_renders_the_same_art_as_the_seeded_path() {
+        // Two renderers drawing the library differently would make the picker
+        // show you something other than what everyone else sees.
+        let m = mark("alice");
+        assert_eq!(glyph_svg(m.glyph, m.color, 28), mark_svg("alice", 28));
+        // And both wrap rather than panic on an out-of-range choice.
+        assert_eq!(glyph_svg(GLYPH_COUNT, 0, 16), glyph_svg(0, 0, 16));
+        assert_eq!(glyph_name(GLYPH_COUNT + 1), glyph_name(1));
+    }
+
+    #[test]
+    fn palette_entries_are_parseable_hex_and_shades_stay_in_range() {
+        for c in PALETTE {
+            assert!(c.len() == 7 && c.starts_with('#'), "{c} is not #rrggbb");
+            let (r, g, b) = rgb(c);
+            assert!(r as u16 + g as u16 + b as u16 > 0, "{c} parsed as black");
+            // Detail colours must actually differ from the body, or eyes vanish.
+            assert_ne!(shade(c, 0.45), c.to_string());
+            assert_ne!(tint(c, 0.62), c.to_string());
+            assert!(shade(c, 0.45).len() == 7 && tint(c, 0.62).len() == 7);
+        }
     }
 }
