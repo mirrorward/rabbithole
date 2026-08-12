@@ -443,12 +443,20 @@ body{overflow:hidden}\
 /* Settings + demo picker. */\
 /* The About window: a standalone, chromeless view, so it sets its own\
    vertical rhythm rather than inheriting the app body's panel layout. */\
-.rh-about{min-height:100%;display:flex;flex-direction:column;align-items:center;text-align:center;gap:.3rem;padding:1.9rem var(--rh-space-5) var(--rh-space-4);background:var(--rh-bg);color:var(--rh-text);overflow-y:auto}\
-.rh-about-mark{color:var(--rh-accent);line-height:0;margin-bottom:var(--rh-space-2)}\
-.rh-about-name{margin:0;font-size:1.6rem;font-weight:700;letter-spacing:-.02em}\
-.rh-about-tagline{margin:0;color:var(--rh-muted);font-size:var(--rh-font-sm)}\
-.rh-about-version{margin:.15rem 0 var(--rh-space-4);font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);color:var(--rh-muted)}\
-.rh-about-points{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--rh-space-2);text-align:left;width:100%;max-width:22rem}\
+.rh-about{min-height:100%;display:flex;flex-direction:column;align-items:center;text-align:center;padding:2rem var(--rh-space-5) var(--rh-space-4);background:var(--rh-bg);color:var(--rh-text);overflow-y:auto}\
+/* Deliberate vertical rhythm: the mark, then the name, then what it is, then\
+   what was built -- each a step apart rather than one crowded stack. */\
+.rh-about-mark{color:var(--rh-accent);line-height:0;margin:0 0 1.15rem}\
+.rh-about-name{margin:0 0 .45rem;font-size:1.65rem;font-weight:700;letter-spacing:-.02em}\
+.rh-about-tagline{margin:0 0 .85rem;color:var(--rh-muted);font-size:var(--rh-font-sm)}\
+.rh-about-version{margin:0 0 1.9rem;display:inline-flex;align-items:center;gap:.45rem;font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);color:var(--rh-muted)}\
+.rh-copy-btn{display:inline-grid;place-items:center;width:1.5rem;height:1.5rem;padding:0;border:1px solid color-mix(in srgb,var(--rh-text) 14%,transparent);border-radius:var(--rh-radius-sm);background:transparent;color:var(--rh-muted);cursor:pointer;transition:color .12s ease,border-color .12s ease,background-color .12s ease,transform .12s ease}\
+.rh-copy-btn:hover{color:var(--rh-text);background:color-mix(in srgb,var(--rh-text) 7%,transparent)}\
+/* The confirmation IS the animation: a tick, briefly, in the accent. */\
+.rh-copy-btn.done{color:var(--rh-accent);border-color:color-mix(in srgb,var(--rh-accent) 55%,transparent);background:color-mix(in srgb,var(--rh-accent) 12%,transparent);transform:scale(1.08)}\
+.rh-about-link{color:var(--rh-muted);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--rh-muted) 40%,transparent)}\
+.rh-about-link:hover{color:var(--rh-accent);border-bottom-color:var(--rh-accent)}\
+.rh-about-points{list-style:none;margin:0 0 var(--rh-space-4);padding:0;display:flex;flex-direction:column;gap:var(--rh-space-2);text-align:left;width:100%;max-width:22rem}\
 .rh-about-points li{display:flex;flex-direction:column;gap:.15rem;padding-left:.7rem;border-left:2px solid color-mix(in srgb,var(--rh-accent) 40%,transparent)}\
 .rh-about-point-k{font-weight:650;font-size:var(--rh-font-sm)}\
 .rh-about-point-v{color:var(--rh-muted);font-size:var(--rh-font-sm);line-height:1.45}\
@@ -468,6 +476,10 @@ body{overflow:hidden}\
 .rh-you-fact{border:1px solid color-mix(in srgb,var(--rh-text) 9%,transparent);border-radius:var(--rh-radius);padding:var(--rh-space-3)}\
 .rh-you-fact dt{font-weight:650;margin-bottom:.25rem}\
 .rh-you-fact dd{margin:0;color:var(--rh-muted);font-size:var(--rh-font-sm);line-height:1.5}\
+.rh-you-backup{display:flex;gap:var(--rh-space-2);flex-wrap:wrap;margin-bottom:var(--rh-space-2)}\
+.rh-restore{border:1px solid color-mix(in srgb,var(--rh-error) 35%,transparent);border-radius:var(--rh-radius);padding:var(--rh-space-3);display:flex;flex-direction:column;gap:var(--rh-space-2);max-width:42rem}\
+.rh-restore-warn{margin:0;color:var(--rh-error);font-size:var(--rh-font-sm);line-height:1.45}\
+.rh-restore-text{min-height:7rem;font-family:var(--rh-font-mono);font-size:var(--rh-font-xs)}\
 .rh-mark-picker{display:flex;flex-wrap:wrap;gap:.4rem;margin:.4rem 0}\
 .rh-mark-choice{display:grid;place-items:center;width:2.6rem;height:2.6rem;padding:0;border:1px solid transparent;border-radius:var(--rh-radius);background:transparent;cursor:pointer;line-height:0}\
 .rh-mark-choice:hover{background:color-mix(in srgb,var(--rh-text) 6%,transparent)}\

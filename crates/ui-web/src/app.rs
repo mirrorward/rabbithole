@@ -1305,6 +1305,31 @@ impl AppState {
         })
     }
 
+    /// A recovery document for the current identity, or `None` when there
+    /// isn't one to back up.
+    pub fn identity_backup(&self) -> Option<String> {
+        self.identity
+            .with_value(|id| id.as_ref().map(crate::identity::backup_json))
+    }
+
+    /// Replace the local identity from a recovery document. Returns the new
+    /// fingerprint, or a message explaining why the file was refused.
+    pub fn restore_identity(&self, text: &str) -> Result<String, String> {
+        let id = crate::identity::restore_from_backup(text)?;
+        let fp = id.fingerprint();
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::identity::adopt(&id);
+            self.you.set(Some(id.you()));
+            self.identity.set_value(Some(id));
+            // Friendships were signed by the OLD key and mean nothing under
+            // the new one; keeping them would show a badge no signature backs.
+            self.friends.set(Vec::new());
+            crate::friend::storage::save(&[]);
+        }
+        Ok(fp)
+    }
+
     /// Pick (or clear) your own mark. Persisted immediately, like settings.
     pub fn set_my_mark(&self, mark: Option<crate::avatar::ChosenMark>) {
         self.my_mark.set(mark);
@@ -1972,10 +1997,6 @@ fn BurrowRail() -> impl IntoView {
     // Hidden on the login/connect screen (route `/`), a full-bleed form.
     let hidden = move || crate::palette::is_chromeless(&location.pathname.get());
 
-    let go_home = {
-        let navigate = navigate.clone();
-        move |_| navigate("/lobby", Default::default())
-    };
     let go_people = {
         let navigate = navigate.clone();
         move |_| navigate("/people", Default::default())
@@ -2000,8 +2021,8 @@ fn BurrowRail() -> impl IntoView {
         let path = location.pathname.get();
         path.trim_end_matches('/') == route
     };
-    // "Home" means "in a burrow" — it's lit for any of that burrow's sections,
-    // not just the lobby it navigates to.
+    // Which scope the rail is showing: in a burrow, the focused tile is where
+    // you are; in the warren, one of the warren icons is.
     let in_burrow = move || {
         crate::palette::scope_of(&location.pathname.get()) == crate::palette::Scope::Burrow
     };
@@ -2016,16 +2037,6 @@ fn BurrowRail() -> impl IntoView {
             class:warren=move || { !in_burrow() }
             aria-label="Burrows"
         >
-            <button
-                class="rh-rail-tile rh-rail-home"
-                class:active=in_burrow
-                aria-current=move || in_burrow().then_some("page")
-                title="Home"
-                aria-label="Home"
-                on:click=go_home
-            >
-                <span class="rh-rail-glyph" inner_html=crate::icons::rail_icon("home")></span>
-            </button>
             <button
                 class="rh-rail-tile rh-rail-unified"
                 class:active=move || at("/people")

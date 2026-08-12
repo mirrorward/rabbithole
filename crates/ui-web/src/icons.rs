@@ -169,6 +169,22 @@ pub fn about_mark() -> String {
     .to_string()
 }
 
+/// Copy: the two-sheets glyph every platform uses for it.
+pub fn copy_icon() -> String {
+    format!(
+        "{OPEN}{}</svg>",
+        concat!(
+            "<rect x=\"9\" y=\"9\" width=\"11\" height=\"11\" rx=\"2.2\"/>",
+            "<path d=\"M15 5.6a2.2 2.2 0 0 0-2.2-2.2H6.2A2.2 2.2 0 0 0 4 5.6v6.6a2.2 2.2 0 0 0 2.2 2.2\"/>"
+        )
+    )
+}
+
+/// The tick a copy control shows for a moment instead of a notification.
+pub fn check_icon() -> String {
+    format!("{OPEN}<path d=\"M4.8 12.6l4.6 4.6L19.2 7.4\"/></svg>")
+}
+
 /// Settings: sliders — *your* app's console, distinct from Admin's operator
 /// console for a burrow.
 pub fn settings_icon() -> String {

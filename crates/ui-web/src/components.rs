@@ -294,7 +294,7 @@ pub fn People() -> impl IntoView {
 /// here is always the number that was actually built.
 #[component]
 pub fn About() -> impl IntoView {
-    let app = expect_context::<AppState>();
+    let copied = create_rw_signal(false);
     let build = build_info();
     let version = build.0.clone();
     let sha = build.1.clone();
@@ -305,13 +305,42 @@ pub fn About() -> impl IntoView {
             <h1 class="rh-about-name" id=a11y::VIEW_TITLE_ID tabindex="-1">"RabbitHole"</h1>
             <p class="rh-about-tagline">"A warren client \u{2014} many burrows, one you."</p>
             <p class="rh-about-version">
-                {move || {
-                    if sha.is_empty() {
-                        format!("Version {version}")
-                    } else {
-                        format!("Version {version} \u{00b7} {sha}")
+                <span>
+                    {move || {
+                        if sha.is_empty() {
+                            format!("Version {version}")
+                        } else {
+                            format!("Version {version} \u{00b7} {sha}")
+                        }
+                    }}
+                </span>
+                // Copy belongs next to the thing it copies. It confirms by
+                // becoming a tick for a moment — a toast for an action whose
+                // result is invisible-but-expected is more interruption than
+                // information.
+                <button
+                    class="rh-copy-btn"
+                    class:done=move || copied.get()
+                    title="Copy version and build"
+                    aria-label="Copy version and build"
+                    on:click=move |_| {
+                        let v = if sha_copy.is_empty() {
+                            build_info().0
+                        } else {
+                            format!("{} ({})", build_info().0, sha_copy)
+                        };
+                        copy_text_quiet(&format!("RabbitHole {v}"));
+                        copied.set(true);
+                        set_timeout(move || copied.set(false), std::time::Duration::from_millis(1400));
                     }
-                }}
+                    inner_html=move || {
+                        if copied.get() {
+                            crate::icons::check_icon()
+                        } else {
+                            crate::icons::copy_icon()
+                        }
+                    }
+                ></button>
             </p>
 
             <ul class="rh-about-points">
@@ -339,21 +368,19 @@ pub fn About() -> impl IntoView {
             </ul>
 
             <div class="rh-about-foot">
-                <span class="rh-about-copy">"\u{00a9} Mirrorward"</span>
+                <a
+                    class="rh-about-link"
+                    href="https://mirrorward.co"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >"\u{00a9} Mirrorward"</a>
                 <span class="rh-about-dot" aria-hidden="true">"\u{00b7}"</span>
-                <span class="rh-about-site">"rabbit.direct"</span>
-                <button
-                    class="rh-btn ghost small"
-                    title="Copy version and build"
-                    on:click=move |_| {
-                        let v = if sha_copy.is_empty() {
-                            build_info().0
-                        } else {
-                            format!("{} ({})", build_info().0, sha_copy)
-                        };
-                        copy_text(&format!("RabbitHole {v}"), app);
-                    }
-                >"Copy build"</button>
+                <a
+                    class="rh-about-link"
+                    href="https://rabbit.direct"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >"rabbit.direct"</a>
             </div>
         </main>
     }
@@ -1024,6 +1051,8 @@ pub fn WelcomeSheet() -> impl IntoView {
 pub fn You() -> impl IntoView {
     let app = expect_context::<AppState>();
     let picking = create_rw_signal(false);
+    let restoring = create_rw_signal(false);
+    let restore_text = create_rw_signal(String::new());
     view! {
         <StatusBar/>
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
@@ -1160,6 +1189,61 @@ pub fn You() -> impl IntoView {
 
                             // What the key is for, in plain sections rather
                             // than one intimidating paragraph.
+                            <h3 class="rh-person-h2">"Backup and restore"</h3>
+                            <p class="rh-settings-note">
+                                "Your key lives only on this machine. Back it up and you can be \
+                                 the same person on another device \u{2014} or after a reinstall. \
+                                 Lose it with no backup and that identity is gone: nobody can \
+                                 reissue it, which is the point of it being yours."
+                            </p>
+                            <div class="rh-you-backup">
+                                <button class="rh-btn" on:click=move |_| backup_identity(app)>
+                                    "Back up identity\u{2026}"
+                                </button>
+                                <button
+                                    class="rh-btn ghost"
+                                    on:click=move |_| restoring.update(|r| *r = !*r)
+                                >
+                                    {move || if restoring.get() { "Cancel" } else { "Restore\u{2026}" }}
+                                </button>
+                            </div>
+                            <Show when=move || restoring.get() fallback=|| ()>
+                                <div class="rh-restore">
+                                    <p class="rh-restore-warn">
+                                        "Restoring replaces the identity on this machine. Anything \
+                                         signed by the current key \u{2014} your friendships \u{2014} \
+                                         stops applying, so back this one up first if you might \
+                                         want it back."
+                                    </p>
+                                    <textarea
+                                        class="rh-input rh-restore-text"
+                                        placeholder="Paste the contents of your identity backup file\u{2026}"
+                                        aria-label="Identity backup contents"
+                                        prop:value=restore_text
+                                        on:input=move |ev| restore_text.set(event_target_value(&ev))
+                                    ></textarea>
+                                    <button
+                                        class="rh-btn"
+                                        prop:disabled=move || restore_text.get().trim().is_empty()
+                                        on:click=move |_| {
+                                            match app.restore_identity(&restore_text.get()) {
+                                                Ok(fp) => {
+                                                    restore_text.set(String::new());
+                                                    restoring.set(false);
+                                                    app.notify(
+                                                        crate::toasts::ToastKind::Success,
+                                                        format!("Restored identity {fp}."),
+                                                    );
+                                                }
+                                                Err(why) => {
+                                                    app.notify(crate::toasts::ToastKind::Warn, why);
+                                                }
+                                            }
+                                        }
+                                    >"Restore this identity"</button>
+                                </div>
+                            </Show>
+
                             <h3 class="rh-person-h2">"What this key does"</h3>
                             <dl class="rh-you-facts">
                                 <div class="rh-you-fact">
@@ -1203,6 +1287,89 @@ pub fn You() -> impl IntoView {
             </section>
         </main>
     }
+}
+
+/// Download the identity backup as a file.
+///
+/// A file, not a clipboard copy: a private key in the clipboard is one paste
+/// away from a chat window, and a backup you deliberately save is one you can
+/// actually keep.
+fn backup_identity(app: AppState) {
+    let Some(doc) = app.identity_backup() else {
+        app.notify(
+            crate::toasts::ToastKind::Warn,
+            "No identity to back up yet.".to_string(),
+        );
+        return;
+    };
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+        let name = app
+            .you
+            .get_untracked()
+            .map(|y| format!("rabbithole-identity-{}.json", y.fingerprint))
+            .unwrap_or_else(|| "rabbithole-identity.json".to_string());
+        let parts = js_sys::Array::of1(&wasm_bindgen::JsValue::from_str(&doc));
+        let opts = web_sys::BlobPropertyBag::new();
+        opts.set_type("application/json");
+        let saved = web_sys::Blob::new_with_str_sequence_and_options(&parts, &opts)
+            .ok()
+            .and_then(|blob| web_sys::Url::create_object_url_with_blob(&blob).ok())
+            .and_then(|url| {
+                let document = web_sys::window()?.document()?;
+                let a = document
+                    .create_element("a")
+                    .ok()?
+                    .dyn_into::<web_sys::HtmlAnchorElement>()
+                    .ok()?;
+                a.set_href(&url);
+                a.set_download(&name);
+                a.click();
+                let _ = web_sys::Url::revoke_object_url(&url);
+                Some(())
+            });
+        app.notify(
+            if saved.is_some() {
+                crate::toasts::ToastKind::Success
+            } else {
+                crate::toasts::ToastKind::Warn
+            },
+            if saved.is_some() {
+                "Saved your identity backup \u{2014} keep it somewhere only you can read."
+                    .to_string()
+            } else {
+                "Couldn't save the backup file here.".to_string()
+            },
+        );
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = doc;
+}
+
+/// Copy without a toast — for buttons that confirm in place (see the About
+/// window's copy control). Best-effort: a context with no clipboard simply
+/// does nothing, which the caller's own animation already implies.
+fn copy_text_quiet(text: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use js_sys::{Function, Reflect};
+        use wasm_bindgen::{JsCast, JsValue};
+        if let Some(w) = web_sys::window() {
+            let nav = JsValue::from(w.navigator());
+            let _ = Reflect::get(&nav, &"clipboard".into())
+                .ok()
+                .and_then(|clip| {
+                    let f = Reflect::get(&clip, &"writeText".into())
+                        .ok()?
+                        .dyn_into::<Function>()
+                        .ok()?;
+                    f.call1(&clip, &JsValue::from_str(text)).ok()
+                });
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = text;
 }
 
 /// Copy text to the clipboard, with a toast either way — a Copy button that

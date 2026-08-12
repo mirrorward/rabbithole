@@ -103,6 +103,9 @@ where headless-verifiable, tested:
 - **You page redesign** — mark hero with a picker (16 faces x 8 colours, persisted,
   honestly labelled local-only), copyable fingerprint, public key behind a
   disclosure, and what the key does as four plain cards.
+- **Identity backup/restore** — export a recovery document (seed + public key +
+  fingerprint, self-warning), restore it with a tamper check; About window spacing,
+  in-place copy, real links; the meaningless "Home" rail tile is gone.
 - **About window** — a themed SPA route in its own window (not the system panel),
   reporting the workspace version + git SHA stamped at build time; the binary is
   named RabbitHole so Command-Tab says so.

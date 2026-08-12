@@ -63,6 +63,67 @@ impl Identity {
     }
 }
 
+/// Recovery-document format version.
+pub const BACKUP_VERSION: u32 = 1;
+
+/// Serialise this identity as a recovery document: everything needed to become
+/// you again on another machine, and nothing else.
+///
+/// The seed **is** the private key, so this is a credential, not a settings
+/// export. Plain JSON on purpose — a recovery file you can't read is one you
+/// can't check — and it carries its own warning so the danger travels with the
+/// bytes rather than living only in the UI that produced them.
+pub fn backup_json(id: &Identity) -> String {
+    format!(
+        "{{\n  \"rabbithole_identity\": {BACKUP_VERSION},\n  \"warning\": \"{}\",\n  \"fingerprint\": \"{}\",\n  \"public_key\": \"{}\",\n  \"secret_seed\": \"{}\"\n}}\n",
+        "This file contains your private key. Anyone who has it can be you on every burrow. Keep it somewhere only you can read.",
+        id.fingerprint(),
+        id.public_hex(),
+        hex::encode(id.seed()),
+    )
+}
+
+/// Parse a recovery document back into an identity.
+///
+/// Lenient about *shape* (any JSON carrying a 64-hex `secret_seed` restores,
+/// so a hand-edited or re-serialised file still works) and strict about
+/// *substance*: the seed must be 32 bytes, and when the document also carries
+/// a public key it must be the one that seed derives — a mismatch means the
+/// file was altered, and restoring it would hand you a different identity than
+/// the one you backed up.
+pub fn restore_from_backup(text: &str) -> Result<Identity, String> {
+    let seed_hex = json_string_field(text, "secret_seed").ok_or_else(|| {
+        "No secret_seed in that file \u{2014} is it a RabbitHole identity backup?".to_string()
+    })?;
+    let bytes =
+        hex::decode(seed_hex.trim()).map_err(|_| "The secret_seed isn't valid hex.".to_string())?;
+    let seed: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("A seed is 32 bytes; that one is {}.", bytes.len()))?;
+    let id = Identity::from_seed(seed);
+    if let Some(claimed) = json_string_field(text, "public_key") {
+        if !claimed.trim().eq_ignore_ascii_case(&id.public_hex()) {
+            return Err(
+                "That file's public key doesn't match its seed \u{2014} it has been altered."
+                    .to_string(),
+            );
+        }
+    }
+    Ok(id)
+}
+
+/// The value of a `"name": "value"` pair — enough for a four-field document,
+/// without pulling a JSON parser into the wasm bundle for it.
+fn json_string_field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let key = format!("\"{name}\"");
+    let after = &text[text.find(&key)? + key.len()..];
+    let after = after.trim_start().strip_prefix(':')?.trim_start();
+    let rest = after.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
 /// The shareable, secret-free view of the local identity — what the "You" hub
 /// shows and what (later) rides on presence/profile for verified de-dup.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,6 +157,16 @@ mod persist {
     }
 
     /// Load the persisted identity, or mint + persist a fresh one on first run.
+    /// Replace the stored identity — the restore half of a backup.
+    ///
+    /// Everything keyed to the old identity (friendships you signed, the marks
+    /// people see beside your name) belongs to that key, not this app, so a
+    /// restore is a *change of person*, not a settings tweak. The caller warns
+    /// before this runs.
+    pub fn adopt(id: &Identity) {
+        save_seed(&id.seed());
+    }
+
     pub fn load_or_create() -> Identity {
         if let Some(seed) = load_seed() {
             return Identity::from_seed(seed);
@@ -127,11 +198,65 @@ mod persist {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use persist::load_or_create;
+pub use persist::{adopt, load_or_create};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_backup_round_trips_into_the_same_identity() {
+        let id = Identity::from_seed([3u8; 32]);
+        let doc = backup_json(&id);
+        let back = restore_from_backup(&doc).expect("round-trips");
+        assert_eq!(back.public_hex(), id.public_hex());
+        assert_eq!(back.seed(), id.seed());
+        // The danger travels with the bytes, not just the UI that made them.
+        assert!(doc.contains("private key"), "the file warns about itself");
+        assert!(doc.contains(&id.fingerprint()), "readable enough to check");
+    }
+
+    #[test]
+    fn a_tampered_backup_is_refused_rather_than_silently_restoring() {
+        let id = Identity::from_seed([4u8; 32]);
+        let other = Identity::from_seed([5u8; 32]);
+        // A file whose public key doesn't match its seed would hand you a
+        // DIFFERENT identity than the one you thought you backed up.
+        let doc = backup_json(&id).replace(&id.public_hex(), &other.public_hex());
+        let err = match restore_from_backup(&doc) {
+            Err(e) => e,
+            Ok(_) => panic!("a tampered backup must not restore"),
+        };
+        assert!(err.contains("altered"), "{err}");
+    }
+
+    #[test]
+    fn junk_is_rejected_with_a_reason_a_person_can_act_on() {
+        for (input, want) in [
+            ("", "No secret_seed"),
+            ("{}", "No secret_seed"),
+            (r#"{"secret_seed":"nothex!!"}"#, "valid hex"),
+            (r#"{"secret_seed":"aabb"}"#, "32 bytes"),
+        ] {
+            let err = match restore_from_backup(input) {
+                Err(e) => e,
+                Ok(_) => panic!("{input:?} must not restore"),
+            };
+            assert!(err.contains(want), "{input:?} => {err}");
+        }
+    }
+
+    #[test]
+    fn a_backup_without_a_public_key_still_restores() {
+        // Hand-edited or re-serialised files are common; only the seed is
+        // load-bearing, so shape is lenient where substance is strict.
+        let id = Identity::from_seed([6u8; 32]);
+        let doc = format!(r#"{{"secret_seed": "{}"}}"#, hex::encode(id.seed()));
+        assert_eq!(
+            restore_from_backup(&doc).unwrap().public_hex(),
+            id.public_hex()
+        );
+    }
 
     #[test]
     fn identity_is_deterministic_and_distinct() {
