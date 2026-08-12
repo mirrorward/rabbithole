@@ -409,6 +409,28 @@ impl UiState {
         self.loading.boards = false;
     }
 
+    /// Replace the thread list with what the server sent, and mark it arrived.
+    ///
+    /// Assign `threads`/`posts` through these setters, never directly: the
+    /// tests below cover the setters, so a sink that writes the field itself
+    /// passes every test and still hangs the view on a skeleton.
+    ///
+    /// Every loading flag has to be cleared by the same call that supplies the
+    /// data. The live sink used to assign `state.threads` directly, which left
+    /// `loading.threads` set forever — so a board with no threads showed a
+    /// loading skeleton in place of its empty state, permanently.
+    pub fn set_threads(&mut self, threads: Vec<Thread>) {
+        self.threads = threads;
+        self.loading.threads = false;
+    }
+
+    /// Replace the open thread's posts and mark them arrived. Same contract as
+    /// [`set_threads`](Self::set_threads).
+    pub fn set_posts(&mut self, posts: Vec<Post>) {
+        self.posts = posts;
+        self.loading.posts = false;
+    }
+
     /// Select a board: record the slug, load its threads and reset any open
     /// thread. Mirrors the shape a future `Event::BoardSelected` would take.
     pub fn select_board(&mut self, slug: &str, threads: Vec<Thread>) {
@@ -637,6 +659,16 @@ mod tests {
         assert!(!s.loading.members);
         s.set_dm_threads(vec![]);
         assert!(!s.loading.dms);
+        s.set_threads(vec![]);
+        assert!(
+            !s.loading.threads,
+            "threads cleared on arrival (even when empty)"
+        );
+        s.set_posts(vec![]);
+        assert!(!s.loading.posts);
+        // Re-raise: selecting a board is also an arrival path.
+        s.loading.threads = true;
+        s.loading.posts = true;
         s.select_board("general", vec![]);
         assert!(!s.loading.threads);
         s.open_thread("t1".into(), vec![]);

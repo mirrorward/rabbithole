@@ -17,7 +17,14 @@ fn main() {
     // effect-after-dispose panic in the 0.148.0 scroll work was found).
     #[cfg(target_arch = "wasm32")]
     std::panic::set_hook(Box::new(|info| {
-        web_sys::console::error_1(&format!("panic: {info}").into());
+        // The message alone names the *library* line that gave up, which for a
+        // reactive-graph panic is always somewhere inside leptos and never the
+        // code that caused it. Throwing away a JS `Error` at the moment of the
+        // panic captures the call stack that got us there, so the wasm frames
+        // in between name the real culprit.
+        let stack = js_sys::Reflect::get(&js_sys::Error::new("panic"), &"stack".into())
+            .unwrap_or_else(|_| "<no stack>".into());
+        web_sys::console::error_2(&format!("panic: {info}").into(), &stack);
     }));
     rabbithole_ui_web::mount();
 }

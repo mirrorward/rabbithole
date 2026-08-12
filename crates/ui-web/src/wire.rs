@@ -302,8 +302,18 @@ pub fn post_create(
     body: &str,
     id: RequestId,
 ) -> Result<Frame, ProtoError> {
-    Frame::request(id, &PostCreate::new(board, subject, body))
+    let mut post = PostCreate::new(board, subject, body);
+    // The composer emits markdown, so say so. `PostCreate::new` defaults to
+    // text/plain, and the field has been on the wire since Wave 3 precisely so
+    // that a reader — this client, telnet, a QWK packet — can tell the
+    // difference instead of guessing from the body.
+    post.mime = MIME_MARKDOWN.into();
+    Frame::request(id, &post)
 }
+
+/// The body MIME the composer produces. See [`crate::markdown`] for why the
+/// stored form is markdown rather than HTML.
+pub const MIME_MARKDOWN: &str = "text/markdown";
 
 /// Build a [`PostCreate`] frame for a **reply** to the thread rooted at
 /// `parent`. A reply carries no subject of its own.
@@ -315,6 +325,7 @@ pub fn post_reply(
 ) -> Result<Frame, ProtoError> {
     let mut post = PostCreate::new(board, "", body);
     post.parent = Some(parent);
+    post.mime = MIME_MARKDOWN.into();
     Frame::request(id, &post)
 }
 

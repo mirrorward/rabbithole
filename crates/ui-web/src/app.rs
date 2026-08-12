@@ -310,7 +310,7 @@ impl AppState {
     /// somewhere else.
     pub fn focus(&self, id: &ServerId) {
         self.mark_read(&self.focused_id.get_untracked());
-        self.focused_id.set(id.clone());
+        self.set_focus(id.clone());
         self.mark_read(id);
     }
 
@@ -365,7 +365,22 @@ impl AppState {
             self.sessions
                 .update(|list| list.push((id.clone(), session)));
         }
-        self.focused_id.set(id);
+        self.set_focus(id);
+    }
+
+    /// Focus `id`, but only actually write the signal when it changes.
+    ///
+    /// `focused_id` drives the shell's remount: writing it rebuilds the whole
+    /// routed tree. `RwSignal::set` notifies unconditionally — it does not
+    /// compare — so re-focusing the burrow you are already on used to tear the
+    /// live view down and stand a new one up. Anything mid-flight in the old
+    /// tree (a board's thread request, here) then resolved against a disposed
+    /// owner and panicked, which is why opening a board could leave its
+    /// skeleton up forever.
+    fn set_focus(&self, id: ServerId) {
+        if self.focused_id.get_untracked() != id {
+            self.focused_id.set(id);
+        }
     }
 
     /// The effective appearance [`Mode`], resolved from the user's
@@ -640,10 +655,10 @@ impl AppState {
                 state.update(|s| s.set_boards(boards))
             }));
             ws.on_threads(std::rc::Rc::new(move |threads| {
-                state.update(|s| s.threads = threads)
+                state.update(|s| s.set_threads(threads))
             }));
             ws.on_posts(std::rc::Rc::new(move |posts| {
-                state.update(|s| s.posts = posts)
+                state.update(|s| s.set_posts(posts))
             }));
             ws.on_dm_threads(std::rc::Rc::new(move |threads| {
                 state.update(|s| s.set_dm_threads(threads))

@@ -100,6 +100,9 @@ where headless-verifiable, tested:
   round-trip, which needs `cargo tauri dev` on a real machine.
 - **Verified identity** across proto/server/web/CLI, hardened against relay.
 - **An adversarial review** (13 fixes) + a security-review relay fix.
+- **Rich text** — a formatting bar + markdown mode over chat, DMs and board posts,
+  rendered on display through a written, host-tested markdown renderer that escapes
+  first and allowlists link schemes. Posts now declare `text/markdown` on the wire.
 - **Warren marks are drawn, not generated** — sixteen 8x8 sprites (rabbit, fox, owl,
   ghost, crown...) assigned from your identity, replacing the procedural blobs.
 - **Left section sidebar** — the nav moved out of the header (nine destinations plus
