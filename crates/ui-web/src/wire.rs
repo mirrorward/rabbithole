@@ -869,8 +869,19 @@ pub enum FileEvent {
         /// Range length in bytes.
         len: usize,
     },
-    /// A FILE request failed.
+    /// A FILE request failed, with no transfer to attach it to (a list or
+    /// metadata request).
     Failed(String),
+    /// A *specific transfer* failed. Keyed by id rather than "the most recent
+    /// running one", because with two downloads in flight that guess marks the
+    /// wrong row — and `retryable` tells the UI whether offering Retry is
+    /// honest or just a button that will fail the same way.
+    TransferFailed {
+        transfer_id: u64,
+        detail: String,
+        sources_tried: u64,
+        retryable: bool,
+    },
 }
 
 /// The swarm work-unit size, mirroring `rabbithole_swarm::UNIT_SIZE` (1 MiB).
@@ -903,6 +914,27 @@ pub enum SwarmWireEvent {
         bytes: u64,
         per_source: Vec<(String, u64)>,
     },
+    /// The fetch gave up. `reason` is the engine's own words (no sources, a
+    /// verification failure, the origin refusing a ticket) — a red row that
+    /// can't say which of those happened is a dead end for the user.
+    Failed {
+        transfer_id: u64,
+        reason: String,
+        /// Sources that were tried, so "no sources" and "three sources all
+        /// failed" are visibly different problems.
+        sources_tried: u64,
+        /// Whether trying again could plausibly work. A file nobody holds
+        /// won't appear because you clicked Retry; a peer that timed out
+        /// might. Offering Retry either way trains people to ignore it.
+        #[serde(default = "yes")]
+        retryable: bool,
+    },
+}
+
+/// `serde` default for [`SwarmWireEvent::Failed::retryable`] — an older shell
+/// that doesn't send the field gets the forgiving answer.
+fn yes() -> bool {
+    true
 }
 
 /// Translate a native [`SwarmWireEvent`] into the [`FileEvent`]s that drive the
@@ -945,6 +977,20 @@ pub fn swarm_event_to_file_events(ev: &SwarmWireEvent, size: u64) -> Vec<FileEve
             transfer_id: *transfer_id,
             size: *bytes,
             server_have: *bytes,
+        }],
+        // A failure the user can act on: the engine's reason plus how many
+        // sources were tried, because "nobody has this file" and "three peers
+        // all refused" call for different next steps.
+        SwarmWireEvent::Failed {
+            transfer_id,
+            reason,
+            sources_tried,
+            retryable,
+        } => vec![FileEvent::TransferFailed {
+            transfer_id: *transfer_id,
+            detail: reason.clone(),
+            sources_tried: *sources_tried,
+            retryable: *retryable,
         }],
     }
 }
@@ -1928,6 +1974,52 @@ mod tests {
             frame_to_file_events(&frame),
             vec![FileEvent::NodeUpdated(node)]
         );
+    }
+
+    #[test]
+    fn a_swarm_failure_reaches_the_ui_with_its_reason() {
+        // The engine always knew why; this is the path that keeps it.
+        let ev = SwarmWireEvent::Failed {
+            transfer_id: 7,
+            reason: "no source could serve 3 remaining unit(s)".into(),
+            sources_tried: 3,
+            retryable: true,
+        };
+        match swarm_event_to_file_events(&ev, 1024).as_slice() {
+            [FileEvent::TransferFailed {
+                transfer_id,
+                detail,
+                sources_tried,
+                retryable,
+            }] => {
+                // Keyed by id: with two downloads in flight, "the most recent
+                // running transfer" marks the wrong row.
+                assert_eq!(*transfer_id, 7);
+                assert!(detail.contains("no source could serve"), "{detail}");
+                assert_eq!(*sources_tried, 3);
+                assert!(*retryable);
+            }
+            other => panic!("expected one TransferFailed, got {other:?}"),
+        }
+        // A file nobody holds is not going to appear because you clicked
+        // Retry — so that failure says so.
+        let none = SwarmWireEvent::Failed {
+            transfer_id: 7,
+            reason: "no peer has this file".into(),
+            sources_tried: 0,
+            retryable: false,
+        };
+        match swarm_event_to_file_events(&none, 1024).as_slice() {
+            [FileEvent::TransferFailed {
+                sources_tried,
+                retryable,
+                ..
+            }] => {
+                assert_eq!(*sources_tried, 0);
+                assert!(!*retryable, "nothing to retry against");
+            }
+            other => panic!("expected one TransferFailed, got {other:?}"),
+        }
     }
 
     #[test]

@@ -32,6 +32,15 @@ impl Tracker {
     }
 }
 
+/// How many sources one download may pull from at once.
+///
+/// The swarm engine runs **one worker per source**, so this number *is* the
+/// parallelism. More sources finish sooner and survive a peer dropping out
+/// mid-transfer; on a metered or narrow link they also compete for the same
+/// pipe, which is why it's a choice rather than a constant.
+pub const DEFAULT_MAX_SOURCES: u32 = 8;
+pub const MAX_SOURCES_CEILING: u32 = 32;
+
 /// Everything on the Settings page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
@@ -41,6 +50,17 @@ pub struct Settings {
     pub reconnect_on_launch: bool,
     /// Show OS notifications for DMs and mentions while the window is away.
     pub notifications: bool,
+    /// Sources per download — see [`DEFAULT_MAX_SOURCES`].
+    ///
+    /// `#[serde(default)]` is load-bearing: a stored `rh.settings.v1` blob
+    /// written before this field existed must still parse, or adding a
+    /// setting would silently wipe someone's tracker list.
+    #[serde(default = "default_max_sources")]
+    pub max_sources: u32,
+}
+
+fn default_max_sources() -> u32 {
+    DEFAULT_MAX_SOURCES
 }
 
 impl Default for Settings {
@@ -49,8 +69,16 @@ impl Default for Settings {
             trackers: vec![Tracker::new(DEFAULT_TRACKER)],
             reconnect_on_launch: true,
             notifications: true,
+            max_sources: DEFAULT_MAX_SOURCES,
         }
     }
+}
+
+/// Clamp a requested source count into something a fetch can actually use.
+/// Zero would mean "no sources", which is not a setting, it's a broken
+/// download; the ceiling stops a typo from opening 10,000 sockets.
+pub fn clamp_max_sources(n: u32) -> u32 {
+    n.clamp(1, MAX_SOURCES_CEILING)
 }
 
 /// Normalise a typed tracker address: trim, drop any scheme and trailing path,
@@ -116,6 +144,27 @@ pub mod storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_written_before_a_field_existed_still_load() {
+        // The real hazard of adding a setting: a stored blob from an older
+        // build must not fail to parse, or the user loses their trackers.
+        let old = r#"{"trackers":[{"host":"t.example","enabled":true}],
+                     "reconnect_on_launch":false,"notifications":false}"#;
+        let s: Settings = serde_json::from_str(old).expect("older blobs still parse");
+        assert_eq!(s.trackers.len(), 1);
+        assert!(!s.reconnect_on_launch);
+        assert_eq!(s.max_sources, DEFAULT_MAX_SOURCES, "new field takes its default");
+    }
+
+    #[test]
+    fn the_source_count_is_clamped_to_something_usable() {
+        // Zero sources isn't a preference, it's a broken download.
+        assert_eq!(clamp_max_sources(0), 1);
+        assert_eq!(clamp_max_sources(1), 1);
+        assert_eq!(clamp_max_sources(8), 8);
+        assert_eq!(clamp_max_sources(10_000), MAX_SOURCES_CEILING);
+    }
 
     #[test]
     fn a_fresh_install_knows_one_tracker() {

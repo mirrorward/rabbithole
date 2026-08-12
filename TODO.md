@@ -103,6 +103,9 @@ where headless-verifiable, tested:
 - **You page redesign** — mark hero with a picker (16 faces x 8 colours, persisted,
   honestly labelled local-only), copyable fingerprint, public key behind a
   disclosure, and what the key does as four plain cards.
+- **Failed transfers say why, and retry** — the reason rides on the transfer (keyed
+  by id, not "the most recent"), sources-tried is shown, Retry resumes from the
+  .rhstate, and sources-per-download is a Settings slider.
 - **Looking Glass is live** — pulls rabbithole.directory (HTTPS JSON, CORS-open),
   falls back to a tracker's INDEX line protocol via the native shell, and labels
   which source answered.

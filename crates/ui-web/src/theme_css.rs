@@ -476,6 +476,11 @@ body{overflow:hidden}\
 .rh-you-fact{border:1px solid color-mix(in srgb,var(--rh-text) 9%,transparent);border-radius:var(--rh-radius);padding:var(--rh-space-3)}\
 .rh-you-fact dt{font-weight:650;margin-bottom:.25rem}\
 .rh-you-fact dd{margin:0;color:var(--rh-muted);font-size:var(--rh-font-sm);line-height:1.5}\
+.rh-xfer-error{display:flex;align-items:center;gap:var(--rh-space-2);flex-wrap:wrap;margin-top:.3rem;padding:.35rem .5rem;border-radius:var(--rh-radius);background:color-mix(in srgb,var(--rh-error) 10%,transparent);border:1px solid color-mix(in srgb,var(--rh-error) 30%,transparent)}\
+.rh-xfer-why{flex:1;min-width:0;color:var(--rh-error);font-size:var(--rh-font-sm);overflow-wrap:anywhere}\
+.rh-settings-range{display:flex;flex-direction:column;gap:.25rem;max-width:26rem;margin-bottom:var(--rh-space-2)}\
+.rh-settings-range-label{font-size:var(--rh-font-sm);color:var(--rh-muted)}\
+.rh-settings-range input[type=range]{width:100%;accent-color:var(--rh-accent)}\
 .rh-glass-bar{display:flex;gap:var(--rh-space-2);align-items:center}\
 .rh-glass-bar .rh-input{flex:1;min-width:0}\
 .rh-glass-source{margin:.3rem 0 var(--rh-space-3);font-size:var(--rh-font-xs);color:var(--rh-muted)}\

@@ -99,6 +99,7 @@ pub async fn swarm_start_download(
     root_hex: String,
     size: u64,
     name: String,
+    max_sources: u32,
 ) -> Result<(), String> {
     let root = parse_root(&root_hex)?;
     let dir = app.path().download_dir().map_err(|e| e.to_string())?;
@@ -106,12 +107,32 @@ pub async fn swarm_start_download(
     eprintln!("[rh-swarm] swarm_start_download: transfer={transfer_id} root={root_hex} size={size} name={name:?}");
     let mut guard = state.client.lock().await;
     let client = guard.as_mut().ok_or("not connected to a burrow")?;
-    run_swarm_download(client, root, size, &dest, move |event| {
-        let _ = app.emit("swarm://event", TransferEvent { transfer_id, event });
+    // A failure is reported to the webview as an event, not just returned:
+    // the UI's transfer row is driven by the event stream, and an error that
+    // only comes back through the invoke promise leaves that row saying
+    // nothing about what happened.
+    let emit_app = app.clone();
+    let result = run_swarm_download(client, root, size, &dest, max_sources as usize, move |event| {
+        let _ = emit_app.emit("swarm://event", TransferEvent { transfer_id, event });
     })
-    .await
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    .await;
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let reason = e.to_string();
+            let _ = app.emit(
+                "swarm://event",
+                TransferEvent {
+                    transfer_id,
+                    event: crate::swarm::SwarmEvent::Failed {
+                        reason: reason.clone(),
+                        sources_tried: 0,
+                    },
+                },
+            );
+            Err(reason)
+        }
+    }
 }
 
 /// Reduce a server-supplied filename to a bare, safe basename so it can't escape

@@ -518,6 +518,35 @@ pub fn Settings() -> impl IntoView {
                     <button class="rh-btn" on:click=move |_| add(())>"Add"</button>
                 </div>
 
+                <h3 class="rh-person-h2">"Downloads"</h3>
+                <p class="rh-settings-note">
+                    "A download pulls from every source that has a piece of the file \u{2014} \
+                     other burrows and other people \u{2014} in parallel. More sources finish \
+                     sooner and survive a peer dropping out; on a metered or narrow link they \
+                     also compete for the same pipe."
+                </p>
+                <label class="rh-settings-range">
+                    <span class="rh-settings-range-label">
+                        "Sources per download: "
+                        <strong>{move || app.settings.get().max_sources}</strong>
+                    </span>
+                    <input
+                        type="range"
+                        min="1"
+                        max=crate::settings::MAX_SOURCES_CEILING.to_string()
+                        prop:value=move || app.settings.get().max_sources.to_string()
+                        on:input=move |ev| {
+                            let n = event_target_value(&ev).parse::<u32>().unwrap_or(
+                                crate::settings::DEFAULT_MAX_SOURCES,
+                            );
+                            app.settings.update(|s| {
+                                s.max_sources = crate::settings::clamp_max_sources(n)
+                            });
+                            app.save_settings();
+                        }
+                    />
+                </label>
+
                 <h3 class="rh-person-h2">"On launch"</h3>
                 <label class="rh-settings-check">
                     <input
@@ -858,7 +887,7 @@ pub fn Transfers() -> impl IntoView {
                     <ul class="rh-xfers">
                         <For
                             each=move || app.all_transfers()
-                            key=|(burrow, t)| (burrow.clone(), t.id, t.done, t.status)
+                            key=|(burrow, t)| (burrow.clone(), t.id, t.done, t.status, t.error.clone())
                             children=move |(burrow, t)| {
                                 let pct = if let Some(pct) = t.done.min(t.total).saturating_mul(100)
                                     .checked_div(t.total)
@@ -892,6 +921,17 @@ pub fn Transfers() -> impl IntoView {
                                         format!("blake3 {h}")
                                     }
                                 });
+                                // The reason, when there is one — the whole
+                                // point of the row for a failed transfer.
+                                let failure = matches!(t.status, TransferStatus::Failed).then(|| {
+                                    (
+                                        t.error.clone().unwrap_or_else(|| {
+                                            "The transfer stopped without saying why.".to_string()
+                                        }),
+                                        t.retryable && t.node_id.is_some(),
+                                        t.id,
+                                    )
+                                });
                                 view! {
                                     <li class="rh-xfer-item">
                                         <div class="rh-xfer-row">
@@ -906,10 +946,40 @@ pub fn Transfers() -> impl IntoView {
                                         </div>
                                         <div class="rh-xfer-detail">
                                             {hash.map(|h| view! { <span class="rh-xfer-hash">{h}</span> })}
-                                            <span class="rh-swarmpill" title="Multi-source swarming is native-only; this download has one source for now.">
-                                                {format!("1 source \u{00b7} {burrow}")}
-                                            </span>
+                                            // What this transfer actually used.
+                                            // A real count when the swarm
+                                            // reported one; the honest
+                                            // single-source note otherwise.
+                                            {match t.sources {
+                                                Some(n) => view! {
+                                                    <span class="rh-swarmpill" title="Sources this download pulled from">
+                                                        {format!(
+                                                            "{n} source{} \u{00b7} {burrow}",
+                                                            if n == 1 { "" } else { "s" },
+                                                        )}
+                                                    </span>
+                                                }.into_view(),
+                                                None => view! {
+                                                    <span class="rh-swarmpill" title="Multi-source swarming is native-only; this download has one source for now.">
+                                                        {format!("1 source \u{00b7} {burrow}")}
+                                                    </span>
+                                                }.into_view(),
+                                            }}
                                         </div>
+                                        // A failed transfer says WHY, and
+                                        // offers to try again when trying
+                                        // again could plausibly work.
+                                        {failure.map(|(why, retryable, id)| view! {
+                                            <div class="rh-xfer-error">
+                                                <span class="rh-xfer-why">{why}</span>
+                                                <Show when=move || { retryable } fallback=|| ()>
+                                                    <button
+                                                        class="rh-btn ghost small"
+                                                        on:click=move |_| app.retry_transfer(id)
+                                                    >"Try again"</button>
+                                                </Show>
+                                            </div>
+                                        })}
                                     </li>
                                 }
                             }

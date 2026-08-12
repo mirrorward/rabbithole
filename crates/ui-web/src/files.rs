@@ -41,7 +41,9 @@ pub enum TransferStatus {
     Active,
     /// Finished successfully.
     Done,
-    /// Aborted or errored.
+    /// Aborted or errored. Carries **why**: the reason arrives with the
+    /// failure event and used to be dropped on the floor, leaving a red row
+    /// that couldn't tell you anything.
     Failed,
 }
 
@@ -63,6 +65,19 @@ pub struct Transfer {
     /// The content's blake3 hash (hex), when known — the content-addressed id
     /// the swarm keys on. `None` for the ticketed path until the node is known.
     pub hash: Option<String>,
+    /// Why this transfer failed, when it did. Set from the failure event's
+    /// own detail — the transport always knew; the UI just wasn't keeping it.
+    pub error: Option<String>,
+    /// How many sources the last attempt pulled from, when the swarm reported
+    /// it. `None` for the inline (single-source) path.
+    pub sources: Option<u32>,
+    /// The file node this transfer came from, so a failed transfer can be
+    /// retried without hunting for it again.
+    pub node_id: Option<i64>,
+    /// Whether retrying could plausibly work. A file nobody holds won't appear
+    /// because you clicked Retry; a peer that timed out might. Offering Retry
+    /// either way trains people to ignore the button.
+    pub retryable: bool,
 }
 
 /// Format a 32-byte blob id as lowercase hex.
@@ -133,6 +148,10 @@ impl FilesState {
                     done: *size as u64,
                     status: TransferStatus::Done,
                     hash: node.blob_id.as_ref().map(blob_hex),
+                    error: None,
+                    sources: None,
+                    node_id: Some(node.id),
+                    retryable: true,
                 });
                 self.status = format!("Downloaded {} ({})", node.name, human_size(*size as i64));
             }
@@ -159,6 +178,10 @@ impl FilesState {
                         TransferStatus::Queued
                     },
                     hash: None,
+                    error: None,
+                    sources: None,
+                    node_id: None,
+                    retryable: true,
                 });
             }
             FileEvent::ChunkReceived {
@@ -183,13 +206,59 @@ impl FilesState {
             }
             FileEvent::Failed(detail) => {
                 self.status = format!("Error: {detail}");
-                // The most recent still-running transfer is the likely victim.
+                // No transfer id on this one (a list or metadata request), so
+                // the most recent still-running transfer is the best guess.
                 if let Some(t) =
                     self.transfers.iter_mut().rev().find(|t| {
                         matches!(t.status, TransferStatus::Queued | TransferStatus::Active)
                     })
                 {
                     t.status = TransferStatus::Failed;
+                    // Keep the reason ON the transfer. It was already in hand
+                    // here and thrown away, which is why a failed row could
+                    // only ever say "Failed".
+                    t.error = Some(detail.clone());
+                }
+            }
+            FileEvent::TransferFailed {
+                transfer_id,
+                detail,
+                sources_tried,
+                retryable,
+            } => {
+                self.status = format!("Error: {detail}");
+                match self.transfers.iter_mut().find(|t| t.id == *transfer_id) {
+                    Some(t) => {
+                        t.status = TransferStatus::Failed;
+                        t.error = Some(detail.clone());
+                        t.sources = Some(*sources_tried as u32);
+                        t.retryable = *retryable;
+                    }
+                    // A download can fail *before* any transfer is opened (no
+                    // sources found, the origin refusing a ticket). Recording
+                    // the failure as a row is the difference between "it told
+                    // me why" and a click that appears to do nothing at all.
+                    None => {
+                        let name = self.name_for_transfer(*transfer_id);
+                        let node_id = self
+                            .nodes
+                            .iter()
+                            .find(|n| n.id as u64 == *transfer_id)
+                            .map(|n| n.id);
+                        self.transfers.push(Transfer {
+                            id: *transfer_id,
+                            name,
+                            dir: TransferDir::Download,
+                            total: 0,
+                            done: 0,
+                            status: TransferStatus::Failed,
+                            hash: None,
+                            error: Some(detail.clone()),
+                            sources: Some(*sources_tried as u32),
+                            node_id,
+                            retryable: *retryable,
+                        });
+                    }
                 }
             }
         }
@@ -459,6 +528,75 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_transfer_keeps_why_and_which_row() {
+        let mut s = FilesState::default();
+        // Two downloads in flight — the case that made "the most recent
+        // running transfer" the wrong answer.
+        s.apply(&FileEvent::TransferOpened {
+            transfer_id: 1,
+            size: 100,
+            server_have: 0,
+        });
+        s.apply(&FileEvent::TransferOpened {
+            transfer_id: 2,
+            size: 100,
+            server_have: 0,
+        });
+        s.apply(&FileEvent::TransferFailed {
+            transfer_id: 1,
+            detail: "peer refused the ticket".into(),
+            sources_tried: 2,
+            retryable: true,
+        });
+        let one = s.transfers.iter().find(|t| t.id == 1).unwrap();
+        let two = s.transfers.iter().find(|t| t.id == 2).unwrap();
+        assert_eq!(one.status, TransferStatus::Failed);
+        assert_eq!(one.error.as_deref(), Some("peer refused the ticket"));
+        assert_eq!(one.sources, Some(2));
+        assert!(one.retryable);
+        // The other download is untouched — the id decides, not recency.
+        assert_ne!(two.status, TransferStatus::Failed);
+        assert!(two.error.is_none());
+    }
+
+    #[test]
+    fn a_failure_before_the_transfer_opened_still_becomes_a_row() {
+        // No sources found means the download never opened a transfer. Without
+        // a row the click looks like it did nothing at all.
+        let mut s = FilesState::default();
+        s.apply(&FileEvent::TransferFailed {
+            transfer_id: 42,
+            detail: "no peer has this file".into(),
+            sources_tried: 0,
+            retryable: false,
+        });
+        assert_eq!(s.transfers.len(), 1);
+        assert_eq!(s.transfers[0].id, 42);
+        assert_eq!(s.transfers[0].status, TransferStatus::Failed);
+        assert_eq!(s.transfers[0].error.as_deref(), Some("no peer has this file"));
+    }
+
+    #[test]
+    fn an_unretryable_failure_says_so() {
+        let mut s = FilesState::default();
+        s.apply(&FileEvent::TransferOpened {
+            transfer_id: 9,
+            size: 10,
+            server_have: 0,
+        });
+        s.apply(&FileEvent::TransferFailed {
+            transfer_id: 9,
+            detail: "no peer has this file".into(),
+            sources_tried: 0,
+            retryable: false,
+        });
+        let t = &s.transfers[0];
+        assert_eq!(t.status, TransferStatus::Failed);
+        assert!(!t.retryable, "a file nobody holds won't appear on retry");
+        assert_eq!(t.sources, Some(0));
+    }
+
+    #[test]
     fn zero_byte_transfer_progress_edge() {
         let t = Transfer {
             id: 1,
@@ -468,6 +606,10 @@ mod tests {
             done: 0,
             status: TransferStatus::Active,
             hash: None,
+            error: None,
+            sources: None,
+            node_id: None,
+            retryable: true,
         };
         assert_eq!(t.progress(), 0.0);
         let done = Transfer {

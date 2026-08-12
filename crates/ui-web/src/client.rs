@@ -114,6 +114,10 @@ pub struct MockClient {
     sink: Option<crate::wire::EventSink>,
 }
 
+/// The seeded file whose download always fails — so the failure path (reason,
+/// sources tried, Retry) can be exercised in the demo. Named for what it does.
+pub const FAILING_DEMO_FILE: &str = "broken-mirror.lha";
+
 /// A seeded demo burrow: enough personality that switching between two of them
 /// is visibly switching *places*, not re-rendering the same fixture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,6 +427,15 @@ impl MockClient {
                 "Start here.",
             ),
             file(
+                7,
+                "warez",
+                FAILING_DEMO_FILE,
+                FAILING_DEMO_FILE,
+                4_194_304,
+                "application/x-lzh",
+                "Demo: this download always fails, so the failure UI is testable.",
+            ),
+            file(
                 3,
                 "warez",
                 "lister.lha",
@@ -472,6 +485,16 @@ impl MockClient {
                 None => vec![FileEvent::Failed(format!("no node #{id}"))],
             },
             FileCommand::Download { id } => match self.file_nodes.iter().find(|n| n.id == id) {
+                // One seeded file always fails, so the failure path — the
+                // reason, the source count, Retry — is exercisable in the demo
+                // without staging a broken swarm. Its name says so.
+                Some(n) if n.name == FAILING_DEMO_FILE => vec![FileEvent::TransferFailed {
+                    transfer_id: n.id as u64,
+                    detail: "no peer could serve 3 of 40 units \u{2014}                              the last source dropped mid-transfer"
+                        .into(),
+                    sources_tried: 2,
+                    retryable: true,
+                }],
                 Some(n) => {
                     let bytes = vec![0u8; n.size.max(0) as usize];
                     file_events(&FileContent::new(n.clone(), bytes))
@@ -1063,7 +1086,9 @@ mod tests {
     #[test]
     fn file_list_folder_filters_by_parent() {
         let mut c = MockClient::new();
-        // Root of "warez": the utils folder + readme.txt (not the nested lha).
+        // Root of "warez": everything at the top level, and NOT the nested
+        // archive. Asserted by identity rather than a bare count, so seeding
+        // another demo file doesn't fail a test about *filtering*.
         let root = c.dispatch_file(FileCommand::ListFolder {
             area: "warez".into(),
             path: None,
@@ -1071,9 +1096,13 @@ mod tests {
         let [FileEvent::FolderListed { nodes }] = root.as_slice() else {
             panic!("expected a folder listing");
         };
-        assert_eq!(nodes.len(), 2);
         assert!(nodes.iter().any(|n| n.name == "utils"));
         assert!(nodes.iter().any(|n| n.name == "readme.txt"));
+        assert!(nodes.iter().any(|n| n.name == FAILING_DEMO_FILE));
+        assert!(
+            !nodes.iter().any(|n| n.name == "lister.lha"),
+            "the nested archive belongs to utils/, not the root"
+        );
 
         // Inside utils: just the nested archive.
         let sub = c.dispatch_file(FileCommand::ListFolder {

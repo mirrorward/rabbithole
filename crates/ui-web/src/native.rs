@@ -84,6 +84,7 @@ pub fn start_swarm_download(
     root_hex: &str,
     size: u64,
     name: &str,
+    max_sources: u32,
 ) {
     let Some(b) = bridge() else { return };
     let Some(invoke) = method(&b, "invoke") else {
@@ -107,18 +108,41 @@ pub fn start_swarm_download(
         &JsValue::from_f64(size as f64),
     );
     let _ = js_sys::Reflect::set(&args, &JsValue::from_str("name"), &JsValue::from_str(name));
+    // How many sources this fetch may use at once — the engine runs one worker
+    // per source, so this is the parallelism the user chose in Settings.
+    let _ = js_sys::Reflect::set(
+        &args,
+        &JsValue::from_str("maxSources"),
+        &JsValue::from_f64(max_sources as f64),
+    );
     if let Ok(ret) = invoke.call2(&b, &JsValue::from_str("swarm_start_download"), &args) {
         if let Ok(promise) = ret.dyn_into::<js_sys::Promise>() {
             // Await the command; if it rejects (undeterminable size, no source,
             // connect failure) mark the seeded Transfer Failed so it doesn't hang
             // at 0% — routing to the session that owns it, not the focused one.
             spawn_local(async move {
-                if JsFuture::from(promise).await.is_err() {
+                if let Err(err) = JsFuture::from(promise).await {
+                    // The shell's own words, not a constant: the command
+                    // rejects with the reason ("not connected to a burrow",
+                    // "root must be 64 hex chars"…), and replacing it with
+                    // "swarm download failed" was the last place the cause
+                    // got thrown away.
+                    let detail = err
+                        .as_string()
+                        .or_else(|| {
+                            js_sys::Reflect::get(&err, &JsValue::from_str("message"))
+                                .ok()
+                                .and_then(|m| m.as_string())
+                        })
+                        .unwrap_or_else(|| "the download could not be started".to_string());
                     if let Some(files) = app.transfer_session_files(transfer_id) {
                         files.update(|f| {
-                            f.apply(&crate::wire::FileEvent::Failed(
-                                "swarm download failed".into(),
-                            ))
+                            f.apply(&crate::wire::FileEvent::TransferFailed {
+                                transfer_id,
+                                detail,
+                                sources_tried: 0,
+                                retryable: true,
+                            })
                         });
                     }
                 }
@@ -165,7 +189,8 @@ fn apply_swarm_event(app: AppState, ev: &SwarmWireEvent) {
     let tid = match ev {
         SwarmWireEvent::Opened { transfer_id, .. }
         | SwarmWireEvent::Chunk { transfer_id, .. }
-        | SwarmWireEvent::Done { transfer_id, .. } => *transfer_id,
+        | SwarmWireEvent::Done { transfer_id, .. }
+        | SwarmWireEvent::Failed { transfer_id, .. } => *transfer_id,
     };
     // The download's own session (seeded the Transfer at start). If it's gone
     // (session closed), drop the event rather than leak a phantom into whatever

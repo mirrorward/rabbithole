@@ -1514,12 +1514,66 @@ impl AppState {
                         server_have: 0,
                     })
                 });
-                crate::native::start_swarm_download(*self, transfer_id, &root_hex, size, &name);
+                // Remember which node this transfer came from so a failure
+                // can be retried without hunting for it again.
+                self.focused().files.update(|f| {
+                    if let Some(t) = f.transfers.iter_mut().find(|t| t.id == transfer_id) {
+                        t.node_id = Some(id);
+                    }
+                });
+                let max_sources = crate::settings::clamp_max_sources(
+                    self.settings.get_untracked().max_sources,
+                );
+                crate::native::start_swarm_download(
+                    *self,
+                    transfer_id,
+                    &root_hex,
+                    size,
+                    &name,
+                    max_sources,
+                );
                 return;
             }
             // No content hash (e.g. a legacy blob): fall through to the WS path.
         }
         self.dispatch_file(FileCommand::Download { id });
+    }
+
+    /// Try a failed transfer again.
+    ///
+    /// Retrying *is* resuming: the swarm engine keeps a `.rhstate` beside the
+    /// destination listing the units already verified, so a second attempt
+    /// re-fetches only what's missing — and re-runs source discovery, which is
+    /// the point when the last attempt failed because a peer went away.
+    pub fn retry_transfer(&self, transfer_id: u64) {
+        let node = self.focused().files.with_untracked(|f| {
+            f.transfers
+                .iter()
+                .find(|t| t.id == transfer_id)
+                .and_then(|t| t.node_id)
+        });
+        match node {
+            Some(id) => {
+                self.focused().files.update(|f| {
+                    if let Some(t) = f.transfers.iter_mut().find(|t| t.id == transfer_id) {
+                        t.status = crate::files::TransferStatus::Queued;
+                        t.error = None;
+                        t.done = 0;
+                    }
+                });
+                self.download(id);
+            }
+            // A transfer we didn't start from a known node (a resumed queue
+            // entry from a previous run) has nothing to retry against — say so
+            // rather than pretending the button did something.
+            None => {
+                self.notify(
+                    crate::toasts::ToastKind::Warn,
+                    "That transfer's file isn't in view \u{2014} open its folder and download it again."
+                        .to_string(),
+                );
+            }
+        }
     }
 
     /// Upload a small file into the current area/folder, then refresh the

@@ -30,6 +30,10 @@ pub enum SwarmEvent {
         bytes: u64,
         per_source: Vec<(String, u64)>,
     },
+    /// The fetch gave up, with the engine's own reason and how many sources
+    /// were in play — the webview shows both, so a failed transfer can say
+    /// what went wrong instead of only that it did.
+    Failed { reason: String, sources_tried: usize },
 }
 
 /// Why a swarm download couldn't proceed.
@@ -99,10 +103,17 @@ pub async fn run_swarm_download(
     root: [u8; 32],
     size: u64,
     dest: &Path,
+    max_sources: usize,
     mut emit: impl FnMut(SwarmEvent),
 ) -> Result<FetchReport, SwarmError> {
     let list = client.swarm_find(root).await?;
-    let sources = sources_from_list(&list);
+    let mut sources = sources_from_list(&list);
+    // The engine runs one worker per source, so the source count IS the
+    // parallelism. Capped by the user's setting rather than hardcoded: on a
+    // metered or narrow link, eight simultaneous peers is a cost, not a gift.
+    if max_sources > 0 && sources.len() > max_sources {
+        sources.truncate(max_sources);
+    }
     if sources.is_empty() {
         return Err(SwarmError::NoPeerSources {
             server_has: list.server_has,
