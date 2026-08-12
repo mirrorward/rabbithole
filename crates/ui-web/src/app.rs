@@ -1559,7 +1559,11 @@ pub fn App() -> impl IntoView {
     view! {
         <style>{STYLESHEET}</style>
         <Router>
-            <div class="rh-app" style=style>
+            // `native` marks the desktop shell: the window's own title bar is
+            // hidden there, so the app's header takes over that job (drag
+            // region, room for the traffic lights). In a browser tab none of
+            // that applies and the class is absent.
+            <div class="rh-app" class:native=is_native() style=style>
                 <a class="rh-skip" href=crate::a11y::SKIP_HREF rel="external">
                     "Skip to main content"
                 </a>
@@ -1600,6 +1604,18 @@ pub fn App() -> impl IntoView {
                 </div>
             </div>
         </Router>
+    }
+}
+
+/// Are we running inside the desktop shell?
+fn is_native() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::native::native_available()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
     }
 }
 

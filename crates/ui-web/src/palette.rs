@@ -102,6 +102,20 @@ fn score(section: &Section, query: &str) -> Option<u8> {
 
 /// Sections matching `query`, best first. An empty/whitespace query returns the
 /// full catalog in nav order. Total: never panics, always defined.
+/// The section a Cmd/Ctrl + digit shortcut jumps to.
+///
+/// `1` is the first section, `9` the ninth -- the convention of browser tabs
+/// and every chat app's workspace switcher, which is why it needs no
+/// explanation to anyone who has used one. Out-of-range digits and `0` do
+/// nothing rather than wrapping to something arbitrary.
+pub fn section_for_digit(key: &str) -> Option<Section> {
+    let n = key.parse::<usize>().ok()?;
+    if n == 0 {
+        return None;
+    }
+    SECTIONS.get(n - 1).copied()
+}
+
 pub fn palette_matches(query: &str) -> Vec<Section> {
     let q = query.trim().to_ascii_lowercase();
     if q.is_empty() {
@@ -120,6 +134,19 @@ pub fn palette_matches(query: &str) -> Vec<Section> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digit_shortcuts_follow_the_nav_order() {
+        // Cmd-1 is the first section, and the sidebar lists them in this same
+        // order -- the shortcut is only learnable if those two agree.
+        assert_eq!(section_for_digit("1").unwrap().route, SECTIONS[0].route);
+        assert_eq!(section_for_digit("2").unwrap().route, SECTIONS[1].route);
+        // Nothing silly at the edges: no wrap-around, no Cmd-0.
+        assert_eq!(section_for_digit("0"), None);
+        assert_eq!(section_for_digit(&format!("{}", SECTIONS.len() + 1)), None);
+        assert_eq!(section_for_digit("k"), None);
+        assert_eq!(section_for_digit(""), None);
+    }
 
     #[test]
     fn empty_query_lists_every_section_in_nav_order() {

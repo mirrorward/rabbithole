@@ -691,13 +691,26 @@ pub fn CommandPalette() -> impl IntoView {
         }
     });
 
-    // Global ⌘K / Ctrl-K toggles the palette from anywhere (wasm only).
+    // Global keys, wasm only: ⌘K / Ctrl-K toggles the palette, and ⌘1…⌘9 jump
+    // straight to a section. The digit shortcuts are what a native app has and
+    // a web page doesn't; they work from anywhere, including mid-message, since
+    // no composer binds a modified digit.
     #[cfg(target_arch = "wasm32")]
     {
+        let jump = use_navigate();
         let handle = window_event_listener(leptos::ev::keydown, move |ev| {
-            if (ev.meta_key() || ev.ctrl_key()) && ev.key().eq_ignore_ascii_case("k") {
+            if !(ev.meta_key() || ev.ctrl_key()) {
+                return;
+            }
+            if ev.key().eq_ignore_ascii_case("k") {
                 ev.prevent_default();
                 open.update(|o| *o = !*o);
+                return;
+            }
+            if let Some(section) = crate::palette::section_for_digit(&ev.key()) {
+                ev.prevent_default();
+                open.set(false);
+                jump(section.route, Default::default());
             }
         });
         on_cleanup(move || handle.remove());

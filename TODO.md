@@ -100,6 +100,9 @@ where headless-verifiable, tested:
   round-trip, which needs `cargo tauri dev` on a real machine.
 - **Verified identity** across proto/server/web/CLI, hardened against relay.
 - **An adversarial review** (13 fixes) + a security-review relay fix.
+- **Native feel** — macOS overlay title bar (the app header *is* the title bar),
+  window drag region, no rubber-banding or tap flash, unselectable chrome with
+  selectable content, and Cmd-1..9 section shortcuts.
 - **Rich text** — a formatting bar + markdown mode over chat, DMs and board posts,
   rendered on display through a written, host-tested markdown renderer that escapes
   first and allowlists link schemes. Posts now declare `text/markdown` on the wire.

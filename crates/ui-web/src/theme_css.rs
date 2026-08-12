@@ -381,6 +381,24 @@ pub const STYLESHEET: &str = "\
 .rh-subnav-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}\
 .rh-subnav .rh-pip{flex:none}\
 .rh-subnav-rule{height:1px;margin:var(--rh-space-2) .55rem;background:color-mix(in srgb,var(--rh-text) 10%,transparent)}\
+/* --- Native feel. What separates an app from a web page is mostly the small
+   things a browser does by default and a native app never does: rubber-band
+   scrolling past the end, a grey flash when you tap, a text cursor over
+   furniture, drag-selecting the sidebar. --- */\
+.rh-app{overscroll-behavior:none;-webkit-tap-highlight-color:transparent;cursor:default}\
+.rh-rail,.rh-header,.rh-format-bar{-webkit-user-select:none;user-select:none}\
+/* …but never at the cost of copying content: messages, posts, filenames and\
+   fingerprints stay selectable, and the stylesheet's own test enforces that\
+   `user-select:none` appears only on the chrome selectors above. */\
+.rh-rich,.rh-line,.rh-post,.rh-scroll,.rh-filetable,.rh-fingerprint{-webkit-user-select:text;user-select:text}\
+.rh-scroll,.rh-panel,.rh-who,.rh-subnav{overscroll-behavior:contain;scrollbar-width:thin}\
+::selection{background:color-mix(in srgb,var(--rh-accent) 30%,transparent)}\
+/* The desktop shell hides the system title bar, so the header is the title bar:\
+   it drags the window, and every control in it has to opt back out or it can't\
+   be clicked. The rail starts below the traffic lights. */\
+.rh-app.native .rh-header{-webkit-app-region:drag}\
+.rh-app.native .rh-header button,.rh-app.native .rh-header a,.rh-app.native .rh-header select,.rh-app.native .rh-header input{-webkit-app-region:no-drag}\
+.rh-app.native .rh-rail{padding-top:1.9rem}\
 .rh-composer{display:flex;flex-direction:column;gap:var(--rh-space-2);padding:var(--rh-space-3) var(--rh-space-5);border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
 .rh-format-bar{display:flex;align-items:center;gap:.15rem;flex-wrap:wrap}\
 .rh-format-btn{display:inline-flex;align-items:center;justify-content:center;min-width:1.9rem;height:1.9rem;padding:0 .4rem;border:1px solid transparent;border-radius:var(--rh-radius-sm);background:transparent;color:var(--rh-muted);font-family:var(--rh-font-sans);font-size:var(--rh-font-sm);font-weight:700;cursor:pointer;transition:background-color .12s ease,color .12s ease}\
@@ -933,7 +951,13 @@ mod tests {
         // does feels like a web page. But `user-select:none` on anything a user
         // might want to *copy* — a message, a filename, a fingerprint — is a
         // real harm, so it's allowed only on navigation furniture.
-        const CHROME: [&str; 4] = [".rh-subnav", ".rh-rail", ".rh-header", ".rh-tabs"];
+        const CHROME: [&str; 5] = [
+            ".rh-subnav",
+            ".rh-rail",
+            ".rh-header",
+            ".rh-format-bar",
+            ".rh-tabs",
+        ];
         for rule in STYLESHEET.split('}') {
             let Some((head, decls)) = rule.rsplit_once('{') else {
                 continue;
@@ -943,10 +967,16 @@ mod tests {
             }
             // `head` may still carry an enclosing `@media (...){`.
             let selector = head.rsplit('{').next().unwrap_or_default().trim();
-            assert!(
-                CHROME.iter().any(|c| selector.starts_with(c)),
-                "`user-select:none` on `{selector}` — that's content, not chrome"
-            );
+            // Check *every* selector in the list, not the string as a whole:
+            // otherwise `.rh-rail,.rh-scroll{user-select:none}` passes on the
+            // strength of its first name and takes the scrollback with it.
+            for one in selector.split(',') {
+                let one = one.trim();
+                assert!(
+                    CHROME.iter().any(|c| one.starts_with(c)),
+                    "`user-select:none` on `{one}` — that's content, not chrome"
+                );
+            }
         }
     }
 }

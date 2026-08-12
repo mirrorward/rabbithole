@@ -92,12 +92,24 @@ pub fn run() {
         .setup(|app| {
             // Build the main window in Rust so it carries the native-bridge init
             // script (config `app.windows` is empty so this is the only window).
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("RabbitHole")
                 .inner_size(1100.0, 760.0)
                 .min_inner_size(720.0, 480.0)
-                .initialization_script(NATIVE_SHIM)
-                .build()?;
+                .initialization_script(NATIVE_SHIM);
+            // On macOS the app's own header becomes the title bar: the system
+            // bar is drawn as a transparent overlay, so the traffic lights float
+            // over our chrome instead of sitting in a separate grey strip above
+            // it. This is what every Mac app of this shape does, and the strip
+            // is the single loudest "this is a web page in a box" tell.
+            //
+            // The SPA holds up its end: `.rh-app.native` reserves room for the
+            // lights and marks the header as a drag region.
+            #[cfg(target_os = "macos")]
+            let win = win
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+            win.build()?;
 
             // Emit a test event a beat after launch so the init-script listener
             // proves Rust→JS event delivery end-to-end.
