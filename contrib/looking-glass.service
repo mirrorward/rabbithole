@@ -1,5 +1,5 @@
 [Unit]
-Description=RabbitHole burrow server
+Description=RabbitHole Looking Glass tracker
 Documentation=https://github.com/mirrorward/rabbithole
 After=network-online.target
 Wants=network-online.target
@@ -8,24 +8,19 @@ Wants=network-online.target
 Type=simple
 User=burrow
 Group=burrow
-# /usr/bin is where the distro packages install; a from-source install into
-# /usr/local/bin should edit this line (or use a drop-in).
-ExecStart=/usr/bin/burrow --data-dir /var/lib/burrow run
-# Serving the web client too? Point --web-root at a built SPA and add:
-#   ExecStart=/usr/bin/burrow --data-dir /var/lib/burrow \
-#       --http --http-addr 0.0.0.0:8080 --web-root /var/lib/burrow/web run
+ExecStart=/usr/bin/looking-glass --status 0.0.0.0:4655
 Restart=on-failure
 RestartSec=5s
 
-# Configuration. Prefer an EnvironmentFile for secrets/overrides; the
-# RABBITHOLE_* names below are the real keys from server-core config.rs.
-Environment=RABBITHOLE_DATA_DIR=/var/lib/burrow
-# EnvironmentFile=-/etc/burrow/burrow.env
+# The tracker keeps its directory in memory and takes its listeners from the
+# command line, so there is nothing to configure by environment.
+# EnvironmentFile=-/etc/burrow/looking-glass.env
 
-# systemd creates and owns /var/lib/burrow (0750) for User=burrow.
-StateDirectory=burrow
+# The tracker holds no persistent state; it still gets a private directory so
+# ProtectSystem=strict has somewhere writable rather than an exception.
+StateDirectory=looking-glass
 StateDirectoryMode=0750
-WorkingDirectory=/var/lib/burrow
+WorkingDirectory=/var/lib/looking-glass
 
 # --- Sandboxing / hardening ---
 NoNewPrivileges=true
@@ -40,7 +35,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 ProtectProc=invisible
-ReadWritePaths=/var/lib/burrow
+ReadWritePaths=/var/lib/looking-glass
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=true
 RestrictRealtime=true

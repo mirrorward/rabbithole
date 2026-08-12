@@ -1,0 +1,75 @@
+# nfpm — one config, three package formats.
+#
+# `deb` and `apk` (and `rpm`, free) are the same content with different
+# metadata, so they are described once here rather than as a debian/ tree plus
+# an APKBUILD plus a .spec — three toolchains to keep in agreement about the
+# same file list. nfpm needs no target distro to build for it, so packages come
+# out of the same CI job that already cross-compiles the binaries.
+#
+#   scripts/package.sh          # host arch, all three formats
+#   nfpm pkg -p deb -t dist/    # by hand
+#
+# Docs: https://nfpm.goreleaser.com
+
+name: rabbithole
+arch: "${PKG_ARCH}"
+platform: linux
+version: "${PKG_VERSION}"
+section: net
+priority: optional
+maintainer: Mirrorward <hello@mirrorward.co>
+description: |
+  RabbitHole — a warren of burrows.
+  A community server and clients in the lineage of BBSs and Hotline: chat,
+  message boards, file libraries with swarmed transfers, and a portable
+  identity that belongs to the user rather than to any server.
+  This package installs the burrow server, the Looking Glass tracker, and the
+  rabbit command-line and terminal clients.
+vendor: Mirrorward
+homepage: https://rabbit.direct
+license: AGPL-3.0-or-later
+
+contents:
+  - src: ${PKG_BIN_DIR}/burrow
+    dst: /usr/bin/burrow
+  - src: ${PKG_BIN_DIR}/looking-glass
+    dst: /usr/bin/looking-glass
+  - src: ${PKG_BIN_DIR}/rabbit
+    dst: /usr/bin/rabbit
+  - src: ${PKG_BIN_DIR}/rabbit-tui
+    dst: /usr/bin/rabbit-tui
+
+  # systemd units. Marked as config so a hand-edited unit survives upgrade.
+  - src: ./contrib/burrow.service
+    dst: /lib/systemd/system/burrow.service
+    type: config|noreplace
+  - src: ./contrib/looking-glass.service
+    dst: /lib/systemd/system/looking-glass.service
+    type: config|noreplace
+
+  - src: ./docs/deployment.md
+    dst: /usr/share/doc/rabbithole/deployment.md
+  - src: ./README.md
+    dst: /usr/share/doc/rabbithole/README.md
+
+  # The state directory. The service's own StateDirectory= would create this,
+  # but declaring it means the ownership is right even for a non-systemd
+  # install, and that `dpkg -r` knows it belongs to us.
+  - dst: /var/lib/burrow
+    type: dir
+    file_info:
+      mode: 0750
+      owner: burrow
+      group: burrow
+
+scripts:
+  preinstall: ./packaging/preinstall.sh
+  postinstall: ./packaging/postinstall.sh
+  preremove: ./packaging/preremove.sh
+
+deb:
+  fields:
+    Bugs: https://github.com/mirrorward/rabbithole/issues
+
+rpm:
+  group: Applications/Internet
