@@ -123,7 +123,12 @@ pub const ADMIN_SECTION: Section = Section {
 /// rather than silently getting the wrong one.
 pub fn scope_of(path: &str) -> Scope {
     let path = path.trim_end_matches('/');
-    if WARREN_SECTIONS.iter().any(|s| path == s.route) {
+    // Sub-paths belong to their parent: /people/<seed> is a person page, still
+    // a warren view, and must not sprout a burrow sidebar.
+    if WARREN_SECTIONS
+        .iter()
+        .any(|s| path == s.route || path.starts_with(&format!("{}/", s.route)))
+    {
         Scope::Warren
     } else {
         Scope::Burrow
@@ -243,6 +248,10 @@ mod tests {
         // route -- both arrive from the router.
         assert_eq!(scope_of("/boards/general"), Scope::Burrow);
         assert_eq!(scope_of("/transfers/"), Scope::Warren);
+        // The person page is a warren view: no burrow sidebar beside it.
+        assert_eq!(scope_of("/people/abc123"), Scope::Warren);
+        // ...but a route that merely starts with the same letters is not.
+        assert_eq!(scope_of("/peoplezoo"), Scope::Burrow);
         // Admin is an operator view inside a burrow, and an unknown route
         // defaults to the burrow sidebar rather than the warren one.
         assert_eq!(scope_of(ADMIN_SECTION.route), Scope::Burrow);

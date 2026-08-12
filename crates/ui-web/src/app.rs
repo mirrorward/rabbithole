@@ -16,7 +16,7 @@ use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
     Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby, Login,
-    Nav, People, Radio, ServerBrowser, Toasts, Transfers, WelcomeSheet, You,
+    Nav, People, PersonPage, Radio, ServerBrowser, Toasts, Transfers, WelcomeSheet, You,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -99,6 +99,15 @@ pub struct AppState {
     pub you: RwSignal<Option<crate::identity::You>>,
     /// Chimes on/off (persisted; off until the user opts in).
     pub sound_on: RwSignal<bool>,
+    /// The full signing identity (holds the secret seed), loaded at launch.
+    /// Needed to *sign* friendship attestations; `you` is the public face.
+    /// `None` in host tests and until the browser seed loads.
+    pub identity: StoredValue<Option<crate::identity::Identity>>,
+    /// The cross-burrow sightings ledger — where you know each person from,
+    /// persisted. Fed by every roster that arrives ([`crate::sightings`]).
+    pub sightings: RwSignal<Vec<crate::sightings::Sighting>>,
+    /// Signed friendships and half-offers, persisted ([`crate::friend`]).
+    pub friends: RwSignal<Vec<crate::friend::Friendship>>,
     /// The web-admin model, folded from admin events.
     pub admin: RwSignal<AdminState>,
     /// The Syndication & Gateways panel model, folded from paired config
@@ -157,6 +166,9 @@ impl AppState {
             focused_id: create_rw_signal(ServerId::local()),
             presence: create_rw_signal(rabbithole_proto::presence::PresenceState::Online),
             you: create_rw_signal(None),
+            identity: store_value(None),
+            sightings: create_rw_signal(Vec::new()),
+            friends: create_rw_signal(Vec::new()),
             #[cfg(target_arch = "wasm32")]
             sound_on: create_rw_signal(crate::sound::enabled()),
             #[cfg(not(target_arch = "wasm32"))]
@@ -504,6 +516,19 @@ impl AppState {
         let sound_on = self.sound_on;
         let dm_sound_on = self.sound_on;
         let notify_name = self.focused().name;
+        // Sightings + friendship need `self` inside the sinks; `AppState` is
+        // Copy, so clone the handle rather than borrowing across the closures.
+        let app_for_sightings = *self;
+        let fr_app = *self;
+        let who_endpoint = endpoint.clone();
+        let who_endpoint_label = endpoint.clone();
+        let who_name = self.focused().name;
+        let who_burrow = move || {
+            who_name
+                .get_untracked()
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| server_label(&ServerId(who_endpoint_label.clone())))
+        };
         self.focused().ws.update_value(|ws| {
             ws.on_event(std::rc::Rc::new(move |event| {
                 match &event {
@@ -627,7 +652,10 @@ impl AppState {
                 state.update(|s| s.front_page = widgets)
             }));
             ws.on_who(std::rc::Rc::new(move |roster| {
-                state.update(|s| s.who = roster)
+                state.update(|s| s.who = roster);
+                // Leave a trace of everyone seen here, so the person page can
+                // say where you know someone *from* even after you disconnect.
+                app_for_sightings.note_roster_sighting(&who_endpoint, &who_burrow());
             }));
             ws.on_presence(std::rc::Rc::new(move |delta| {
                 state.update(|s| match delta {
@@ -664,6 +692,21 @@ impl AppState {
                 })
             }));
             ws.on_dm_received(std::rc::Rc::new(move |(peer, msg)| {
+                // A friendship attestation rides in as a DM. Verify it binds
+                // OUR key (a relayed offer for someone else fails and is
+                // dropped), store their half, and never show the raw payload.
+                #[cfg(target_arch = "wasm32")]
+                if let Some((their_pub, sig)) = crate::friend::parse_offer(&msg.text) {
+                    if let Some(me) = fr_app.you.get_untracked().map(|y| y.public_hex) {
+                        if crate::friend::verify_half(&their_pub, &me, &sig) {
+                            fr_app.friends.update(|list| {
+                                crate::friend::record_their_offer(list, &their_pub, &msg.from, &sig);
+                            });
+                            crate::friend::storage::save(&fr_app.friends.get_untracked());
+                        }
+                    }
+                    return;
+                }
                 // A DM is addressed to you personally — notify when away, with
                 // its own title and tag so it never reads (or collapses) as room
                 // chatter. Same policy as the lobby: silent while you're looking.
@@ -1100,6 +1143,120 @@ impl AppState {
         self.dispatch_file(FileCommand::ListFolder { area, path });
     }
 
+    /// Persist the sightings ledger and mirror it into the signal. wasm-only
+    /// (host tests have no storage); the signal drives the person page.
+    pub fn note_roster_sighting(&self, endpoint: &str, burrow_name: &str) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let roster = self.focused().state.with_untracked(|s| s.who.clone());
+            crate::sightings::storage::note_roster(
+                endpoint,
+                burrow_name,
+                &roster,
+                crate::clock::now_ms(),
+            );
+            self.sightings.set(crate::sightings::storage::load());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = (endpoint, burrow_name);
+    }
+
+    /// Resolve a person page's `:seed` to the live [`Person`] if they're
+    /// currently on any connected burrow (their presence + which burrows).
+    pub fn person_by_seed(&self, seed: &str) -> Option<crate::state::Person> {
+        self.people().into_iter().find(|p| {
+            crate::sightings::seed_of(p.key.as_deref(), &p.screen_name) == seed
+        })
+    }
+
+    /// Files on the focused burrow uploaded by a person, matched by the handle
+    /// they use *there*. The person page's "shared files" — offered by them,
+    /// linkable at this burrow.
+    pub fn files_by(&self, handle: &str) -> Vec<rabbithole_proto::filelib::FileNodeView> {
+        if handle.is_empty() {
+            return Vec::new();
+        }
+        let h = handle.to_lowercase();
+        self.focused().files.with_untracked(|f| {
+            f.nodes
+                .iter()
+                .filter(|n| n.uploader.to_lowercase() == h)
+                .cloned()
+                .collect()
+        })
+    }
+
+    /// The DM thread with `handle` on the focused burrow, if one exists.
+    pub fn dm_with(&self, handle: &str) -> Option<crate::state::DmThread> {
+        if handle.is_empty() {
+            return None;
+        }
+        self.focused().state.with_untracked(|s| {
+            s.dm_threads.iter().find(|t| t.peer == handle).cloned()
+        })
+    }
+
+    /// The focused burrow's endpoint — the id the sightings ledger files a
+    /// person's per-burrow handle under.
+    pub fn focused_endpoint(&self) -> String {
+        self.focused_id.get().0
+    }
+
+    /// The friendship status with a peer identity key (hex).
+    pub fn friendship(&self, peer_pub: &str) -> crate::friend::Status {
+        self.friends
+            .with_untracked(|list| crate::friend::status_of(list, peer_pub))
+    }
+
+    /// Send (or accept) a friendship offer to the person with identity key
+    /// `peer_pub`, whom we can reach as `handle` on the focused live burrow.
+    /// Signs our half, stores it, and DMs the signed offer to their handle.
+    pub fn offer_friendship(&self, peer_pub: &str, peer_name: &str, handle: &str) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let sig = self.identity.with_value(|id| {
+                id.as_ref().map(|id| crate::friend::sign(id, peer_pub))
+            });
+            let (Some(sig), Some(me)) =
+                (sig, self.you.get_untracked().map(|y| y.public_hex))
+            else {
+                self.toasts.update(|q| {
+                    q.push(
+                        crate::toasts::ToastKind::Warn,
+                        "No identity to sign with yet.".to_string(),
+                    );
+                });
+                return;
+            };
+            self.friends.update(|list| {
+                crate::friend::record_my_sig(list, peer_pub, peer_name, &sig);
+            });
+            crate::friend::storage::save(&self.friends.get_untracked());
+            // The offer is a DM to their handle on this burrow — no server
+            // involvement beyond delivering a message they can already receive.
+            let offer = crate::friend::encode_offer(&me, &sig);
+            if self.focused().live.get_untracked() && !handle.is_empty() {
+                self.focused().ws.update_value(|c| c.send_dm(handle, &offer));
+            }
+            let mutual = matches!(
+                self.friendship(peer_pub),
+                crate::friend::Status::Mutual
+            );
+            self.toasts.update(|q| {
+                q.push(
+                    crate::toasts::ToastKind::Success,
+                    if mutual {
+                        format!("You and {peer_name} are now friends.")
+                    } else {
+                        format!("Friendship offer sent to {peer_name}.")
+                    },
+                );
+            });
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = (peer_pub, peer_name, handle);
+    }
+
     /// Show a node's metadata card.
     pub fn select_file(&self, id: i64) {
         self.focused().files.update(|f| f.selected = Some(id));
@@ -1470,8 +1627,17 @@ pub fn App() -> impl IntoView {
     crate::native::install_swarm_listener(app);
 
     // Load (or mint) the portable identity that names you across every burrow.
+    // Keep the full signing identity (for friendship attestations) in a
+    // StoredValue, and expose only its public face in the reactive `you`.
     #[cfg(target_arch = "wasm32")]
-    app.you.set(Some(crate::identity::load_or_create().you()));
+    {
+        let id = crate::identity::load_or_create();
+        app.you.set(Some(id.you()));
+        app.identity.set_value(Some(id));
+        // Restore the persisted sightings ledger and friendships.
+        app.sightings.set(crate::sightings::storage::load());
+        app.friends.set(crate::friend::storage::load());
+    }
 
     // Reflect cross-burrow unread in the browser tab title, so a backgrounded
     // warren still signals activity: "(3) RabbitHole".
@@ -1585,6 +1751,7 @@ pub fn App() -> impl IntoView {
                                 <Routes>
                                     <Route path="/" view=Login/>
                                     <Route path="/people" view=People/>
+                                    <Route path="/people/:seed" view=PersonPage/>
                                     <Route path="/transfers" view=Transfers/>
                                     <Route path="/you" view=You/>
                                     <Route path="/lobby" view=Lobby/>

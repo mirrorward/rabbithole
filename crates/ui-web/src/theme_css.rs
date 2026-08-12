@@ -440,6 +440,31 @@ body{overflow:hidden}\
 .rh-icon-btn{display:inline-flex;align-items:center;justify-content:center;padding:.3rem;min-width:2rem;line-height:0}\
 .rh-icon-btn span{display:grid;place-items:center}\
 .rh-sidenav-slot{display:contents}\
+/* The person page: one human, everything you know about them. */\
+.rh-person-link{display:flex;align-items:center;gap:var(--rh-space-2);width:100%;padding:.35rem .4rem;border-radius:var(--rh-radius);color:inherit;text-decoration:none;border-bottom:0}\
+.rh-person-link:hover{background:color-mix(in srgb,var(--rh-text) 5%,transparent)}\
+.rh-person-hero{display:flex;align-items:flex-start;gap:var(--rh-space-4);padding:var(--rh-space-3) 0 var(--rh-space-4);flex-wrap:wrap}\
+.rh-person-hero-mark{flex:none;line-height:0}\
+.rh-person-hero-id{flex:1;min-width:12rem;display:flex;flex-direction:column;gap:.2rem}\
+.rh-person-hero-line{display:flex;align-items:center;gap:var(--rh-space-2);flex-wrap:wrap}\
+.rh-person-hero-name{font-size:var(--rh-font-lg);font-weight:700;letter-spacing:-.01em}\
+.rh-person-hero-key{font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);color:var(--rh-muted)}\
+.rh-person-hero-presence{font-size:var(--rh-font-sm);color:var(--rh-muted)}\
+.rh-person-actions{display:flex;align-items:center;gap:var(--rh-space-2);flex:none}\
+/* The badge is only ever shown for a MUTUAL signed attestation; a one-sided\
+   offer gets the muted `pending` treatment, never the accent. */\
+.rh-friend-badge{display:inline-flex;align-items:center;gap:.3rem;padding:.1rem .5rem;border-radius:var(--rh-radius-full);background:color-mix(in srgb,var(--rh-accent) 16%,transparent);color:var(--rh-accent);font-size:var(--rh-font-xs);font-weight:700}\
+.rh-friend-badge.pending{background:color-mix(in srgb,var(--rh-text) 8%,transparent);color:var(--rh-muted);font-weight:600}\
+.rh-person-h2{margin:var(--rh-space-4) 0 var(--rh-space-2);font-size:var(--rh-font-sm);text-transform:uppercase;letter-spacing:.06em;color:var(--rh-muted)}\
+.rh-known-from,.rh-person-dm,.rh-person-files{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:1px}\
+.rh-known-row{display:flex;align-items:center;gap:var(--rh-space-2);padding:.35rem .4rem;border-radius:var(--rh-radius)}\
+.rh-known-row:hover{background:color-mix(in srgb,var(--rh-text) 4%,transparent)}\
+.rh-known-name{font-weight:600}\
+.rh-known-handle{color:var(--rh-muted);font-size:var(--rh-font-sm);font-family:var(--rh-font-mono)}\
+.rh-known-when{margin-left:auto;color:var(--rh-muted);font-size:var(--rh-font-xs);font-variant-numeric:tabular-nums}\
+.rh-person-dm-row{display:flex;gap:var(--rh-space-2);padding:.25rem .4rem;min-width:0}\
+.rh-person-dm-from{flex:none;font-weight:600;color:var(--rh-accent);font-size:var(--rh-font-sm)}\
+.rh-person-dm-text{min-width:0;overflow-wrap:anywhere;font-size:var(--rh-font-sm)}\
 .rh-sidenav-slot.rh-hidden{display:none}\
 .rh-subnav-scope{display:block;padding:.1rem .55rem .35rem;font-size:var(--rh-font-xs);text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:var(--rh-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
 /* The rail's warren destinations get the same lit treatment as a focused\

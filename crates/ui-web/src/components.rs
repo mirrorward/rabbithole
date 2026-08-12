@@ -246,13 +246,23 @@ pub fn People() -> impl IntoView {
                                     &crate::avatar::seed_for(p.key.as_deref(), &p.screen_name),
                                     24,
                                 );
+                                // The row opens the person page, keyed by the
+                                // same seed People coalesces on — so the page
+                                // survives a handle change and stays distinct
+                                // from a same-handle stranger.
+                                let href = format!(
+                                    "/people/{}",
+                                    crate::sightings::seed_of(p.key.as_deref(), &p.screen_name),
+                                );
                                 view! {
                                     <li class="rh-person">
-                                        <span class="rh-mark" inner_html=mark></span>
-                                        <span class=dot aria-hidden="true"></span>
-                                        <span class="rh-person-name">{p.screen_name}</span>
-                                        {idkey}
-                                        <span class="rh-person-servers">{servers}</span>
+                                        <A href=href class="rh-person-link">
+                                            <span class="rh-mark" inner_html=mark></span>
+                                            <span class=dot aria-hidden="true"></span>
+                                            <span class="rh-person-name">{p.screen_name}</span>
+                                            {idkey}
+                                            <span class="rh-person-servers">{servers}</span>
+                                        </A>
                                     </li>
                                 }
                             }
@@ -261,6 +271,275 @@ pub fn People() -> impl IntoView {
                 </Show>
             </section>
         </main>
+    }
+}
+
+/// The **person page**: everything you know about one human across your warren.
+///
+/// Reached from a People row (`/people/:seed`). The seed is the same
+/// coalescing id People and the sightings ledger use — an identity key when
+/// they have one, else a bare handle — so the page survives a handle change
+/// and stays distinct from a same-handle stranger.
+///
+/// It draws from three sources at once: the live [`crate::state::Person`] (are
+/// they on now, and where), the persisted [`crate::sightings`] ledger (where
+/// you know them *from*, even offline), and [`crate::friend`] (are you
+/// cryptographically friends). Plus the focused burrow's DM thread and their
+/// uploads there.
+#[component]
+pub fn PersonPage() -> impl IntoView {
+    use crate::friend::Status;
+    let app = expect_context::<AppState>();
+    let params = use_params_map();
+    let seed = move || params.with(|p| p.get("seed").cloned().unwrap_or_default());
+
+    // Live presence + current burrows, if they're on right now.
+    let live = move || app.person_by_seed(&seed());
+    // The persisted trail: where you know them from.
+    let trail = move || {
+        app.sightings
+            .with(|l| crate::sightings::burrows_for(l, &seed()).cloned())
+    };
+    // Their identity key: the live person's, else — for a keyed seed — the
+    // seed itself is the key (64 hex chars).
+    let peer_key = move || {
+        live().and_then(|p| p.key).or_else(|| {
+            let s = seed();
+            (s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())).then_some(s)
+        })
+    };
+    // Their handle on the FOCUSED burrow (what DMs and uploads there file under).
+    let handle_here = move || {
+        let focused_ep = app.focused_endpoint();
+        app.sightings
+            .with(|l| crate::sightings::handle_on(l, &seed(), &focused_ep))
+            .or_else(|| live().map(|p| p.screen_name))
+            .unwrap_or_default()
+    };
+    let display_name = move || {
+        live()
+            .map(|p| p.screen_name)
+            .or_else(|| trail().map(|t| t.name))
+            .unwrap_or_else(seed)
+    };
+    let status = move || peer_key().map(|k| app.friendship(&k)).unwrap_or(Status::None);
+    // You appear in your own People list (you're on those burrows too). The
+    // page still reads usefully — where you're known from — but befriending or
+    // DMing yourself is nonsense, so those actions go.
+    let is_me = move || match (peer_key(), app.you.get()) {
+        (Some(k), Some(me)) => k.eq_ignore_ascii_case(&me.public_hex),
+        _ => false,
+    };
+    let navigate = use_navigate();
+
+    // Message: select the conversation with their handle here, then route to
+    // it. A Callback (which is Copy) because it's used inside <Show> children,
+    // which must be Fn — a plain closure capturing `navigate` is FnOnce.
+    let go_dm = Callback::new(move |_: leptos::ev::MouseEvent| {
+        let h = handle_here();
+        if !h.is_empty() {
+            app.select_dm(&h);
+            navigate("/dms", Default::default());
+        }
+    });
+    let befriend = move |_| {
+        if let Some(k) = peer_key() {
+            app.offer_friendship(&k, &display_name(), &handle_here());
+        }
+    };
+
+    view! {
+        <StatusBar/>
+        <main class="rh-body rh-person-page" id=a11y::MAIN_ID tabindex="-1">
+            <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">
+                {move || format!("{} \u{2014} person", display_name())}
+            </h1>
+            <section class="rh-panel">
+                <A href="/people" class="rh-back">"\u{2190} People"</A>
+                <header class="rh-person-hero">
+                    <span
+                        class="rh-mark rh-person-hero-mark"
+                        inner_html=move || crate::avatar::mark_svg(&seed(), 72)
+                    ></span>
+                    <div class="rh-person-hero-id">
+                        <div class="rh-person-hero-line">
+                            <span class="rh-person-hero-name">{display_name}</span>
+                            {move || match status() {
+                                Status::Mutual => view! {
+                                    <span class="rh-friend-badge" title="Mutual signed friendship">
+                                        "\u{1f91d} Friends"
+                                    </span>
+                                }.into_view(),
+                                Status::OfferedByThem => view! {
+                                    <span class="rh-friend-badge pending" title="They signed \u{2014} accept to confirm">
+                                        "wants to be friends"
+                                    </span>
+                                }.into_view(),
+                                Status::OfferedByMe => view! {
+                                    <span class="rh-friend-badge pending" title="You signed \u{2014} awaiting their signature">
+                                        "offer sent"
+                                    </span>
+                                }.into_view(),
+                                Status::None => ().into_view(),
+                            }}
+                        </div>
+                        {move || peer_key().map(|k| {
+                            let fp = crate::identity::short_fingerprint(&k);
+                            view! {
+                                <div class="rh-person-hero-key" title=k>"\u{26bf} "{fp}</div>
+                            }
+                        })}
+                        <div class="rh-person-hero-presence">
+                            {move || match live() {
+                                Some(p) => format!(
+                                    "online now \u{00b7} {}",
+                                    p.servers.join(" \u{00b7} ")
+                                ),
+                                None => "not connected right now".to_string(),
+                            }}
+                        </div>
+                    </div>
+                    <div class="rh-person-actions">
+                        <Show when=move || { is_me() } fallback=|| ()>
+                            <span class="rh-friend-badge pending">"this is you"</span>
+                        </Show>
+                        <Show when=move || { !is_me() } fallback=|| ()>
+                            <button
+                                class="rh-btn"
+                                prop:disabled=move || { handle_here().is_empty() || !app.online() }
+                                on:click=move |ev| go_dm.call(ev)
+                            >
+                                "Message"
+                            </button>
+                        </Show>
+                        {move || peer_key().filter(|_| !is_me()).map(|_| {
+                            let (label, disabled) = match status() {
+                                Status::Mutual => ("Friends", true),
+                                Status::OfferedByThem => ("Accept friendship", false),
+                                Status::OfferedByMe => ("Offer sent", true),
+                                Status::None => ("Add friend", false),
+                            };
+                            view! {
+                                <button class="rh-btn ghost" prop:disabled=disabled on:click=befriend>
+                                    {label}
+                                </button>
+                            }
+                        })}
+                    </div>
+                </header>
+
+                <h2 class="rh-person-h2">"Known from"</h2>
+                <Show
+                    when=move || trail().map(|t| !t.burrows.is_empty()).unwrap_or(false)
+                    fallback=move || view! {
+                        <p class="rh-empty">
+                            "No shared burrows on record yet \u{2014} a place appears here once you've both been seen on it."
+                        </p>
+                    }
+                >
+                    <ul class="rh-known-from">
+                        <For
+                            each=move || trail().map(|t| t.burrows).unwrap_or_default()
+                            key=|b| b.endpoint.clone()
+                            children=move |b| {
+                                let ago = crate::files::relative_day(
+                                    b.last_seen_unix_ms / 1000,
+                                    crate::clock::now_ms() / 1000,
+                                );
+                                let here_now = live()
+                                    .map(|p| p.servers.contains(&b.burrow_name))
+                                    .unwrap_or(false);
+                                let dot = if here_now { "rh-pres on" } else { "rh-pres off" };
+                                view! {
+                                    <li class="rh-known-row">
+                                        <span class=dot aria-hidden="true"></span>
+                                        <span class="rh-known-name">{b.burrow_name}</span>
+                                        <span class="rh-known-handle">"as @"{b.handle}</span>
+                                        <span class="rh-known-when">
+                                            {if here_now { "here now".to_string() } else { ago }}
+                                        </span>
+                                    </li>
+                                }
+                            }
+                        />
+                    </ul>
+                </Show>
+
+                <PersonConversation handle=Signal::derive(handle_here)/>
+                <PersonFiles handle=Signal::derive(handle_here)/>
+            </section>
+        </main>
+    }
+}
+
+/// The recent DM exchange with a person on the focused burrow. A preview: the
+/// full conversation lives in DMs, one click away via Message.
+#[component]
+fn PersonConversation(handle: Signal<String>) -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let thread = move || app.dm_with(&handle.get());
+    view! {
+        <Show when=move || thread().map(|t| !t.messages.is_empty()).unwrap_or(false) fallback=|| ()>
+            <h2 class="rh-person-h2">"Recent messages"</h2>
+            <ul class="rh-person-dm">
+                <For
+                    each=move || {
+                        let msgs = thread().map(|t| t.messages).unwrap_or_default();
+                        let start = msgs.len().saturating_sub(4);
+                        msgs[start..].iter().cloned().enumerate().collect::<Vec<_>>()
+                    }
+                    key=|(i, m)| (*i, m.at_unix_ms, m.text.clone())
+                    children=move |(_, m)| view! {
+                        <li class="rh-person-dm-row">
+                            <span class="rh-person-dm-from">{m.from}</span>
+                            <span
+                                class="rh-rich rh-person-dm-text"
+                                inner_html=crate::markdown::inline_to_html(&m.text)
+                            ></span>
+                        </li>
+                    }
+                />
+            </ul>
+        </Show>
+    }
+}
+
+/// Files a person has uploaded on the focused burrow — what they've offered,
+/// each row opening its card in the file browser.
+#[component]
+fn PersonFiles(handle: Signal<String>) -> impl IntoView {
+    use crate::files::{human_size, KIND_FOLDER};
+    let app = expect_context::<AppState>();
+    let files = move || app.files_by(&handle.get());
+    view! {
+        <Show when=move || !files().is_empty() fallback=|| ()>
+            <h2 class="rh-person-h2">"Shared files"</h2>
+            <ul class="rh-tree rh-person-files">
+                <For
+                    each=files
+                    key=|n| n.id
+                    children=move |n| {
+                        let is_folder = n.kind == KIND_FOLDER;
+                        let size = if is_folder {
+                            "\u{2014}".to_string()
+                        } else {
+                            human_size(n.size)
+                        };
+                        let id = n.id;
+                        let icon = crate::icons::file_icon(is_folder);
+                        view! {
+                            <li class="rh-tree-item">
+                                <button class="rh-file-link" on:click=move |_| app.select_file(id)>
+                                    <span class="rh-file-icon" aria-hidden="true" inner_html=icon></span>
+                                    <span class="rh-file-name">{n.name}</span>
+                                    <span class="rh-fcol-size">{size}</span>
+                                </button>
+                            </li>
+                        }
+                    }
+                />
+            </ul>
+        </Show>
     }
 }
 

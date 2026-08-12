@@ -100,6 +100,10 @@ where headless-verifiable, tested:
   round-trip, which needs `cargo tauri dev` on a real machine.
 - **Verified identity** across proto/server/web/CLI, hardened against relay.
 - **An adversarial review** (13 fixes) + a security-review relay fix.
+- **Person page + signed friendship** — `/people/:seed` shows where you know someone
+  from (persisted sightings ledger, survives disconnect), their handle per burrow,
+  recent DMs, files they've shared, and a mutual Ed25519 friendship attestation
+  (both halves required; offers travel as self-authenticating DMs).
 - **Keyboard lists + motion at native tempo** — ↑/↓/Home/End drive every list
   (container is the single Tab stop; rows tabindex=-1; modifiers pass through),
   one 28px control height in the title bar, palette pop-in, pip pop on arrival
