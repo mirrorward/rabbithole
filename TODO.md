@@ -100,6 +100,9 @@ where headless-verifiable, tested:
   round-trip, which needs `cargo tauri dev` on a real machine.
 - **Verified identity** across proto/server/web/CLI, hardened against relay.
 - **An adversarial review** (13 fixes) + a security-review relay fix.
+- **You page redesign** — mark hero with a picker (16 faces x 8 colours, persisted,
+  honestly labelled local-only), copyable fingerprint, public key behind a
+  disclosure, and what the key does as four plain cards.
 - **macOS shell** — the app menu is "RabbitHole" (not the binary name), with
   About RabbitHole (icon + description) and Settings… on Cmd-, routed into the SPA;
   Edit/Window rebuilt so copy/paste survives; the Dock/Command-Tab icon is a proper

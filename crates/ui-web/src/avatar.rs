@@ -250,6 +250,51 @@ fn rgb(hex: &str) -> (u8, u8, u8) {
     (p(0), p(2), p(4))
 }
 
+/// Your own chosen mark, when you've picked one instead of taking the mark
+/// your key derives. Stored locally.
+///
+/// Honest limit: this is a **local** preference. The wire carries no mark
+/// field, so other people still see the mark your identity derives — the
+/// picker says so rather than implying a change nobody else can see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChosenMark {
+    pub glyph: usize,
+    pub color: usize,
+}
+
+#[cfg(target_arch = "wasm32")]
+pub mod chosen {
+    //! `localStorage` persistence for a picked mark.
+    use super::ChosenMark;
+
+    const KEY: &str = "rh.mark.v1";
+
+    fn store() -> Option<web_sys::Storage> {
+        web_sys::window()?.local_storage().ok()?
+    }
+
+    pub fn load() -> Option<ChosenMark> {
+        let raw = store()?.get_item(KEY).ok()??;
+        let (g, c) = raw.split_once(':')?;
+        Some(ChosenMark {
+            glyph: g.parse().ok()?,
+            color: c.parse().ok()?,
+        })
+    }
+
+    pub fn save(m: Option<ChosenMark>) {
+        let Some(s) = store() else { return };
+        match m {
+            Some(m) => {
+                let _ = s.set_item(KEY, &format!("{}:{}", m.glyph, m.color));
+            }
+            None => {
+                let _ = s.remove_item(KEY);
+            }
+        }
+    }
+}
+
 /// The seed to draw someone's mark from: their verified identity key when they
 /// have one, else their handle.
 ///

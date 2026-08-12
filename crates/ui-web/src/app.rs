@@ -107,6 +107,10 @@ pub struct AppState {
     /// The cross-burrow sightings ledger — where you know each person from,
     /// persisted. Fed by every roster that arrives ([`crate::sightings`]).
     pub sightings: RwSignal<Vec<crate::sightings::Sighting>>,
+    /// Your chosen warren mark, if you've picked one instead of the mark your
+    /// key derives ([`crate::avatar::ChosenMark`]). Local-only: the wire has
+    /// no mark field, so this changes what *you* see.
+    pub my_mark: RwSignal<Option<crate::avatar::ChosenMark>>,
     /// App settings: trackers and the handful of choices that are yours rather
     /// than a burrow's ([`crate::settings`]). Persisted.
     pub settings: RwSignal<crate::settings::Settings>,
@@ -174,6 +178,7 @@ impl AppState {
             sightings: create_rw_signal(Vec::new()),
             friends: create_rw_signal(Vec::new()),
             settings: create_rw_signal(crate::settings::Settings::default()),
+            my_mark: create_rw_signal(None),
             #[cfg(target_arch = "wasm32")]
             sound_on: create_rw_signal(crate::sound::enabled()),
             #[cfg(not(target_arch = "wasm32"))]
@@ -1299,6 +1304,25 @@ impl AppState {
         })
     }
 
+    /// Pick (or clear) your own mark. Persisted immediately, like settings.
+    pub fn set_my_mark(&self, mark: Option<crate::avatar::ChosenMark>) {
+        self.my_mark.set(mark);
+        #[cfg(target_arch = "wasm32")]
+        crate::avatar::chosen::save(mark);
+    }
+
+    /// The SVG for your own mark at `size`: your pick when you have one, else
+    /// the mark your identity key derives.
+    pub fn my_mark_svg(&self, size: u32) -> String {
+        match self.my_mark.get() {
+            Some(m) => crate::avatar::glyph_svg(m.glyph, m.color, size),
+            None => match self.you.get() {
+                Some(you) => crate::avatar::mark_svg(&you.public_hex, size),
+                None => crate::avatar::glyph_svg(0, 0, size),
+            },
+        }
+    }
+
     /// Persist settings after any change. Callers mutate `settings` then call
     /// this; keeping the write in one place means no edit path can forget it.
     pub fn save_settings(&self) {
@@ -1754,6 +1778,7 @@ pub fn App() -> impl IntoView {
         app.sightings.set(crate::sightings::storage::load());
         app.friends.set(crate::friend::storage::load());
         app.settings.set(crate::settings::storage::load());
+        app.my_mark.set(crate::avatar::chosen::load());
     }
 
     // Reflect cross-burrow unread in the browser tab title, so a backgrounded

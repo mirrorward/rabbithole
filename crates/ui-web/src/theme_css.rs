@@ -441,6 +441,27 @@ body{overflow:hidden}\
 .rh-icon-btn span{display:grid;place-items:center}\
 .rh-sidenav-slot{display:contents}\
 /* Settings + demo picker. */\
+/* The You page: your mark, your fingerprint, and what the key actually does. */\
+.rh-you-hero{display:flex;align-items:flex-start;gap:var(--rh-space-5);padding:var(--rh-space-3) 0 var(--rh-space-4);flex-wrap:wrap}\
+.rh-you-avatar{display:flex;flex-direction:column;align-items:center;gap:var(--rh-space-2);flex:none}\
+.rh-you-ident{flex:1;min-width:16rem;display:flex;flex-direction:column;gap:var(--rh-space-2)}\
+.rh-you-fp-line{display:flex;align-items:center;gap:var(--rh-space-2);flex-wrap:wrap}\
+.rh-you-eyebrow{font-size:var(--rh-font-xs);text-transform:uppercase;letter-spacing:.06em;color:var(--rh-muted)}\
+.rh-you-fp{font-family:var(--rh-font-mono);font-size:var(--rh-font-lg);letter-spacing:.02em}\
+.rh-you-lead{margin:0;color:var(--rh-muted);max-width:56ch;line-height:1.5}\
+.rh-you-key summary{cursor:default;font-size:var(--rh-font-sm);color:var(--rh-muted)}\
+.rh-you-key .rh-you-pub{display:block;margin:.35rem 0;font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);overflow-wrap:anywhere;color:var(--rh-muted)}\
+.rh-you-facts{margin:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(16rem,1fr));gap:var(--rh-space-3)}\
+.rh-you-fact{border:1px solid color-mix(in srgb,var(--rh-text) 9%,transparent);border-radius:var(--rh-radius);padding:var(--rh-space-3)}\
+.rh-you-fact dt{font-weight:650;margin-bottom:.25rem}\
+.rh-you-fact dd{margin:0;color:var(--rh-muted);font-size:var(--rh-font-sm);line-height:1.5}\
+.rh-mark-picker{display:flex;flex-wrap:wrap;gap:.4rem;margin:.4rem 0}\
+.rh-mark-choice{display:grid;place-items:center;width:2.6rem;height:2.6rem;padding:0;border:1px solid transparent;border-radius:var(--rh-radius);background:transparent;cursor:pointer;line-height:0}\
+.rh-mark-choice:hover{background:color-mix(in srgb,var(--rh-text) 6%,transparent)}\
+.rh-mark-choice.on{border-color:var(--rh-accent);background:color-mix(in srgb,var(--rh-accent) 12%,transparent)}\
+.rh-mark-colors{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;margin-bottom:var(--rh-space-2)}\
+.rh-mark-color{width:1.5rem;height:1.5rem;padding:0;border:2px solid transparent;border-radius:var(--rh-radius-full);cursor:pointer}\
+.rh-mark-color.on{border-color:var(--rh-text)}\
 .rh-settings-note{margin:0 0 var(--rh-space-2);color:var(--rh-muted);font-size:var(--rh-font-sm);max-width:62ch}\
 .rh-tracker-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:1px}\
 .rh-tracker-row{display:flex;align-items:center;gap:var(--rh-space-2);padding:.35rem .4rem;border-radius:var(--rh-radius)}\

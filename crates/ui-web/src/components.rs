@@ -918,12 +918,12 @@ pub fn WelcomeSheet() -> impl IntoView {
 #[component]
 pub fn You() -> impl IntoView {
     let app = expect_context::<AppState>();
+    let picking = create_rw_signal(false);
     view! {
         <StatusBar/>
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"You"</h1>
             <section class="rh-panel">
-                <h2 class="rh-panel-title">"You · your portable identity"</h2>
                 <Show
                     when=move || app.you.get().is_some()
                     fallback=|| view! {
@@ -931,42 +931,205 @@ pub fn You() -> impl IntoView {
                     }
                 >
                     {move || app.you.get().map(|you| {
-                        // Your own warren mark — the same face everyone else
-                        // sees beside your name, seeded by your identity key.
-                        let mark = crate::avatar::mark_svg(&you.public_hex, 56);
+                        let fp = you.fingerprint.clone();
+                        let pk = you.public_hex.clone();
+                        let pk_copy = pk.clone();
+                        let fp_copy = fp.clone();
                         view! {
-                            <div class="rh-you">
-                                <div class="rh-you-mark rh-mark" inner_html=mark></div>
-                                <div class="rh-you-fields">
-                                    <div class="rh-you-row">
-                                        <span class="rh-you-label">"Fingerprint"</span>
-                                        <code class="rh-you-fp">{you.fingerprint.clone()}</code>
-                                    </div>
-                                    <div class="rh-you-row">
-                                        <span class="rh-you-label">"Public key"</span>
-                                        <code class="rh-you-pub">{you.public_hex.clone()}</code>
-                                    </div>
+                            // The hero: your mark, big, with the two things
+                            // that actually identify you underneath.
+                            <header class="rh-you-hero">
+                                <div class="rh-you-avatar">
+                                    <span
+                                        class="rh-mark"
+                                        inner_html=move || app.my_mark_svg(80)
+                                    ></span>
+                                    <button
+                                        class="rh-btn ghost small"
+                                        on:click=move |_| picking.update(|p| *p = !*p)
+                                    >
+                                        {move || if picking.get() { "Done" } else { "Change mark" }}
+                                    </button>
                                 </div>
-                            </div>
-                            <p class="rh-you-note">
-                                "This Ed25519 key travels with you across burrows. At each handshake the \
-                                 burrow challenges it and you sign a one-time nonce, proving you hold the \
-                                 private key — enough to stop someone from simply copying your public key \
-                                 out of a roster, and to coalesce your sightings even when your handle \
-                                 differs from server to server. Over QUIC the burrow also binds that \
-                                 signature to its own TLS certificate, so a proof you give one burrow \
-                                 can't be replayed to another. This client speaks WebSocket, which has \
-                                 nothing to bind to \u{2014} so here it proves possession of the key and \
-                                 nothing more, and a burrow you connect to could in principle relay your \
-                                 proof elsewhere. Treat the mark as \u{201c}this is probably them,\u{201d} \
-                                 not a security guarantee."
-                            </p>
+                                <div class="rh-you-ident">
+                                    <div class="rh-you-fp-line">
+                                        <span class="rh-you-eyebrow">"Fingerprint"</span>
+                                        <code class="rh-you-fp">{fp.clone()}</code>
+                                        <button
+                                            class="rh-btn ghost small"
+                                            title="Copy fingerprint"
+                                            on:click=move |_| copy_text(&fp_copy, app)
+                                        >"Copy"</button>
+                                    </div>
+                                    <p class="rh-you-lead">
+                                        "Read this aloud to a friend to check you're both \
+                                         talking about the same key. Sixteen characters is \
+                                         short enough to say and long enough that a collision \
+                                         isn't a practical worry."
+                                    </p>
+                                    <details class="rh-you-key">
+                                        <summary>"Public key"</summary>
+                                        <code class="rh-you-pub">{pk.clone()}</code>
+                                        <button
+                                            class="rh-btn ghost small"
+                                            on:click=move |_| copy_text(&pk_copy, app)
+                                        >"Copy"</button>
+                                    </details>
+                                </div>
+                            </header>
+
+                            // The picker, only when asked for.
+                            <Show when=move || picking.get() fallback=|| ()>
+                                <h3 class="rh-person-h2">"Your mark"</h3>
+                                <p class="rh-settings-note">
+                                    "Pick a face and a colour, or keep the one your key draws. \
+                                     This is local for now \u{2014} the wire carries no mark, so \
+                                     other people still see the one your identity derives."
+                                </p>
+                                <div class="rh-mark-picker">
+                                    {(0..crate::avatar::GLYPH_COUNT).map(|g| {
+                                        view! {
+                                            <button
+                                                class="rh-mark-choice"
+                                                class:on=move || {
+                                                    app.my_mark.get().map(|m| m.glyph) == Some(g)
+                                                }
+                                                title=crate::avatar::glyph_name(g)
+                                                aria-label=crate::avatar::glyph_name(g)
+                                                on:click=move |_| {
+                                                    let color = app
+                                                        .my_mark
+                                                        .get_untracked()
+                                                        .map(|m| m.color)
+                                                        .unwrap_or(0);
+                                                    app.set_my_mark(Some(crate::avatar::ChosenMark {
+                                                        glyph: g,
+                                                        color,
+                                                    }));
+                                                }
+                                                inner_html=move || {
+                                                    let c = app
+                                                        .my_mark
+                                                        .get()
+                                                        .map(|m| m.color)
+                                                        .unwrap_or(0);
+                                                    crate::avatar::glyph_svg(g, c, 32)
+                                                }
+                                            ></button>
+                                        }
+                                    }).collect_view()}
+                                </div>
+                                <div class="rh-mark-colors">
+                                    {(0..crate::avatar::PALETTE.len()).map(|c| {
+                                        view! {
+                                            <button
+                                                class="rh-mark-color"
+                                                class:on=move || {
+                                                    app.my_mark.get().map(|m| m.color) == Some(c)
+                                                }
+                                                aria-label=format!("Colour {}", c + 1)
+                                                style=format!(
+                                                    "background:{}",
+                                                    crate::avatar::PALETTE[c],
+                                                )
+                                                on:click=move |_| {
+                                                    let glyph = app
+                                                        .my_mark
+                                                        .get_untracked()
+                                                        .map(|m| m.glyph)
+                                                        .unwrap_or(0);
+                                                    app.set_my_mark(Some(crate::avatar::ChosenMark {
+                                                        glyph,
+                                                        color: c,
+                                                    }));
+                                                }
+                                            ></button>
+                                        }
+                                    }).collect_view()}
+                                    <button
+                                        class="rh-btn ghost small"
+                                        on:click=move |_| app.set_my_mark(None)
+                                    >"Use my key's mark"</button>
+                                </div>
+                            </Show>
+
+                            // What the key is for, in plain sections rather
+                            // than one intimidating paragraph.
+                            <h3 class="rh-person-h2">"What this key does"</h3>
+                            <dl class="rh-you-facts">
+                                <div class="rh-you-fact">
+                                    <dt>"It travels with you"</dt>
+                                    <dd>
+                                        "The same key names you on every burrow, so your \
+                                         sightings coalesce even when your handle differs from \
+                                         place to place."
+                                    </dd>
+                                </div>
+                                <div class="rh-you-fact">
+                                    <dt>"It proves possession"</dt>
+                                    <dd>
+                                        "At each handshake the burrow challenges you and you \
+                                         sign a one-time nonce \u{2014} enough to stop someone \
+                                         copying your public key out of a roster and wearing it."
+                                    </dd>
+                                </div>
+                                <div class="rh-you-fact">
+                                    <dt>"Relay-proof over QUIC only"</dt>
+                                    <dd>
+                                        "Over QUIC the burrow binds that signature to its own \
+                                         TLS certificate, so a proof you give one burrow can't \
+                                         be replayed to another. This client speaks WebSocket, \
+                                         which has nothing to bind to \u{2014} here it proves \
+                                         possession and nothing more."
+                                    </dd>
+                                </div>
+                                <div class="rh-you-fact">
+                                    <dt>"It is not a name"</dt>
+                                    <dd>
+                                        "A mark means \u{201c}this is probably them\u{201d}, not \
+                                         a security guarantee. Check fingerprints out of band \
+                                         when it matters."
+                                    </dd>
+                                </div>
+                            </dl>
                         }
                     })}
                 </Show>
             </section>
         </main>
     }
+}
+
+/// Copy text to the clipboard, with a toast either way — a Copy button that
+/// silently does nothing is worse than no button.
+fn copy_text(text: &str, app: AppState) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Reflect rather than web_sys::Clipboard: the crate builds without
+        // that feature, and one call doesn't earn enabling it.
+        use js_sys::{Function, Reflect};
+        use wasm_bindgen::{JsCast, JsValue};
+        let text = text.to_string();
+        let copied = web_sys::window().and_then(|w| {
+            let nav = JsValue::from(w.navigator());
+            let clip = Reflect::get(&nav, &"clipboard".into()).ok()?;
+            let write = Reflect::get(&clip, &"writeText".into())
+                .ok()?
+                .dyn_into::<Function>()
+                .ok()?;
+            write.call1(&clip, &JsValue::from_str(&text)).ok()
+        });
+        if copied.is_some() {
+            app.notify(crate::toasts::ToastKind::Success, "Copied.".to_string());
+            return;
+        }
+        app.notify(
+            crate::toasts::ToastKind::Warn,
+            "Clipboard unavailable here.".to_string(),
+        );
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (text, app);
 }
 
 /// The user's presence status — a single control that fans the chosen status
