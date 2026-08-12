@@ -126,7 +126,6 @@ pub struct AppState {
     pub custom_pack: RwSignal<Option<PackTokens>>,
     /// The user's opt-out of server theming (persisted). `true` = ignore any
     /// server overlay and render the user's own pack/mode choice only.
-    pub server_theme_disabled: RwSignal<bool>,
     /// Radio now-playing per station, folded from routed `[radio]` notices.
     pub radio: RwSignal<RadioState>,
     /// The user's radio player preferences (enable/volume/mute/station plus
@@ -170,7 +169,6 @@ impl AppState {
             toasts: create_rw_signal(crate::toasts::ToastQueue::default()),
             theme: create_rw_signal(initial_theme_choice()),
             custom_pack: create_rw_signal(None),
-            server_theme_disabled: create_rw_signal(initial_server_theme_disabled()),
             radio: create_rw_signal(RadioState::default()),
             radio_prefs: create_rw_signal(initial_radio_prefs()),
             #[cfg(target_arch = "wasm32")]
@@ -435,14 +433,6 @@ impl AppState {
         self.focused()
             .server_theme
             .with(|s| s.as_ref().map(|o| o.name.clone()))
-    }
-
-    /// Turn server theming on/off for this user (persisted), per PLAN §9.11's
-    /// "user can disable server theming" rail.
-    pub fn set_server_theme_disabled(&self, disabled: bool) {
-        self.server_theme_disabled.set(disabled);
-        #[cfg(target_arch = "wasm32")]
-        crate::server_theme::storage::save_disabled(disabled);
     }
 
     /// Load the mock's seeded server theme bundle so the overlay + opt-out are
@@ -1442,19 +1432,6 @@ fn initial_radio_prefs() -> RadioPrefs {
     }
 }
 
-/// Whether server theming starts disabled: the persisted opt-out on the
-/// browser, else `false` (server themes apply by default, per PLAN §9.11).
-fn initial_server_theme_disabled() -> bool {
-    #[cfg(target_arch = "wasm32")]
-    {
-        crate::server_theme::storage::load_disabled()
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        false
-    }
-}
-
 /// Whether the OS prefers dark mode. On the host (tests) this defaults to
 /// `true`, preserving the SPA's original dark-first default.
 fn os_prefers_dark() -> bool {
@@ -1545,14 +1522,14 @@ pub fn App() -> impl IntoView {
 
     let style = move || {
         let (pack, mode) = (app.theme.get().pack, app.mode());
-        // Server theming layers below the editor's live preview and only when
-        // the user hasn't switched it off.
-        let show_server = !app.server_theme_disabled.get();
+        // A burrow's theme is how that place looks and always applies; the
+        // user's pack and light/dark choice are the app's own defaults, used
+        // where the burrow supplies nothing. The editor's live preview still
+        // layers above both.
         app.custom_pack.with(|custom| {
-            app.focused().server_theme.with(|server| {
-                let server = show_server.then_some(server.as_ref()).flatten();
-                resolve_root_style(custom.as_ref(), server, pack, mode)
-            })
+            app.focused()
+                .server_theme
+                .with(|server| resolve_root_style(custom.as_ref(), server.as_ref(), pack, mode))
         })
     };
 

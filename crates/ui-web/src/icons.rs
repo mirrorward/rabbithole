@@ -87,6 +87,44 @@ pub fn section_icon(path: &str) -> String {
     format!("{OPEN}{body}</svg>")
 }
 
+/// The theme-pack control: overlapping swatches, the universal "change how this
+/// looks" glyph. Labelled by the button's `aria-label`, like the section icons.
+pub fn pack_icon() -> String {
+    format!(
+        "{OPEN}{}</svg>",
+        // Overlapping swatches. Two circles read as a chain link at this size,
+        // which is the icon for something else entirely.
+        concat!(
+            "<rect x=\"3.4\" y=\"3.4\" width=\"11.2\" height=\"11.2\" rx=\"2.6\"/>",
+            "<rect x=\"9.4\" y=\"9.4\" width=\"11.2\" height=\"11.2\" rx=\"2.6\"/>"
+        )
+    )
+}
+
+/// The appearance control, drawn as what it currently is: a sun for light, a
+/// moon for dark, and a half-filled disc for "follow the system" — the same
+/// three shapes every OS uses, so the button says what it does without a word
+/// of text beside it.
+pub fn mode_icon(choice: crate::theme_css::ModeChoice) -> String {
+    use crate::theme_css::ModeChoice;
+    let body = match choice {
+        ModeChoice::Light => concat!(
+            "<circle cx=\"12\" cy=\"12\" r=\"4\"/>",
+            "<path d=\"M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2\"/>",
+            "<path d=\"M5.4 5.4l1.6 1.6M17 17l1.6 1.6M18.6 5.4L17 7M7 17l-1.6 1.6\"/>"
+        ),
+        ModeChoice::Dark => {
+            "<path d=\"M20 14.2A8.4 8.4 0 0 1 9.8 4a8.4 8.4 0 1 0 10.2 10.2z\"/>"
+        }
+        // Half light, half dark: the disc is outlined, and one side filled.
+        ModeChoice::System => concat!(
+            "<circle cx=\"12\" cy=\"12\" r=\"8.4\"/>",
+            "<path d=\"M12 3.6a8.4 8.4 0 0 0 0 16.8z\" fill=\"currentColor\" stroke=\"none\"/>"
+        ),
+    };
+    format!("{OPEN}{body}</svg>")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

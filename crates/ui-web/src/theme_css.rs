@@ -38,10 +38,11 @@ pub fn root_style(pack: ThemePack, mode: Mode) -> String {
 /// 1. the theme editor's **custom pack override slot** — when a custom
 ///    [`PackTokens`] is applied (a live edit preview) it wins wholesale, so the
 ///    editor shows exactly what is being edited, unlayered;
-/// 2. otherwise a **server theme overlay** (PLAN §9.11), when present and not
-///    disabled by the user, layered on top of the built-in `pack` — the
-///    operator's accent/metric tokens nudge the chosen pack without replacing
-///    it;
+/// 2. otherwise a **server theme overlay** (PLAN §9.11) whenever the burrow
+///    ships one, layered on top of the built-in `pack` — the operator's
+///    accent/metric tokens nudge the chosen pack without replacing it. A
+///    burrow's theme is how that place looks, so it always applies; the user's
+///    pack is the app's default for where a burrow supplies nothing;
 /// 3. otherwise the plain built-in `pack`.
 ///
 /// Pure and host-tested — the reactive layer in [`crate::app`] only feeds it
@@ -124,6 +125,18 @@ pub fn next_pack(pack: ThemePack) -> ThemePack {
 }
 
 /// A short button label for a mode choice.
+/// The mode's plain name, for a label or tooltip beside an icon.
+pub fn mode_name(choice: ModeChoice) -> &'static str {
+    match choice {
+        ModeChoice::System => "Auto",
+        ModeChoice::Light => "Light",
+        ModeChoice::Dark => "Dark",
+    }
+}
+
+/// A short button label for a mode, with its glyph. For text buttons only —
+/// beside an icon the glyph is a second, worse copy of the same idea, and it
+/// lands in the accessible name where it reads as punctuation.
 pub fn mode_label(choice: ModeChoice) -> &'static str {
     match choice {
         ModeChoice::System => "\u{25D0} Auto",
@@ -399,6 +412,8 @@ body{overflow:hidden}\
 .rh-subnav-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}\
 .rh-subnav .rh-pip{flex:none}\
 .rh-subnav-rule{height:1px;margin:var(--rh-space-2) .55rem;background:color-mix(in srgb,var(--rh-text) 10%,transparent)}\
+.rh-icon-btn{display:inline-flex;align-items:center;justify-content:center;padding:.3rem;min-width:2rem;line-height:0}\
+.rh-icon-btn span{display:grid;place-items:center}\
 .rh-subnav-scope{display:block;padding:.1rem .55rem .35rem;font-size:var(--rh-font-xs);text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:var(--rh-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
 /* The rail's warren destinations get the same lit treatment as a focused\
    burrow tile, so the rail always shows where you are -- not only which burrow\

@@ -23,7 +23,7 @@ use crate::a11y;
 use crate::app::AppState;
 use crate::files::{human_size, node_kind_label, TransferStatus, KIND_FOLDER};
 use crate::syndication_admin::FeedsStatus;
-use crate::theme_css::{mode_label, pack_label};
+use crate::theme_css::{mode_name, pack_label};
 use crate::theme_editor::{contrast_warnings, EditorAction, EditorState};
 
 /// Strip a `ws://`/`wss://` endpoint down to a readable `host:port` for chips.
@@ -43,40 +43,17 @@ fn endpoint_host(endpoint: &str) -> String {
 pub fn ThemeToggle() -> impl IntoView {
     let app = expect_context::<AppState>();
     let pack = move || pack_label(app.theme.get().pack);
-    let mode = move || mode_label(app.theme.get().mode);
-    // The server-theming opt-out only appears when the connected burrow ships
-    // a theme (PLAN §9.11: server theming is on by default, user can disable).
-    let server_name = move || {
-        app.focused()
-            .server_theme
-            .with(|s| s.as_ref().map(|o| o.name.clone()))
-    };
-    let disabled = move || app.server_theme_disabled.get();
-    let server_title = move || match (server_name(), disabled()) {
-        (Some(name), false) => {
-            format!("Server theme \u{201c}{name}\u{201d} on \u{2014} click to use your own")
-        }
-        (Some(name), true) => {
-            format!("Server theme \u{201c}{name}\u{201d} off \u{2014} click to apply it")
-        }
-        (None, _) => String::new(),
-    };
-    // Solid when the server theme is applied (its accent tints the button
-    // itself), ghost when the user has switched it off.
-    let server_class = move || {
-        if disabled() {
-            "rh-btn ghost small"
-        } else {
-            "rh-btn small"
-        }
-    };
+    let mode = move || mode_name(app.theme.get().mode);
     view! {
         <span class="rh-theme-menu">
             // Chimes: off until asked for, and silent whenever the window is
             // focused (see crate::sound). A quiet toggle, not a settings page.
             <button
-                class="rh-btn ghost rh-sound-toggle"
+                class="rh-btn ghost rh-sound-toggle rh-icon-btn"
                 aria-pressed=move || app.sound_on.get().to_string()
+                aria-label=move || {
+                    if app.sound_on.get() { "Chimes on" } else { "Chimes off" }
+                }
                 title=move || {
                     if app.sound_on.get() {
                         "Chimes on \u{2014} click to silence"
@@ -100,31 +77,27 @@ pub fn ThemeToggle() -> impl IntoView {
             >
                 {move || if app.sound_on.get() { "\u{1F514}" } else { "\u{1F515}" }}
             </button>
-            <Show when=move || server_name().is_some() fallback=|| ()>
-                <button
-                    class=server_class
-                    aria-pressed=move || (!disabled()).to_string()
-                    title=server_title
-                    on:click=move |_| {
-                        app.set_server_theme_disabled(!app.server_theme_disabled.get_untracked())
-                    }
-                >
-                    "\u{25C6} Server"
-                </button>
-            </Show>
+            // Icons, not words: three text buttons in a row read as a
+            // settings panel wedged into the title bar. The label each one
+            // used to show lives in its tooltip and accessible name, which is
+            // where it was actually useful.
             <button
-                class="rh-btn ghost"
-                title="Cycle theme pack: Clean / Retro / High Contrast"
+                class="rh-btn ghost rh-icon-btn"
+                title=move || format!("Appearance: {} \u{2014} click to change", pack())
+                aria-label=move || format!("Appearance: {}", pack())
                 on:click=move |_| app.cycle_pack()
             >
-                {pack}
+                <span inner_html=crate::icons::pack_icon()></span>
             </button>
             <button
-                class="rh-btn ghost"
-                title="Cycle appearance: Auto / Light / Dark"
+                class="rh-btn ghost rh-icon-btn"
+                title=move || format!("{} \u{2014} click to change", mode())
+                aria-label=mode
                 on:click=move |_| app.cycle_theme()
             >
-                {mode}
+                <span inner_html=move || {
+                    crate::icons::mode_icon(app.theme.get().mode)
+                }></span>
             </button>
         </span>
     }
