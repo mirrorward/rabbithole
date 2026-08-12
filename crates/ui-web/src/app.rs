@@ -1634,10 +1634,14 @@ fn SideNav() -> impl IntoView {
         let path = location.pathname.get();
         path != "/" && crate::palette::scope_of(&path) == crate::palette::Scope::Burrow
     };
+    // Hidden with CSS, not unmounted: a <Show> would tear the nav down on
+    // every warren-scope route and remount it on return, replaying the pips'
+    // arrival animation on plain navigation — the exact replay-on-remount
+    // class of motion 0.179 removed.
     view! {
-        <Show when=show fallback=|| ()>
+        <div class="rh-sidenav-slot" class:rh-hidden=move || { !show() }>
             <Nav/>
-        </Show>
+        </div>
     }
 }
 

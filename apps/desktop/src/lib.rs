@@ -94,6 +94,16 @@ const NATIVE_SHIM: &str = r#"
     }
     e.preventDefault();
   }, { capture: true });
+  window.__RH_NATIVE__.listen('rh://fullscreen', function (e) {
+    document.documentElement.classList.toggle('rh-fullscreen', !!(e && e.payload));
+  });
+  // Transitions come from events; the STARTING state has to be asked for —
+  // events are not replayed, and a reload while fullscreen resets the class.
+  window.__RH_NATIVE__.invoke('fullscreen_state')
+    .then(function (fs) {
+      document.documentElement.classList.toggle('rh-fullscreen', !!fs);
+    })
+    .catch(function () {});
   window.__RH_NATIVE__.listen('test://tick', function (e) {
     console.log('[rh-native] event test://tick ->', e && e.payload);
     // Invoke a Rust callback so the event (Rust->JS) round-trip is observable
@@ -117,6 +127,16 @@ fn ping(name: String) -> String {
 /// The webview calls this from its `test://tick` listener, so the Rust→JS event
 /// delivery (and the `listen` subscription over `core:event`) is confirmed from
 /// the terminal, closing the bridge round-trip in both directions.
+/// The webview asks for the CURRENT fullscreen state at startup. The
+/// `rh://fullscreen` events only fire on transitions (inside the Resized
+/// handler), so a window restored fullscreen at launch — or a webview reload
+/// while fullscreen, which resets <html> classes — would otherwise keep the
+/// title strip's dead band until the user happened to resize.
+#[tauri::command]
+fn fullscreen_state(window: tauri::WebviewWindow) -> bool {
+    window.is_fullscreen().unwrap_or(false)
+}
+
 #[tauri::command]
 fn tick_ack(payload: String) {
     eprintln!("[rh-bridge] tick_ack from webview: event payload={payload:?} — Rust→JS event delivery works");
@@ -137,6 +157,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ping,
             tick_ack,
+            fullscreen_state,
             transfers::native_available,
             transfers::connect_native,
             transfers::swarm_start_download,
@@ -161,7 +182,20 @@ pub fn run() {
             let win = win
                 .title_bar_style(tauri::TitleBarStyle::Overlay)
                 .hidden_title(true);
-            win.build()?;
+            let window = win.build()?;
+            // Fullscreen reclaims the title strip: the traffic lights slide
+            // away, so the 1.75rem clearance would become a dead band. There
+            // is no fullscreen event as such — Resized fires on the
+            // transition, and is_fullscreen() is a cheap attribute read.
+            {
+                let w = window.clone();
+                window.on_window_event(move |event| {
+                    if matches!(event, tauri::WindowEvent::Resized(_)) {
+                        let fs = w.is_fullscreen().unwrap_or(false);
+                        let _ = w.emit("rh://fullscreen", fs);
+                    }
+                });
+            }
 
             // Emit a test event a beat after launch so the init-script listener
             // proves Rust→JS event delivery end-to-end.

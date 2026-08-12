@@ -91,6 +91,7 @@ pub mod conn;
 pub mod files;
 pub mod icons;
 pub mod identity;
+pub mod keynav;
 pub mod markdown;
 pub mod notify;
 pub mod packs;

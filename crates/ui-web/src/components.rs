@@ -1427,7 +1427,7 @@ pub fn Boards() -> impl IntoView {
                         sub="This burrow hasn't opened any boards to post on."
                     />
                 </Show>
-                <ul class="rh-tree">
+                <ul class="rh-tree" tabindex="0" aria-label="Boards" on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-board-link")>
                     <For
                         each=move || state.with(|s| s.boards.clone())
                         key=|b| b.slug.clone()
@@ -1435,6 +1435,9 @@ pub fn Boards() -> impl IntoView {
                             let href = format!("/boards/{}", b.slug);
                             view! {
                                 <li class="rh-tree-item">
+                                    // (Router <A> takes no tabindex in leptos 0.6, so board rows stay
+                                    // individual Tab stops — a board list is a handful of rows, not a
+                                    // forty-row file table, so the cost is small. Arrows still work.)
                                     <A href=href class="rh-board-link">
                                         <span class="rh-board-name">{b.name}</span>
                                         <span class="rh-board-desc">{b.description}</span>
@@ -1518,7 +1521,7 @@ pub fn BoardView() -> impl IntoView {
                 // the main content — so it stays a narrow column with a dense
                 // two-line row (subject, then author · replies · activity)
                 // rather than a squeezed table.
-                <ul class="rh-tree rh-threadtable">
+                <ul class="rh-tree rh-threadtable" tabindex="0" aria-label="Threads" on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-thread-link")>
                     <For
                         each=move || state.with(|s| s.threads.clone())
                         key=|t| t.id.clone()
@@ -1541,6 +1544,7 @@ pub fn BoardView() -> impl IntoView {
                                 <li class="rh-tree-item">
                                     <button
                                         class=class
+                                        tabindex="-1"
                                         aria-current=move || selected.get().then_some("true")
                                         on:click=move |_| app.open_thread(id.clone())
                                     >
@@ -1711,7 +1715,7 @@ pub fn Dms() -> impl IntoView {
                         on:input=move |ev| new_peer.set(event_target_value(&ev))
                     />
                 </form>
-                <ul>
+                <ul tabindex="0" aria-label="Conversations" on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-dm-peer")>
                     <For
                         each=move || state.with(|s| s.dm_threads.clone())
                         key=|t| t.id.clone()
@@ -1733,6 +1737,7 @@ pub fn Dms() -> impl IntoView {
                                 <li>
                                     <button
                                         class=class
+                                        tabindex="-1"
                                         aria-current=move || current().then_some("true")
                                         on:click=move |_| app.select_dm(&id)
                                     >
@@ -1886,27 +1891,48 @@ pub fn Directory() -> impl IntoView {
                         }
                     })}
                 </Show>
-                <ul class="rh-tree">
+                <ul class="rh-tree" tabindex="0" aria-label="Members" on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-member-link")>
                     <For
                         each=move || state.with(|s| s.matching_members())
-                        // Key on presence too, so a member's dot/label re-renders
-                        // when they go online/offline (a handle-only key would
-                        // reuse the stale row — see the security review).
-                        key=|m| (m.handle.clone(), m.online)
+                        // Keyed by handle ALONE, with presence read reactively
+                        // inside the row. The old key included `online` so a
+                        // presence flip would re-render the dot (the security
+                        // review's stale-row fix) — but recreating the row
+                        // destroys the element, and now that rows hold keyboard
+                        // focus (keynav), that ejected the user to <body>
+                        // mid-navigation. A reactive read updates the dot in
+                        // place: both reviews stay satisfied.
+                        key=|m| m.handle.clone()
                         children=move |m| {
                             let handle = m.handle.clone();
-                            let dot = if m.online { "rh-dot on" } else { "rh-dot off" };
+                            let presence_of = {
+                                let handle = m.handle.clone();
+                                move || {
+                                    state.with(|s| {
+                                        s.members
+                                            .iter()
+                                            .find(|x| x.handle == handle)
+                                            .map(|x| x.online)
+                                            .unwrap_or(m.online)
+                                    })
+                                }
+                            };
+                            let dot = {
+                                let p = presence_of.clone();
+                                move || if p() { "rh-dot on" } else { "rh-dot off" }
+                            };
                             // The dot alone carried presence; keep it
                             // decorative and speak the state as hidden text.
-                            let presence = if m.online { "Online:" } else { "Offline:" };
+                            let spoken = move || if presence_of() { "Online:" } else { "Offline:" };
                             view! {
                                 <li class="rh-tree-item">
                                     <button
                                         class="rh-member-link"
+                                        tabindex="-1"
                                         on:click=move |_| app.select_member(&handle)
                                     >
                                         <span class=dot aria-hidden="true"></span>
-                                        <span class="rh-visually-hidden">{presence}</span>
+                                        <span class="rh-visually-hidden">{spoken}</span>
                                         <span class="rh-member-name">{m.display_name}</span>
                                         <span class="rh-member-handle">"@"{m.handle}</span>
                                     </button>
@@ -2299,7 +2325,7 @@ fn FolderBrowser() -> impl IntoView {
         >
             <p class="rh-empty">"Nothing matches that filter."</p>
         </Show>
-        <ul class="rh-tree rh-filetable">
+        <ul class="rh-tree rh-filetable" tabindex="0" aria-label="Files" on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-file-link")>
             <For
                 each=visible
                 key=|n| n.id
@@ -2344,6 +2370,7 @@ fn FolderBrowser() -> impl IntoView {
                         <li class="rh-tree-item">
                             <button
                                 class=class
+                                tabindex="-1"
                                 aria-current=move || selected().then_some("true")
                                 on:click=on_click
                                 // Double-click gets the file — Finder's and

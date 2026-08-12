@@ -100,6 +100,12 @@ where headless-verifiable, tested:
   round-trip, which needs `cargo tauri dev` on a real machine.
 - **Verified identity** across proto/server/web/CLI, hardened against relay.
 - **An adversarial review** (13 fixes) + a security-review relay fix.
+- **Keyboard lists + motion at native tempo** — ↑/↓/Home/End drive every list
+  (container is the single Tab stop; rows tabindex=-1; modifiers pass through),
+  one 28px control height in the title bar, palette pop-in, pip pop on arrival
+  only, fullscreen reclaims the title strip (with initial-state sync).
+  Deferred: focus recovery when a focused row is removed; board rows stay
+  individual Tab stops (router <A> takes no tabindex in leptos 0.6).
 - **The rail is one icon family** — rings (home/brand), smiley (people), arrow-into-
   tray (transfers), bust (you), plus — same 20px box, same stroke, contact-sheeted.
 - **Native-feel pass** (50-agent audit, 20 confirmed findings) — real Tauri drag
