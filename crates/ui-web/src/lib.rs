@@ -94,6 +94,7 @@ pub mod icons;
 pub mod identity;
 pub mod keynav;
 pub mod markdown;
+pub mod net;
 pub mod notify;
 pub mod packs;
 pub mod palette;

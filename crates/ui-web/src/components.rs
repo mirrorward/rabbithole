@@ -2917,20 +2917,43 @@ pub fn ServerBrowser() -> impl IntoView {
     let navigate = use_navigate();
     let query = create_rw_signal(String::new());
     let rows = move || crate::servers::browse(&servers.get(), &query.get());
+    // Refresh from the network on arrival: the seeded list is a fallback, not
+    // the answer. A render effect so a route re-entry doesn't fire it against
+    // a disposed view.
+    create_render_effect(move |seen: Option<bool>| {
+        if seen.is_none() {
+            app.load_directory();
+        }
+        true
+    });
 
     view! {
         <StatusBar/>
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <section class="rh-panel rh-servers" aria-label="Server directory">
                 <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">"Looking Glass"</h1>
-                <input
-                    class="rh-input"
-                    type="search"
-                    aria-label="Search servers"
-                    placeholder="Search servers\u{2026}"
-                    prop:value=move || query.get()
-                    on:input=move |ev| query.set(event_target_value(&ev))
-                />
+                <div class="rh-glass-bar">
+                    <input
+                        class="rh-input"
+                        type="search"
+                        aria-label="Search servers"
+                        placeholder="Search servers\u{2026}"
+                        prop:value=move || query.get()
+                        on:input=move |ev| query.set(event_target_value(&ev))
+                    />
+                    <button
+                        class="rh-btn ghost"
+                        prop:disabled=move || app.directory_loading.get()
+                        on:click=move |_| app.load_directory()
+                    >
+                        {move || if app.directory_loading.get() { "Refreshing\u{2026}" } else { "Refresh" }}
+                    </button>
+                </div>
+                // Where this listing came from. A directory that doesn't say
+                // who told it is asking to be trusted for no reason.
+                <p class="rh-glass-source">
+                    "via "{move || app.directory_source.get().label()}
+                </p>
                 <ul class="rh-server-list">
                     <For
                         each=rows
@@ -2947,11 +2970,15 @@ pub fn ServerBrowser() -> impl IntoView {
                                         <span class=dot aria-hidden="true"></span>
                                         <span class="rh-visually-hidden">{presence}</span>
                                         <span class="rh-server-name">{s.name.clone()}</span>
-                                        <span class="rh-server-users">
-                                            {s.users_online}" online"
-                                        </span>
+                                        {s.users_online.map(|n| view! {
+                                            <span class="rh-server-users">{n}" online"</span>
+                                        })}
                                     </div>
                                     <p class="rh-server-desc">{s.description.clone()}</p>
+                                    {(!s.listeners.is_empty()).then(|| {
+                                        let list = s.listeners.join(" \u{00b7} ");
+                                        view! { <p class="rh-server-listeners">{list}</p> }
+                                    })}
                                     <div class="rh-server-foot">
                                         <span class="rh-server-uptime">{uptime}</span>
                                         <code class="rh-server-endpoint">{s.endpoint.clone()}</code>

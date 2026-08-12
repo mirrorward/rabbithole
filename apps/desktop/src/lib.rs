@@ -135,6 +135,50 @@ fn native_shim() -> String {
         .replace("__RH_SHA__", env!("RH_GIT_SHA"))
 }
 
+/// Fetch a Looking Glass tracker's `INDEX` listing over its status port.
+///
+/// The status port is a **line protocol over TCP** (one command line in,
+/// tab-separated rows out) — not HTTP, so the webview cannot dial it and the
+/// shell does the socket here. The reply is handed back verbatim for
+/// `ui_web::servers::parse_tracker_index`; parsing stays in one place, tested
+/// against the documented column layout.
+///
+/// Bounded on every axis a hostile or broken tracker could exploit: connect
+/// timeout, read timeout, and a response cap.
+#[tauri::command]
+async fn tracker_index() -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    const HOST: &str = "tracker.rabbit.direct:4655";
+    const CONNECT: std::time::Duration = std::time::Duration::from_secs(3);
+    const IO: std::time::Duration = std::time::Duration::from_secs(5);
+    const MAX: usize = 512 * 1024;
+
+    let mut stream = tokio::time::timeout(CONNECT, TcpStream::connect(HOST))
+        .await
+        .ok()?
+        .ok()?;
+    let exchange = async {
+        stream.write_all(b"INDEX\n").await.ok()?;
+        stream.flush().await.ok()?;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let n = stream.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.len() > MAX {
+                break;
+            }
+        }
+        String::from_utf8(buf).ok()
+    };
+    tokio::time::timeout(IO, exchange).await.ok()?
+}
+
 /// A trivial command proving JS→Rust invoke works. Logs on the Rust side so the
 /// round-trip is observable from the `cargo tauri dev` terminal (not just the
 /// webview devtools console).
@@ -296,6 +340,7 @@ pub fn run() {
             ping,
             tick_ack,
             fullscreen_state,
+            tracker_index,
             transfers::native_available,
             transfers::connect_native,
             transfers::swarm_start_download,

@@ -185,3 +185,24 @@ fn apply_swarm_event(app: AppState, ev: &SwarmWireEvent) {
         });
     }
 }
+
+/// Ask the native core for a Looking Glass tracker's `INDEX` listing.
+///
+/// The tracker's status port is a **line protocol over TCP** — one command
+/// line in, tab-separated rows out — which a webview cannot dial. The shell
+/// does the socket in Rust and hands back the raw reply for
+/// [`crate::servers::parse_tracker_index`]. `None` in a browser tab, where
+/// there is no shell to ask: that isn't a failure, it's a capability the web
+/// build doesn't have.
+#[cfg(target_arch = "wasm32")]
+pub async fn tracker_index() -> Option<String> {
+    let b = bridge()?;
+    let invoke = method(&b, "invoke")?;
+    let args = js_sys::Object::new();
+    let promise = invoke
+        .call2(&b, &JsValue::from_str("tracker_index"), &args.into())
+        .ok()?
+        .dyn_into::<js_sys::Promise>()
+        .ok()?;
+    JsFuture::from(promise).await.ok()?.as_string()
+}

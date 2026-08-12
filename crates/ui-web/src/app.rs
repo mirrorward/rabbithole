@@ -127,6 +127,11 @@ pub struct AppState {
     pub palette_open: RwSignal<bool>,
     /// The Looking Glass server-browser directory ([`crate::servers`]).
     pub servers: RwSignal<Vec<crate::servers::DirectoryServer>>,
+    /// Where the current listing came from — shown, because "who told you
+    /// this" is part of the answer to "who is out there".
+    pub directory_source: RwSignal<crate::servers::DirectorySource>,
+    /// Whether a directory refresh is in flight.
+    pub directory_loading: RwSignal<bool>,
     /// An endpoint chosen in the server browser, handed to the login screen to
     /// prefill on its next mount (then cleared).
     pub pending_endpoint: RwSignal<Option<String>>,
@@ -188,6 +193,8 @@ impl AppState {
             syndication: create_rw_signal(SynAdminState::default()),
             palette_open: create_rw_signal(false),
             servers: create_rw_signal(crate::servers::sample_directory()),
+            directory_source: create_rw_signal(crate::servers::DirectorySource::Seeded),
+            directory_loading: create_rw_signal(false),
             pending_endpoint: create_rw_signal(None),
             toasts: create_rw_signal(crate::toasts::ToastQueue::default()),
             theme: create_rw_signal(initial_theme_choice()),
@@ -1303,6 +1310,57 @@ impl AppState {
         self.focused().state.with_untracked(|s| {
             s.dm_threads.iter().find(|t| t.peer == handle).cloned()
         })
+    }
+
+    /// Refresh the Looking Glass from the network.
+    ///
+    /// Two sources, two protocols, in preference order:
+    ///
+    /// 1. **rabbithole.directory** over HTTPS+JSON. CORS is open, so this
+    ///    works in a browser tab and in the shell alike.
+    /// 2. **A Looking Glass tracker** (`tracker.rabbit.direct`) — whose status
+    ///    port is a *line-oriented TCP* protocol, not HTTP. A browser cannot
+    ///    dial it at all, so this leg exists only in the native shell, which
+    ///    does the socket in Rust.
+    ///
+    /// Neither reachable leaves the seeded sample in place, labelled as such:
+    /// an empty browser would look like "nobody is out there", which is a
+    /// different and wrong claim.
+    pub fn load_directory(&self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let servers = self.servers;
+            let source = self.directory_source;
+            let loading = self.directory_loading;
+            let app = *self;
+            loading.set(true);
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Some(text) = crate::net::fetch_text(crate::servers::DIRECTORY_URL).await {
+                    if let Ok(rows) = crate::servers::parse_directory_json(&text) {
+                        servers.set(rows);
+                        source.set(crate::servers::DirectorySource::Directory);
+                        loading.set(false);
+                        return;
+                    }
+                }
+                // The tracker speaks TCP; only the shell can reach it.
+                if let Some(text) = crate::native::tracker_index().await {
+                    if let Ok(rows) = crate::servers::parse_tracker_index(&text) {
+                        servers.set(rows);
+                        source.set(crate::servers::DirectorySource::Tracker);
+                        loading.set(false);
+                        return;
+                    }
+                }
+                app.notify(
+                    crate::toasts::ToastKind::Warn,
+                    "Couldn\u{2019}t reach a directory \u{2014} showing the built-in list."
+                        .to_string(),
+                );
+                source.set(crate::servers::DirectorySource::Seeded);
+                loading.set(false);
+            });
+        }
     }
 
     /// A recovery document for the current identity, or `None` when there
