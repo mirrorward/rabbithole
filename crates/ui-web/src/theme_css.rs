@@ -366,7 +366,18 @@ pub const STYLESHEET: &str = "\
 .rh-conn{order:3;font-size:var(--rh-font-xs);font-weight:600;color:var(--rh-muted);text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}\
 .rh-status{order:4;color:var(--rh-muted);font-size:var(--rh-font-sm);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:14rem}\
 .rh-spacer{order:5;flex:1}\
-.rh-live-slot{order:6}\
+.rh-live-slot{order:6;min-width:0;flex:0 1 auto;overflow:hidden}\
+/* The header's flexible parts must actually be able to shrink. Everything in\
+   it was `white-space:nowrap` with no `min-width:0`, so a long now-playing\
+   line -- a radio track title -- pushed the trailing controls off\
+   the right edge of the window -- the same overflow that moved the section nav\
+   out of here, reappearing with one long string. Title, status and now-playing\
+   give way; the controls never do. */\
+.rh-header{overflow:hidden}\
+.rh-header .rh-title{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}\
+.rh-header .rh-title-text{min-width:0;overflow:hidden;text-overflow:ellipsis}\
+.rh-status{flex:0 1 auto}\
+.rh-theme-menu,.rh-presence,.rh-kbd-jump,.rh-dot,.rh-conn{flex:none}\
 .rh-theme-menu{order:8;display:inline-flex;gap:.35rem;align-items:center}\
 .rh-nav{order:7;display:flex;gap:.15rem;align-items:center}\
 .rh-nav a,.rh-nav .rh-nav-item{color:var(--rh-muted);display:inline-flex;align-items:center;gap:.3rem;white-space:nowrap;text-decoration:none;font-size:var(--rh-font-sm);font-weight:500;padding:.35rem .7rem;border-radius:var(--rh-radius-full);transition:background-color .15s ease,color .15s ease;border-bottom:0}\
@@ -396,9 +407,17 @@ pub const STYLESHEET: &str = "\
 /* The desktop shell hides the system title bar, so the header is the title bar:\
    it drags the window, and every control in it has to opt back out or it can't\
    be clicked. The rail starts below the traffic lights. */\
+/* The traffic lights sit at the window's top-LEFT, which in this layout is over\
+   the burrow rail and the top of the sidebar -- not over the header. So the\
+   whole window content shifts down by a title-bar's height and that strip\
+   becomes the drag region: the lights get clear space, and there is one\
+   unambiguous place to grab the window (what VS Code does with the same\
+   constraint). The header is draggable too, with its controls opting back out\
+   or they couldn't be clicked. */\
+.rh-app.native{padding-top:1.75rem}\
+.rh-app.native::before{content:'';position:fixed;top:0;left:0;right:0;height:1.75rem;-webkit-app-region:drag;z-index:100}\
 .rh-app.native .rh-header{-webkit-app-region:drag}\
 .rh-app.native .rh-header button,.rh-app.native .rh-header a,.rh-app.native .rh-header select,.rh-app.native .rh-header input{-webkit-app-region:no-drag}\
-.rh-app.native .rh-rail{padding-top:1.9rem}\
 .rh-composer{display:flex;flex-direction:column;gap:var(--rh-space-2);padding:var(--rh-space-3) var(--rh-space-5);border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
 .rh-format-bar{display:flex;align-items:center;gap:.15rem;flex-wrap:wrap}\
 .rh-format-btn{display:inline-flex;align-items:center;justify-content:center;min-width:1.9rem;height:1.9rem;padding:0 .4rem;border:1px solid transparent;border-radius:var(--rh-radius-sm);background:transparent;color:var(--rh-muted);font-family:var(--rh-font-sans);font-size:var(--rh-font-sm);font-weight:700;cursor:pointer;transition:background-color .12s ease,color .12s ease}\
@@ -609,6 +628,13 @@ pub const STYLESHEET: &str = "\
 .rh-scroll::-webkit-scrollbar,.rh-panel::-webkit-scrollbar,.rh-who::-webkit-scrollbar{width:10px;height:10px}\
 .rh-scroll::-webkit-scrollbar-thumb,.rh-panel::-webkit-scrollbar-thumb,.rh-who::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--rh-text) 18%,transparent);border-radius:var(--rh-radius-full);border:3px solid transparent;background-clip:padding-box}\
 .rh-scroll::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--rh-text) 30%,transparent);background-clip:padding-box}\
+/* Between the desktop row and the phone grid there is a band where the header\
+   has more controls than room. Two things go first, in this order, because\
+   neither is load-bearing: the status line (the connection banner says the same\
+   thing, louder) and the Cmd-K hint (the shortcut still works without a button\
+   advertising it). Measured: without this the header overflows by ~29px at\
+   760px wide, which is exactly where a small desktop window lands. */\
+@media (max-width:860px){.rh-status,.rh-kbd-jump{display:none}}\
 @media (max-width:720px){.rh-header{display:grid;grid-template-columns:minmax(0,1fr) auto auto;grid-template-areas:\"title dot presence\" \"live live theme\" \"nav nav nav\";align-items:center;padding:var(--rh-space-2) var(--rh-space-3);min-height:0;gap:var(--rh-space-2)}.rh-header .rh-title{grid-area:title;font-size:var(--rh-font-size);min-width:0;overflow:hidden}.rh-dot{grid-area:dot}.rh-presence{grid-area:presence;justify-self:end;padding:.25rem .4rem;font-size:var(--rh-font-xs)}.rh-live-slot{grid-area:live;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}\
 .rh-live-slot .rh-radio-now{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.rh-nav{grid-area:nav;min-width:0;overflow-x:auto;padding-bottom:.15rem}.rh-subnav{position:fixed;left:0;right:0;bottom:0;z-index:30;width:auto;flex-direction:row;gap:0;padding:.3rem var(--rh-space-2) calc(.3rem + env(safe-area-inset-bottom));overflow-x:auto;overflow-y:hidden;border-right:0;border-top:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);background:color-mix(in srgb,var(--rh-surface) 92%,transparent);backdrop-filter:saturate(1.4) blur(14px);-webkit-backdrop-filter:saturate(1.4) blur(14px)}.rh-subnav-link{flex:none;flex-direction:column;gap:.1rem;padding:.3rem .6rem;font-size:var(--rh-font-xs);min-width:3.7rem;justify-content:center}.rh-subnav-label{flex:none}.rh-subnav-rule{display:none}.rh-subnav .rh-pip{position:absolute;top:.15rem;right:.5rem}.rh-subnav-link{position:relative}.rh-shell-main{padding-bottom:3.6rem}.rh-theme-menu{grid-area:theme;justify-self:end}.rh-theme-menu button{padding:.25rem .5rem;font-size:var(--rh-font-xs)}.rh-status,.rh-kbd-jump,.rh-spacer{display:none}.rh-conn{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}.rh-toasts{top:6.4rem}.rh-body{flex-direction:column}.rh-who,.rh-threads,.rh-members,.rh-files,.rh-stations{max-width:none;width:auto;border-right:0;border-left:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-who{max-height:35vh}.rh-chat{min-height:0}.rh-filetable-head,.rh-filetable .rh-file-link{grid-template-columns:minmax(0,1fr) 5rem}.rh-fcol-kind,.rh-fcol-who,.rh-fcol-when{display:none}.rh-scroll{padding:var(--rh-space-3)}.rh-compose{padding:var(--rh-space-2) var(--rh-space-3)}.rh-compose .rh-input{min-width:0}.rh-compose .rh-btn{padding-left:var(--rh-space-4);padding-right:var(--rh-space-4)}.rh-present{order:-1;display:flex;align-items:center;gap:var(--rh-space-2);padding:.4rem var(--rh-space-3);max-height:none}.rh-present h2{margin:0;flex:none}.rh-present ul{flex-direction:row;flex:1;min-width:0;overflow-x:auto;gap:.4rem;padding-bottom:.15rem}.rh-present li{flex:none;white-space:nowrap}.rh-reader{min-height:14rem}.rh-login{margin:var(--rh-space-6) var(--rh-space-4)}}\
 @keyframes rh-shimmer{0%{background-position:-180% 0}100%{background-position:180% 0}}\
