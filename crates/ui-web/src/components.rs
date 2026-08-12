@@ -120,16 +120,14 @@ pub fn ThemeToggle() -> impl IntoView {
 /// tear it down and rebuild it.
 #[component]
 pub fn Nav() -> impl IntoView {
-    use crate::palette::{scope_of, sections_for, Scope};
+    use crate::palette::{sections_for, Scope};
     let app = expect_context::<AppState>();
     let is_admin = app.focused().is_admin;
     let state = app.focused().state;
-    let location = leptos_router::use_location();
-    // Which sidebar to show: the rail picks a scope, this lists that scope's
-    // sections. Standing in Transfers — which spans every burrow — the burrow's
-    // own Lobby/Boards/Files were still listed, which is a nav full of links
-    // that don't belong to what you're looking at.
-    let scope = move || scope_of(&location.pathname.get());
+    // Only ever rendered inside a burrow (the shell hides the sidebar
+    // entirely on warren routes — People, Transfers, You and Servers are each
+    // one screen and get the full width). So this lists the burrow's sections,
+    // headed by the burrow's name.
     // Unread pips: the counts the wire has always carried, summed per section.
     // A pip says "something happened here" without shouting a number in a nav.
     let dm_unread = move || state.with(|s| s.dm_threads.iter().map(|t| t.unread).sum::<u64>());
@@ -142,23 +140,17 @@ pub fn Nav() -> impl IntoView {
     view! {
         <nav class="rh-subnav" aria-label="Primary">
             <span class="rh-subnav-scope">
-                {move || match scope() {
-                    Scope::Burrow => app.focused().name.get().unwrap_or_else(|| "This burrow".into()),
-                    Scope::Warren => "Your warren".to_string(),
-                }}
+                {move || app.focused().name.get().unwrap_or_else(|| "This burrow".into())}
             </span>
             <For
-                each=move || sections_for(scope()).to_vec()
+                each=|| sections_for(Scope::Burrow).to_vec()
                 key=|s| s.route
                 children=move |s| view! {
                     <NavLink path=s.route label=s.label unread=unread_for(s.route)/>
                 }
             />
-            // The operator console, for operators, inside a burrow only.
-            <Show
-                when=move || { is_admin.get() && scope() == Scope::Burrow }
-                fallback=|| ()
-            >
+            // The operator console, for operators.
+            <Show when=move || is_admin.get() fallback=|| ()>
                 <div class="rh-subnav-rule" aria-hidden="true"></div>
                 <NavLink path="/admin" label="Admin" unread=None/>
             </Show>
@@ -693,7 +685,6 @@ pub fn CommandPalette() -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     {
         let jump = use_navigate();
-        let here = leptos_router::use_location();
         let handle = window_event_listener(leptos::ev::keydown, move |ev| {
             if !(ev.meta_key() || ev.ctrl_key()) {
                 return;
@@ -703,8 +694,7 @@ pub fn CommandPalette() -> impl IntoView {
                 open.update(|o| *o = !*o);
                 return;
             }
-            let scope = crate::palette::scope_of(&here.pathname.get_untracked());
-            if let Some(section) = crate::palette::section_for_digit(scope, &ev.key()) {
+            if let Some(section) = crate::palette::section_for_digit(&ev.key()) {
                 ev.prevent_default();
                 open.set(false);
                 jump(section.route, Default::default());

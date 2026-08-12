@@ -60,6 +60,26 @@ pub fn resolve_root_style(
     }
 }
 
+/// The `--rh-bg` value inside a resolved root style string — the colour of
+/// "anywhere the app hasn't painted".
+///
+/// `index.html` paints `html` with a fixed dark pre-boot backdrop so the first
+/// frame isn't a white flash. That backdrop must be *replaced* once the theme
+/// is known: any later gap between the viewport and the app — a stale-cache
+/// body margin, a `dvh` shortfall in some webview, rubber-banding — otherwise
+/// shows up as a black border around a light app. The app root re-paints
+/// `html`/`body` with this value so a gap degrades to the theme's own
+/// background instead of evidence.
+pub fn background_of(root_style: &str) -> &str {
+    root_style
+        .split("--rh-bg:")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("#14161b")
+}
+
 /// How the user wants light vs dark chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModeChoice {
@@ -998,6 +1018,28 @@ mod tests {
         // Belt-and-braces textual checks mirroring the markup rules: CSS
         // cannot set tabindex, but it can break keyboard UX with these.
         assert!(!STYLESHEET.contains("pointer-events:none"));
+    }
+
+    #[test]
+    fn every_resolved_style_yields_a_background_for_the_page_itself() {
+        // Whatever the pack/mode/overlay, the html/body repaint must find a
+        // real colour — a miss leaves the dark pre-boot backdrop in place and
+        // any viewport gap renders as a black frame around the app.
+        for pack in [ThemePack::Clean, ThemePack::Retro, ThemePack::HighContrast] {
+            for mode in [Mode::Light, Mode::Dark] {
+                let style = resolve_root_style(None, None, pack, mode);
+                let bg = background_of(&style);
+                assert!(
+                    bg.starts_with('#') || bg.starts_with("rgb") || bg.starts_with("color"),
+                    "{pack:?}/{mode:?} background looks wrong: {bg:?}"
+                );
+                assert!(!bg.contains("--"), "{pack:?}/{mode:?} grabbed a var, not a value");
+            }
+        }
+        // Absent or malformed: fall back to the pre-boot backdrop, never panic.
+        assert_eq!(background_of(""), "#14161b");
+        assert_eq!(background_of("--rh-text:#fff;"), "#14161b");
+        assert_eq!(background_of("--rh-bg:;"), "#14161b");
     }
 
     #[test]

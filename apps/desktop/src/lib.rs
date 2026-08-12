@@ -48,6 +48,40 @@ const NATIVE_SHIM: &str = r#"
   window.__RH_NATIVE__.invoke('ping', { name: 'slice-3' })
     .then(function (r) { console.log('[rh-native] invoke ping ->', r); })
     .catch(function (e) { console.error('[rh-native] invoke ping FAILED', e); });
+  // Layout + build forensics: report what the webview is ACTUALLY rendering.
+  // This is the only reliable window into the webview from the outside — the
+  // desktop app has no remote devtools, and screenshots keep lying (stale
+  // caches, capture offsets). Logged by `ping` to stderr.
+  window.addEventListener('load', function () {
+    setTimeout(function () {
+      try {
+        var d = document.documentElement;
+        var app = document.querySelector('.rh-app');
+        var r = app && app.getBoundingClientRect();
+        var hr = d.getBoundingClientRect();
+        var scripts = Array.prototype.map.call(document.scripts, function (s) {
+          return (s.src || '').split('/').pop();
+        }).filter(Boolean);
+        var diag = {
+          v: d.getAttribute('data-rh-version') || 'UNSTAMPED (pre-0.178 or stale cache)',
+          iw: window.innerWidth, ih: window.innerHeight,
+          dpr: window.devicePixelRatio,
+          vv: window.visualViewport ? {
+            w: window.visualViewport.width, h: window.visualViewport.height,
+            scale: window.visualViewport.scale
+          } : null,
+          html: { w: hr.width, h: hr.height, x: hr.x, y: hr.y },
+          app: r ? { w: r.width, h: r.height, x: r.x, y: r.y } : null,
+          native_class: !!(app && app.classList.contains('native')),
+          scripts: scripts,
+          href: location.href
+        };
+        window.__RH_NATIVE__.invoke('ping', { name: 'diag ' + JSON.stringify(diag) });
+      } catch (err) {
+        window.__RH_NATIVE__.invoke('ping', { name: 'diag FAILED ' + String(err) });
+      }
+    }, 2500);
+  });
   window.__RH_NATIVE__.listen('test://tick', function (e) {
     console.log('[rh-native] event test://tick ->', e && e.payload);
     // Invoke a Rust callback so the event (Rust->JS) round-trip is observable

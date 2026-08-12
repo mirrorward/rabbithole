@@ -76,9 +76,26 @@ pub fn icon_rgba(size: u32) -> Vec<u8> {
     out
 }
 
+/// Should the service worker exist in this context?
+///
+/// **Never in the native shell.** The worker is cache-first over the hashed
+/// bundles — exactly right for a web deployment's offline shell, and exactly
+/// wrong inside the desktop webview, where it pinned weeks-stale builds: the
+/// app kept rendering an old bundle from CacheStorage across rebuilds and
+/// relaunches, which surfaced to the user as long-fixed bugs (an 8px black
+/// margin) "still there". The desktop app's assets are local; it has nothing
+/// to be offline *from*.
+pub fn sw_allowed(native: bool) -> bool {
+    !native
+}
+
 /// Register `/sw.js` from the boot path. Fire-and-forget: unsupported and
 /// insecure contexts are a silent no-op, and a failed registration is logged
 /// and swallowed — the worker is an enhancement, never a dependency.
+///
+/// In the native shell this instead **unregisters** any worker and deletes its
+/// caches: installs poisoned by a build that predates [`sw_allowed`] keep
+/// serving stale bundles until someone cleans up, so the shell cleans up.
 #[cfg(target_arch = "wasm32")]
 pub fn register_service_worker() {
     use wasm_bindgen::JsValue;
@@ -86,6 +103,10 @@ pub fn register_service_worker() {
     let Some(window) = web_sys::window() else {
         return;
     };
+    if !sw_allowed(crate::native::native_available()) {
+        purge_service_worker(&window);
+        return;
+    }
     let navigator = window.navigator();
     // Feature-detect instead of trusting the binding: on insecure contexts
     // (plain http that is not localhost) and older browsers,
@@ -106,8 +127,74 @@ pub fn register_service_worker() {
     });
 }
 
+/// Best-effort teardown: unregister every service worker and delete every
+/// cache for this origin. `Reflect`-based so it needs no new `web-sys`
+/// features, and every step tolerates absence — a webview with no worker and
+/// no caches is already in the desired state.
+#[cfg(target_arch = "wasm32")]
+fn purge_service_worker(window: &web_sys::Window) {
+    use js_sys::{Array, Function, Promise, Reflect};
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen_futures::JsFuture;
+
+    let window = window.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        let call0 = |target: &JsValue, name: &str| -> Option<Promise> {
+            let f = Reflect::get(target, &JsValue::from_str(name)).ok()?;
+            let f: Function = f.dyn_into().ok()?;
+            f.call0(target).ok()?.dyn_into().ok()
+        };
+        use wasm_bindgen::JsCast;
+        // navigator.serviceWorker.getRegistrations() -> each .unregister()
+        let nav = JsValue::from(window.navigator());
+        if let Ok(sw) = Reflect::get(&nav, &JsValue::from_str("serviceWorker")) {
+            if !sw.is_undefined() {
+                if let Some(p) = call0(&sw, "getRegistrations") {
+                    if let Ok(regs) = JsFuture::from(p).await {
+                        for reg in Array::from(&regs).iter() {
+                            if let Some(p) = call0(&reg, "unregister") {
+                                let _ = JsFuture::from(p).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // caches.keys() -> each caches.delete(name)
+        if let Ok(caches) = Reflect::get(&window, &JsValue::from_str("caches")) {
+            if !caches.is_undefined() {
+                if let Some(p) = call0(&caches, "keys") {
+                    if let Ok(keys) = JsFuture::from(p).await {
+                        for key in Array::from(&keys).iter() {
+                            let del = Reflect::get(&caches, &JsValue::from_str("delete"))
+                                .ok()
+                                .and_then(|f| f.dyn_into::<Function>().ok())
+                                .and_then(|f| f.call1(&caches, &key).ok())
+                                .and_then(|p| p.dyn_into::<Promise>().ok());
+                            if let Some(p) = del {
+                                let _ = JsFuture::from(p).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        leptos::logging::log!("[rh-pwa] native shell: service worker + caches purged");
+    });
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_native_shell_never_gets_a_service_worker() {
+        // The worker is cache-first over hashed bundles. In the desktop
+        // webview that pinned weeks-stale builds across relaunches — every
+        // "this bug is still there" report during the black-margin hunt was
+        // this. Web deployments keep it; the shell must not.
+        assert!(super::sw_allowed(false), "web keeps its offline shell");
+        assert!(!super::sw_allowed(true), "the native shell must never cache-first itself");
+    }
+
     use super::*;
     use crate::packs::PackTokens;
 

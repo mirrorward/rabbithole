@@ -100,6 +100,11 @@ where headless-verifiable, tested:
   round-trip, which needs `cargo tauri dev` on a real machine.
 - **Verified identity** across proto/server/web/CLI, hardened against relay.
 - **An adversarial review** (13 fixes) + a security-review relay fix.
+- **The stale-webview class is closed** — the PWA service worker never runs in the
+  native shell (and purges poisoned installs); html/body repaint with the theme bg;
+  the SPA stamps its version into the DOM and the shell's diag line reports it.
+- **Sidebar only when the rail item has rooms** — a burrow shows its sections;
+  People/Transfers/You/Servers are single screens with no subnav.
 - **Header controls are icons** — the server-theme opt-out button is gone (a burrow's
   theme always applies); appearance and light/dark are icon buttons.
 - **Scoped navigation** — the rail picks a scope (a burrow, or the warren) and the

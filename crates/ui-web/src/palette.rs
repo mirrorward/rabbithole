@@ -176,19 +176,19 @@ fn score(section: &Section, query: &str) -> Option<u8> {
     alias_sub.then_some(3)
 }
 
-/// The section a Cmd/Ctrl + digit shortcut jumps to, within `scope`.
+/// The section a Cmd/Ctrl + digit shortcut jumps to.
 ///
-/// `1` is the first item **in the sidebar you're looking at** — the convention
-/// of browser tabs and every workspace switcher. Scoping it matters: a shortcut
-/// that jumps somewhere other than the Nth row on screen is unlearnable, and
-/// the sidebar's contents now depend on the scope. Out-of-range digits and `0`
-/// do nothing rather than wrapping to something arbitrary.
-pub fn section_for_digit(scope: Scope, key: &str) -> Option<Section> {
+/// `1` is the first row of the burrow sidebar — the only sidebar there is,
+/// since the warren destinations are single screens with none. From a warren
+/// view the shortcut therefore jumps back *into* the focused burrow, which is
+/// also what returning to `1`–`9` means everywhere else. Out-of-range digits
+/// and `0` do nothing rather than wrapping to something arbitrary.
+pub fn section_for_digit(key: &str) -> Option<Section> {
     let n = key.parse::<usize>().ok()?;
     if n == 0 {
         return None;
     }
-    sections_for(scope).get(n - 1).copied()
+    BURROW_SECTIONS.get(n - 1).copied()
 }
 
 /// Sections matching `query`, best first. An empty/whitespace query returns the
@@ -213,22 +213,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn digit_shortcuts_follow_the_sidebar_you_are_looking_at() {
-        // Cmd-1 is the first row of the *current* sidebar. Since the sidebar's
-        // contents depend on the scope, so must the shortcut -- otherwise Cmd-1
-        // in the warren jumps to a burrow section that isn't on screen.
-        for scope in [Scope::Burrow, Scope::Warren] {
-            let list = sections_for(scope);
-            assert_eq!(section_for_digit(scope, "1").unwrap().route, list[0].route);
-            assert_eq!(section_for_digit(scope, "2").unwrap().route, list[1].route);
-            // Nothing silly at the edges: no wrap-around, no Cmd-0.
-            assert_eq!(section_for_digit(scope, "0"), None);
-            assert_eq!(section_for_digit(scope, &format!("{}", list.len() + 1)), None);
-            assert_eq!(section_for_digit(scope, "k"), None);
-            assert_eq!(section_for_digit(scope, ""), None);
-        }
-        assert_eq!(section_for_digit(Scope::Burrow, "1").unwrap().label, "Lobby");
-        assert_eq!(section_for_digit(Scope::Warren, "1").unwrap().label, "People");
+    fn digit_shortcuts_follow_the_burrow_sidebar() {
+        // Cmd-1 is the first row of the burrow sidebar -- the only sidebar
+        // there is. The shortcut is only learnable if those two agree.
+        assert_eq!(section_for_digit("1").unwrap().route, BURROW_SECTIONS[0].route);
+        assert_eq!(section_for_digit("1").unwrap().label, "Lobby");
+        assert_eq!(section_for_digit("2").unwrap().route, BURROW_SECTIONS[1].route);
+        // Nothing silly at the edges: no wrap-around, no Cmd-0.
+        assert_eq!(section_for_digit("0"), None);
+        assert_eq!(
+            section_for_digit(&format!("{}", BURROW_SECTIONS.len() + 1)),
+            None
+        );
+        assert_eq!(section_for_digit("k"), None);
+        assert_eq!(section_for_digit(""), None);
     }
 
     #[test]

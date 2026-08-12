@@ -1535,6 +1535,19 @@ pub fn App() -> impl IntoView {
 
     view! {
         <style>{STYLESHEET}</style>
+        // Re-paint the page itself with the theme's background. index.html
+        // paints `html` with a fixed dark pre-boot backdrop (no white flash on
+        // first frame); once the theme is resolved, anywhere the app fails to
+        // cover — a viewport gap, overscroll, a webview quirk — must show the
+        // theme's colour, not that backdrop. The black frame around the whole
+        // app that shipped for weeks was exactly this: an unpainted 8px body
+        // margin rendering the pre-boot dark.
+        <style>{move || {
+            format!(
+                "html,body{{background:{}}}",
+                crate::theme_css::background_of(&style())
+            )
+        }}</style>
         <Router>
             // `native` marks the desktop shell: the window's own title bar is
             // hidden there, so the app's header takes over that job (drag
@@ -1596,15 +1609,23 @@ fn is_native() -> bool {
     }
 }
 
-/// The section sidebar, mounted once by the shell. Hidden on the connect screen
-/// (route `/`), which is a full-bleed form with nowhere to navigate to yet —
-/// the same rule the burrow rail follows.
+/// The section sidebar, mounted once by the shell.
+///
+/// The rail item you picked dictates whether a sidebar exists at all: a
+/// *burrow* is a place with rooms — lobby, boards, files — so it gets the
+/// list. People, Transfers, You and Servers are each one screen; a sidebar
+/// beside them would be navigation for navigation's sake, so they get the
+/// full width instead. Hidden on the connect screen (route `/`) too, same as
+/// the rail.
 #[component]
 fn SideNav() -> impl IntoView {
     let location = leptos_router::use_location();
-    let on_login = move || location.pathname.get() == "/";
+    let show = move || {
+        let path = location.pathname.get();
+        path != "/" && crate::palette::scope_of(&path) == crate::palette::Scope::Burrow
+    };
     view! {
-        <Show when=move || { !on_login() } fallback=|| ()>
+        <Show when=show fallback=|| ()>
             <Nav/>
         </Show>
     }
@@ -1803,6 +1824,18 @@ fn RouteFocus() -> impl IntoView {
 /// fatal: the app mounts identically whether or not a worker installs.
 pub fn mount() {
     #[cfg(target_arch = "wasm32")]
-    crate::pwa::register_service_worker();
+    {
+        // Stamp the build onto the document so the outside world can tell
+        // WHAT is actually rendering. The desktop shell's diag line reads
+        // this; during the black-margin hunt the webview spent hours serving
+        // a weeks-old cached bundle and nothing said so.
+        if let Some(root) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+        {
+            let _ = root.set_attribute("data-rh-version", env!("CARGO_PKG_VERSION"));
+        }
+        crate::pwa::register_service_worker();
+    }
     mount_to_body(App);
 }
