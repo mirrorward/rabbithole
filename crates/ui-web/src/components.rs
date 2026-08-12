@@ -532,11 +532,13 @@ pub fn You() -> impl IntoView {
                                  burrow challenges it and you sign a one-time nonce, proving you hold the \
                                  private key — enough to stop someone from simply copying your public key \
                                  out of a roster, and to coalesce your sightings even when your handle \
-                                 differs from server to server. It's a portable identity hint, not a login: \
-                                 a burrow you connect to could still relay your proof elsewhere, so it isn't \
-                                 a relay-proof authentication (that needs transport channel-binding, a \
-                                 future step). Treat the mark as \u{201c}this is probably them,\u{201d} not \
-                                 a security guarantee."
+                                 differs from server to server. Over QUIC the burrow also binds that \
+                                 signature to its own TLS certificate, so a proof you give one burrow \
+                                 can't be replayed to another. This client speaks WebSocket, which has \
+                                 nothing to bind to \u{2014} so here it proves possession of the key and \
+                                 nothing more, and a burrow you connect to could in principle relay your \
+                                 proof elsewhere. Treat the mark as \u{201c}this is probably them,\u{201d} \
+                                 not a security guarantee."
                             </p>
                         }
                     })}
