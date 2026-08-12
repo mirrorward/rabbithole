@@ -440,6 +440,18 @@ body{overflow:hidden}\
 .rh-icon-btn{display:inline-flex;align-items:center;justify-content:center;padding:.3rem;min-width:2rem;line-height:0}\
 .rh-icon-btn span{display:grid;place-items:center}\
 .rh-sidenav-slot{display:contents}\
+/* Settings + demo picker. */\
+.rh-settings-note{margin:0 0 var(--rh-space-2);color:var(--rh-muted);font-size:var(--rh-font-sm);max-width:62ch}\
+.rh-tracker-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:1px}\
+.rh-tracker-row{display:flex;align-items:center;gap:var(--rh-space-2);padding:.35rem .4rem;border-radius:var(--rh-radius)}\
+.rh-tracker-row:hover{background:color-mix(in srgb,var(--rh-text) 4%,transparent)}\
+.rh-tracker-host{font-family:var(--rh-font-mono);font-size:var(--rh-font-sm)}\
+.rh-tracker-tag{font-size:var(--rh-font-xs);color:var(--rh-muted);border:1px solid color-mix(in srgb,var(--rh-text) 14%,transparent);border-radius:var(--rh-radius-full);padding:0 .4rem}\
+.rh-tracker-remove{margin-left:auto}\
+.rh-tracker-add{display:flex;gap:var(--rh-space-2);margin-top:var(--rh-space-2);max-width:32rem}\
+.rh-settings-check{display:flex;align-items:center;gap:var(--rh-space-2);padding:.25rem 0;font-size:var(--rh-font-sm)}\
+.rh-demo-picker{display:flex;align-items:center;gap:var(--rh-space-2);flex-wrap:wrap;margin-bottom:var(--rh-space-2)}\
+.rh-demo-label{font-size:var(--rh-font-xs);text-transform:uppercase;letter-spacing:.06em;color:var(--rh-muted)}\
 /* The person page: one human, everything you know about them. */\
 .rh-person-link{display:flex;align-items:center;gap:var(--rh-space-2);width:100%;padding:.35rem .4rem;border-radius:var(--rh-radius);color:inherit;text-decoration:none;border-bottom:0}\
 .rh-person-link:hover{background:color-mix(in srgb,var(--rh-text) 5%,transparent)}\
@@ -751,7 +763,9 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
    Before this the Cmd-K chip, the presence menu and the icon buttons were\
    three heights with three border treatments -- assorted widgets, not a\
    toolbar. */\
-.rh-header .rh-kbd-jump,.rh-header .rh-presence,.rh-theme-menu .rh-btn{height:1.75rem;display:inline-flex;align-items:center;border:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);border-radius:var(--rh-radius);background-color:transparent;color:var(--rh-muted)}\
+.rh-header .rh-kbd-jump,.rh-header .rh-presence,.rh-theme-menu .rh-btn,.rh-header .rh-leave{height:1.75rem;display:inline-flex;align-items:center;border:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);border-radius:var(--rh-radius);background-color:transparent;color:var(--rh-muted);font-size:var(--rh-font-sm);font-weight:500}\
+.rh-header .rh-leave{padding:0 .55rem}\
+.rh-header .rh-leave:hover{color:var(--rh-error);border-color:color-mix(in srgb,var(--rh-error) 45%,transparent);background-color:color-mix(in srgb,var(--rh-error) 8%,transparent)}\
 .rh-header .rh-presence{background-color:transparent}\
 .rh-theme-menu .rh-btn:hover{color:var(--rh-text);background-color:color-mix(in srgb,var(--rh-text) 6%,transparent);border-color:color-mix(in srgb,var(--rh-text) 22%,transparent)}\
 .rh-header .rh-kbd-jump:hover,.rh-header .rh-presence:hover{color:var(--rh-text);background-color:color-mix(in srgb,var(--rh-text) 6%,transparent);border-color:color-mix(in srgb,var(--rh-text) 22%,transparent)}\

@@ -16,7 +16,6 @@
 
 use leptos::*;
 use leptos_router::{use_navigate, use_params_map, A};
-use rabbithole_core::api::Command;
 use rabbithole_core::theme::{Mode, ThemePack};
 
 use crate::a11y;
@@ -140,7 +139,15 @@ pub fn Nav() -> impl IntoView {
     view! {
         <nav class="rh-subnav" aria-label="Primary">
             <span class="rh-subnav-scope">
-                {move || app.focused().name.get().unwrap_or_else(|| "This burrow".into())}
+                // focused_tracked(), not focused(): the latter reads the id
+                // untracked, so this label was computed once at mount and
+                // never followed a burrow switch.
+                {move || {
+                    app.focused_tracked()
+                        .name
+                        .get()
+                        .unwrap_or_else(|| "This burrow".into())
+                }}
             </span>
             <For
                 each=|| sections_for(Scope::Burrow).to_vec()
@@ -269,6 +276,156 @@ pub fn People() -> impl IntoView {
                         />
                     </ul>
                 </Show>
+            </section>
+        </main>
+    }
+}
+
+/// **Settings**: the choices that belong to you rather than to any burrow.
+///
+/// Reached from the app menu (⌘,) on the desktop and from ⌘K anywhere. The
+/// centrepiece is the tracker list — the directories the Looking Glass asks
+/// when you go looking for burrows. A tracker is a discovery service, not a
+/// place you're a member of, so the list is yours: add, disable, remove.
+#[component]
+pub fn Settings() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let new_tracker = create_rw_signal(String::new());
+
+    let add = move |_| {
+        let input = new_tracker.get();
+        let mut added = false;
+        app.settings.update(|s| {
+            added = crate::settings::add_tracker(&mut s.trackers, &input);
+        });
+        if added {
+            new_tracker.set(String::new());
+            app.save_settings();
+        } else if !input.trim().is_empty() {
+            app.notify(
+                crate::toasts::ToastKind::Warn,
+                "That tracker is already listed.".to_string(),
+            );
+        }
+    };
+
+    view! {
+        <StatusBar/>
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
+            <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Settings"</h1>
+            <section class="rh-panel rh-settings">
+                <h2 class="rh-panel-title">"Settings"</h2>
+
+                <h3 class="rh-person-h2">"Trackers"</h3>
+                <p class="rh-settings-note">
+                    "Directories asked when you look for burrows to join. A tracker only \
+                     says who is out there \u{2014} joining is still up to you."
+                </p>
+                <ul class="rh-tracker-list">
+                    <For
+                        each=move || app.settings.get().trackers
+                        key=|t| t.host.clone()
+                        children=move |t| {
+                            let host = t.host.clone();
+                            let host_toggle = host.clone();
+                            let host_remove = host.clone();
+                            let is_default = host == crate::settings::DEFAULT_TRACKER;
+                            view! {
+                                <li class="rh-tracker-row">
+                                    <input
+                                        type="checkbox"
+                                        class="rh-tracker-on"
+                                        aria-label=format!("Query {host}")
+                                        prop:checked=t.enabled
+                                        on:change=move |_| {
+                                            app.settings.update(|s| {
+                                                if let Some(x) =
+                                                    s.trackers.iter_mut().find(|x| x.host == host_toggle)
+                                                {
+                                                    x.enabled = !x.enabled;
+                                                }
+                                            });
+                                            app.save_settings();
+                                        }
+                                    />
+                                    <span class="rh-tracker-host">{host.clone()}</span>
+                                    {is_default.then(|| view! {
+                                        <span class="rh-tracker-tag">"default"</span>
+                                    })}
+                                    <button
+                                        class="rh-btn ghost small rh-tracker-remove"
+                                        title=format!("Remove {host}")
+                                        on:click=move |_| {
+                                            app.settings.update(|s| {
+                                                s.trackers.retain(|x| x.host != host_remove)
+                                            });
+                                            app.save_settings();
+                                        }
+                                    >
+                                        "Remove"
+                                    </button>
+                                </li>
+                            }
+                        }
+                    />
+                </ul>
+                <div class="rh-tracker-add">
+                    <input
+                        class="rh-input"
+                        placeholder="tracker.example \u{2014} add a tracker"
+                        aria-label="Add a tracker"
+                        prop:value=new_tracker
+                        on:input=move |ev| new_tracker.set(event_target_value(&ev))
+                        on:keydown=move |ev| {
+                            if ev.key() == "Enter" {
+                                ev.prevent_default();
+                                add(());
+                            }
+                        }
+                    />
+                    <button class="rh-btn" on:click=move |_| add(())>"Add"</button>
+                </div>
+
+                <h3 class="rh-person-h2">"On launch"</h3>
+                <label class="rh-settings-check">
+                    <input
+                        type="checkbox"
+                        prop:checked=move || app.settings.get().reconnect_on_launch
+                        on:change=move |_| {
+                            app.settings.update(|s| {
+                                s.reconnect_on_launch = !s.reconnect_on_launch
+                            });
+                            app.save_settings();
+                        }
+                    />
+                    <span>"Reconnect to the burrows I was in"</span>
+                </label>
+
+                <h3 class="rh-person-h2">"Notifications"</h3>
+                <label class="rh-settings-check">
+                    <input
+                        type="checkbox"
+                        prop:checked=move || app.settings.get().notifications
+                        on:change=move |_| {
+                            app.settings.update(|s| s.notifications = !s.notifications);
+                            app.save_settings();
+                        }
+                    />
+                    <span>"Notify me about direct messages while I'm away"</span>
+                </label>
+                <label class="rh-settings-check">
+                    <input
+                        type="checkbox"
+                        prop:checked=move || app.sound_on.get()
+                        on:change=move |_| {
+                            let on = !app.sound_on.get_untracked();
+                            app.sound_on.set(on);
+                            #[cfg(target_arch = "wasm32")]
+                            crate::sound::set_enabled(on);
+                        }
+                    />
+                    <span>"Play a chime for new messages"</span>
+                </label>
             </section>
         </main>
     }
@@ -855,7 +1012,6 @@ pub fn StatusBar() -> impl IntoView {
             name
         }
     };
-    let status = move || state.with(|s| s.status.clone());
     let conn_label = move || state.with(|s| s.conn.label());
     let dot_class = move || {
         if state.with(|s| s.conn.is_live()) {
@@ -885,23 +1041,26 @@ pub fn StatusBar() -> impl IntoView {
             <span class=dot_class aria-hidden="true"></span>
             <span class="rh-conn" role="status">{conn_label}</span>
             <span class="rh-title"><span class="rh-title-text">{title}</span></span>
-            <span class="rh-status" role="status">{status}</span>
             <span class="rh-spacer"></span>
             <span class="rh-live-slot" role="status">
                 <Show when=move || radio.with(|r| r.on_air().is_some()) fallback=|| ()>
                     <A href="/radio" class="rh-radio-now">{now_playing}</A>
                 </Show>
             </span>
-            <button
-                type="button"
-                class="rh-kbd-jump"
-                on:click=move |_| app.palette_open.set(true)
-                aria-haspopup="dialog"
-                aria-label="Jump to a section (Command-K)"
-                title="Jump to a section (\u{2318}K)"
-            >
-                <span aria-hidden="true">"\u{2318}K"</span>
-            </button>
+            // Leaving is only meaningful for a burrow you actually joined —
+            // the demo session is the app's floor.
+            <Show when=move || { app.can_leave() } fallback=|| ()>
+                <button
+                    class="rh-btn ghost rh-leave"
+                    title="Disconnect from this burrow"
+                    on:click=move |_| {
+                        let id = app.focused_endpoint();
+                        app.disconnect(&crate::app::ServerId(id));
+                    }
+                >
+                    "Leave"
+                </button>
+            </Show>
             <PresenceControl/>
             <ThemeToggle/>
         </header>
@@ -1157,7 +1316,17 @@ pub fn Login() -> impl IntoView {
             .or_else(|| last.as_ref().map(|b| b.endpoint.clone()))
             .unwrap_or_else(|| "ws://localhost:9000".to_string()),
     );
-    app.pending_endpoint.set(None);
+    // The Looking Glass hands its pick over in the URL (`/?server=…`): a
+    // signal set in one component and read by another during the same
+    // navigation races the new component's first read.
+    let query = leptos_router::use_query_map();
+    create_render_effect(move |_| {
+        if let Some(ep) = query.with(|q| q.get("server").cloned()) {
+            if !ep.is_empty() {
+                endpoint.set(ep);
+            }
+        }
+    });
     let handle = create_rw_signal(last.as_ref().map(|b| b.handle.clone()).unwrap_or_default());
     let password = create_rw_signal(String::new());
     // Opt in to a real RHP-over-WebSocket session instead of the seeded demo.
@@ -1180,48 +1349,42 @@ pub fn Login() -> impl IntoView {
             navigate("/lobby", Default::default());
             return;
         }
-        let who = handle.get();
-        if who.trim().is_empty() {
-            return;
-        }
-        let name = who.clone();
-        app.dispatch(Command::Connect {
-            endpoint: endpoint.get(),
-            pinned_fingerprint: None,
-        });
-        // The seeded host handle carries the admin capability; everyone else
-        // signs in as a regular member. A real transport would derive this from
-        // the session's capability set in the `HelloAck`.
-        let is_admin = who == "rabbit";
-        app.dispatch(Command::SignIn {
-            login: who,
-            password: String::new(),
-        });
-        app.set_admin(is_admin);
-        app.refresh_who();
-        app.load_dms();
-        // Seeded now-playing notices, so the status segment shows on arrival.
-        app.load_radio();
-        // The server's published theme bundle (welcome frame in the real
-        // transport), so the overlay + opt-out are live on arrival.
-        app.load_server_theme();
-        // Humanized arrival: a welcome toast, plus a "you've got mail" moment
-        // when the inbox has conversations waiting.
-        app.notify(
-            crate::toasts::ToastKind::Success,
-            format!("Signed in as {name}"),
-        );
-        let waiting = app.focused().state.with(|s| s.dm_threads.len());
-        if waiting > 0 {
+        // The demo path, dev builds only. Without the `demo` feature there is
+        // no seeded burrow to join, and the form requires a live connection —
+        // a shipped build must never present fabricated data as a place.
+        #[cfg(feature = "demo")]
+        {
+            let who = handle.get();
+            if who.trim().is_empty() {
+                return;
+            }
+            let name = who.clone();
+            let demo = crate::client::DEMO_BURROWS
+                .iter()
+                .find(|d| d.endpoint == endpoint.get())
+                .unwrap_or(&crate::client::DEMO_BURROWS[0]);
+            app.join_demo(demo, &who);
             app.notify(
-                crate::toasts::ToastKind::Mail,
-                format!(
-                    "You\u{2019}ve got mail \u{2014} {waiting} conversation{} waiting",
-                    if waiting == 1 { "" } else { "s" }
-                ),
+                crate::toasts::ToastKind::Success,
+                format!("Signed in as {name}"),
             );
+            let waiting = app.focused().state.with(|s| s.dm_threads.len());
+            if waiting > 0 {
+                app.notify(
+                    crate::toasts::ToastKind::Mail,
+                    format!(
+                        "You\u{2019}ve got mail \u{2014} {waiting} conversation{} waiting",
+                        if waiting == 1 { "" } else { "s" }
+                    ),
+                );
+            }
+            navigate("/lobby", Default::default());
         }
-        navigate("/lobby", Default::default());
+        #[cfg(not(feature = "demo"))]
+        app.notify(
+            crate::toasts::ToastKind::Warn,
+            "Tick \u{201c}live connection\u{201d} and enter a burrow address.".to_string(),
+        );
     };
 
     view! {
@@ -1248,6 +1411,33 @@ pub fn Login() -> impl IntoView {
                         }).collect_view()}
                     </div>
                 })}
+                // Dev builds get the seeded warren: two burrows, so switching
+                // places is testable without running two servers.
+                {
+                    #[cfg(feature = "demo")]
+                    {
+                        view! {
+                            <div class="rh-demo-picker">
+                                <span class="rh-demo-label">"Demo burrows"</span>
+                                {crate::client::DEMO_BURROWS.iter().map(|d| {
+                                    let ep = d.endpoint.to_string();
+                                    view! {
+                                        <button
+                                            type="button"
+                                            class="rh-recent-chip"
+                                            on:click=move |_| {
+                                                endpoint.set(ep.clone());
+                                                go_live.set(false);
+                                            }
+                                        >{d.name}</button>
+                                    }
+                                }).collect_view()}
+                            </div>
+                        }.into_view()
+                    }
+                    #[cfg(not(feature = "demo"))]
+                    ().into_view()
+                }
                 <label for=a11y::LOGIN_SERVER_ID>"Server"</label>
                 <input
                     id=a11y::LOGIN_SERVER_ID
@@ -2332,9 +2522,20 @@ pub fn ServerBrowser() -> impl IntoView {
                                         <code class="rh-server-endpoint">{s.endpoint.clone()}</code>
                                         <button
                                             class="rh-btn"
+                                            // The pick travels in the URL, not a
+                                            // signal: setting a signal and
+                                            // navigating in the same handler
+                                            // races the new component's first
+                                            // read, and a query param is also
+                                            // shareable and reload-proof.
                                             on:click=move |_| {
-                                                app.pending_endpoint.set(Some(endpoint.clone()));
-                                                navigate("/", Default::default());
+                                                navigate(
+                                                    &format!(
+                                                        "/?server={}",
+                                                        crate::servers::encode_param(&endpoint),
+                                                    ),
+                                                    Default::default(),
+                                                );
                                             }
                                         >
                                             "Connect"

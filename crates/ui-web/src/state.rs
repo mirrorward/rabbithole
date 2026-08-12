@@ -342,6 +342,8 @@ impl UiState {
                 self.connected = true;
                 self.conn = ConnState::Online;
                 self.server_name = server_name.clone();
+                // Kept for the polite live region + tests; the header shows
+                // the burrow's NAME, not a sentence about the connection.
                 self.status = format!("Connected to {server_name} ({server_version})");
             }
             Event::Disconnected { reason } => {

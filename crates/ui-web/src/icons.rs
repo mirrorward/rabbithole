@@ -70,17 +70,22 @@ pub fn section_icon(path: &str) -> String {
             "<circle cx=\"8.4\" cy=\"16.5\" r=\"2.1\"/>"
         ),
         // Everyone, everywhere you're connected.
+        // Everyone, everywhere you're connected: plainly more than one person.
         "/people" => concat!(
-            "<circle cx=\"12\" cy=\"12\" r=\"8.2\"/>",
-            "<circle cx=\"12\" cy=\"9.6\" r=\"2.4\"/>",
-            "<path d=\"M6.9 18.4a5.4 5.4 0 0 1 10.2 0\"/>"
+            "<circle cx=\"9\" cy=\"9.4\" r=\"3.1\"/>",
+            "<path d=\"M3.4 19a5.9 5.9 0 0 1 11.2 0\"/>",
+            "<circle cx=\"17\" cy=\"8.2\" r=\"2.4\"/>",
+            "<path d=\"M15.8 13.2a4.9 4.9 0 0 1 4.8 4.6\"/>"
         ),
         // Bytes coming down to you.
         "/transfers" => "<path d=\"M12 4v11m0 0l-4-4m4 4l4-4M4.5 19.5h15\"/>",
         // Your own key and face.
+        // *You*, not "a person": a bust inside a ring — the badge/account
+        // idiom, unmistakable beside /people's group of figures.
         "/you" => concat!(
-            "<circle cx=\"12\" cy=\"8.6\" r=\"3.6\"/>",
-            "<path d=\"M5 20a7 7 0 0 1 14 0\"/>"
+            "<circle cx=\"12\" cy=\"12\" r=\"9\"/>",
+            "<circle cx=\"12\" cy=\"10\" r=\"3.1\"/>",
+            "<path d=\"M6.3 18.7a6.1 6.1 0 0 1 11.4 0\"/>"
         ),
         _ => "<circle cx=\"12\" cy=\"12\" r=\"3.2\"/>",
     };
@@ -135,13 +140,27 @@ pub fn rail_icon(which: &str) -> String {
             "<path d=\"M4.5 15.7v2.6a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5v-2.6\"/>"
         ),
         "you" => concat!(
-            "<circle cx=\"12\" cy=\"8\" r=\"4.2\"/>",
-            "<path d=\"M4.2 20.2a7.8 7.8 0 0 1 15.6 0\"/>"
+            "<circle cx=\"12\" cy=\"12\" r=\"9\"/>",
+            "<circle cx=\"12\" cy=\"10\" r=\"3.1\"/>",
+            "<path d=\"M6.3 18.7a6.1 6.1 0 0 1 11.4 0\"/>"
         ),
         "add" => "<path d=\"M12 5.6v12.8M5.6 12h12.8\"/>",
         _ => "<circle cx=\"12\" cy=\"12\" r=\"3.2\"/>",
     };
     format!("{OPEN}{body}</svg>")
+}
+
+/// Settings: sliders — *your* app's console, distinct from Admin's operator
+/// console for a burrow.
+pub fn settings_icon() -> String {
+    format!(
+        "{OPEN}{}</svg>",
+        concat!(
+            "<path d=\"M4.5 7.5h9M17.5 7.5h2M4.5 16.5h2M10.5 16.5h9\"/>",
+            "<circle cx=\"15.4\" cy=\"7.5\" r=\"2.1\"/>",
+            "<circle cx=\"8.6\" cy=\"16.5\" r=\"2.1\"/>"
+        )
+    )
 }
 
 /// The chime toggle: a bell, slashed when muted. Drawn like every other icon
@@ -199,7 +218,7 @@ mod tests {
     use super::*;
 
     /// Every section the nav can link to.
-    const PATHS: [&str; 12] = [
+    const PATHS: [&str; 13] = [
         "/lobby",
         "/boards",
         "/dms",
@@ -212,6 +231,7 @@ mod tests {
         "/people",
         "/transfers",
         "/you",
+        "/settings",
     ];
 
     #[test]

@@ -84,6 +84,12 @@ pub const BURROW_SECTIONS: &[Section] = &[
 /// belonging to one, in sidebar order.
 pub const WARREN_SECTIONS: &[Section] = &[
     Section {
+        label: "You",
+        route: "/you",
+        hint: "identity",
+        aliases: &["identity", "key", "profile", "me", "account", "avatar"],
+    },
+    Section {
         label: "People",
         route: "/people",
         hint: "everyone",
@@ -96,18 +102,21 @@ pub const WARREN_SECTIONS: &[Section] = &[
         aliases: &["downloads", "uploads", "queue", "progress"],
     },
     Section {
-        label: "You",
-        route: "/you",
-        hint: "identity",
-        aliases: &["identity", "key", "profile", "me", "account"],
-    },
-    Section {
         label: "Servers",
         route: "/servers",
         hint: "directory",
         aliases: &["directory", "looking glass", "browse", "hubs", "explore"],
     },
 ];
+
+/// App settings — yours, not a burrow's. Reachable by search and by ⌘, on the
+/// desktop; not in a scope list, because it isn't a place in the warren.
+pub const SETTINGS_SECTION: Section = Section {
+    label: "Settings",
+    route: "/settings",
+    hint: "yours",
+    aliases: &["preferences", "trackers", "config", "options"],
+};
 
 /// The operator console. Reachable by search for anyone who can see it, but
 /// never part of a scope's list — see [`BURROW_SECTIONS`].
@@ -151,7 +160,7 @@ pub fn all_sections() -> Vec<Section> {
         .iter()
         .chain(WARREN_SECTIONS)
         .copied()
-        .chain(std::iter::once(ADMIN_SECTION))
+        .chain([SETTINGS_SECTION, ADMIN_SECTION])
         .collect()
 }
 
@@ -223,6 +232,9 @@ mod tests {
         // there is. The shortcut is only learnable if those two agree.
         assert_eq!(section_for_digit("1").unwrap().route, BURROW_SECTIONS[0].route);
         assert_eq!(section_for_digit("1").unwrap().label, "Lobby");
+        // You leads the warren list: it's the one entry that is always about
+        // you, so it sits first.
+        assert_eq!(WARREN_SECTIONS[0].label, "You");
         assert_eq!(section_for_digit("2").unwrap().route, BURROW_SECTIONS[1].route);
         // Nothing silly at the edges: no wrap-around, no Cmd-0.
         assert_eq!(section_for_digit("0"), None);
@@ -263,11 +275,12 @@ mod tests {
         // Built from the same lists, so a section can't be in a nav but
         // unreachable by search, or searchable but in no nav.
         let all = all_sections();
-        assert_eq!(all.len(), BURROW_SECTIONS.len() + WARREN_SECTIONS.len() + 1);
+        assert_eq!(all.len(), BURROW_SECTIONS.len() + WARREN_SECTIONS.len() + 2);
         for s in BURROW_SECTIONS.iter().chain(WARREN_SECTIONS) {
             assert!(all.iter().any(|a| a.route == s.route), "{} missing", s.route);
         }
         assert!(all.iter().any(|a| a.route == ADMIN_SECTION.route));
+        assert!(all.iter().any(|a| a.route == SETTINGS_SECTION.route));
         // No route appears twice, or the palette would list it twice.
         let mut routes: Vec<&str> = all.iter().map(|s| s.route).collect();
         routes.sort_unstable();
@@ -310,7 +323,12 @@ mod tests {
         assert_eq!(palette_matches("members")[0].label, "Directory");
         assert_eq!(palette_matches("music")[0].label, "Radio");
         assert_eq!(palette_matches("gallery")[0].label, "Art");
-        assert_eq!(palette_matches("settings")[0].label, "Admin");
+        // "settings" is now a label prefix of Settings (rank 0), which beats
+        // Admin's *alias* of the same word (rank 2) — the right answer once
+        // the app has a real Settings page.
+        assert_eq!(palette_matches("settings")[0].label, "Settings");
+        assert_eq!(palette_matches("operator")[0].label, "Admin");
+        assert_eq!(palette_matches("trackers")[0].label, "Settings");
     }
 
     #[test]

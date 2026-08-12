@@ -36,6 +36,14 @@ pub fn add_recent(mut list: Vec<RecentBurrow>, mut entry: RecentBurrow) -> Vec<R
     list
 }
 
+/// Drop an endpoint from the list entirely — used when the user leaves a
+/// burrow, so it stops auto-reconnecting and its resume token stops being
+/// stored. Pure.
+pub fn forget_endpoint(mut list: Vec<RecentBurrow>, endpoint: &str) -> Vec<RecentBurrow> {
+    list.retain(|b| b.endpoint != endpoint);
+    list
+}
+
 /// Set (or clear) the resume token for an endpoint already in the list. Pure.
 pub fn set_token(
     mut list: Vec<RecentBurrow>,
@@ -109,6 +117,13 @@ mod persist {
 
     /// Store the resume token for an endpoint after a successful auth (empty =
     /// guest / not resumable → clear it).
+    /// Forget a burrow: no auto-reconnect, and the stored resume token goes
+    /// with it (leaving a burrow should not leave a credential behind).
+    pub fn forget(endpoint: &str) {
+        let list = super::forget_endpoint(load(), endpoint);
+        save(&list);
+    }
+
     pub fn remember_token(endpoint: &str, token: &str) {
         let tok = (!token.is_empty()).then(|| token.to_string());
         save(&super::set_token(load(), endpoint, tok));
@@ -116,7 +131,7 @@ mod persist {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use persist::{load, remember, remember_token};
+pub use persist::{forget, load, remember, remember_token};
 
 #[cfg(test)]
 mod tests {
@@ -149,6 +164,20 @@ mod tests {
         // Signing out / a guest auth clears it.
         let list = set_token(list, "ws://a", None);
         assert_eq!(list[0].token, None);
+    }
+
+    #[test]
+    fn forgetting_a_burrow_drops_it_and_its_token() {
+        // Leaving a burrow must not leave a resume credential behind.
+        let list = vec![
+            RecentBurrow { endpoint: "ws://a".into(), handle: "me".into(), token: Some("t".into()) },
+            RecentBurrow { endpoint: "ws://b".into(), handle: "me".into(), token: None },
+        ];
+        let after = forget_endpoint(list, "ws://a");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].endpoint, "ws://b");
+        // Forgetting something absent is a no-op, not a panic.
+        assert_eq!(forget_endpoint(after.clone(), "ws://zz").len(), 1);
     }
 
     #[test]

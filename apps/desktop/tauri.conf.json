@@ -5,7 +5,7 @@
   "identifier": "com.mirrorward.rabbithole",
   "build": {
     "beforeDevCommand": {
-      "script": "trunk serve --address 127.0.0.1 --port 1420",
+      "script": "trunk serve --address 127.0.0.1 --port 1420 --features demo",
       "cwd": "../../crates/ui-web"
     },
     "beforeBuildCommand": {

@@ -54,6 +54,13 @@ pub trait UiClient {
     /// protocol family and its events land.
     fn boards(&self) -> Vec<Board>;
 
+    /// The welcome screen this client would have received on connect. Only the
+    /// demo seam has one (a live session gets its widgets over the wire), so
+    /// the default is empty.
+    fn demo_welcome_widgets(&self) -> Vec<rabbithole_proto::welcome::WelcomeWidget> {
+        Vec::new()
+    }
+
     /// Threads belonging to the board identified by `slug`.
     fn threads(&self, slug: &str) -> Vec<Thread>;
 
@@ -100,9 +107,77 @@ pub struct MockClient {
     /// live server.
     radio_frames: Vec<Frame>,
     invite_seq: u32,
+    /// Which seeded burrow this session is playing.
+    demo: DemoBurrow,
     /// Sink registered through the async [`EventClient`] seam, if any. Skipped
     /// by [`Debug`] (closures are not `Debug`).
     sink: Option<crate::wire::EventSink>,
+}
+
+/// A seeded demo burrow: enough personality that switching between two of them
+/// is visibly switching *places*, not re-rendering the same fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DemoBurrow {
+    /// Display name — what the header and rail tile show.
+    pub name: &'static str,
+    /// The pseudo-endpoint its session is keyed by (`demo://…`).
+    pub endpoint: &'static str,
+    /// Message of the day.
+    pub motd: &'static str,
+    /// The operator's featured item: title, then body.
+    pub featured: (&'static str, &'static str),
+    /// One-line ticker.
+    pub ticker: &'static str,
+    /// Who's on.
+    pub who: &'static [&'static str],
+}
+
+/// The demo warren. Two burrows, because the whole point of this app is being
+/// in more than one place at once.
+pub const DEMO_BURROWS: &[DemoBurrow] = &[
+    DemoBurrow {
+        name: "The Warren",
+        endpoint: "demo://the-warren",
+        motd: "Welcome to the Warren. Be kind, share freely, and mind the carrots.",
+        featured: (
+            "Tonight: Demoscene Night",
+            "Fresh uploads in /demos \u{2014} 40 packs from the Amiga era, all seeded by the swarm.",
+        ),
+        ticker: "New boards open \u{00b7} Uploads are drag-and-drop \u{00b7} Say hello in the lobby",
+        who: &["rabbit", "alice", "bob"],
+    },
+    DemoBurrow {
+        name: "Night Pool",
+        endpoint: "demo://night-pool",
+        motd: "The Night Pool: slow chat, long files, no hurry.",
+        featured: (
+            "Archive drive underway",
+            "Help us seed the 1993 shareware shelf \u{2014} 12 GB and climbing.",
+        ),
+        ticker: "Quiet hours 02:00\u{2013}06:00 \u{00b7} Be excellent",
+        who: &["maria", "kim", "rabbit"],
+    },
+];
+
+impl DemoBurrow {
+    /// The welcome screen this burrow would send on connect — the same widget
+    /// shapes a real burrow's `WelcomeScreen` carries, so the news panel is
+    /// exercised by the demo exactly as it is live.
+    pub fn welcome_widgets(&self) -> Vec<rabbithole_proto::welcome::WelcomeWidget> {
+        use rabbithole_proto::welcome::WelcomeWidget;
+        vec![
+            WelcomeWidget::Motd(self.motd.to_string()),
+            WelcomeWidget::OnlineNow {
+                count: self.who.len() as u32,
+                sample: self.who.iter().map(|w| w.to_string()).collect(),
+            },
+            WelcomeWidget::Featured {
+                title: self.featured.0.to_string(),
+                body: self.featured.1.to_string(),
+            },
+            WelcomeWidget::Ticker(self.ticker.to_string()),
+        ]
+    }
 }
 
 impl std::fmt::Debug for MockClient {
@@ -140,12 +215,20 @@ impl MockClient {
     /// A fresh, disconnected mock with a seeded member list, board tree, DM
     /// conversations and directory.
     pub fn new() -> Self {
+        Self::named(&DEMO_BURROWS[0])
+    }
+
+    /// A demo burrow with a specific identity. Multiple mock sessions are what
+    /// make the warren layer testable — one mock server can't exercise burrow
+    /// switching, per-burrow unread, or "known from" across places.
+    pub fn named(demo: &DemoBurrow) -> Self {
         Self {
             connected: false,
             signed_in: false,
-            server_name: String::new(),
+            server_name: demo.name.to_string(),
+            demo: *demo,
             current_user: None,
-            who: vec!["rabbit".to_string(), "alice".to_string(), "bob".to_string()],
+            who: demo.who.iter().map(|w| w.to_string()).collect(),
             boards: Self::seeded_boards(),
             threads: Self::seeded_threads(),
             posts: Self::seeded_posts(),
@@ -646,11 +729,20 @@ impl MockClient {
 }
 
 impl UiClient for MockClient {
+    fn demo_welcome_widgets(&self) -> Vec<rabbithole_proto::welcome::WelcomeWidget> {
+        self.demo.welcome_widgets()
+    }
+
     fn send(&mut self, command: Command) -> Vec<Event> {
         match command {
             Command::Connect { endpoint, .. } => {
                 self.connected = true;
-                self.server_name = derive_server_name(&endpoint);
+                // A demo burrow has a NAME; only an unrecognised endpoint falls
+                // back to its host (which is what used to put "localhost" in
+                // the title bar).
+                if self.server_name.is_empty() {
+                    self.server_name = derive_server_name(&endpoint);
+                }
                 vec![Event::Connected {
                     server_name: self.server_name.clone(),
                     server_version: "0.5.0-mock".to_string(),
@@ -792,7 +884,10 @@ mod tests {
     }
 
     #[test]
-    fn connect_emits_connected_with_derived_name() {
+    fn a_demo_burrow_connects_under_its_own_name() {
+        // A seeded burrow HAS a name; the endpoint host is only a fallback.
+        // Deriving "localhost" from the address is what used to put that word
+        // in the title bar instead of the place's name.
         let mut c = MockClient::new();
         let ev = c.send(Command::Connect {
             endpoint: "ws://warren.example:9000".into(),
@@ -801,10 +896,29 @@ mod tests {
         assert_eq!(
             ev,
             vec![Event::Connected {
-                server_name: "warren.example".into(),
+                server_name: DEMO_BURROWS[0].name.into(),
                 server_version: "0.5.0-mock".into(),
             }]
         );
+    }
+
+    #[test]
+    fn each_demo_burrow_is_a_distinct_place() {
+        // Two mock sessions must differ in the ways switching between them is
+        // supposed to show: name, roster, and news.
+        let a = &DEMO_BURROWS[0];
+        let b = &DEMO_BURROWS[1];
+        assert_ne!(a.name, b.name);
+        assert_ne!(a.endpoint, b.endpoint);
+        assert_ne!(a.who, b.who);
+        assert_ne!(a.motd, b.motd);
+        // …and each ships a full welcome screen, so the news panel is
+        // exercised by the demo exactly as it is live.
+        for d in DEMO_BURROWS {
+            let w = d.welcome_widgets();
+            assert_eq!(w.len(), 4, "{}", d.name);
+            assert!(MockClient::named(d).demo_welcome_widgets().len() == 4);
+        }
     }
 
     #[test]

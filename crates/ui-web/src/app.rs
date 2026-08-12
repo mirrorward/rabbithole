@@ -16,7 +16,8 @@ use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
     Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby, Login,
-    Nav, People, PersonPage, Radio, ServerBrowser, Toasts, Transfers, WelcomeSheet, You,
+    Nav, People, PersonPage, Radio, ServerBrowser, Settings, Toasts, Transfers, WelcomeSheet,
+    You,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -106,6 +107,9 @@ pub struct AppState {
     /// The cross-burrow sightings ledger — where you know each person from,
     /// persisted. Fed by every roster that arrives ([`crate::sightings`]).
     pub sightings: RwSignal<Vec<crate::sightings::Sighting>>,
+    /// App settings: trackers and the handful of choices that are yours rather
+    /// than a burrow's ([`crate::settings`]). Persisted.
+    pub settings: RwSignal<crate::settings::Settings>,
     /// Signed friendships and half-offers, persisted ([`crate::friend`]).
     pub friends: RwSignal<Vec<crate::friend::Friendship>>,
     /// The web-admin model, folded from admin events.
@@ -169,6 +173,7 @@ impl AppState {
             identity: store_value(None),
             sightings: create_rw_signal(Vec::new()),
             friends: create_rw_signal(Vec::new()),
+            settings: create_rw_signal(crate::settings::Settings::default()),
             #[cfg(target_arch = "wasm32")]
             sound_on: create_rw_signal(crate::sound::enabled()),
             #[cfg(not(target_arch = "wasm32"))]
@@ -778,6 +783,41 @@ impl AppState {
         self.focused().live.set(true);
     }
 
+    /// Leave a burrow: close its socket, drop its resume token, and remove its
+    /// session (and rail tile). Focus falls back to another connected burrow,
+    /// or to the connect screen when that was the last one.
+    pub fn disconnect(&self, id: &ServerId) {
+        let id = id.clone();
+        #[cfg(target_arch = "wasm32")]
+        {
+            use crate::wire::EventClient;
+            // Tell the transport this close is deliberate, so it doesn't
+            // schedule a reconnect for a burrow the user just left.
+            self.sessions.with_untracked(|list| {
+                if let Some((_, session)) = list.iter().find(|(sid, _)| *sid == id) {
+                    session
+                        .ws
+                        .update_value(|c| c.dispatch(rabbithole_core::api::Command::Disconnect));
+                }
+            });
+            crate::recent::forget(&id.0);
+        }
+        // The demo session is the app's floor — leaving it would leave nothing
+        // to show, so it stays.
+        if id == ServerId::local() {
+            return;
+        }
+        self.sessions.update(|list| list.retain(|(sid, _)| *sid != id));
+        if self.focused_id.get_untracked() == id {
+            let next = self
+                .sessions
+                .with_untracked(|list| list.first().map(|(sid, _)| sid.clone()));
+            if let Some(next) = next {
+                self.set_focus(next);
+            }
+        }
+    }
+
     /// Manually redial the live socket now (the reconnect banner's button).
     pub fn reconnect(&self) {
         #[cfg(target_arch = "wasm32")]
@@ -820,6 +860,69 @@ impl AppState {
                     s.apply(event);
                 }
             });
+        });
+    }
+
+    /// Join a seeded demo burrow: give it its own session (keyed by the demo
+    /// endpoint, so two of them coexist in the rail exactly like two live
+    /// burrows), label it, and connect its mock client.
+    ///
+    /// Dev-only. Demo data is compiled out of shipping builds — see the
+    /// `demo` feature in `Cargo.toml`.
+    #[cfg(feature = "demo")]
+    pub fn join_demo(&self, demo: &crate::client::DemoBurrow, handle: &str) {
+        let id = ServerId(demo.endpoint.to_string());
+        let exists = self
+            .sessions
+            .with_untracked(|list| list.iter().any(|(sid, _)| *sid == id));
+        if !exists {
+            let session = Session {
+                state: create_rw_signal(UiState::default()),
+                files: create_rw_signal(FilesState::default()),
+                is_admin: create_rw_signal(false),
+                live: create_rw_signal(false),
+                server_theme: create_rw_signal(None),
+                name: create_rw_signal(Some(demo.name.to_string())),
+                seen: create_rw_signal(0),
+                #[cfg(target_arch = "wasm32")]
+                ws: store_value(crate::ws::WsClient::new()),
+                client: store_value(crate::client::MockClient::named(demo)),
+            };
+            self.sessions
+                .update(|list| list.push((id.clone(), session)));
+        }
+        self.set_focus(id);
+        self.focused().name.set(Some(demo.name.to_string()));
+        self.dispatch(Command::Connect {
+            endpoint: demo.endpoint.to_string(),
+            pinned_fingerprint: None,
+        });
+        self.dispatch(Command::SignIn {
+            login: handle.to_string(),
+            password: String::new(),
+        });
+        // The seeded host handle carries the admin capability.
+        self.set_admin(handle == "rabbit");
+        self.refresh_who();
+        self.load_dms();
+        self.load_radio();
+        self.load_server_theme();
+        self.load_demo_front_page();
+    }
+
+    /// Seed the focused (demo) session's news panel from its burrow identity.
+    /// A real burrow sends a `WelcomeScreen` on connect; the mock never did,
+    /// so the demo had no news at all.
+    pub fn load_demo_front_page(&self) {
+        let widgets = self
+            .focused()
+            .client
+            .with_value(|c| c.demo_welcome_widgets());
+        if widgets.is_empty() {
+            return;
+        }
+        self.focused().state.update(|s| {
+            s.front_page = widgets;
         });
     }
 
@@ -1194,6 +1297,19 @@ impl AppState {
         self.focused().state.with_untracked(|s| {
             s.dm_threads.iter().find(|t| t.peer == handle).cloned()
         })
+    }
+
+    /// Persist settings after any change. Callers mutate `settings` then call
+    /// this; keeping the write in one place means no edit path can forget it.
+    pub fn save_settings(&self) {
+        #[cfg(target_arch = "wasm32")]
+        crate::settings::storage::save(&self.settings.get_untracked());
+    }
+
+    /// Can the focused burrow be left? Everything except the app's floor
+    /// session (the one that exists before you join anywhere).
+    pub fn can_leave(&self) -> bool {
+        self.focused_id.get() != ServerId::local()
     }
 
     /// The focused burrow's endpoint — the id the sightings ledger files a
@@ -1637,6 +1753,7 @@ pub fn App() -> impl IntoView {
         // Restore the persisted sightings ledger and friendships.
         app.sightings.set(crate::sightings::storage::load());
         app.friends.set(crate::friend::storage::load());
+        app.settings.set(crate::settings::storage::load());
     }
 
     // Reflect cross-burrow unread in the browser tab title, so a backgrounded
@@ -1750,6 +1867,7 @@ pub fn App() -> impl IntoView {
                             view! {
                                 <Routes>
                                     <Route path="/" view=Login/>
+                                    <Route path="/settings" view=Settings/>
                                     <Route path="/people" view=People/>
                                     <Route path="/people/:seed" view=PersonPage/>
                                     <Route path="/transfers" view=Transfers/>

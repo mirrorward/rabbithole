@@ -104,6 +104,7 @@ pub mod scroll;
 pub mod server_theme;
 pub mod sightings;
 pub mod servers;
+pub mod settings;
 pub mod sound;
 pub mod state;
 pub mod syndication_admin;

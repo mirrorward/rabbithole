@@ -49,6 +49,22 @@ pub fn browse(servers: &[DirectoryServer], query: &str) -> Vec<DirectoryServer> 
     out
 }
 
+/// Percent-encode a value for a query string. Only the characters that would
+/// otherwise break the URL — enough for endpoints, which are
+/// `scheme://host:port` and nothing exotic.
+pub fn encode_param(v: &str) -> String {
+    let mut out = String::with_capacity(v.len() + 8);
+    for b in v.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// A short, human `"98% up"` label for the health chip.
 pub fn uptime_label(pct: u8) -> String {
     format!("{}% up", pct.min(100))
@@ -67,7 +83,8 @@ pub fn sample_directory() -> Vec<DirectoryServer> {
             uptime_pct: uptime,
             reachable,
         };
-    vec![
+    #[allow(unused_mut)]
+    let mut list = vec![
         s(
             "The Warren",
             "wss://warren.rabbithole.example",
@@ -108,7 +125,26 @@ pub fn sample_directory() -> Vec<DirectoryServer> {
             34,
             false,
         ),
-    ]
+    ];
+    // Dev builds list the seeded demo burrows first, so "+ a burrow" reaches
+    // them without typing an address — the only way to exercise the warren
+    // layer (switching places, per-burrow unread) without running two servers.
+    #[cfg(feature = "demo")]
+    {
+        let demos: Vec<DirectoryServer> = crate::client::DEMO_BURROWS
+            .iter()
+            .map(|d| DirectoryServer {
+                name: d.name.into(),
+                endpoint: d.endpoint.into(),
+                description: format!("Demo burrow \u{2014} {}", d.motd),
+                users_online: d.who.len() as u32,
+                uptime_pct: 100,
+                reachable: true,
+            })
+            .collect();
+        list.splice(0..0, demos);
+    }
+    list
 }
 
 #[cfg(test)]
@@ -124,6 +160,18 @@ mod tests {
             uptime_pct: uptime,
             reachable,
         }
+    }
+
+    #[test]
+    fn endpoints_survive_the_query_string() {
+        // The Looking Glass hands its pick to the connect screen through the
+        // URL, so an endpoint's separators must not end the parameter.
+        assert_eq!(
+            encode_param("wss://warren.example:9000"),
+            "wss%3A%2F%2Fwarren.example%3A9000"
+        );
+        assert_eq!(encode_param("demo://night-pool"), "demo%3A%2F%2Fnight-pool");
+        assert_eq!(encode_param("a-b_c.d~e"), "a-b_c.d~e", "unreserved stays readable");
     }
 
     #[test]

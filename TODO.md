@@ -100,6 +100,10 @@ where headless-verifiable, tested:
   round-trip, which needs `cargo tauri dev` on a real machine.
 - **Verified identity** across proto/server/web/CLI, hardened against relay.
 - **An adversarial review** (13 fixes) + a security-review relay fix.
+- **Settings + demo warren + chrome cleanup** — a Settings page (trackers, default
+  `tracker.rabbit.direct`), two named demo burrows behind a dev-only `demo` feature
+  (news on connect, distinct rosters), Leave a burrow, header trimmed to the burrow's
+  real name, You first in the warren nav with a "me" icon.
 - **Person page + signed friendship** — `/people/:seed` shows where you know someone
   from (persisted sightings ledger, survives disconnect), their handle per burrow,
   recent DMs, files they've shared, and a mutual Ed25519 friendship attestation

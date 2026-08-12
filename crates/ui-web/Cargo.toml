@@ -7,6 +7,15 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Seeded demo burrows (rosters, boards, files, news) for developing the UI
+# without a server. OFF by default so no shipped build — debug or release —
+# can show fabricated data as if it were real. Dev workflows opt in:
+#   trunk serve --features demo
+# `cargo tauri dev` does this via beforeDevCommand; `cargo tauri build` runs
+# the plain `trunk build`, so a packaged app never contains it.
+demo = []
+
 [dependencies]
 leptos.workspace = true
 leptos_router.workspace = true
