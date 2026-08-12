@@ -94,6 +94,15 @@ const NATIVE_SHIM: &str = r#"
     }
     e.preventDefault();
   }, { capture: true });
+  window.__RH_NATIVE__.listen('rh://navigate', function (e) {
+    var to = e && e.payload;
+    if (typeof to === 'string' && to.charAt(0) === '/') {
+      // The SPA owns routing; dispatching popstate after pushState is how a
+      // history-router hears about a navigation it didn't initiate.
+      window.history.pushState({}, '', to);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }
+  });
   window.__RH_NATIVE__.listen('rh://fullscreen', function (e) {
     document.documentElement.classList.toggle('rh-fullscreen', !!(e && e.payload));
   });
@@ -142,6 +151,88 @@ fn tick_ack(payload: String) {
     eprintln!("[rh-bridge] tick_ack from webview: event payload={payload:?} — Rust→JS event delivery works");
 }
 
+/// The macOS application menu.
+///
+/// Tauri's default menu names the app submenu and its About item after the
+/// *binary* — "About rabbithole-desktop" — which is a build artifact's name,
+/// not the app's. Building the menu by hand fixes that and buys two things
+/// the default can't: a **Settings…** item on ⌘, (the macOS convention, which
+/// every Mac user reaches for), and an About panel with something in it.
+///
+/// Building a custom menu replaces the whole default, so Edit and Window are
+/// re-created here in full. Dropping them would silently cost ⌘C/⌘V in an app
+/// full of text fields — a much worse regression than the wrong app name.
+#[cfg(target_os = "macos")]
+fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+
+    let about = AboutMetadataBuilder::new()
+        .name(Some("RabbitHole"))
+        .version(Some(env!("CARGO_PKG_VERSION")))
+        .copyright(Some("© Mirrorward"))
+        // `credits` is the one rich field macOS renders here, so it carries
+        // what the panel is for: what this program *is*. One paragraph per
+        // entry — the panel wraps text itself, and manual breaks fight it.
+        .credits(Some(
+            [
+                "A warren client for RabbitHole.",
+                "",
+                "Chat, message boards, file libraries and swarmed transfers across many burrows at once \u{2014} with a portable identity that is yours, not any server's.",
+                "",
+                "rabbit.direct",
+            ]
+            .join("\n"),
+        ))
+        // An unbundled run (cargo run / tauri dev) has no .app for macOS to
+        // take an icon from, so the panel falls back to a generic folder.
+        // Embedding the already-rounded artwork makes it right either way.
+        .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/about.png")).ok())
+        .build();
+
+    let settings = MenuItemBuilder::with_id("settings", "Settings…")
+        .accelerator("CmdOrCtrl+,")
+        .build(app)?;
+
+    let app_menu = SubmenuBuilder::new(app, "RabbitHole")
+        .item(&PredefinedMenuItem::about(app, Some("About RabbitHole"), Some(about))?)
+        .separator()
+        .item(&settings)
+        .separator()
+        .item(&PredefinedMenuItem::services(app, None)?)
+        .separator()
+        .item(&PredefinedMenuItem::hide(app, Some("Hide RabbitHole"))?)
+        .item(&PredefinedMenuItem::hide_others(app, None)?)
+        .item(&PredefinedMenuItem::show_all(app, None)?)
+        .separator()
+        .item(&PredefinedMenuItem::quit(app, Some("Quit RabbitHole"))?)
+        .build()?;
+
+    // Re-created, not inherited: a custom menu replaces the default wholesale.
+    let edit_menu = SubmenuBuilder::new(app, "Edit")
+        .item(&PredefinedMenuItem::undo(app, None)?)
+        .item(&PredefinedMenuItem::redo(app, None)?)
+        .separator()
+        .item(&PredefinedMenuItem::cut(app, None)?)
+        .item(&PredefinedMenuItem::copy(app, None)?)
+        .item(&PredefinedMenuItem::paste(app, None)?)
+        .item(&PredefinedMenuItem::select_all(app, None)?)
+        .build()?;
+
+    let window_menu = SubmenuBuilder::new(app, "Window")
+        .item(&PredefinedMenuItem::minimize(app, None)?)
+        .item(&PredefinedMenuItem::maximize(app, None)?)
+        .item(&PredefinedMenuItem::fullscreen(app, None)?)
+        .separator()
+        .item(&PredefinedMenuItem::close_window(app, None)?)
+        .build()?;
+
+    MenuBuilder::new(app)
+        .item(&app_menu)
+        .item(&edit_menu)
+        .item(&window_menu)
+        .build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
@@ -163,6 +254,12 @@ pub fn run() {
             transfers::swarm_start_download,
         ])
         .setup(|app| {
+            // Name the app after itself, not after its binary.
+            #[cfg(target_os = "macos")]
+            {
+                let menu = build_menu(app.handle())?;
+                app.set_menu(menu)?;
+            }
             // Build the main window in Rust so it carries the native-bridge init
             // script (config `app.windows` is empty so this is the only window).
             let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
@@ -193,6 +290,18 @@ pub fn run() {
                     if matches!(event, tauri::WindowEvent::Resized(_)) {
                         let fs = w.is_fullscreen().unwrap_or(false);
                         let _ = w.emit("rh://fullscreen", fs);
+                    }
+                });
+            }
+
+            // Settings… (⌘,) is a *menu* action with a web destination: the
+            // shell tells the SPA where to go rather than owning a second
+            // settings surface that would drift from it.
+            {
+                let handle = app.handle().clone();
+                app.on_menu_event(move |_app, event| {
+                    if event.id() == "settings" {
+                        let _ = handle.emit("rh://navigate", "/settings");
                     }
                 });
             }

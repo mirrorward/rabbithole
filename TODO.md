@@ -100,6 +100,10 @@ where headless-verifiable, tested:
   round-trip, which needs `cargo tauri dev` on a real machine.
 - **Verified identity** across proto/server/web/CLI, hardened against relay.
 - **An adversarial review** (13 fixes) + a security-review relay fix.
+- **macOS shell** — the app menu is "RabbitHole" (not the binary name), with
+  About RabbitHole (icon + description) and Settings… on Cmd-, routed into the SPA;
+  Edit/Window rebuilt so copy/paste survives; the Dock/Command-Tab icon is a proper
+  rounded macOS icon (`scripts/build-macos-icns.sh`).
 - **Settings + demo warren + chrome cleanup** — a Settings page (trackers, default
   `tracker.rabbit.direct`), two named demo burrows behind a dev-only `demo` feature
   (news on connect, distinct rosters), Leave a burrow, header trimmed to the burrow's
