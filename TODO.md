@@ -100,6 +100,8 @@ where headless-verifiable, tested:
   round-trip, which needs `cargo tauri dev` on a real machine.
 - **Verified identity** across proto/server/web/CLI, hardened against relay.
 - **An adversarial review** (13 fixes) + a security-review relay fix.
+- **Scoped navigation** — the rail picks a scope (a burrow, or the warren) and the
+  sidebar lists that scope's sections; the active rail destination highlights.
 - **Native feel** — macOS overlay title bar (the app header *is* the title bar),
   window drag region, no rubber-banding or tap flash, unselectable chrome with
   selectable content, and Cmd-1..9 section shortcuts.

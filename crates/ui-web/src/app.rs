@@ -1668,18 +1668,67 @@ fn BurrowRail() -> impl IntoView {
         move |_| navigate("/servers", Default::default())
     };
 
+    // Which rail destination is current. The warren tiles had no active state
+    // at all: standing in Transfers, the only thing lit was the focused burrow
+    // tile, so the rail never showed where you actually were.
+    let at = move |route: &'static str| {
+        let path = location.pathname.get();
+        path.trim_end_matches('/') == route
+    };
+    // "Home" means "in a burrow" — it's lit for any of that burrow's sections,
+    // not just the lobby it navigates to.
+    let in_burrow = move || {
+        crate::palette::scope_of(&location.pathname.get()) == crate::palette::Scope::Burrow
+    };
     view! {
-        <nav class="rh-rail" class:rh-rail-hidden=hidden aria-label="Burrows">
-            <button class="rh-rail-tile rh-rail-home" title="Home" aria-label="Home" on:click=go_home>
+        <nav
+            class="rh-rail"
+            class:rh-rail-hidden=hidden
+            // In warren scope the focused burrow is still *focused* — the header
+            // and People still relate to it — but it isn't where you are. It
+            // keeps its edge bar and gives up the lit background, so exactly one
+            // tile reads as "you are here".
+            class:warren=move || { !in_burrow() }
+            aria-label="Burrows"
+        >
+            <button
+                class="rh-rail-tile rh-rail-home"
+                class:active=in_burrow
+                aria-current=move || in_burrow().then_some("page")
+                title="Home"
+                aria-label="Home"
+                on:click=go_home
+            >
                 <span class="rh-rail-hole" aria-hidden="true"></span>
             </button>
-            <button class="rh-rail-tile rh-rail-unified" title="People" aria-label="People" on:click=go_people>
+            <button
+                class="rh-rail-tile rh-rail-unified"
+                class:active=move || at("/people")
+                aria-current=move || at("/people").then_some("page")
+                title="People"
+                aria-label="People"
+                on:click=go_people
+            >
                 "\u{263a}"
             </button>
-            <button class="rh-rail-tile rh-rail-unified" title="Transfers" aria-label="Transfers" on:click=go_transfers>
+            <button
+                class="rh-rail-tile rh-rail-unified"
+                class:active=move || at("/transfers")
+                aria-current=move || at("/transfers").then_some("page")
+                title="Transfers"
+                aria-label="Transfers"
+                on:click=go_transfers
+            >
                 "\u{2913}"
             </button>
-            <button class="rh-rail-tile rh-rail-unified rh-rail-you" title="You" aria-label="You" on:click=go_you>
+            <button
+                class="rh-rail-tile rh-rail-unified rh-rail-you"
+                class:active=move || at("/you")
+                aria-current=move || at("/you").then_some("page")
+                title="You"
+                aria-label="You"
+                on:click=go_you
+            >
                 "\u{2726}"
             </button>
             <div class="rh-rail-sep"></div>

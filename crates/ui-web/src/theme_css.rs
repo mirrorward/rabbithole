@@ -245,6 +245,13 @@ pub mod storage {
 /// `prefers-reduced-motion: reduce` block that neutralises all motion.
 pub const STYLESHEET: &str = "\
 *{box-sizing:border-box}\
+/* The browser's default `body{margin:8px}` was never reset, so the app -- which\
+   is exactly 100dvh tall -- sat inside a body 16px taller than the viewport.\
+   That made the whole window scroll by a few pixels and exposed a dark border\
+   on every side: index.html paints `html` with the pre-boot backdrop, and that\
+   is what was showing through. */\
+html,body{margin:0;padding:0;height:100%}\
+body{overflow:hidden}\
 .rh-app{font-family:var(--rh-font-sans);font-size:var(--rh-font-size);line-height:1.5;color:var(--rh-text);background-color:var(--rh-bg);background-image:var(--rh-bg-image);height:100vh;height:100dvh;display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}\
 .rh-shell{flex:1;display:flex;min-height:0}\
 .rh-shell-main{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;overflow-y:auto}\
@@ -392,6 +399,13 @@ pub const STYLESHEET: &str = "\
 .rh-subnav-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}\
 .rh-subnav .rh-pip{flex:none}\
 .rh-subnav-rule{height:1px;margin:var(--rh-space-2) .55rem;background:color-mix(in srgb,var(--rh-text) 10%,transparent)}\
+.rh-subnav-scope{display:block;padding:.1rem .55rem .35rem;font-size:var(--rh-font-xs);text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:var(--rh-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+/* The rail's warren destinations get the same lit treatment as a focused\
+   burrow tile, so the rail always shows where you are -- not only which burrow\
+   is selected. */\
+.rh-rail-tile.active{color:var(--rh-accent);background:color-mix(in srgb,var(--rh-accent) 16%,transparent)}\
+.rh-rail-home.active,.rh-rail-unified.active{box-shadow:0 0 0 1px color-mix(in srgb,var(--rh-accent) 45%,transparent)}\
+.rh-rail.warren .rh-rail-server.active{background:color-mix(in srgb,var(--rh-text) 5%,transparent);color:var(--rh-muted);box-shadow:none}\
 /* --- Native feel. What separates an app from a web page is mostly the small
    things a browser does by default and a native app never does: rubber-band
    scrolling past the end, a grey flash when you tap, a text cursor over
@@ -969,6 +983,19 @@ mod tests {
         // Belt-and-braces textual checks mirroring the markup rules: CSS
         // cannot set tabindex, but it can break keyboard UX with these.
         assert!(!STYLESHEET.contains("pointer-events:none"));
+    }
+
+    #[test]
+    fn the_page_itself_never_scrolls() {
+        // The app is exactly one viewport tall, so anything that adds height
+        // around it makes the whole window scroll a few pixels and reveals the
+        // pre-boot backdrop as a dark border. The browser's default body margin
+        // did exactly that until it was reset.
+        assert!(STYLESHEET.contains("html,body{margin:0;padding:0;height:100%}"));
+        assert!(STYLESHEET.contains("body{overflow:hidden}"));
+        assert!(STYLESHEET.contains(".rh-app{"));
+        // The app still owns the viewport height it assumes.
+        assert!(STYLESHEET.contains("height:100vh;height:100dvh"));
     }
 
     #[test]

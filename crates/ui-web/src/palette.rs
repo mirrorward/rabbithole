@@ -16,8 +16,26 @@ pub struct Section {
     pub aliases: &'static [&'static str],
 }
 
-/// Every jump target, in nav order. An empty query lists them all as-is.
-pub const SECTIONS: &[Section] = &[
+/// Which nav a destination belongs to.
+///
+/// The rail picks a **scope**; the sidebar lists that scope's sections. A
+/// burrow's sections (its lobby, its boards, its files) mean nothing while
+/// you're looking at transfers across every burrow you're connected to, so
+/// showing them there was just a list of wrong links.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// Inside one burrow: the place you're connected to.
+    Burrow,
+    /// Across every burrow: the warren layer.
+    Warren,
+}
+
+/// The sections of one burrow, in sidebar order.
+///
+/// Admin is deliberately absent: it only exists for operators, so the nav
+/// renders it conditionally after this list rather than having every reader
+/// filter it out.
+pub const BURROW_SECTIONS: &[Section] = &[
     Section {
         label: "Lobby",
         route: "/lobby",
@@ -55,24 +73,82 @@ pub const SECTIONS: &[Section] = &[
         aliases: &["music", "stream", "tunes", "listen"],
     },
     Section {
-        label: "Servers",
-        route: "/servers",
-        hint: "directory",
-        aliases: &["directory", "looking glass", "browse", "hubs", "explore"],
-    },
-    Section {
         label: "Art",
         route: "/art",
         hint: "gallery",
         aliases: &["gallery", "ansi", "images"],
     },
+];
+
+/// The warren's own sections — everything that spans burrows rather than
+/// belonging to one, in sidebar order.
+pub const WARREN_SECTIONS: &[Section] = &[
     Section {
-        label: "Admin",
-        route: "/admin",
-        hint: "operator",
-        aliases: &["settings", "config", "operator", "moderate"],
+        label: "People",
+        route: "/people",
+        hint: "everyone",
+        aliases: &["everyone", "friends", "roster", "contacts"],
+    },
+    Section {
+        label: "Transfers",
+        route: "/transfers",
+        hint: "queue",
+        aliases: &["downloads", "uploads", "queue", "progress"],
+    },
+    Section {
+        label: "You",
+        route: "/you",
+        hint: "identity",
+        aliases: &["identity", "key", "profile", "me", "account"],
+    },
+    Section {
+        label: "Servers",
+        route: "/servers",
+        hint: "directory",
+        aliases: &["directory", "looking glass", "browse", "hubs", "explore"],
     },
 ];
+
+/// The operator console. Reachable by search for anyone who can see it, but
+/// never part of a scope's list — see [`BURROW_SECTIONS`].
+pub const ADMIN_SECTION: Section = Section {
+    label: "Admin",
+    route: "/admin",
+    hint: "operator",
+    aliases: &["settings", "config", "operator", "moderate"],
+};
+
+/// The scope a route belongs to. Anything not explicitly warren-level is a
+/// burrow route, so a new burrow section gets the burrow sidebar by default
+/// rather than silently getting the wrong one.
+pub fn scope_of(path: &str) -> Scope {
+    let path = path.trim_end_matches('/');
+    if WARREN_SECTIONS.iter().any(|s| path == s.route) {
+        Scope::Warren
+    } else {
+        Scope::Burrow
+    }
+}
+
+/// The sections the sidebar lists for a scope.
+pub fn sections_for(scope: Scope) -> &'static [Section] {
+    match scope {
+        Scope::Burrow => BURROW_SECTIONS,
+        Scope::Warren => WARREN_SECTIONS,
+    }
+}
+
+/// Every jump target the palette searches: both scopes plus the operator
+/// console. Built from the same lists the sidebars render, so a section can't
+/// exist in a nav and be unreachable by search — or the reverse.
+pub fn all_sections() -> Vec<Section> {
+    BURROW_SECTIONS
+        .iter()
+        .chain(WARREN_SECTIONS)
+        .copied()
+        .chain(std::iter::once(ADMIN_SECTION))
+        .collect()
+}
 
 /// Rank of a section against a lowercased, non-empty query. Lower is better;
 /// `None` means no match. A label prefix beats a label substring beats an
@@ -100,29 +176,30 @@ fn score(section: &Section, query: &str) -> Option<u8> {
     alias_sub.then_some(3)
 }
 
-/// Sections matching `query`, best first. An empty/whitespace query returns the
-/// full catalog in nav order. Total: never panics, always defined.
-/// The section a Cmd/Ctrl + digit shortcut jumps to.
+/// The section a Cmd/Ctrl + digit shortcut jumps to, within `scope`.
 ///
-/// `1` is the first section, `9` the ninth -- the convention of browser tabs
-/// and every chat app's workspace switcher, which is why it needs no
-/// explanation to anyone who has used one. Out-of-range digits and `0` do
-/// nothing rather than wrapping to something arbitrary.
-pub fn section_for_digit(key: &str) -> Option<Section> {
+/// `1` is the first item **in the sidebar you're looking at** — the convention
+/// of browser tabs and every workspace switcher. Scoping it matters: a shortcut
+/// that jumps somewhere other than the Nth row on screen is unlearnable, and
+/// the sidebar's contents now depend on the scope. Out-of-range digits and `0`
+/// do nothing rather than wrapping to something arbitrary.
+pub fn section_for_digit(scope: Scope, key: &str) -> Option<Section> {
     let n = key.parse::<usize>().ok()?;
     if n == 0 {
         return None;
     }
-    SECTIONS.get(n - 1).copied()
+    sections_for(scope).get(n - 1).copied()
 }
 
+/// Sections matching `query`, best first. An empty/whitespace query returns the
+/// full catalog in nav order. Total: never panics, always defined.
 pub fn palette_matches(query: &str) -> Vec<Section> {
     let q = query.trim().to_ascii_lowercase();
     if q.is_empty() {
-        return SECTIONS.to_vec();
+        return all_sections();
     }
     // Stable sort by score keeps nav order among equal-ranked hits.
-    let mut scored: Vec<(u8, usize, Section)> = SECTIONS
+    let mut scored: Vec<(u8, usize, Section)> = all_sections()
         .iter()
         .enumerate()
         .filter_map(|(i, s)| score(s, &q).map(|r| (r, i, *s)))
@@ -136,26 +213,75 @@ mod tests {
     use super::*;
 
     #[test]
-    fn digit_shortcuts_follow_the_nav_order() {
-        // Cmd-1 is the first section, and the sidebar lists them in this same
-        // order -- the shortcut is only learnable if those two agree.
-        assert_eq!(section_for_digit("1").unwrap().route, SECTIONS[0].route);
-        assert_eq!(section_for_digit("2").unwrap().route, SECTIONS[1].route);
-        // Nothing silly at the edges: no wrap-around, no Cmd-0.
-        assert_eq!(section_for_digit("0"), None);
-        assert_eq!(section_for_digit(&format!("{}", SECTIONS.len() + 1)), None);
-        assert_eq!(section_for_digit("k"), None);
-        assert_eq!(section_for_digit(""), None);
+    fn digit_shortcuts_follow_the_sidebar_you_are_looking_at() {
+        // Cmd-1 is the first row of the *current* sidebar. Since the sidebar's
+        // contents depend on the scope, so must the shortcut -- otherwise Cmd-1
+        // in the warren jumps to a burrow section that isn't on screen.
+        for scope in [Scope::Burrow, Scope::Warren] {
+            let list = sections_for(scope);
+            assert_eq!(section_for_digit(scope, "1").unwrap().route, list[0].route);
+            assert_eq!(section_for_digit(scope, "2").unwrap().route, list[1].route);
+            // Nothing silly at the edges: no wrap-around, no Cmd-0.
+            assert_eq!(section_for_digit(scope, "0"), None);
+            assert_eq!(section_for_digit(scope, &format!("{}", list.len() + 1)), None);
+            assert_eq!(section_for_digit(scope, "k"), None);
+            assert_eq!(section_for_digit(scope, ""), None);
+        }
+        assert_eq!(section_for_digit(Scope::Burrow, "1").unwrap().label, "Lobby");
+        assert_eq!(section_for_digit(Scope::Warren, "1").unwrap().label, "People");
+    }
+
+    #[test]
+    fn every_route_belongs_to_exactly_one_scope() {
+        // The sidebar is chosen by this function, so a route that lands in the
+        // wrong scope shows a whole nav of links that don't apply.
+        for s in WARREN_SECTIONS {
+            assert_eq!(scope_of(s.route), Scope::Warren, "{}", s.route);
+        }
+        for s in BURROW_SECTIONS {
+            assert_eq!(scope_of(s.route), Scope::Burrow, "{}", s.route);
+        }
+        // Sub-routes stay with their parent, and a trailing slash is the same
+        // route -- both arrive from the router.
+        assert_eq!(scope_of("/boards/general"), Scope::Burrow);
+        assert_eq!(scope_of("/transfers/"), Scope::Warren);
+        // Admin is an operator view inside a burrow, and an unknown route
+        // defaults to the burrow sidebar rather than the warren one.
+        assert_eq!(scope_of(ADMIN_SECTION.route), Scope::Burrow);
+        assert_eq!(scope_of("/wishing-well"), Scope::Burrow);
+    }
+
+    #[test]
+    fn the_search_catalog_is_exactly_what_the_navs_render() {
+        // Built from the same lists, so a section can't be in a nav but
+        // unreachable by search, or searchable but in no nav.
+        let all = all_sections();
+        assert_eq!(all.len(), BURROW_SECTIONS.len() + WARREN_SECTIONS.len() + 1);
+        for s in BURROW_SECTIONS.iter().chain(WARREN_SECTIONS) {
+            assert!(all.iter().any(|a| a.route == s.route), "{} missing", s.route);
+        }
+        assert!(all.iter().any(|a| a.route == ADMIN_SECTION.route));
+        // No route appears twice, or the palette would list it twice.
+        let mut routes: Vec<&str> = all.iter().map(|s| s.route).collect();
+        routes.sort_unstable();
+        let before = routes.len();
+        routes.dedup();
+        assert_eq!(routes.len(), before, "a route is in two navs");
     }
 
     #[test]
     fn empty_query_lists_every_section_in_nav_order() {
         let all = palette_matches("");
-        assert_eq!(all.len(), SECTIONS.len());
+        assert_eq!(all.len(), all_sections().len());
         assert_eq!(all[0].label, "Lobby");
         assert_eq!(all.last().unwrap().label, "Admin");
+        // The warren destinations are searchable too -- before this they were
+        // rail-only, so Cmd-K couldn't reach People, Transfers or You at all.
+        for label in ["People", "Transfers", "You"] {
+            assert!(all.iter().any(|s| s.label == label), "{label} unreachable");
+        }
         // Whitespace is treated as empty.
-        assert_eq!(palette_matches("   ").len(), SECTIONS.len());
+        assert_eq!(palette_matches("   ").len(), all_sections().len());
     }
 
     #[test]
