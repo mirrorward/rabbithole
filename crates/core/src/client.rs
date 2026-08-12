@@ -258,9 +258,26 @@ impl Client {
         login: &str,
         password: &str,
     ) -> Result<psess::AuthOk, ClientError> {
-        let ok: psess::AuthOk = self
-            .request(&psess::AuthPassword::new(login, password))
-            .await?;
+        self.auth_password_totp(login, password, None).await
+    }
+
+    /// Sign in with a password and, when the account has two-factor enabled,
+    /// its current TOTP code.
+    ///
+    /// `AuthPassword::with_totp` has existed since the 2FA slice, but nothing
+    /// called it — so an account with 2FA turned on simply could not sign in
+    /// from any native client, which is a lockout, not a missing feature.
+    pub async fn auth_password_totp(
+        &mut self,
+        login: &str,
+        password: &str,
+        totp: Option<&str>,
+    ) -> Result<psess::AuthOk, ClientError> {
+        let mut req = psess::AuthPassword::new(login, password);
+        if let Some(code) = totp.map(str::trim).filter(|c| !c.is_empty()) {
+            req = req.with_totp(code);
+        }
+        let ok: psess::AuthOk = self.request(&req).await?;
         self.remember_token(&ok);
         Ok(ok)
     }

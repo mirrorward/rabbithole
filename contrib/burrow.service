@@ -1,6 +1,6 @@
 [Unit]
 Description=RabbitHole burrow server
-Documentation=https://github.com/kevinelliott/RabbitHole
+Documentation=https://github.com/mirrorward/rabbithole
 After=network-online.target
 Wants=network-online.target
 

@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 mod browser;
+mod chatlog;
 mod handoff;
 mod radio;
 
@@ -93,6 +94,12 @@ enum View {
 
 struct App {
     lines: Vec<(String, String)>, // (from, text); from "" = system
+    /// Where the chat log is scrolled to. Follows the newest line unless the
+    /// reader deliberately scrolls back (see [`chatlog`]).
+    scroll: chatlog::Scroll,
+    /// Rows the chat pane had at the last draw — scrolling is measured in
+    /// screen rows, and only the renderer knows how many there are.
+    chat_height: usize,
     online: Vec<String>,
     input: String,
     pack: ThemePack,
@@ -124,7 +131,9 @@ impl App {
     }
 
     fn sys(&mut self, text: impl Into<String>) {
-        self.lines.push((String::new(), text.into()));
+        let before = self.lines.len();
+        chatlog::push_trimmed(&mut self.lines, (String::new(), text.into()));
+        self.scroll.on_appended(1, before);
     }
 
     fn status(&mut self, text: impl Into<String>) {
@@ -180,6 +189,8 @@ async fn main() -> Result<()> {
 
     let mut app = App {
         lines: history.into_iter().map(|m| (m.from, m.text)).collect(),
+        scroll: chatlog::Scroll::new(),
+        chat_height: 0,
         online,
         input: String::new(),
         pack: ThemePack::Clean,
@@ -267,7 +278,9 @@ async fn run(
 fn apply_push(app: &mut App, frame: &rabbithole_proto::Frame) {
     if let Some(Ok(m)) = frame.decode::<ChatMessage>() {
         if m.room == "lobby" {
-            app.lines.push((m.from, m.text));
+            let before = app.lines.len();
+            chatlog::push_trimmed(&mut app.lines, (m.from, m.text));
+            app.scroll.on_appended(1, before);
         }
     } else if let Some(Ok(j)) = frame.decode::<UserJoined>() {
         if !app.online.contains(&j.user.screen_name) {
@@ -341,6 +354,36 @@ async fn handle_lobby_key(
     key: KeyEvent,
     ctrl: bool,
 ) -> Result<()> {
+    // Scrollback first: these keys never reach the input line, so reading
+    // history can't accidentally type into the room.
+    let page = app.chat_height.max(1);
+    match key.code {
+        KeyCode::PageUp => {
+            app.scroll.up(page, app.lines.len(), app.chat_height);
+            return Ok(());
+        }
+        KeyCode::PageDown => {
+            app.scroll.down(page);
+            return Ok(());
+        }
+        KeyCode::Up => {
+            app.scroll.up(1, app.lines.len(), app.chat_height);
+            return Ok(());
+        }
+        KeyCode::Down => {
+            app.scroll.down(1);
+            return Ok(());
+        }
+        KeyCode::Home => {
+            app.scroll.jump_top(app.lines.len(), app.chat_height);
+            return Ok(());
+        }
+        KeyCode::End => {
+            app.scroll.jump_bottom();
+            return Ok(());
+        }
+        _ => {}
+    }
     match key.code {
         KeyCode::Esc => app.should_quit = true,
         KeyCode::Backspace => {
@@ -601,7 +644,7 @@ fn start_health_fetch(app: &mut App, fetch_tx: &UnboundedSender<browser::Fetched
 // Rendering.
 // ---------------------------------------------------------------------------
 
-fn draw(f: &mut Frame, app: &App) {
+fn draw(f: &mut Frame, app: &mut App) {
     let pal = app.palette();
     let bg = Style::default()
         .bg(to_color(pal.background))
@@ -617,6 +660,8 @@ fn draw(f: &mut Frame, app: &App) {
     let muted = Style::default().fg(to_color(pal.muted));
     let text = Style::default().fg(to_color(pal.text));
 
+    // The lobby records its pane height as it draws (scrolling is measured in
+    // screen rows), so it takes the mutable borrow; the others only read.
     match app.view {
         View::Lobby => draw_lobby(f, app, bands[0], accent, muted, text),
         View::Radio => draw_radio(f, app, bands[0], accent, muted),
@@ -625,7 +670,7 @@ fn draw(f: &mut Frame, app: &App) {
     draw_status_bar(f, app, bands[1], accent, muted);
 }
 
-fn draw_lobby(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Style, text: Style) {
+fn draw_lobby(f: &mut Frame, app: &mut App, area: Rect, accent: Style, muted: Style, text: Style) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(20), Constraint::Length(22)])
@@ -635,9 +680,15 @@ fn draw_lobby(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Style,
         .constraints([Constraint::Min(3), Constraint::Length(3)])
         .split(cols[0]);
 
-    // Chat log (tail to fit).
-    let log: Vec<ListItem> = app
-        .lines
+    // Chat log — the window the scroll model picked. `rows[0]` includes the
+    // block's top and bottom borders, so the text area is two rows shorter;
+    // getting that wrong hides the newest line.
+    let height = rows[0].height.saturating_sub(2) as usize;
+    // Remember it: scrolling is measured in screen rows, and only the
+    // renderer knows how many the pane has.
+    app.chat_height = height;
+    let (first, last) = app.scroll.window(app.lines.len(), height);
+    let log: Vec<ListItem> = app.lines[first..last]
         .iter()
         .map(|(from, line)| {
             if from.is_empty() {
@@ -650,7 +701,14 @@ fn draw_lobby(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Style,
             }
         })
         .collect();
-    let title = format!(" {} — lobby ", app.server_name);
+    let behind = app.lines.len().saturating_sub(last);
+    let title = if app.scroll.at_bottom() {
+        format!(" {} — lobby ", app.server_name)
+    } else {
+        // Scrolled back: say how much is below, so a busy room can't look
+        // idle just because you were reading something older.
+        format!(" {} — lobby — {behind} below (End) ", app.server_name)
+    };
     f.render_widget(
         List::new(log).block(
             Block::default()

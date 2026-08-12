@@ -56,7 +56,7 @@ surface.
   directory, admin console, theme editor (live light/dark/retro preview), and a
   radio player — an installable **PWA** with an offline app-shell, served by
   `burrow --http`.
-- **TUI clients** (`rabbit-tui`): chat/who/DMs, a radio now-playing panel with
+- **TUI clients** (`rabbit-tui`): chat/who, a radio now-playing panel with
   external-player handoff, and a **Looking Glass** server browser
   (INDEX/CATEGORIES/HEALTH with an uptime sparkline).
 - **`rabbit` CLI**: login (password/guest, QUIC or WS), chat, boards, files,

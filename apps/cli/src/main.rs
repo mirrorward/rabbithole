@@ -49,6 +49,9 @@ enum Cmd {
         /// Password (or set RABBIT_PASSWORD).
         #[arg(long)]
         password: Option<String>,
+        /// Current 6-digit code, for accounts with two-factor enabled.
+        #[arg(long)]
+        totp: Option<String>,
         /// Sign in as a guest.
         #[arg(long)]
         guest: bool,
@@ -58,6 +61,12 @@ enum Cmd {
     },
     /// Forget the cached session.
     Logout,
+    /// Accept this burrow's agreement (read it first with `rabbit status`).
+    Agree {
+        /// Accept without printing the agreement first.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Show the cached session.
     Status,
     /// List who's online.
@@ -99,6 +108,11 @@ enum Cmd {
         /// Parent post id (hex, full or unambiguous prefix from `read`).
         parent: String,
         text: Vec<String>,
+    },
+    /// Direct messages — read, send, and list private conversations.
+    Dm {
+        #[command(subcommand)]
+        action: DmAction,
     },
     /// The Wishing Well — a request board for wanted files/boards/features.
     Wish {
@@ -242,6 +256,31 @@ enum QueueAction {
     Clear,
 }
 
+/// Direct-message actions.
+#[derive(Subcommand)]
+enum DmAction {
+    /// List conversations, most recent first.
+    List,
+    /// Print a conversation, newest last.
+    Read {
+        /// The other party's handle.
+        with: String,
+        /// How many messages to fetch.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        /// Leave the conversation marked unread.
+        #[arg(long)]
+        keep_unread: bool,
+    },
+    /// Send a direct message.
+    Send {
+        /// The other party's handle.
+        to: String,
+        /// The message (joined with spaces).
+        text: Vec<String>,
+    },
+}
+
 #[derive(Subcommand)]
 enum WishAction {
     /// List wishes (optionally by status: open|claimed|fulfilled|declined).
@@ -280,6 +319,13 @@ struct Session {
     guest_name: Option<String>,
     screen_name: String,
     replay_cursor: u64,
+    /// The agreement this burrow requires, if we have not accepted it yet.
+    ///
+    /// Stored so `rabbit status` can actually show it — login used to say
+    /// "read it with `rabbit status`" while `status` had no idea it existed,
+    /// and every other command silently accepted it on the user's behalf.
+    #[serde(default)]
+    pending_agreement: Option<String>,
 }
 
 /// The per-user RabbitHole data directory, created private (0700 on Unix) since
@@ -409,6 +455,7 @@ async fn main() -> Result<()> {
             server_name,
             user,
             password,
+            totp,
             guest,
             name,
         } => {
@@ -429,7 +476,8 @@ async fn main() -> Result<()> {
                 let password = password
                     .or_else(|| std::env::var("RABBIT_PASSWORD").ok())
                     .context("--password or RABBIT_PASSWORD")?;
-                c.auth_password(&user, &password).await?
+                c.auth_password_totp(&user, &password, totp.as_deref())
+                    .await?
             };
             let welcome = c.expect_welcome().await?;
 
@@ -443,6 +491,7 @@ async fn main() -> Result<()> {
                     .filter(|s| !s.is_empty()),
                 screen_name: ok.screen_name.clone(),
                 replay_cursor: c.replay_cursor,
+                pending_agreement: welcome.agreement.clone(),
             };
             save_session(&session)?;
 
@@ -466,7 +515,10 @@ async fn main() -> Result<()> {
                     println!("\n{}\n", welcome.motd);
                 }
                 if welcome.agreement.is_some() {
-                    println!("(this server has an agreement; commands will auto-accept — read it with `rabbit status`)");
+                    println!(
+                        "\nThis burrow has an agreement you have not accepted.\n\
+                         Read it with `rabbit status`, then accept with `rabbit agree`."
+                    );
                 }
             }
             c.close().await;
@@ -482,6 +534,28 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Agree { yes } => {
+            let (mut c, mut s) = reconnect().await?;
+            let Some(text) = s.pending_agreement.clone() else {
+                println!("nothing to accept \u{2014} this burrow has no pending agreement");
+                return Ok(());
+            };
+            // Show what is being agreed to unless the caller says they have
+            // already read it. Accepting terms you were never shown is the
+            // behaviour this command exists to replace.
+            if !yes && !cli.json {
+                println!("\u{2500}\u{2500} agreement \u{2500}\u{2500}\n{text}\n");
+            }
+            c.agreement_accept().await?;
+            s.pending_agreement = None;
+            save_session(&s)?;
+            if cli.json {
+                println!("{}", serde_json::json!({"accepted": true}));
+            } else {
+                println!("accepted \u{2014} you're in.");
+            }
+            Ok(())
+        }
         Cmd::Status => {
             let s = load_session()?;
             if cli.json {
@@ -490,6 +564,14 @@ async fn main() -> Result<()> {
                 println!("endpoint:    {}", s.endpoint);
                 println!("screen name: {}", s.screen_name);
                 println!("resumable:   {}", s.token.is_some());
+                match &s.pending_agreement {
+                    Some(text) => {
+                        println!("agreement:   NOT ACCEPTED");
+                        println!("\n\u{2500}\u{2500} agreement \u{2500}\u{2500}\n{text}\n");
+                        println!("Accept it with `rabbit agree`.");
+                    }
+                    None => println!("agreement:   none pending"),
+                }
             }
             Ok(())
         }
@@ -505,6 +587,11 @@ async fn main() -> Result<()> {
                             "role": u.role,
                             "transport": u.transport,
                             "connected_secs": u.connected_secs,
+                            // The wire has carried these since presence
+                            // landed; `who` just threw them away.
+                            "state": format!("{:?}", u.state).to_lowercase(),
+                            "status": u.status,
+                            "identity_key": u.pubkey.as_ref().map(hex::encode),
                         })
                     })
                     .collect();
@@ -512,10 +599,18 @@ async fn main() -> Result<()> {
             } else {
                 println!("{} online:", users.len());
                 for u in users {
+                    // A key glyph marks a portable identity — the same hint
+                    // the web roster shows, and the reason two people with the
+                    // same handle are distinguishable.
+                    let keyed = if u.pubkey.is_some() { "\u{26bf}" } else { " " };
+                    let state = format!("{:?}", u.state).to_lowercase();
                     println!(
-                        "  {:24} {:10} {:>6}s",
-                        u.screen_name, u.transport, u.connected_secs
+                        "  {keyed} {:22} {:8} {:10} {:>6}s",
+                        u.screen_name, state, u.transport, u.connected_secs
                     );
+                    if let Some(msg) = u.status.as_deref().filter(|m| !m.is_empty()) {
+                        println!("      \u{201c}{msg}\u{201d}");
+                    }
                 }
             }
             c.close().await;
@@ -663,6 +758,7 @@ async fn main() -> Result<()> {
             parent,
             text,
         } => cmd_reply(cli.json, board, parent, text.join(" ")).await,
+        Cmd::Dm { action } => cmd_dm(cli.json, action).await,
         Cmd::Wish { action } => cmd_wish(cli.json, action).await,
         Cmd::File { action } => cmd_file(cli.json, action).await,
         Cmd::Queue { action } => cmd_queue(cli.json, action).await,
@@ -1402,6 +1498,109 @@ async fn cmd_reply(json: bool, board: String, parent: String, text: String) -> R
     Ok(())
 }
 
+/// Direct messages.
+///
+/// The DM family has been on the wire since Wave 2 and the CLI had no surface
+/// for it at all — a terminal user could read every board and file on a burrow
+/// but not the message someone sent them.
+async fn cmd_dm(json: bool, action: DmAction) -> Result<()> {
+    let (mut c, _) = reconnect().await?;
+    match action {
+        DmAction::List => {
+            let threads = c.dm_threads().await?;
+            if json {
+                let rows: Vec<_> = threads
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "with": t.with,
+                            "last_text": t.last_text,
+                            "last_at_unix_ms": t.last_at_unix_ms,
+                            "unread": t.unread,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::Value::Array(rows));
+            } else if threads.is_empty() {
+                println!("no conversations yet");
+            } else {
+                for t in threads {
+                    // Unread first in the eye-line: it's the reason to look.
+                    let mark = if t.unread > 0 {
+                        format!("({})", t.unread)
+                    } else {
+                        "   ".to_string()
+                    };
+                    let preview: String = t.last_text.replace('\n', " ").chars().take(56).collect();
+                    println!("{mark:>5} {:20} {preview}", t.with);
+                }
+            }
+        }
+        DmAction::Read {
+            with,
+            limit,
+            keep_unread,
+        } => {
+            // before_id 0 = from the newest backwards.
+            let msgs = c.dm_history(&with, 0, limit).await?;
+            if json {
+                let rows: Vec<_> = msgs
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "id": m.id,
+                            "from": m.from,
+                            "to": m.to,
+                            "text": m.text,
+                            "at_unix_ms": m.at_unix_ms,
+                            "is_auto": m.is_auto,
+                            "encrypted": m.encrypted.is_some(),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::Value::Array(rows));
+            } else if msgs.is_empty() {
+                println!("no messages with {with}");
+            } else {
+                for m in &msgs {
+                    // An encrypted DM's `text` is empty by construction; say so
+                    // rather than printing a blank line that looks like a bug.
+                    let body = if m.encrypted.is_some() && m.text.is_empty() {
+                        "[end-to-end encrypted \u{2014} not readable here]"
+                    } else {
+                        &m.text
+                    };
+                    let auto = if m.is_auto { " (auto)" } else { "" };
+                    println!("{:>16}{auto}: {body}", m.from);
+                }
+            }
+            // Reading marks read, which is what reading means — unless the
+            // caller is scripting and wants the unread flag left alone.
+            if !keep_unread {
+                if let Some(newest) = msgs.iter().map(|m| m.id).max() {
+                    c.dm_mark_read(&with, newest).await?;
+                }
+            }
+        }
+        DmAction::Send { to, text } => {
+            let body = text.join(" ");
+            if body.trim().is_empty() {
+                bail!("nothing to send");
+            }
+            let sent = c
+                .dm_send(&rabbithole_proto::dm::DmSend::new(&to, body))
+                .await?;
+            if json {
+                println!("{}", serde_json::json!({"id": sent.id, "to": to}));
+            } else {
+                println!("sent to {to}");
+            }
+        }
+    }
+    c.close().await;
+    Ok(())
+}
+
 async fn cmd_wish(json: bool, action: WishAction) -> Result<()> {
     use rabbithole_proto::wish::WishSetStatus;
     let (mut c, _) = reconnect().await?;
@@ -1506,8 +1705,12 @@ fn report_wish(json: bool, verb: &str, w: &rabbithole_proto::wish::WishView) {
 }
 
 /// Re-establish a session from the cache: token resume for accounts,
-/// fresh guest sign-in for guests. Auto-accepts a pending agreement
-/// (the login command surfaced it to the human).
+/// fresh guest sign-in for guests.
+///
+/// A pending agreement is **not** accepted here. Accepting a burrow's terms is
+/// a decision, and a decision the user never sees is not one they made — this
+/// used to happen silently on every command. `rabbit agree` is the deliberate
+/// act; until then the agreement is remembered and reported.
 async fn reconnect() -> Result<(Client, Session)> {
     let mut s = load_session()?;
     let identity = load_or_create_identity()?;
@@ -1526,9 +1729,8 @@ async fn reconnect() -> Result<(Client, Session)> {
     };
     s.screen_name = ok.screen_name.clone();
     let welcome = c.expect_welcome().await?;
-    if welcome.agreement.is_some() {
-        c.agreement_accept().await?;
-    }
+    // Track it so `status` stays accurate; never accept on their behalf.
+    s.pending_agreement = welcome.agreement.clone();
     Ok((c, s))
 }
 
