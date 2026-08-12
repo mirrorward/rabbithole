@@ -1707,7 +1707,7 @@ fn BurrowRail() -> impl IntoView {
                 aria-label="Home"
                 on:click=go_home
             >
-                <span class="rh-rail-hole" aria-hidden="true"></span>
+                <span class="rh-rail-glyph" inner_html=crate::icons::rail_icon("home")></span>
             </button>
             <button
                 class="rh-rail-tile rh-rail-unified"
@@ -1717,7 +1717,7 @@ fn BurrowRail() -> impl IntoView {
                 aria-label="People"
                 on:click=go_people
             >
-                <span class="rh-rail-glyph" inner_html=crate::icons::section_icon("/people")></span>
+                <span class="rh-rail-glyph" inner_html=crate::icons::rail_icon("people")></span>
             </button>
             <button
                 class="rh-rail-tile rh-rail-unified"
@@ -1727,7 +1727,7 @@ fn BurrowRail() -> impl IntoView {
                 aria-label="Transfers"
                 on:click=go_transfers
             >
-                <span class="rh-rail-glyph" inner_html=crate::icons::section_icon("/transfers")></span>
+                <span class="rh-rail-glyph" inner_html=crate::icons::rail_icon("transfers")></span>
             </button>
             <button
                 class="rh-rail-tile rh-rail-unified rh-rail-you"
@@ -1737,7 +1737,7 @@ fn BurrowRail() -> impl IntoView {
                 aria-label="You"
                 on:click=go_you
             >
-                <span class="rh-rail-glyph" inner_html=crate::icons::section_icon("/you")></span>
+                <span class="rh-rail-glyph" inner_html=crate::icons::rail_icon("you")></span>
             </button>
             <div class="rh-rail-sep"></div>
             <For
@@ -1796,7 +1796,7 @@ fn BurrowRail() -> impl IntoView {
                 aria-label="Add a burrow"
                 on:click=go_add
             >
-                "+"
+                <span class="rh-rail-glyph" inner_html=crate::icons::rail_icon("add")></span>
             </button>
         </nav>
     }

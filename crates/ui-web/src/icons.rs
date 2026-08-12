@@ -101,6 +101,49 @@ pub fn pack_icon() -> String {
     )
 }
 
+/// The burrow rail's own icon set.
+///
+/// The rail is the app's main nav, and it grew by accretion: a CSS-gradient
+/// bullseye for Home, three section icons drawn for the sidebar's 18px, a
+/// text "+" — four visual languages in one column, at four optical sizes,
+/// with People and You both reading as "a person". One family now, drawn for
+/// the rail's 20px box at matched optical weight:
+///
+/// * **home** — the rabbit hole itself, concentric rings: the brand mark, and
+///   "into the burrow".
+/// * **people** — a smiling face. Warm, instantly "the people I know", and
+///   unmistakable next to **you**, the classic single bust.
+/// * **transfers** — an arrow landing in a tray: bytes arriving somewhere,
+///   not just pointing down.
+/// * **add** — a plus.
+///
+/// Unknown names get the neutral dot, same as [`section_icon`].
+pub fn rail_icon(which: &str) -> String {
+    let body = match which {
+        "home" => concat!(
+            "<circle cx=\"12\" cy=\"12\" r=\"8.2\"/>",
+            "<circle cx=\"12\" cy=\"12\" r=\"4.4\"/>",
+            "<circle cx=\"12\" cy=\"12\" r=\"1\" fill=\"currentColor\" stroke=\"none\"/>"
+        ),
+        "people" => concat!(
+            "<circle cx=\"12\" cy=\"12\" r=\"7.8\"/>",
+            "<path d=\"M9.1 9.7v1M14.9 9.7v1\"/>",
+            "<path d=\"M8.5 14.1a4.6 4.6 0 0 0 7 0\"/>"
+        ),
+        "transfers" => concat!(
+            "<path d=\"M12 3.8v9.6m0 0l-4-4m4 4l4-4\"/>",
+            "<path d=\"M4.5 15.7v2.6a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5v-2.6\"/>"
+        ),
+        "you" => concat!(
+            "<circle cx=\"12\" cy=\"8\" r=\"4.2\"/>",
+            "<path d=\"M4.2 20.2a7.8 7.8 0 0 1 15.6 0\"/>"
+        ),
+        "add" => "<path d=\"M12 5.6v12.8M5.6 12h12.8\"/>",
+        _ => "<circle cx=\"12\" cy=\"12\" r=\"3.2\"/>",
+    };
+    format!("{OPEN}{body}</svg>")
+}
+
 /// The chime toggle: a bell, slashed when muted. Drawn like every other icon
 /// here — the colour emoji it replaces ignored the theme, sat on its own
 /// baseline, and no native app puts emoji in its window chrome.
@@ -208,6 +251,27 @@ mod tests {
             assert!(!seen.contains(&svg), "{p} duplicates another section's icon");
             seen.push(svg);
         }
+    }
+
+    #[test]
+    fn the_rail_family_is_distinct_sized_alike_and_self_contained() {
+        const RAIL: [&str; 5] = ["home", "people", "transfers", "you", "add"];
+        let mut seen = Vec::new();
+        for name in RAIL {
+            let svg = rail_icon(name);
+            assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"), "{name}");
+            assert!(svg.contains("stroke=\"currentColor\""), "{name}");
+            assert!(svg.contains("aria-hidden=\"true\""), "{name}");
+            assert!(svg.contains("viewBox=\"0 0 24 24\""), "{name} shares the grid");
+            assert!(!svg.contains("http") && !svg.contains("<image"), "{name}");
+            assert!(!seen.contains(&svg), "{name} duplicates another rail icon");
+            seen.push(svg);
+        }
+        // People and You must not read as the same figure — that ambiguity is
+        // what got the old set replaced.
+        assert_ne!(rail_icon("people"), rail_icon("you"));
+        // Unknown names degrade to the neutral dot, never a panic.
+        assert!(rail_icon("wat").contains("circle"));
     }
 
     #[test]

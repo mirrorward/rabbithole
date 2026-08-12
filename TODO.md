@@ -100,6 +100,8 @@ where headless-verifiable, tested:
   round-trip, which needs `cargo tauri dev` on a real machine.
 - **Verified identity** across proto/server/web/CLI, hardened against relay.
 - **An adversarial review** (13 fixes) + a security-review relay fix.
+- **The rail is one icon family** — rings (home/brand), smiley (people), arrow-into-
+  tray (transfers), bust (you), plus — same 20px box, same stroke, contact-sheeted.
 - **Native-feel pass** (50-agent audit, 20 confirmed findings) — real Tauri drag
   regions (the -webkit-app-region CSS was a WKWebView no-op: the window was
   undraggable), no browser context menu over chrome, window frame remembered

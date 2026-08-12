@@ -304,6 +304,7 @@ body{overflow:hidden}\
 .rh-pres.idle{background:var(--rh-muted)}\
 .rh-pres.off{background:var(--rh-muted);opacity:.5}\
 .rh-rail-glyph{display:grid;place-items:center;line-height:0}\
+.rh-rail-glyph svg{width:20px;height:20px}\
 .rh-rail-unified{border-radius:var(--rh-radius-full);color:var(--rh-accent);background:color-mix(in srgb,var(--rh-accent) 12%,transparent);font-size:1.05rem}\
 .rh-people{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}\
 .rh-person{display:flex;align-items:center;gap:.6rem;padding:.5rem .3rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\
@@ -389,9 +390,9 @@ body{overflow:hidden}\
 .rh-rail-home,.rh-rail-add{border-radius:var(--rh-radius-full)}\
 .rh-rail-server{color:var(--rh-text);background:color-mix(in srgb,var(--rh-accent) 16%,var(--rh-surface));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--rh-accent) 30%,transparent)}\
 .rh-rail-server.active::before{content:\"\";position:absolute;left:-9px;top:8px;bottom:8px;width:3px;border-radius:3px;background:var(--rh-accent)}\
-.rh-rail-add{color:var(--rh-muted);background:transparent;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--rh-text) 12%,transparent);font-size:1.15rem}\
+.rh-rail-add{color:var(--rh-muted);background:transparent;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--rh-text) 12%,transparent)}\
 .rh-rail-sep{width:22px;height:1px;background:color-mix(in srgb,var(--rh-text) 10%,transparent)}\
-.rh-rail-hole{width:22px;height:22px;border-radius:50%;background:radial-gradient(circle at 50% 52%,var(--rh-surface) 0 16%,var(--rh-accent) 16% 30%,var(--rh-surface) 30% 46%,color-mix(in srgb,var(--rh-accent) 55%,var(--rh-surface)) 46% 64%,var(--rh-surface) 64% 100%);box-shadow:0 0 0 1px color-mix(in srgb,var(--rh-accent) 35%,transparent)}\
+.rh-rail-home{color:var(--rh-accent)}\
 :focus-visible{outline:2px solid var(--rh-focus);outline-offset:2px}\
 .rh-visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}\
 .rh-skip{position:fixed;left:-999rem;top:var(--rh-space-2);z-index:99;background:var(--rh-accent);color:var(--rh-bg);padding:var(--rh-space-2) var(--rh-space-3);border-radius:var(--rh-radius);text-decoration:none;font-weight:600;box-shadow:var(--rh-shadow-2)}\
