@@ -32,6 +32,9 @@ pub mod transfers;
 const NATIVE_SHIM: &str = r#"
 (function () {
   var I = window.__TAURI_INTERNALS__;
+  // Stamped at compile time from the workspace manifest + git SHA, so the
+  // About window reports the build that is actually running.
+  window.__RH_BUILD__ = { version: '__RH_VERSION__', sha: '__RH_SHA__' };
   window.__RH_IS_NATIVE__ = !!I;
   if (!I) { return; }
   window.__RH_NATIVE__ = {
@@ -124,6 +127,14 @@ const NATIVE_SHIM: &str = r#"
 })();
 "#;
 
+/// The init script with the build stamps substituted in. A constant can't
+/// carry them, and the About window's whole job is reporting them accurately.
+fn native_shim() -> String {
+    NATIVE_SHIM
+        .replace("__RH_VERSION__", env!("RH_VERSION"))
+        .replace("__RH_SHA__", env!("RH_GIT_SHA"))
+}
+
 /// A trivial command proving JS→Rust invoke works. Logs on the Rust side so the
 /// round-trip is observable from the `cargo tauri dev` terminal (not just the
 /// webview devtools console).
@@ -193,8 +204,15 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         .accelerator("CmdOrCtrl+,")
         .build(app)?;
 
+    // Our own About window, not `PredefinedMenuItem::about`: the system panel
+    // accepts an icon, a name, a version and a blob of credits text and
+    // nothing else, which is precisely why it can never look like the app it
+    // belongs to. The metadata above is still built, so the panel stays one
+    // line away if the custom window ever fails to open.
+    let _ = &about;
+    let about_item = MenuItemBuilder::with_id("about", "About RabbitHole").build(app)?;
     let app_menu = SubmenuBuilder::new(app, "RabbitHole")
-        .item(&PredefinedMenuItem::about(app, Some("About RabbitHole"), Some(about))?)
+        .item(&about_item)
         .separator()
         .item(&settings)
         .separator()
@@ -233,6 +251,35 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         .build()
 }
 
+/// Open (or focus) the About window: a small, non-resizable webview showing
+/// the SPA's `/about` route, so it wears the app's own theme and type.
+fn open_about(app: &tauri::AppHandle) {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+    if let Some(w) = app.get_webview_window("about") {
+        let _ = w.set_focus();
+        return;
+    }
+    // The SPA is a *history* router, so a fragment (`index.html#/about`) lands
+    // it on "/" and the window renders the whole app shell. Rewriting the path
+    // in an init script — which runs at document start, before the SPA mounts —
+    // means it boots directly into the About route, in dev (where the window
+    // loads the dev server) and in a bundle alike.
+    let builder = WebviewWindowBuilder::new(app, "about", WebviewUrl::App("index.html".into()))
+        .title("About RabbitHole")
+        .inner_size(420.0, 640.0)
+        .resizable(false)
+        .minimizable(false)
+        .initialization_script(format!(
+            "{}\nhistory.replaceState({{}}, '', '/about');",
+            native_shim()
+        ));
+    #[cfg(target_os = "macos")]
+    let builder = builder.title_bar_style(tauri::TitleBarStyle::Transparent);
+    if let Err(e) = builder.build() {
+        eprintln!("[rh-menu] about window failed to open: {e}");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
@@ -266,7 +313,7 @@ pub fn run() {
                 .title("RabbitHole")
                 .inner_size(1100.0, 760.0)
                 .min_inner_size(720.0, 480.0)
-                .initialization_script(NATIVE_SHIM);
+                .initialization_script(native_shim());
             // On macOS the app's own header becomes the title bar: the system
             // bar is drawn as a transparent overlay, so the traffic lights float
             // over our chrome instead of sitting in a separate grey strip above
@@ -300,8 +347,12 @@ pub fn run() {
             {
                 let handle = app.handle().clone();
                 app.on_menu_event(move |_app, event| {
-                    if event.id() == "settings" {
-                        let _ = handle.emit("rh://navigate", "/settings");
+                    match event.id().0.as_str() {
+                        "settings" => {
+                            let _ = handle.emit("rh://navigate", "/settings");
+                        }
+                        "about" => open_about(&handle),
+                        _ => {}
                     }
                 });
             }

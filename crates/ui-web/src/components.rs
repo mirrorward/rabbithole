@@ -281,6 +281,111 @@ pub fn People() -> impl IntoView {
     }
 }
 
+/// The **About window**: what this program is, in the app's own voice.
+///
+/// macOS's standard About panel takes an icon, a name, a version string and a
+/// blob of credits text — and nothing else. That's why it can never look like
+/// the app it belongs to. So the desktop shell opens a small webview at
+/// `/about` instead, and this renders inside it: the same tokens, the same
+/// type, the same theme the rest of the app is wearing.
+///
+/// Version and build come from the shell (`window.__RH_BUILD__`, stamped at
+/// compile time from the workspace manifest plus the git SHA), so the number
+/// here is always the number that was actually built.
+#[component]
+pub fn About() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let build = build_info();
+    let version = build.0.clone();
+    let sha = build.1.clone();
+    let sha_copy = sha.clone();
+    view! {
+        <main class="rh-about" id=a11y::MAIN_ID tabindex="-1">
+            <div class="rh-about-mark" inner_html=crate::icons::about_mark()></div>
+            <h1 class="rh-about-name" id=a11y::VIEW_TITLE_ID tabindex="-1">"RabbitHole"</h1>
+            <p class="rh-about-tagline">"A warren client \u{2014} many burrows, one you."</p>
+            <p class="rh-about-version">
+                {move || {
+                    if sha.is_empty() {
+                        format!("Version {version}")
+                    } else {
+                        format!("Version {version} \u{00b7} {sha}")
+                    }
+                }}
+            </p>
+
+            <ul class="rh-about-points">
+                <li>
+                    <span class="rh-about-point-k">"Places, not feeds"</span>
+                    <span class="rh-about-point-v">
+                        "Chat, message boards, file libraries and radio \u{2014} each burrow \
+                         its own place, all of them at once."
+                    </span>
+                </li>
+                <li>
+                    <span class="rh-about-point-k">"Files that arrive from everywhere"</span>
+                    <span class="rh-about-point-v">
+                        "Content-addressed transfers, verified end to end, pulled from every \
+                         peer that has a piece."
+                    </span>
+                </li>
+                <li>
+                    <span class="rh-about-point-k">"An identity that is yours"</span>
+                    <span class="rh-about-point-v">
+                        "One key names you everywhere. No server owns it, and friendship is \
+                         something both sides sign."
+                    </span>
+                </li>
+            </ul>
+
+            <div class="rh-about-foot">
+                <span class="rh-about-copy">"\u{00a9} Mirrorward"</span>
+                <span class="rh-about-dot" aria-hidden="true">"\u{00b7}"</span>
+                <span class="rh-about-site">"rabbit.direct"</span>
+                <button
+                    class="rh-btn ghost small"
+                    title="Copy version and build"
+                    on:click=move |_| {
+                        let v = if sha_copy.is_empty() {
+                            build_info().0
+                        } else {
+                            format!("{} ({})", build_info().0, sha_copy)
+                        };
+                        copy_text(&format!("RabbitHole {v}"), app);
+                    }
+                >"Copy build"</button>
+            </div>
+        </main>
+    }
+}
+
+/// `(version, short_sha)` as stamped by the desktop shell, else the SPA's own
+/// crate version — a browser tab has no shell to ask.
+fn build_info() -> (String, String) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use js_sys::Reflect;
+        use wasm_bindgen::JsValue;
+        if let Some(w) = web_sys::window() {
+            if let Ok(b) = Reflect::get(&w, &JsValue::from_str("__RH_BUILD__")) {
+                if !b.is_undefined() {
+                    let get = |k: &str| {
+                        Reflect::get(&b, &JsValue::from_str(k))
+                            .ok()
+                            .and_then(|v| v.as_string())
+                            .unwrap_or_default()
+                    };
+                    let v = get("version");
+                    if !v.is_empty() {
+                        return (v, get("sha"));
+                    }
+                }
+            }
+        }
+    }
+    (env!("CARGO_PKG_VERSION").to_string(), String::new())
+}
+
 /// **Settings**: the choices that belong to you rather than to any burrow.
 ///
 /// Reached from the app menu (⌘,) on the desktop and from ⌘K anywhere. The

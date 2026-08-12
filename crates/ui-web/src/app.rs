@@ -15,7 +15,8 @@ use rabbithole_proto::welcome::ThemeBundle;
 use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
-    Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby, Login,
+    About, Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby,
+    Login,
     Nav, People, PersonPage, Radio, ServerBrowser, Settings, Toasts, Transfers, WelcomeSheet,
     You,
 };
@@ -1892,6 +1893,7 @@ pub fn App() -> impl IntoView {
                             view! {
                                 <Routes>
                                     <Route path="/" view=Login/>
+                                    <Route path="/about" view=About/>
                                     <Route path="/settings" view=Settings/>
                                     <Route path="/people" view=People/>
                                     <Route path="/people/:seed" view=PersonPage/>
@@ -1942,7 +1944,8 @@ fn SideNav() -> impl IntoView {
     let location = leptos_router::use_location();
     let show = move || {
         let path = location.pathname.get();
-        path != "/" && crate::palette::scope_of(&path) == crate::palette::Scope::Burrow
+        !crate::palette::is_chromeless(&path)
+            && crate::palette::scope_of(&path) == crate::palette::Scope::Burrow
     };
     // Hidden with CSS, not unmounted: a <Show> would tear the nav down on
     // every warren-scope route and remount it on return, replaying the pips'
@@ -1967,7 +1970,7 @@ fn BurrowRail() -> impl IntoView {
     let location = leptos_router::use_location();
     let navigate = leptos_router::use_navigate();
     // Hidden on the login/connect screen (route `/`), a full-bleed form.
-    let hidden = move || location.pathname.get() == "/";
+    let hidden = move || crate::palette::is_chromeless(&location.pathname.get());
 
     let go_home = {
         let navigate = navigate.clone();

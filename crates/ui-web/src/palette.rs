@@ -127,6 +127,15 @@ pub const ADMIN_SECTION: Section = Section {
     aliases: &["settings", "config", "operator", "moderate"],
 };
 
+/// Routes that render **without** the shell: no burrow rail, no sidebar.
+///
+/// The connect screen (nothing to navigate to yet) and About, which the
+/// desktop shell opens in its own small window — chrome there would be a
+/// sidebar to nowhere.
+pub fn is_chromeless(path: &str) -> bool {
+    matches!(path.trim_end_matches('/'), "" | "/about")
+}
+
 /// The scope a route belongs to. Anything not explicitly warren-level is a
 /// burrow route, so a new burrow section gets the burrow sidebar by default
 /// rather than silently getting the wrong one.
@@ -244,6 +253,18 @@ mod tests {
         );
         assert_eq!(section_for_digit("k"), None);
         assert_eq!(section_for_digit(""), None);
+    }
+
+    #[test]
+    fn chromeless_routes_are_exactly_the_standalone_ones() {
+        // "/" trims to "" — the connect screen; About opens in its own window.
+        assert!(is_chromeless("/"));
+        assert!(is_chromeless("/about"));
+        assert!(is_chromeless("/about/"));
+        // Everything else is a place inside the app and keeps its chrome.
+        for p in ["/lobby", "/people", "/settings", "/boards/general", "/aboutish"] {
+            assert!(!is_chromeless(p), "{p}");
+        }
     }
 
     #[test]

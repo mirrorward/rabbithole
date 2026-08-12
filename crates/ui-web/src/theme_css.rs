@@ -441,6 +441,19 @@ body{overflow:hidden}\
 .rh-icon-btn span{display:grid;place-items:center}\
 .rh-sidenav-slot{display:contents}\
 /* Settings + demo picker. */\
+/* The About window: a standalone, chromeless view, so it sets its own\
+   vertical rhythm rather than inheriting the app body's panel layout. */\
+.rh-about{min-height:100%;display:flex;flex-direction:column;align-items:center;text-align:center;gap:.3rem;padding:1.9rem var(--rh-space-5) var(--rh-space-4);background:var(--rh-bg);color:var(--rh-text);overflow-y:auto}\
+.rh-about-mark{color:var(--rh-accent);line-height:0;margin-bottom:var(--rh-space-2)}\
+.rh-about-name{margin:0;font-size:1.6rem;font-weight:700;letter-spacing:-.02em}\
+.rh-about-tagline{margin:0;color:var(--rh-muted);font-size:var(--rh-font-sm)}\
+.rh-about-version{margin:.15rem 0 var(--rh-space-4);font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);color:var(--rh-muted)}\
+.rh-about-points{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--rh-space-2);text-align:left;width:100%;max-width:22rem}\
+.rh-about-points li{display:flex;flex-direction:column;gap:.15rem;padding-left:.7rem;border-left:2px solid color-mix(in srgb,var(--rh-accent) 40%,transparent)}\
+.rh-about-point-k{font-weight:650;font-size:var(--rh-font-sm)}\
+.rh-about-point-v{color:var(--rh-muted);font-size:var(--rh-font-sm);line-height:1.45}\
+.rh-about-foot{margin-top:auto;padding-top:var(--rh-space-3);display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;justify-content:center;color:var(--rh-muted);font-size:var(--rh-font-xs)}\
+.rh-about-dot{opacity:.6}\
 /* The You page: your mark, your fingerprint, and what the key actually does. */\
 .rh-you-hero{display:flex;align-items:flex-start;gap:var(--rh-space-5);padding:var(--rh-space-3) 0 var(--rh-space-4);flex-wrap:wrap}\
 .rh-you-avatar{display:flex;flex-direction:column;align-items:center;gap:var(--rh-space-2);flex:none}\

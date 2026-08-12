@@ -103,6 +103,9 @@ where headless-verifiable, tested:
 - **You page redesign** — mark hero with a picker (16 faces x 8 colours, persisted,
   honestly labelled local-only), copyable fingerprint, public key behind a
   disclosure, and what the key does as four plain cards.
+- **About window** — a themed SPA route in its own window (not the system panel),
+  reporting the workspace version + git SHA stamped at build time; the binary is
+  named RabbitHole so Command-Tab says so.
 - **macOS shell** — the app menu is "RabbitHole" (not the binary name), with
   About RabbitHole (icon + description) and Settings… on Cmd-, routed into the SPA;
   Edit/Window rebuilt so copy/paste survives; the Dock/Command-Tab icon is a proper

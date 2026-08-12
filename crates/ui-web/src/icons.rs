@@ -150,6 +150,25 @@ pub fn rail_icon(which: &str) -> String {
     format!("{OPEN}{body}</svg>")
 }
 
+/// The app mark for the About window: the rabbit hole itself, at display size
+/// with the accent doing the work. Bigger and softer than the 24px rail icon —
+/// this one is meant to be looked at, not scanned.
+pub fn about_mark() -> String {
+    concat!(
+        "<svg viewBox=\"0 0 96 96\" width=\"96\" height=\"96\" fill=\"none\" ",
+        "aria-hidden=\"true\" focusable=\"false\">",
+        "<rect x=\"2\" y=\"2\" width=\"92\" height=\"92\" rx=\"22\" ",
+        "fill=\"currentColor\" fill-opacity=\".10\"/>",
+        "<circle cx=\"48\" cy=\"48\" r=\"31\" stroke=\"currentColor\" stroke-width=\"3\" ",
+        "stroke-opacity=\".35\"/>",
+        "<circle cx=\"48\" cy=\"48\" r=\"20\" stroke=\"currentColor\" stroke-width=\"3.5\" ",
+        "stroke-opacity=\".65\"/>",
+        "<circle cx=\"48\" cy=\"48\" r=\"9\" fill=\"currentColor\"/>",
+        "</svg>"
+    )
+    .to_string()
+}
+
 /// Settings: sliders — *your* app's console, distinct from Admin's operator
 /// console for a burrow.
 pub fn settings_icon() -> String {
