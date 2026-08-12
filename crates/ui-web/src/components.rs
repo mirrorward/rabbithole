@@ -75,7 +75,7 @@ pub fn ThemeToggle() -> impl IntoView {
                     }
                 }
             >
-                {move || if app.sound_on.get() { "\u{1F514}" } else { "\u{1F515}" }}
+                <span inner_html=move || crate::icons::bell_icon(app.sound_on.get())></span>
             </button>
             // Icons, not words: three text buttons in a row read as a
             // settings panel wedged into the title bar. The label each one
@@ -598,7 +598,11 @@ pub fn StatusBar() -> impl IntoView {
     // track changes announce too. The dot is decorative — the label beside
     // it carries the state as text.
     view! {
-        <header class="rh-header">
+        // `data-tauri-drag-region` lets the desktop window be dragged by the
+        // header's empty surface; the attribute only fires when the header
+        // itself is the mousedown target, so every control in it stays
+        // clickable. Inert in a browser tab.
+        <header class="rh-header" data-tauri-drag-region="true">
             <span class=dot_class aria-hidden="true"></span>
             <span class="rh-conn" role="status">{conn_label}</span>
             <span class="rh-title"><span class="rh-title-text">{title}</span></span>
@@ -657,6 +661,27 @@ pub fn CommandPalette() -> impl IntoView {
     let input_ref = create_node_ref::<leptos::html::Input>();
 
     let matches = move || crate::palette::palette_matches(&query.get());
+    let list_ref = create_node_ref::<leptos::html::Ul>();
+    // Keep the selection on screen. Arrowing below the fold moved the
+    // highlight somewhere invisible — Spotlight and Raycast never let that
+    // happen. Direct scrollTop math instead of scroll_into_view so only the
+    // list moves, never the page, and instantly (right under reduced motion).
+    #[cfg(target_arch = "wasm32")]
+    create_effect(move |_| {
+        let i = selected.get();
+        let Some(list) = list_ref.get() else { return };
+        let items = list.children();
+        let Some(item) = items.item(i as u32) else { return };
+        use wasm_bindgen::JsCast;
+        let Ok(item) = item.dyn_into::<web_sys::HtmlElement>() else { return };
+        let (top, height) = (item.offset_top(), item.offset_height());
+        let (view_top, view_h) = (list.scroll_top(), list.client_height());
+        if top < view_top {
+            list.set_scroll_top(top);
+        } else if top + height > view_top + view_h {
+            list.set_scroll_top(top + height - view_h);
+        }
+    });
     // Hoisted out of `view!`: the `::<Vec<_>>` turbofish confuses the macro's
     // tag parser (the `<` reads as an open tag).
     let items = move || {
@@ -761,7 +786,7 @@ pub fn CommandPalette() -> impl IntoView {
                             }
                         }
                     />
-                    <ul class="rh-palette-list" role="listbox" aria-label="Sections">
+                    <ul class="rh-palette-list" role="listbox" aria-label="Sections" node_ref=list_ref>
                         <For
                             each=items
                             key=|(_, s)| s.route
@@ -2104,7 +2129,25 @@ fn FolderBrowser() -> impl IntoView {
     let picker = create_node_ref::<leptos::html::Input>();
     // Drag-and-drop: highlight while a drag is over the folder, and take the
     // drop. Guarded so a drag that carries no files does nothing.
+    // Drag depth, not a boolean: dragenter/dragleave fire for every child the
+    // payload crosses (crumbs, toolbar, rows), so a boolean strobes the
+    // highlight as the file moves. Native drop targets highlight steadily.
+    let drag_depth = create_rw_signal(0i32);
     let dragging = create_rw_signal(false);
+    create_effect(move |_| dragging.set(drag_depth.get() > 0));
+    // Only a drag that actually carries files is a drop we can take — dragging
+    // selected text across the pane must not light it up.
+    #[cfg(target_arch = "wasm32")]
+    let has_files = |ev: &leptos::ev::DragEvent| {
+        ev.data_transfer()
+            .map(|dt| {
+                let types = dt.types();
+                (0..types.length()).any(|i| types.get(i).as_string().as_deref() == Some("Files"))
+            })
+            .unwrap_or(false)
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let has_files = |_ev: &leptos::ev::DragEvent| false;
     let visible = move || {
         let q = filter.get();
         files.with(|f| {
@@ -2131,15 +2174,27 @@ fn FolderBrowser() -> impl IntoView {
         <div
             class="rh-dropzone"
             class:dragging=move || dragging.get()
-            on:dragover=move |ev| {
-                // Only claim the drag if it actually carries files.
-                ev.prevent_default();
-                dragging.set(true);
+            on:dragenter=move |ev| {
+                if has_files(&ev) {
+                    ev.prevent_default();
+                    drag_depth.update(|d| *d += 1);
+                }
             }
-            on:dragleave=move |_| dragging.set(false)
+            on:dragover=move |ev| {
+                if has_files(&ev) {
+                    ev.prevent_default();
+                    // The OS cursor shows the + copy badge instead of the
+                    // browser default.
+                    #[cfg(target_arch = "wasm32")]
+                    if let Some(dt) = ev.data_transfer() {
+                        dt.set_drop_effect("copy");
+                    }
+                }
+            }
+            on:dragleave=move |_| drag_depth.update(|d| *d = (*d - 1).max(0))
             on:drop=move |ev| {
                 ev.prevent_default();
-                dragging.set(false);
+                drag_depth.set(0);
                 #[cfg(target_arch = "wasm32")]
                 if let Some(list) = ev.data_transfer().and_then(|dt| dt.files()) {
                     crate::upload::upload_file_list(app, list);
@@ -2252,7 +2307,9 @@ fn FolderBrowser() -> impl IntoView {
                     let id = n.id;
                     let is_folder = n.kind == KIND_FOLDER;
                     let name = n.name.clone();
-                    let icon = if is_folder { "\u{1F4C1}" } else { "\u{1F4C4}" };
+                    // A drawn glyph, not the 📁/📄 emoji: this table is the
+                    // pane users compare directly to Finder.
+                    let icon = crate::icons::file_icon(is_folder);
                     let size = if is_folder {
                         "\u{2014}".to_string()
                     } else {
@@ -2289,9 +2346,39 @@ fn FolderBrowser() -> impl IntoView {
                                 class=class
                                 aria-current=move || selected().then_some("true")
                                 on:click=on_click
+                                // Double-click gets the file — Finder's and
+                                // Hotline's contract, and this table's whole
+                                // premise. Folders already opened on the first
+                                // click. The filename stays selectable, so
+                                // clear the text selection double-click paints.
+                                on:dblclick=move |_| {
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        // Reflect, not web_sys::Selection: the
+                                        // crate builds without the Selection
+                                        // feature and one call doesn't earn it.
+                                        use js_sys::{Function, Reflect};
+                                        use wasm_bindgen::JsCast;
+                                        if let Some(w) = web_sys::window() {
+                                            let _ = Reflect::get(&w, &"getSelection".into())
+                                                .ok()
+                                                .and_then(|f| f.dyn_into::<Function>().ok())
+                                                .and_then(|f| f.call0(&w).ok())
+                                                .and_then(|sel| {
+                                                    Reflect::get(&sel, &"removeAllRanges".into())
+                                                        .ok()
+                                                        .and_then(|f| f.dyn_into::<Function>().ok())
+                                                        .map(|f| f.call0(&sel))
+                                                });
+                                        }
+                                    }
+                                    if !is_folder {
+                                        app.download(id);
+                                    }
+                                }
                             >
                                 <span class="rh-fcol-name">
-                                    <span class="rh-file-icon" aria-hidden="true">{icon}</span>
+                                    <span class="rh-file-icon" aria-hidden="true" inner_html=icon></span>
                                     <span class="rh-file-name">{n.name.clone()}</span>
                                 </span>
                                 <span class="rh-fcol-size">{size}</span>

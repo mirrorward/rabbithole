@@ -100,6 +100,14 @@ where headless-verifiable, tested:
   round-trip, which needs `cargo tauri dev` on a real machine.
 - **Verified identity** across proto/server/web/CLI, hardened against relay.
 - **An adversarial review** (13 fixes) + a security-review relay fix.
+- **Native-feel pass** (50-agent audit, 20 confirmed findings) — real Tauri drag
+  regions (the -webkit-app-region CSS was a WKWebView no-op: the window was
+  undraggable), no browser context menu over chrome, window frame remembered
+  across launches, drawn bell/file/rail icons replacing emoji, themed presence
+  select, pressed states on every row, instant pane switches, global scrollbar
+  styling, single focus ring, double-click downloads, steady dropzone highlight,
+  palette selection stays visible, OS-matched pre-boot. Deferred: arrow-key list
+  navigation, fullscreen strip reclaim, title-bar control height token.
 - **The stale-webview class is closed** — the PWA service worker never runs in the
   native shell (and purges poisoned installs); html/body repaint with the theme bg;
   the SPA stamps its version into the DOM and the shell's diag line reports it.

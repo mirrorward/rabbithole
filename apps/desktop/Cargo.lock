@@ -2946,7 +2946,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rabbithole-core"
-version = "0.177.0"
+version = "0.178.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -2977,13 +2977,14 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "tauri-plugin-window-state",
  "tempfile",
  "tokio",
 ]
 
 [[package]]
 name = "rabbithole-e2ee"
-version = "0.177.0"
+version = "0.178.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -2997,7 +2998,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-identity"
-version = "0.177.0"
+version = "0.178.0"
 dependencies = [
  "argon2",
  "blake3",
@@ -3015,7 +3016,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-net"
-version = "0.177.0"
+version = "0.178.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -3035,7 +3036,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-proto"
-version = "0.177.0"
+version = "0.178.0"
 dependencies = [
  "bytes",
  "postcard",
@@ -3045,7 +3046,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-reticulum"
-version = "0.177.0"
+version = "0.178.0"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -3061,7 +3062,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-store-client"
-version = "0.177.0"
+version = "0.178.0"
 dependencies = [
  "rabbithole-proto",
  "rusqlite",
@@ -3070,7 +3071,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-swarm"
-version = "0.177.0"
+version = "0.178.0"
 dependencies = [
  "bao-tree",
  "blake3",
@@ -4132,6 +4133,37 @@ dependencies = [
  "syn 2.0.118",
  "tauri-codegen",
  "tauri-utils",
+]
+
+[[package]]
+name = "tauri-plugin"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74be5dd4bed9afbd145e5716b5fa2ec28cbc29c34ffa61c258c9273d896c8020"
+dependencies = [
+ "anyhow",
+ "glob",
+ "plist",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tauri-utils",
+ "walkdir",
+]
+
+[[package]]
+name = "tauri-plugin-window-state"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73736611e14142408d15353e21e3cca2f12a3cfb523ad0ce85999b6d2ef1a704"
+dependencies = [
+ "bitflags 2.13.0",
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -39,6 +39,7 @@ rabbithole-swarm = { path = "../../crates/swarm" }
 rabbithole-core = { path = "../../crates/core", features = ["native"] }
 rabbithole-proto = { path = "../../crates/proto" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tauri-plugin-window-state = "2"
 
 [dev-dependencies]
 rabbithole-identity = { path = "../../crates/identity" }

@@ -295,7 +295,7 @@ body{overflow:hidden}\
 .rh-rail-badge{position:absolute;top:-5px;right:-5px;min-width:17px;height:17px;padding:0 4px;border-radius:var(--rh-radius-full);background:var(--rh-error);color:#fff;font-size:.62rem;font-weight:800;line-height:17px;text-align:center;box-shadow:0 0 0 2px color-mix(in srgb,var(--rh-accent) 6%,var(--rh-surface));animation:rh-pop .18s cubic-bezier(.2,.9,.3,1.2) both}\
 .rh-rail-dot.pending{background:var(--rh-accent)}\
 .rh-rail-dot.off{background:var(--rh-muted)}\
-.rh-presence{font:inherit;font-size:var(--rh-font-sm);color:var(--rh-text);background:var(--rh-surface);border:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);border-radius:var(--rh-radius);padding:.3rem .5rem;cursor:pointer}\
+.rh-presence{appearance:none;-webkit-appearance:none;background-image:url(data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2010%206%27%3E%3Cpath%20d=%27M1%201l4%204%204-4%27%20fill=%27none%27%20stroke=%27%23888%27%20stroke-width=%271.5%27%20stroke-linecap=%27round%27/%3E%3C/svg%3E);background-repeat:no-repeat;background-position:right .5rem center;background-size:.55rem;padding-right:1.4rem;font:inherit;font-size:var(--rh-font-sm);color:var(--rh-text);background:var(--rh-surface);border:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);border-radius:var(--rh-radius);padding:.3rem .5rem;cursor:pointer}\
 .rh-presence:hover{border-color:color-mix(in srgb,var(--rh-accent) 45%,transparent)}\
 .rh-who-row{display:flex;align-items:center;gap:.45rem}\
 .rh-pres{width:.5rem;height:.5rem;border-radius:50%;flex:none}\
@@ -303,6 +303,7 @@ body{overflow:hidden}\
 .rh-pres.away{background:#e8b84b}\
 .rh-pres.idle{background:var(--rh-muted)}\
 .rh-pres.off{background:var(--rh-muted);opacity:.5}\
+.rh-rail-glyph{display:grid;place-items:center;line-height:0}\
 .rh-rail-unified{border-radius:var(--rh-radius-full);color:var(--rh-accent);background:color-mix(in srgb,var(--rh-accent) 12%,transparent);font-size:1.05rem}\
 .rh-people{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}\
 .rh-person{display:flex;align-items:center;gap:.6rem;padding:.5rem .3rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\
@@ -445,7 +446,16 @@ body{overflow:hidden}\
    things a browser does by default and a native app never does: rubber-band
    scrolling past the end, a grey flash when you tap, a text cursor over
    furniture, drag-selecting the sidebar. --- */\
-.rh-app{overscroll-behavior:none;-webkit-tap-highlight-color:transparent;cursor:default}\
+.rh-app{overscroll-behavior:none;-webkit-tap-highlight-color:transparent;cursor:default;touch-action:manipulation}\
+/* AppKit reserves the hand cursor for hyperlinks; a hand over every control is\
+   the classic wrapper tell. Content links keep it. Browser builds keep web\
+   conventions untouched. */\
+.rh-app.native .rh-btn,.rh-app.native .rh-rail-tile,.rh-app.native .rh-format-btn,.rh-app.native .rh-recent-chip,.rh-app.native .rh-presence,.rh-app.native .rh-crumb,.rh-app.native .rh-board-link,.rh-app.native .rh-thread-link,.rh-app.native .rh-file-link,.rh-app.native .rh-member-link,.rh-app.native .rh-station-link,.rh-app.native .rh-dm-peer,.rh-app.native .rh-subnav-link,.rh-app.native .rh-palette-item,.rh-app.native .rh-kbd-jump,.rh-app.native .rh-icon-btn{cursor:default}\
+.rh-app.native .rh-rich a{cursor:pointer}\
+/* Dragging a nav link must not lift a translucent URL ghost out of the\
+   sidebar. Selection rules already protect content; this stops element drag. */\
+.rh-rail,.rh-header,.rh-subnav,.rh-format-bar{-webkit-user-drag:none}\
+.rh-subnav a,.rh-header a,img{-webkit-user-drag:none}\
 .rh-rail,.rh-header,.rh-format-bar{-webkit-user-select:none;user-select:none}\
 /* …but never at the cost of copying content: messages, posts, filenames and\
    fingerprints stay selectable, and the stylesheet's own test enforces that\
@@ -464,9 +474,12 @@ body{overflow:hidden}\
    constraint). The header is draggable too, with its controls opting back out\
    or they couldn't be clicked. */\
 .rh-app.native{padding-top:1.75rem}\
-.rh-app.native::before{content:'';position:fixed;top:0;left:0;right:0;height:1.75rem;-webkit-app-region:drag;z-index:100}\
-.rh-app.native .rh-header{-webkit-app-region:drag}\
-.rh-app.native .rh-header button,.rh-app.native .rh-header a,.rh-app.native .rh-header select,.rh-app.native .rh-header input{-webkit-app-region:no-drag}\
+/* The strip under the traffic lights. Layout only: dragging comes from the\
+   element's data-tauri-drag-region attribute, which Tauri's own handler\
+   watches. (-webkit-app-region, used here previously, is a Chromium extension\
+   WKWebView ignores -- with the system title bar hidden that no-op left the\
+   window unmovable by its own chrome.) */\
+.rh-drag-strip{position:fixed;top:0;left:0;right:0;height:1.75rem;z-index:100}\
 .rh-composer{display:flex;flex-direction:column;gap:var(--rh-space-2);padding:var(--rh-space-3) var(--rh-space-5);border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
 .rh-format-bar{display:flex;align-items:center;gap:.15rem;flex-wrap:wrap}\
 .rh-format-btn{display:inline-flex;align-items:center;justify-content:center;min-width:1.9rem;height:1.9rem;padding:0 .4rem;border:1px solid transparent;border-radius:var(--rh-radius-sm);background:transparent;color:var(--rh-muted);font-family:var(--rh-font-sans);font-size:var(--rh-font-sm);font-weight:700;cursor:pointer;transition:background-color .12s ease,color .12s ease}\
@@ -506,6 +519,11 @@ body{overflow:hidden}\
 .rh-input{font:inherit;padding:.5rem .7rem;border-radius:var(--rh-radius);border:1px solid color-mix(in srgb,var(--rh-text) 16%,transparent);background:color-mix(in srgb,var(--rh-bg) 60%,var(--rh-surface));color:var(--rh-text);transition:border-color .15s ease,box-shadow .15s ease}\
 .rh-input::placeholder{color:var(--rh-muted)}\
 .rh-input:hover{border-color:color-mix(in srgb,var(--rh-text) 26%,transparent)}\
+/* Text inputs match :focus-visible even on mouse click, so the global outline\
+   stacked on the input's own ring -- the classic web double ring, on the most\
+   clicked control in the app. The box-shadow ring remains for everyone,\
+   keyboard included. */\
+.rh-input:focus-visible{outline:2px solid transparent}\
 .rh-input:focus{border-color:var(--rh-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--rh-accent) 24%,transparent)}\
 .rh-kbd-jump{font:inherit;font-size:var(--rh-font-xs);font-weight:600;color:var(--rh-muted);background:color-mix(in srgb,var(--rh-text) 6%,transparent);border:1px solid color-mix(in srgb,var(--rh-text) 14%,transparent);border-radius:var(--rh-radius);padding:.22rem .5rem;cursor:pointer;line-height:1.4;letter-spacing:.03em;white-space:nowrap;transition:background-color .15s ease,color .15s ease,border-color .15s ease}\
 .rh-kbd-jump:hover{color:var(--rh-accent);border-color:color-mix(in srgb,var(--rh-accent) 40%,transparent);background:color-mix(in srgb,var(--rh-accent) 10%,transparent)}\
@@ -521,7 +539,7 @@ body{overflow:hidden}\
 .rh-servers{flex:1;padding:var(--rh-space-5);overflow-y:auto}\
 .rh-server-list{list-style:none;margin:var(--rh-space-4) 0 0;padding:0;display:grid;gap:var(--rh-space-4);grid-template-columns:repeat(auto-fill,minmax(20rem,1fr))}\
 .rh-server-card{display:flex;flex-direction:column;gap:var(--rh-space-2);background:var(--rh-surface);border:1px solid color-mix(in srgb,var(--rh-text) 10%,transparent);border-radius:var(--rh-radius-xl);padding:var(--rh-space-4);box-shadow:var(--rh-shadow-1);transition:box-shadow .15s ease,transform .12s ease}\
-.rh-server-card:hover{box-shadow:var(--rh-shadow-2);transform:translateY(-2px)}\
+.rh-server-card:hover{border-color:color-mix(in srgb,var(--rh-accent) 45%,transparent);background:color-mix(in srgb,var(--rh-text) 4%,transparent)}\
 .rh-server-head{display:flex;align-items:center;gap:var(--rh-space-2)}\
 .rh-server-name{font-weight:700;font-size:var(--rh-font-lg);color:var(--rh-text)}\
 .rh-server-users{margin-left:auto;font-size:var(--rh-font-xs);color:var(--rh-muted);text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}\
@@ -554,8 +572,10 @@ body{overflow:hidden}\
 .rh-card-field{margin:.35rem 0;font-size:var(--rh-font-sm);color:var(--rh-text)}\
 .rh-card-label{display:inline-block;min-width:5rem;color:var(--rh-muted);font-size:var(--rh-font-xs);text-transform:uppercase;letter-spacing:.05em;margin-right:.5rem}\
 .rh-card-avatar{width:4rem;height:4rem;border-radius:var(--rh-radius-full);object-fit:cover;margin-bottom:var(--rh-space-2);border:2px solid color-mix(in srgb,var(--rh-accent) 40%,transparent)}\
-.rh-login{position:relative;max-width:23rem;margin:5rem auto;display:flex;flex-direction:column;gap:var(--rh-space-3);background:var(--rh-surface);padding:var(--rh-space-8);border-radius:var(--rh-radius-xl);border:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent);box-shadow:var(--rh-shadow-3)}\
-.rh-login::before{content:'';position:absolute;inset:-40% 10% auto;height:60%;z-index:-1;background:radial-gradient(60% 100% at 50% 0,color-mix(in srgb,var(--rh-accent) 40%,transparent),transparent 70%);filter:blur(30px)}\
+/* A connect dialog, not a marketing hero: the blurred accent glow and heavy\
+   drop shadow are the SaaS-login look. A quiet panel on the window ground is\
+   what Transmit or Screens put in front of you. */\
+.rh-login{position:relative;max-width:23rem;margin:5rem auto;display:flex;flex-direction:column;gap:var(--rh-space-3);background:var(--rh-surface);padding:var(--rh-space-8);border-radius:var(--rh-radius-lg);border:1px solid color-mix(in srgb,var(--rh-text) 10%,transparent);box-shadow:var(--rh-shadow-1)}\
 .rh-login h1{margin:0 0 var(--rh-space-2);text-align:center;font-size:var(--rh-font-2xl);letter-spacing:-.02em;display:flex;flex-direction:column;align-items:center;gap:.7rem;color:var(--rh-text)}\
 .rh-login h1::before{content:'';width:3.25rem;height:3.25rem;border-radius:var(--rh-radius-full);background:radial-gradient(circle at 50% 52%,var(--rh-surface) 0 15%,var(--rh-accent) 15% 27%,var(--rh-surface) 27% 41%,color-mix(in srgb,var(--rh-accent) 62%,var(--rh-surface)) 41% 58%,var(--rh-surface) 58% 73%,color-mix(in srgb,var(--rh-accent) 34%,var(--rh-surface)) 73% 100%);box-shadow:0 0 0 1px color-mix(in srgb,var(--rh-accent) 35%,transparent),0 8px 24px -6px color-mix(in srgb,var(--rh-accent) 70%,transparent)}\
 .rh-login label{font-size:var(--rh-font-xs);font-weight:600;color:var(--rh-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:-.35rem}\
@@ -589,7 +609,11 @@ body{overflow:hidden}\
 .rh-panel-title{font-size:var(--rh-font-xs);text-transform:uppercase;letter-spacing:.06em;font-weight:700;color:var(--rh-muted);margin:.2rem 0 var(--rh-space-4)}\
 .rh-tree{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--rh-space-2)}\
 .rh-board-link,.rh-thread-link,.rh-member-link,.rh-file-link,.rh-station-link{display:flex;flex-direction:column;gap:.2rem;width:100%;text-align:left;text-decoration:none;font:inherit;cursor:pointer;background:var(--rh-surface);color:var(--rh-text);border:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent);border-radius:var(--rh-radius-lg);padding:.7rem var(--rh-space-4);transition:border-color .15s ease,box-shadow .15s ease,transform .12s ease}\
-.rh-board-link:hover,.rh-thread-link:hover,.rh-member-link:hover,.rh-file-link:hover,.rh-station-link:hover{border-color:color-mix(in srgb,var(--rh-accent) 45%,transparent);box-shadow:var(--rh-shadow-2);transform:translateY(-1px)}\
+.rh-board-link:hover,.rh-thread-link:hover,.rh-member-link:hover,.rh-file-link:hover,.rh-station-link:hover{border-color:color-mix(in srgb,var(--rh-accent) 45%,transparent);background:color-mix(in srgb,var(--rh-text) 4%,transparent)}\
+/* Pressed states. A native row visibly darkens the instant the mouse goes\
+   down; a row that shows nothing between hover and navigation reads as a\
+   hyperlink. Instant, untransitioned -- also right under reduced motion. */\
+.rh-board-link:active,.rh-thread-link:active,.rh-member-link:active,.rh-file-link:active,.rh-station-link:active,.rh-subnav-link:active,.rh-dm-peer:active,.rh-crumb:active,.rh-format-btn:active,.rh-recent-chip:active,.rh-palette-item:active,.rh-back:active{background:color-mix(in srgb,var(--rh-text) 10%,transparent)}\
 .rh-thread-link.active,.rh-file-link.active,.rh-station-link.active{border-color:var(--rh-accent);box-shadow:0 0 0 1px var(--rh-accent),var(--rh-shadow-2)}\
 .rh-board-name,.rh-thread-title{font-weight:600;color:var(--rh-text);font-size:var(--rh-font-size)}\
 .rh-board-desc,.rh-thread-author,.rh-member-handle{font-size:var(--rh-font-xs);color:var(--rh-muted)}\
@@ -674,15 +698,21 @@ body{overflow:hidden}\
 .rh-preview-body{padding:var(--rh-space-4);display:flex;flex-direction:column;gap:var(--rh-space-2);align-items:flex-start}\
 .rh-art-wrap{padding:var(--rh-space-5);overflow:auto}\
 .rh-art{background:#000;border:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);border-radius:var(--rh-radius-lg);image-rendering:pixelated;max-width:100%;box-shadow:var(--rh-shadow-2)}\
-.rh-scroll::-webkit-scrollbar,.rh-panel::-webkit-scrollbar,.rh-who::-webkit-scrollbar{width:10px;height:10px}\
-.rh-scroll::-webkit-scrollbar-thumb,.rh-panel::-webkit-scrollbar-thumb,.rh-who::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--rh-text) 18%,transparent);border-radius:var(--rh-radius-full);border:3px solid transparent;background-clip:padding-box}\
-.rh-scroll::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--rh-text) 30%,transparent);background-clip:padding-box}\
+/* Every scroller, not an opt-in list: mismatched scrollbars between adjacent\
+   panes is a pure web-page artifact (the old whitelist missed the main\
+   content pane and the command palette). */\
+*{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--rh-text) 25%,transparent) transparent}\
+::-webkit-scrollbar{width:10px;height:10px}\
+::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--rh-text) 18%,transparent);border-radius:var(--rh-radius-full);border:3px solid transparent;background-clip:padding-box}\
+::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--rh-text) 30%,transparent);background-clip:padding-box}\
+::-webkit-scrollbar-corner{background:transparent}\
 /* Between the desktop row and the phone grid there is a band where the header\
    has more controls than room. Two things go first, in this order, because\
    neither is load-bearing: the status line (the connection banner says the same\
    thing, louder) and the Cmd-K hint (the shortcut still works without a button\
    advertising it). Measured: without this the header overflows by ~29px at\
    760px wide, which is exactly where a small desktop window lands. */\
+@media (hover:none){.rh-line-cont .rh-line-time{opacity:1}}\
 @media (max-width:860px){.rh-status,.rh-kbd-jump{display:none}}\
 @media (max-width:720px){.rh-header{display:grid;grid-template-columns:minmax(0,1fr) auto auto;grid-template-areas:\"title dot presence\" \"live live theme\" \"nav nav nav\";align-items:center;padding:var(--rh-space-2) var(--rh-space-3);min-height:0;gap:var(--rh-space-2)}.rh-header .rh-title{grid-area:title;font-size:var(--rh-font-size);min-width:0;overflow:hidden}.rh-dot{grid-area:dot}.rh-presence{grid-area:presence;justify-self:end;padding:.25rem .4rem;font-size:var(--rh-font-xs)}.rh-live-slot{grid-area:live;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}\
 .rh-live-slot .rh-radio-now{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.rh-nav{grid-area:nav;min-width:0;overflow-x:auto;padding-bottom:.15rem}.rh-subnav{position:fixed;left:0;right:0;bottom:0;z-index:30;width:auto;flex-direction:row;gap:0;padding:.3rem var(--rh-space-2) calc(.3rem + env(safe-area-inset-bottom));overflow-x:auto;overflow-y:hidden;border-right:0;border-top:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);background:color-mix(in srgb,var(--rh-surface) 92%,transparent);backdrop-filter:saturate(1.4) blur(14px);-webkit-backdrop-filter:saturate(1.4) blur(14px)}.rh-subnav-link{flex:none;flex-direction:column;gap:.1rem;padding:.3rem .6rem;font-size:var(--rh-font-xs);min-width:3.7rem;justify-content:center}.rh-subnav-label{flex:none}.rh-subnav-rule{display:none}.rh-subnav .rh-pip{position:absolute;top:.15rem;right:.5rem}.rh-subnav-link{position:relative}.rh-shell-main{padding-bottom:3.6rem}.rh-theme-menu{grid-area:theme;justify-self:end}.rh-theme-menu button{padding:.25rem .5rem;font-size:var(--rh-font-xs)}.rh-status,.rh-kbd-jump,.rh-spacer{display:none}.rh-conn{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}.rh-toasts{top:6.4rem}.rh-body{flex-direction:column}.rh-who,.rh-threads,.rh-members,.rh-files,.rh-stations{max-width:none;width:auto;border-right:0;border-left:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-who{max-height:35vh}.rh-chat{min-height:0}.rh-filetable-head,.rh-filetable .rh-file-link{grid-template-columns:minmax(0,1fr) 5rem}.rh-fcol-kind,.rh-fcol-who,.rh-fcol-when{display:none}.rh-scroll{padding:var(--rh-space-3)}.rh-compose{padding:var(--rh-space-2) var(--rh-space-3)}.rh-compose .rh-input{min-width:0}.rh-compose .rh-btn{padding-left:var(--rh-space-4);padding-right:var(--rh-space-4)}.rh-present{order:-1;display:flex;align-items:center;gap:var(--rh-space-2);padding:.4rem var(--rh-space-3);max-height:none}.rh-present h2{margin:0;flex:none}.rh-present ul{flex-direction:row;flex:1;min-width:0;overflow-x:auto;gap:.4rem;padding-bottom:.15rem}.rh-present li{flex:none;white-space:nowrap}.rh-reader{min-height:14rem}.rh-login{margin:var(--rh-space-6) var(--rh-space-4)}}\
@@ -694,7 +724,8 @@ body{overflow:hidden}\
 @keyframes rh-toast-in{from{opacity:0;transform:translateX(14px) scale(.98)}to{opacity:1;transform:none}}\
 @keyframes rh-pop{from{opacity:0;transform:scale(.85)}to{opacity:1;transform:none}}\
 @keyframes rh-pulse-ring{0%{box-shadow:0 0 0 0 color-mix(in srgb,#3fbf7f 55%,transparent)}70%{box-shadow:0 0 0 4px color-mix(in srgb,#3fbf7f 0%,transparent)}100%{box-shadow:0 0 0 0 color-mix(in srgb,#3fbf7f 0%,transparent)}}\
-.rh-body{animation:rh-fade-up .19s ease both}\
+/* Panes swap instantly. The .19s fade+rise on every route change (and every\
+   burrow-focus remount) was a web page-transition; Finder and Slack cut. */\
 .rh-welcome{animation:rh-slide-down .24s cubic-bezier(.2,.8,.2,1) both}\
 .rh-toast{animation:rh-toast-in .22s cubic-bezier(.2,.8,.2,1) both}\
 .rh-pres.on{box-shadow:0 0 0 2px color-mix(in srgb,#3fbf7f 22%,transparent)}\
@@ -702,7 +733,9 @@ body{overflow:hidden}\
 .rh-rail-tile{transition:background-color .15s ease,color .15s ease,transform .12s ease,box-shadow .15s ease}\
 .rh-rail-tile:hover{transform:translateY(-1px);box-shadow:0 3px 8px color-mix(in srgb,var(--rh-text) 14%,transparent)}\
 .rh-rail-tile:active{transform:translateY(0) scale(.95)}\
-.rh-person,.rh-xfer-item,.rh-who-row{animation:rh-fade-up .2s ease both}\
+/* Live rows appear instantly: the who-list is keyed by (name, state), so\
+   presence churn recreates rows -- re-fading them made live data read as a\
+   page reload. */\
 .rh-btn:active{transform:scale(.97)}\
 .rh-rail-server.active{animation:rh-pop .22s cubic-bezier(.2,.9,.3,1.2) both}\
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:.01ms!important;transition-delay:0s!important;animation-duration:.01ms!important;animation-delay:0s!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}\

@@ -31,8 +31,16 @@
       /* Pre-boot backdrop: the Clean-dark background token, so the first
          paint (before the wasm mounts and injects the app stylesheet)
          does not flash white. The app overrides everything on mount. */
+      /* Match the OS: a light-mode launch used to flash dark-then-light,
+         which is the "web app booting" signature. The app repaints these the
+         moment the real theme resolves. */
       html {
-        background: #14161b;
+        background: #fafbfc;
+      }
+      @media (prefers-color-scheme: dark) {
+        html {
+          background: #14161b;
+        }
       }
     </style>
   </head>

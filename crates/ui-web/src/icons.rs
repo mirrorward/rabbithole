@@ -101,6 +101,32 @@ pub fn pack_icon() -> String {
     )
 }
 
+/// The chime toggle: a bell, slashed when muted. Drawn like every other icon
+/// here — the colour emoji it replaces ignored the theme, sat on its own
+/// baseline, and no native app puts emoji in its window chrome.
+pub fn bell_icon(on: bool) -> String {
+    let bell = "<path d=\"M12 4a5.2 5.2 0 0 1 5.2 5.2c0 3.2.9 4.7 1.8 5.8H5c.9-1.1 1.8-2.6 1.8-5.8A5.2 5.2 0 0 1 12 4z\"/>\
+                <path d=\"M10 18.6a2.1 2.1 0 0 0 4 0\"/>";
+    let body = if on {
+        bell.to_string()
+    } else {
+        format!("{bell}<path d=\"M4.5 3.5l15 17\"/>")
+    };
+    format!("{OPEN}{body}</svg>")
+}
+
+/// A file-table row's icon: a tabbed folder or a dog-eared document. The
+/// 📁/📄 emoji these replace are the fastest way to make a file browser read
+/// as a hobby web page next to Finder.
+pub fn file_icon(is_folder: bool) -> String {
+    let body = if is_folder {
+        "<path d=\"M3.5 18.5v-12h5.2l2 2.2h9.8v9.8a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1z\"/>"
+    } else {
+        "<path d=\"M6 3.5h8l4 4v13h-12z\"/><path d=\"M14 3.5v4h4\"/>"
+    };
+    format!("{OPEN}{body}</svg>")
+}
+
 /// The appearance control, drawn as what it currently is: a sun for light, a
 /// moon for dark, and a half-filled disc for "follow the system" — the same
 /// three shapes every OS uses, so the button says what it does without a word
@@ -182,6 +208,27 @@ mod tests {
             assert!(!seen.contains(&svg), "{p} duplicates another section's icon");
             seen.push(svg);
         }
+    }
+
+    #[test]
+    fn the_bell_and_file_icons_keep_the_module_contract() {
+        // Same guarantees as the section set: self-contained, colour-inheriting,
+        // silent to screen readers (the buttons carry the accessible names).
+        for svg in [
+            bell_icon(true),
+            bell_icon(false),
+            file_icon(true),
+            file_icon(false),
+        ] {
+            assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"));
+            assert!(svg.contains("stroke=\"currentColor\""));
+            assert!(svg.contains("aria-hidden=\"true\""));
+            assert!(!svg.contains("http") && !svg.contains("<image"));
+        }
+        // The states must actually differ, or the toggle shows nothing.
+        assert_ne!(bell_icon(true), bell_icon(false), "muted adds the slash");
+        assert!(bell_icon(false).len() > bell_icon(true).len());
+        assert_ne!(file_icon(true), file_icon(false), "folder and document differ");
     }
 
     #[test]

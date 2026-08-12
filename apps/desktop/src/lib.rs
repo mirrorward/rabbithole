@@ -82,6 +82,18 @@ const NATIVE_SHIM: &str = r#"
       }
     }, 2500);
   });
+  // No browser context menu over app chrome: "Reload Page" floating over a
+  // sidebar is the loudest possible web-page tell. Editable fields and the
+  // selectable content regions keep their menus — Copy and Look Up on a
+  // message are features, not tells.
+  window.addEventListener('contextmenu', function (e) {
+    var t = e.target;
+    if (t && t.closest &&
+        t.closest('input, textarea, [contenteditable], .rh-rich, .rh-line, .rh-post, pre, code')) {
+      return;
+    }
+    e.preventDefault();
+  }, { capture: true });
   window.__RH_NATIVE__.listen('test://tick', function (e) {
     console.log('[rh-native] event test://tick ->', e && e.payload);
     // Invoke a Rust callback so the event (Rust->JS) round-trip is observable
@@ -115,6 +127,12 @@ pub fn run() {
     use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
 
     tauri::Builder::default()
+        // Remember the window frame across launches. A window that reopens
+        // wherever the user last put it is table stakes for a desktop app;
+        // one that snaps back to a hardcoded 1100x760 every launch reads as a
+        // browser tab in a wrapper. The builder's sizes below become
+        // first-launch defaults only.
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(transfers::TransfersManager::default())
         .invoke_handler(tauri::generate_handler![
             ping,

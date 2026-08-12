@@ -1554,6 +1554,16 @@ pub fn App() -> impl IntoView {
             // region, room for the traffic lights). In a browser tab none of
             // that applies and the class is absent.
             <div class="rh-app" class:native=is_native() style=style>
+                // The desktop title bar. A real element carrying
+                // `data-tauri-drag-region`, because that attribute is the only
+                // thing Tauri's WKWebView drag handler looks for —
+                // `-webkit-app-region:drag`, which this used to rely on, is a
+                // Chromium extension and a silent no-op here. With the system
+                // title bar hidden that no-op meant the window couldn't be
+                // moved by its own chrome at all.
+                <Show when=is_native fallback=|| ()>
+                    <div class="rh-drag-strip" data-tauri-drag-region="true"></div>
+                </Show>
                 <a class="rh-skip" href=crate::a11y::SKIP_HREF rel="external">
                     "Skip to main content"
                 </a>
@@ -1707,7 +1717,7 @@ fn BurrowRail() -> impl IntoView {
                 aria-label="People"
                 on:click=go_people
             >
-                "\u{263a}"
+                <span class="rh-rail-glyph" inner_html=crate::icons::section_icon("/people")></span>
             </button>
             <button
                 class="rh-rail-tile rh-rail-unified"
@@ -1717,7 +1727,7 @@ fn BurrowRail() -> impl IntoView {
                 aria-label="Transfers"
                 on:click=go_transfers
             >
-                "\u{2913}"
+                <span class="rh-rail-glyph" inner_html=crate::icons::section_icon("/transfers")></span>
             </button>
             <button
                 class="rh-rail-tile rh-rail-unified rh-rail-you"
@@ -1727,7 +1737,7 @@ fn BurrowRail() -> impl IntoView {
                 aria-label="You"
                 on:click=go_you
             >
-                "\u{2726}"
+                <span class="rh-rail-glyph" inner_html=crate::icons::section_icon("/you")></span>
             </button>
             <div class="rh-rail-sep"></div>
             <For

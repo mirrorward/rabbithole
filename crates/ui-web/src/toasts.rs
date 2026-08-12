@@ -19,11 +19,14 @@ pub enum ToastKind {
 impl ToastKind {
     /// A stable glyph for the toast (decorative; the text carries meaning).
     pub fn glyph(self) -> &'static str {
+        // Each glyph carries U+FE0E, the *text presentation* selector: ℹ and ⚠
+        // otherwise default to their emoji forms on Apple platforms — a blue
+        // box and a yellow triangle that ignore the toast's CSS tint entirely.
         match self {
-            ToastKind::Info => "\u{2139}",    // ℹ
-            ToastKind::Success => "\u{2713}", // ✓
-            ToastKind::Mail => "\u{2709}",    // ✉
-            ToastKind::Warn => "\u{26A0}",    // ⚠
+            ToastKind::Info => "\u{2139}\u{fe0e}",    // ℹ
+            ToastKind::Success => "\u{2713}\u{fe0e}", // ✓
+            ToastKind::Mail => "\u{2709}\u{fe0e}",    // ✉
+            ToastKind::Warn => "\u{26A0}\u{fe0e}",    // ⚠
         }
     }
 
