@@ -76,7 +76,7 @@ Follow-up decisions (2026-07-01, round 2):
 
 | # | Decision | Choice |
 |---|----------|--------|
-| 5 | Native port | **4653** (H-O-L-E on a phone keypad); web/WS 4654, tracker 4655 |
+| 5 | Native port | **4653** (H-O-L-E on a phone keypad); web/WS 4654, tracker 4655. *Current:* public looking-glass INDEX still defaults to 4655; `just up` binds it on **5497** so it does not collide with `federation_addr`. |
 | 6 | Zmodem over telnet | **Yes** — Wave 6 |
 | 7 | Door games | **Yes** — Wave 6 (DOOR32.SYS + telnet/PTY bridge) |
 | 8 | Themed naming | **Yes** — Wonderland/burrow naming across features & binaries (see §2.1 glossary) |
@@ -199,7 +199,7 @@ One tokio runtime; one listener task per enabled surface; all funnel into `serve
 |---|---|---|
 | RHP native | **4653/udp** (QUIC) + **4653/tcp** (TLS fallback) | flagship — 4653 spells **H-O-L-E** on a phone keypad |
 | HTTP/WS | **4654** | embedded web client, web admin, WS transport, `.well-known`, rabbit links |
-| Tracker (native) | **4655** | directory service (`apps/tracker`) |
+| Tracker (native) | **4655** | directory service (`apps/tracker`) — public / standalone default. `just up` binds INDEX on **5497** beside a federating burrow; clients dial that port for loopback and honor `$RABBIT_TRACKER_STATUS`. |
 | Telnet | 23 (or 2323 unprivileged) | BBS surface |
 | finger | 79 | presence |
 | NNTP | 119 / 563 (TLS) | reader + peering |
@@ -920,7 +920,7 @@ Flagged for review — each has a working default so nothing blocks:
 | # | Question | Status |
 |---|----------|--------|
 | 1 | Project license | **OPEN — owner deciding.** Candidates: MIT/Apache-2.0 dual (max adoption), AGPL-3.0 server + MIT clients (prevents closed server forks), MPL-2.0 (file-level middle ground) |
-| 2 | Default native port | **DECIDED: 4653** — spells H-O-L-E on a phone keypad; web/WS 4654, tracker 4655 (IANA-unassigned range, all configurable) |
+| 2 | Default native port | **DECIDED: 4653** — spells H-O-L-E on a phone keypad; web/WS 4654, tracker 4655 (IANA-unassigned range, all configurable). *Current:* `just up` moves tracker status to 5497; public glass stays 4655. |
 | 3 | iroh vs hand-rolled quinn for swarm NAT layer | **Spike both in W5** (rationale in PLAN review thread); default iroh if its endpoint model coexists with our quinn listener |
 | 4 | Zmodem on the telnet surface | **DECIDED: yes** — in Wave 6 |
 | 5 | Door-game support (DOOR32.SYS + telnet/PTY bridge) | **DECIDED: yes** — in Wave 6 |

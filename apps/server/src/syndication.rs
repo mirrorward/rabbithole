@@ -531,6 +531,11 @@ impl FeedUrl {
 }
 
 /// Split `host`, `host:port`, `[v6]`, or `[v6]:port`. Host is unbracketed.
+///
+/// Twin of `rabbithole_directory::split_authority`. Not shared: the directory
+/// crate is dependency-free by design, and burrow depending on it just to
+/// parse feed URLs would couple syndication to discovery. Keep the two
+/// parsers in step when the authority rules change.
 fn split_feed_authority(authority: &str, default_port: u16) -> Result<(String, u16)> {
     let a = authority.trim();
     if let Some(rest) = a.strip_prefix('[') {

@@ -168,7 +168,13 @@ pub const TRACKER_STATUS_PORT: u16 = 4655;
 
 /// Status port `just up` / `just tracker` bind so INDEX does not sit on the
 /// burrow's `federation_addr` (4655). Public looking-glass stays on 4655.
+/// Override the bind with [`TRACKER_STATUS_ENV`]; clients read the same
+/// variable so a custom port does not have to be retyped.
 pub const LOCAL_STATUS_PORT: u16 = 5497;
+
+/// Bind address for the local-stack status port (`just up`, `just tracker`).
+/// Same name the justfile reads. A host:port, `[v6]:port`, or a bare port.
+pub const TRACKER_STATUS_ENV: &str = "RABBIT_TRACKER_STATUS";
 
 /// A live discovery answer plus which source produced it.
 ///
@@ -291,10 +297,38 @@ pub fn is_loopback_host(host: &str) -> bool {
         .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// Status port for a bare host: 5497 on loopback (`just up`), 4655 elsewhere.
+/// Port from a bind spec (`0.0.0.0:5497`, `[::]:9000`) or a bare port number.
+/// Host-only values have no port to honor.
+pub fn port_from_bind(spec: &str) -> Option<u16> {
+    let s = spec.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(p) = s.parse::<u16>() {
+        return Some(p);
+    }
+    match split_authority(s, 0) {
+        Ok((_, port)) if port != 0 => Some(port),
+        _ => None,
+    }
+}
+
+/// Local-stack status port from an optional bind override (the justfile env).
+pub fn local_status_port_from(override_bind: Option<&str>) -> u16 {
+    override_bind
+        .and_then(port_from_bind)
+        .unwrap_or(LOCAL_STATUS_PORT)
+}
+
+/// Local-stack status port: [`TRACKER_STATUS_ENV`] when set, else 5497.
+pub fn local_status_port() -> u16 {
+    local_status_port_from(std::env::var(TRACKER_STATUS_ENV).ok().as_deref())
+}
+
+/// Status port for a bare host: the local-stack port on loopback, 4655 elsewhere.
 pub fn default_status_port(host: &str) -> u16 {
     if is_loopback_host(host) {
-        LOCAL_STATUS_PORT
+        local_status_port()
     } else {
         TRACKER_STATUS_PORT
     }
@@ -303,14 +337,25 @@ pub fn default_status_port(host: &str) -> u16 {
 /// Normalize a tracker entry to a dialable `host:port` (bracketed IPv6).
 ///
 /// A URL's scheme colon is not a port. A bare public host gets 4655; a bare
-/// loopback host gets 5497 so `just up` and a typed `localhost` agree.
+/// loopback host gets [`local_status_port`] so `just up` and a typed
+/// `localhost` agree, including a custom [`TRACKER_STATUS_ENV`].
 pub fn status_addr(entry: &str) -> String {
+    status_addr_with(entry, local_status_port())
+}
+
+/// [`status_addr`] with an explicit local-stack port (tests, and callers
+/// that already resolved the env).
+pub fn status_addr_with(entry: &str, local_port: u16) -> String {
     let e = host_port_of(entry);
     if has_explicit_status_port(e) {
         return e.to_string();
     }
     let host = e.trim_matches(|c| c == '[' || c == ']');
-    let port = default_status_port(host);
+    let port = if is_loopback_host(host) {
+        local_port
+    } else {
+        TRACKER_STATUS_PORT
+    };
     if host.contains(':') {
         format!("[{host}]:{port}")
     } else {
@@ -883,18 +928,38 @@ mod tests {
 
     #[test]
     fn loopback_bare_hosts_use_the_local_stack_port() {
-        assert_eq!(status_addr("localhost"), "localhost:5497");
-        assert_eq!(status_addr("127.0.0.1"), "127.0.0.1:5497");
-        assert_eq!(status_addr("::1"), "[::1]:5497");
-        assert_eq!(status_addr("[::1]"), "[::1]:5497");
+        let local = LOCAL_STATUS_PORT;
+        assert_eq!(status_addr_with("localhost", local), "localhost:5497");
+        assert_eq!(status_addr_with("127.0.0.1", local), "127.0.0.1:5497");
+        assert_eq!(status_addr_with("::1", local), "[::1]:5497");
+        assert_eq!(status_addr_with("[::1]", local), "[::1]:5497");
         assert_eq!(
-            status_addr("tracker.rabbit.direct"),
+            status_addr_with("tracker.rabbit.direct", local),
             "tracker.rabbit.direct:4655"
         );
-        assert_eq!(status_addr("[::1]:4655"), "[::1]:4655");
+        assert_eq!(status_addr_with("[::1]:4655", local), "[::1]:4655");
         assert_eq!(
-            status_addr("https://tracker.rabbit.direct/api/burrows"),
+            status_addr_with("https://tracker.rabbit.direct/api/burrows", local),
             "tracker.rabbit.direct:4655"
+        );
+    }
+
+    #[test]
+    fn a_custom_status_bind_is_the_port_loopback_clients_dial() {
+        // `just up` and the TUI both read RABBIT_TRACKER_STATUS. A custom
+        // bind must not force the user to retype the port on localhost.
+        assert_eq!(port_from_bind("0.0.0.0:6000"), Some(6000));
+        assert_eq!(port_from_bind("[::]:9000"), Some(9000));
+        assert_eq!(port_from_bind("6000"), Some(6000));
+        assert_eq!(port_from_bind("localhost"), None);
+        assert_eq!(local_status_port_from(Some("0.0.0.0:6000")), 6000);
+        assert_eq!(local_status_port_from(None), LOCAL_STATUS_PORT);
+        assert_eq!(status_addr_with("localhost", 6000), "localhost:6000");
+        assert_eq!(status_addr_with("::1", 6000), "[::1]:6000");
+        assert_eq!(
+            status_addr_with("tracker.rabbit.direct", 6000),
+            "tracker.rabbit.direct:4655",
+            "a local override must not move the public glass"
         );
     }
 }

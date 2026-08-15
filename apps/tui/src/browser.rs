@@ -341,8 +341,8 @@ fn parse_prefixed_u64(field: &str, prefix: &str) -> Option<u64> {
 
 /// Normalize a typed tracker address: trim, and append the status port when
 /// the user typed a bare host. Public hosts get 4655; loopback (`localhost`,
-/// `127.0.0.1`, `::1`) gets 5497 so `just up` and a typed local glass agree.
-/// `None` for blank input.
+/// `127.0.0.1`, `::1`) gets `$RABBIT_TRACKER_STATUS`'s port (5497 by default)
+/// so `just up` and a typed local glass agree. `None` for blank input.
 pub fn normalize_tracker_addr(input: &str) -> Option<String> {
     let s = input.trim();
     if s.is_empty() {
@@ -774,14 +774,18 @@ mod tests {
             normalize_tracker_addr("tracker.example").as_deref(),
             Some("tracker.example:4655")
         );
+        let local = rabbithole_directory::local_status_port();
+        let localhost = format!("localhost:{local}");
+        let loopback = format!("127.0.0.1:{local}");
+        let v6 = format!("[::1]:{local}");
         assert_eq!(
             normalize_tracker_addr("localhost").as_deref(),
-            Some("localhost:5497"),
-            "just up binds INDEX on 5497"
+            Some(localhost.as_str()),
+            "just up / $RABBIT_TRACKER_STATUS bind INDEX here"
         );
         assert_eq!(
             normalize_tracker_addr("127.0.0.1").as_deref(),
-            Some("127.0.0.1:5497")
+            Some(loopback.as_str())
         );
         assert_eq!(
             normalize_tracker_addr(" 10.0.0.1:9999 ").as_deref(),
@@ -791,7 +795,7 @@ mod tests {
             normalize_tracker_addr("[::1]:4655").as_deref(),
             Some("[::1]:4655")
         );
-        assert_eq!(normalize_tracker_addr("::1").as_deref(), Some("[::1]:5497"));
+        assert_eq!(normalize_tracker_addr("::1").as_deref(), Some(v6.as_str()));
         assert_eq!(normalize_tracker_addr("   "), None);
         assert_eq!(normalize_tracker_addr(""), None);
     }

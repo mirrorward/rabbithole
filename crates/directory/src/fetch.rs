@@ -404,16 +404,18 @@ mod tests {
             "tracker.rabbit.direct:4655"
         );
         assert_eq!(tracker_addr("http://127.0.0.1:3000/"), "127.0.0.1:3000");
-        assert_eq!(tracker_addr("localhost"), "localhost:5497");
-        assert_eq!(tracker_addr("127.0.0.1"), "127.0.0.1:5497");
+        let local = crate::local_status_port();
+        assert_eq!(tracker_addr("localhost"), format!("localhost:{local}"));
+        assert_eq!(tracker_addr("127.0.0.1"), format!("127.0.0.1:{local}"));
     }
 
     #[test]
     fn ipv6_literals_keep_their_hextets() {
         // Splitting on the last colon would turn `::1` into host `:` port `1`.
-        // Loopback without a port is the local stack (5497), bracketed so
+        // Loopback without a port is the local stack, bracketed so
         // TcpStream::connect can parse it.
-        assert_eq!(tracker_addr("::1"), "[::1]:5497");
+        let local = crate::local_status_port();
+        assert_eq!(tracker_addr("::1"), format!("[::1]:{local}"));
         assert_eq!(tracker_addr("[::1]:4655"), "[::1]:4655");
     }
 

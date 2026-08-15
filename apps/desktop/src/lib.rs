@@ -402,6 +402,34 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    fn first_quoted(text: &str, prefix: &str) -> Option<String> {
+        text.lines().find_map(|l| {
+            l.trim()
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.split('"').nth(1))
+                .map(str::to_string)
+        })
+    }
+
+    #[test]
+    fn the_crate_version_matches_the_product() {
+        // Isolated workspace: cannot inherit version.workspace. CI also runs
+        // scripts/check-desktop-version.sh; this catches `cargo test` here.
+        let root = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"));
+        let tauri = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.conf.json"));
+        let workspace = first_quoted(root, "version = ").expect("workspace version");
+        assert_eq!(
+            env!("CARGO_PKG_VERSION"),
+            workspace,
+            "apps/desktop/Cargo.toml drifted from the product version"
+        );
+        let tauri_ver = first_quoted(tauri, "\"version\": ").expect("tauri version");
+        assert_eq!(
+            tauri_ver, workspace,
+            "tauri.conf.json drifted from the product version"
+        );
+    }
+
     #[test]
     fn the_shell_asks_the_same_status_port_as_the_tui() {
         // Hardcoding `tracker.rabbit.direct:4655` here is how the two clients

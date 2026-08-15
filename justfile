@@ -53,7 +53,8 @@ up: build web
     set -uo pipefail
     echo "burrow   → quic 4653 · ws 4654 · web {{http_addr}}"
     echo "tracker  → status {{tracker_status}}"
-    echo "clients  → 127.0.0.1:5497  (public glass stays :4655)"
+    bind='{{tracker_status}}'
+    echo "clients  → 127.0.0.1:${bind##*:}  (public glass stays :4655)"
     echo "data     → {{data_dir}}"
     echo
     ./target/release/burrow --data-dir "{{data_dir}}" \
@@ -86,6 +87,7 @@ account login password:
 
 # Everything CI checks.
 check:
+    scripts/check-desktop-version.sh
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace
