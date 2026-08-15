@@ -71,7 +71,7 @@ pub async fn discover(tracker: Option<&str>, endpoint_fields: &[&str]) -> Result
     match fetch_glass(TRACKER_URL, endpoint_fields).await {
         Ok(servers) => Ok(Listing {
             servers,
-            source: DirectorySource::Tracker,
+            source: DirectorySource::standard_glass(),
             fallback_reason: Some(directory_error),
         }),
         // Both failed. Lead with the directory's failure: it is what the user
@@ -105,7 +105,7 @@ async fn named_tracker(entry: &str, endpoint_fields: &[&str]) -> Result<Listing,
             Ok(servers) => {
                 return Ok(Listing {
                     servers,
-                    source: DirectorySource::Tracker,
+                    source: DirectorySource::looking_glass(entry),
                     fallback_reason: None,
                 })
             }
@@ -119,7 +119,7 @@ async fn named_tracker(entry: &str, endpoint_fields: &[&str]) -> Result<Listing,
     })?;
     parse_tracker_index(&text).map(|servers| Listing {
         servers,
-        source: DirectorySource::Tracker,
+        source: DirectorySource::looking_glass(entry),
         // HTTPS was the wider try on this coordinator; the status port
         // answering is a narrower path, and the reason belongs on the listing.
         fallback_reason: (https_error != "not tried (plaintext entry)").then_some(https_error),

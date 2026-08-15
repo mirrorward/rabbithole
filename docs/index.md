@@ -33,7 +33,7 @@ docs in the repository. Build it locally with `mdbook build docs` (or
 
 ## Status (honest)
 
-RabbitHole is pre-1.0 and moves fast; the wire may change between minor
+As of **0.191.0**, RabbitHole is pre-1.0 and moves fast; the wire may change between minor
 versions (the proto registry test guards against *accidental* breakage — see
 [versioning](protocol/versioning.md)). Waves 0–14 are substantially landed:
 the native RHP server and its surfaces (accounts/personas/TOTP, chat/rooms/DMs

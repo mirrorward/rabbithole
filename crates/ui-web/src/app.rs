@@ -1346,7 +1346,7 @@ impl AppState {
                 if let Some(text) = crate::net::fetch_text(crate::servers::TRACKER_URL).await {
                     if let Ok(rows) = crate::servers::parse_glass_json(&text, &["ws"]) {
                         servers.set(rows);
-                        source.set(crate::servers::DirectorySource::Tracker);
+                        source.set(crate::servers::DirectorySource::standard_glass());
                         loading.set(false);
                         return;
                     }
@@ -1356,7 +1356,7 @@ impl AppState {
                 if let Some(text) = crate::native::tracker_index().await {
                     if let Ok(rows) = crate::servers::parse_tracker_index(&text) {
                         servers.set(rows);
-                        source.set(crate::servers::DirectorySource::Tracker);
+                        source.set(crate::servers::DirectorySource::standard_glass());
                         loading.set(false);
                         return;
                     }

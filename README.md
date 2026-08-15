@@ -12,7 +12,7 @@ browsers, telnet BBS clients, newsreaders, offline mail readers, and (yes) real
 classic Hotline clients. Servers federate over **Tunnels** and are discoverable
 through **Looking Glass** directories.
 
-**Status: 0.61.0 — waves 0–14 largely landed.** The native server and its
+**Status: 0.191.0 — waves 0–14 largely landed.** The native server and its
 surfaces are feature-complete for a public flagship; remaining work is 1.0
 hardening (E2EE wiring, cross-server flood-fill, GUI/mobile shells) and the
 post-1.0 Reticulum mesh. See [`TODO.md`](TODO.md) for the exact per-wave state.
@@ -33,7 +33,7 @@ recovery codes, multiple personas per account, and an ACL evaluator (roles +
 classes + capability bitmask, nearest-ancestor / deny-wins) governing every
 surface.
 
-| Subsystem | State at 0.61.0 |
+| Subsystem | State at 0.191.0 |
 |---|---|
 | **Accounts & identity** | Ed25519 identity keys, Argon2id passwords, hashed session tokens + resume, TOTP + recovery codes, key enrollment, registration gating (open/invite/closed) |
 | **Personas & presence** | Multiple personas per account, profiles/.plan/avatars+banners, buddy lists, presence states (away/idle/invisible), member directory + locate |
@@ -111,7 +111,7 @@ Native transports and rate limiting are the only things on out of the box;
 | Radio DJ source + `updinfo` | 8001 (`radio_source_addr`) | `radio_source_enabled` | off |
 | RSS/Atom syndication | — (outbound fetcher) | `syndication_enabled` | off |
 | QWK/QWKE offline mail | — (telnet `[M]` + `ctl`) | `qwk_enabled` | off |
-| Looking Glass tracker | 5498 TCP / 5499 UDP + 4656 UDP gossip; status INDEX on 4655 | (`looking-glass` daemon) | — |
+| Looking Glass tracker | 5498 TCP / 5499 UDP + 4656 UDP gossip; status INDEX on 4655 (public default). `just up` binds status to **5497** so it does not collide with federation 4655. | (`looking-glass` daemon) | — |
 | Looking Glass announce | outbound HTTPS `POST /api/announce` | `announce_enabled` (needs `advertise_host`) | **on**, inert until a public host is set |
 
 Federation also requires a restart-only `federation_origin`. This immutable

@@ -5,7 +5,7 @@ Sample configuration and deployment recipes for a RabbitHole **Burrow**.
 ## `flagship-burrow.toml`
 
 An opinionated, fully-commented configuration for a **public flagship** server
-at 0.61.0. It shows every configuration key the server understands: keys whose
+at 0.191.0. It shows every configuration key the server understands: keys whose
 built-in default is fine are present but **commented out** (with their default
 value shown), so you can read the whole surface top-to-bottom and uncomment only
 what you change.

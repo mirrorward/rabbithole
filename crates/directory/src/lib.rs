@@ -95,23 +95,53 @@ pub fn browse(servers: &[DirectoryServer], query: &str) -> Vec<DirectoryServer> 
 
 /// Where a listing came from — shown to the user, because a narrower source
 /// answering is a different answer, not the same one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectorySource {
     /// `rabbithole.directory` over HTTPS.
     Directory,
-    /// A Looking Glass tracker's status port (the `INDEX` line protocol).
-    Tracker,
+    /// A Looking Glass. The string is the coordinator that answered (host,
+    /// and a non-default port when the user named one), not a hardcoded
+    /// flagship hostname — a self-hosted glass is a different answer.
+    Tracker(String),
     /// The built-in sample list — nothing reachable answered.
     Seeded,
 }
 
 impl DirectorySource {
-    pub fn label(self) -> &'static str {
+    /// The standard Looking Glass, `tracker.rabbit.direct`.
+    pub fn standard_glass() -> Self {
+        DirectorySource::Tracker(TRACKER_HOST.to_string())
+    }
+
+    /// A Looking Glass the user named. Scheme, path, and the default status
+    /// port are stripped so the label is the coordinator, not the URL we dialed.
+    pub fn looking_glass(entry: &str) -> Self {
+        DirectorySource::Tracker(tracker_label(entry))
+    }
+
+    pub fn label(&self) -> &str {
         match self {
             DirectorySource::Directory => "rabbithole.directory",
-            DirectorySource::Tracker => "tracker.rabbit.direct",
+            DirectorySource::Tracker(host) => host,
             DirectorySource::Seeded => "built-in sample \u{2014} no directory reachable",
         }
+    }
+}
+
+/// Human label for a Looking Glass entry: scheme and path stripped, the
+/// default status port omitted so `https://glass.example/api/burrows` and
+/// `glass.example:4655` both read as `glass.example`.
+pub fn tracker_label(entry: &str) -> String {
+    let e = entry.trim();
+    let e = e
+        .strip_prefix("https://")
+        .or_else(|| e.strip_prefix("http://"))
+        .unwrap_or(e);
+    let e = e.split('/').next().unwrap_or(e);
+    let suffix = format!(":{TRACKER_STATUS_PORT}");
+    match e.strip_suffix(suffix.as_str()) {
+        Some(host) if !host.is_empty() => host.to_string(),
+        _ => e.to_string(),
     }
 }
 
@@ -146,9 +176,12 @@ pub fn parse_directory_json_with(
     endpoint_fields: &[&str],
 ) -> Result<Vec<DirectoryServer>, String> {
     let doc = json::parse(text).map_err(|e| format!("That directory reply isn't JSON: {e}"))?;
-    let rows = doc.arr_field("burrows");
-    if rows.is_empty() && doc.get("burrows").is_none() {
-        return Err("That directory reply has no burrows list.".to_string());
+    let rows = listed_burrows(&doc, "directory")?;
+    if rows.is_empty() {
+        // The directory answered and said nobody is listed. That is a
+        // listing, not a fetch failure — substituting a sample would claim
+        // otherwise.
+        return Ok(Vec::new());
     }
     let out: Vec<DirectoryServer> = rows
         .iter()
@@ -187,9 +220,12 @@ pub fn parse_glass_json(
     endpoint_kinds: &[&str],
 ) -> Result<Vec<DirectoryServer>, String> {
     let doc = json::parse(text).map_err(|e| format!("That tracker reply isn't JSON: {e}"))?;
-    let rows = doc.arr_field("burrows");
-    if rows.is_empty() && doc.get("burrows").is_none() {
-        return Err("That tracker reply has no burrows list.".to_string());
+    let rows = listed_burrows(&doc, "tracker")?;
+    if rows.is_empty() {
+        // A glass with nobody announced serves `burrows: []`. Keep that
+        // answer; falling through to a seeded sample would look like
+        // "somebody is out there".
+        return Ok(Vec::new());
     }
     let out: Vec<DirectoryServer> = rows
         .iter()
@@ -302,9 +338,26 @@ pub fn parse_tracker_index(text: &str) -> Result<Vec<DirectoryServer>, String> {
         });
     }
     if out.is_empty() {
+        // No parseable rows. An INDEX with no lines is a live empty listing
+        // (the glass serves that when nobody has announced). Lines we could
+        // not read are a broken reply, not "nobody".
+        if text.lines().all(|l| l.trim().is_empty()) {
+            return Ok(Vec::new());
+        }
         return Err("The tracker returned no servers.".to_string());
     }
     Ok(out)
+}
+
+/// The `burrows` array from a directory or glass JSON document.
+///
+/// Missing or non-array is a broken reply. Present-and-empty is a successful
+/// listing of nobody — callers must not treat that as "try the next source".
+fn listed_burrows<'a>(doc: &'a json::Json, kind: &str) -> Result<&'a [json::Json], String> {
+    match doc.get("burrows") {
+        Some(json::Json::Arr(items)) => Ok(items),
+        _ => Err(format!("That {kind} reply has no burrows list.")),
+    }
 }
 
 #[cfg(test)]
@@ -430,9 +483,13 @@ mod tests {
     #[test]
     fn an_empty_but_valid_glass_listing_is_distinguished_from_a_broken_one() {
         // The live tracker really does serve this when nobody has announced.
+        // That is "nobody is out there", not "we could not ask".
         let empty = r#"{"ok":true,"updatedAt":1786533368707,"total":0,"online":0,"burrows":[]}"#;
-        let err = parse_glass_json(empty, &["ws"]).unwrap_err();
-        assert!(err.contains("no burrows this client can dial"), "{err}");
+        let rows = parse_glass_json(empty, &["ws"]).expect("empty is a listing");
+        assert!(rows.is_empty(), "keep the empty answer");
+        assert!(parse_directory_json(r#"{"ok":true,"burrows":[]}"#)
+            .expect("empty directory is a listing")
+            .is_empty());
         // Whereas a reply with no burrows *field* is a different problem.
         let broken = parse_glass_json(r#"{"ok":false,"error":"store_not_provisioned"}"#, &["ws"])
             .unwrap_err();
@@ -510,7 +567,10 @@ mod tests {
         let rows = parse_tracker_index("ERR Lounge\t1.2.3.4:1\t3\t\t100\t1\tno\t-\t-\n")
             .expect("tab-framed rows are data");
         assert_eq!(rows[0].name, "ERR Lounge");
-        assert!(parse_tracker_index("").is_err(), "empty is not a listing");
+        assert!(
+            parse_tracker_index("").unwrap().is_empty(),
+            "an empty INDEX is a listing of nobody, not a fetch failure"
+        );
     }
 
     #[test]
@@ -519,9 +579,20 @@ mod tests {
         assert!(DirectorySource::Directory
             .label()
             .contains("rabbithole.directory"));
-        assert!(DirectorySource::Tracker
-            .label()
-            .contains("tracker.rabbit.direct"));
+        assert_eq!(
+            DirectorySource::standard_glass().label(),
+            "tracker.rabbit.direct"
+        );
+        assert_eq!(
+            DirectorySource::looking_glass("https://glass.example:8443/api/burrows").label(),
+            "glass.example:8443",
+            "a named coordinator is labelled as itself, not the flagship host"
+        );
+        assert_eq!(
+            DirectorySource::looking_glass("tracker.rabbit.direct:4655").label(),
+            "tracker.rabbit.direct",
+            "the default status port is not part of the name"
+        );
         assert!(DirectorySource::Seeded.label().contains("sample"));
     }
 

@@ -3030,8 +3030,20 @@ pub fn ServerBrowser() -> impl IntoView {
                 // Where this listing came from. A directory that doesn't say
                 // who told it is asking to be trusted for no reason.
                 <p class="rh-glass-source">
-                    "via "{move || app.directory_source.get().label()}
+                    "via "{move || app.directory_source.with(|s| s.label().to_string())}
                 </p>
+                <Show when=move || {
+                    servers.get().is_empty() && !app.directory_loading.get()
+                } fallback=|| ()>
+                    <p class="rh-empty">
+                        {move || match app.directory_source.get() {
+                            crate::servers::DirectorySource::Seeded => {
+                                "Couldn\u{2019}t reach a directory."
+                            }
+                            _ => "No burrows listed right now.",
+                        }}
+                    </p>
+                </Show>
                 <ul class="rh-server-list">
                     <For
                         each=rows

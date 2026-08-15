@@ -899,12 +899,10 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Styl
     };
     let bar_title = if b.editing_addr {
         " tracker address — Enter connect · Esc cancel "
+    } else if b.addr.is_some() {
+        " server browser — a tracker · d directory · r refresh · c filter · h health · Esc back "
     } else {
-        if b.addr.is_some() {
-            " server browser — a tracker · d directory · r refresh · c filter · h health · Esc back "
-        } else {
-            " server browser — a tracker · d directory · r refresh · Esc back "
-        }
+        " server browser — a tracker · d directory · r refresh · Esc back "
     };
     f.render_widget(
         Paragraph::new(bar).block(

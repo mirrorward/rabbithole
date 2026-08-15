@@ -17,8 +17,12 @@ set shell := ["bash", "-uc"]
 
 # Where the burrow keeps its db, blobs, identity and ctl socket.
 data_dir := env_var_or_default("RABBITHOLE_DATA_DIR", "./burrow-data")
-# The tracker's status port (INDEX/HEALTH), matching apps/tui's default.
-tracker_status := env_var_or_default("RABBIT_TRACKER_STATUS", "0.0.0.0:4655")
+# The tracker's status port (INDEX/HEALTH) for the local stack.
+# Not 4655: that is the burrow's default `federation_addr`, and `just up`
+# would lose the fight if burrow.toml enables Tunnels. The public
+# looking-glass still defaults to 4655; this is only the side-by-side recipe.
+# Override with RABBIT_TRACKER_STATUS.
+tracker_status := env_var_or_default("RABBIT_TRACKER_STATUS", "0.0.0.0:5497")
 # Where `just up` serves the web client.
 http_addr := env_var_or_default("RABBITHOLE_HTTP_ADDR", "0.0.0.0:8080")
 

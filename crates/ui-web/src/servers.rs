@@ -116,6 +116,19 @@ pub fn sample_directory() -> Vec<DirectoryServer> {
     list
 }
 
+/// Keep a live answer, even when it is empty. The sample is only for when
+/// nothing reachable answered — substituting it for an empty glass would
+/// claim "here are some burrows" when the source said "nobody".
+pub fn keep_live_or_sample(
+    live: Option<(Vec<DirectoryServer>, DirectorySource)>,
+    sample: Vec<DirectoryServer>,
+) -> (Vec<DirectoryServer>, DirectorySource) {
+    match live {
+        Some((rows, source)) => (rows, source),
+        None => (sample, DirectorySource::Seeded),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +153,31 @@ mod tests {
     fn uptime_label_clamps() {
         assert_eq!(uptime_label(98), "98% up");
         assert_eq!(uptime_label(200), "100% up");
+    }
+
+    #[test]
+    fn an_empty_live_listing_is_not_replaced_by_the_sample() {
+        // A glass that answers `burrows: []` said nobody is out there.
+        // The sample is a different claim, used only when nothing answered.
+        let sample = sample_directory();
+        assert!(!sample.is_empty(), "the sample has rows to tempt us");
+
+        let empty_glass = parse_glass_json(
+            r#"{"ok":true,"updatedAt":1,"total":0,"online":0,"burrows":[]}"#,
+            &["ws"],
+        )
+        .expect("empty is a listing");
+        assert!(empty_glass.is_empty());
+
+        let (rows, source) = keep_live_or_sample(
+            Some((empty_glass, DirectorySource::standard_glass())),
+            sample.clone(),
+        );
+        assert!(rows.is_empty(), "keep the empty live answer");
+        assert_eq!(source.label(), "tracker.rabbit.direct");
+
+        let (rows, source) = keep_live_or_sample(None, sample);
+        assert!(!rows.is_empty(), "unreachable → sample");
+        assert_eq!(source, DirectorySource::Seeded);
     }
 }

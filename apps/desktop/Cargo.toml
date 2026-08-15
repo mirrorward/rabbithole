@@ -43,6 +43,8 @@ rabbithole-swarm = { path = "../../crates/swarm" }
 # The native RHP client (connect + swarm_find/swarm_ticket): source discovery.
 rabbithole-core = { path = "../../crates/core", features = ["native"] }
 rabbithole-proto = { path = "../../crates/proto" }
+# Same discovery client the TUI uses: HTTPS + the status-port INDEX.
+rabbithole-directory = { path = "../../crates/directory", features = ["native"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tauri-plugin-window-state = "2"
 

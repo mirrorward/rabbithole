@@ -143,40 +143,21 @@ fn native_shim() -> String {
 /// `ui_web::servers::parse_tracker_index`; parsing stays in one place, tested
 /// against the documented column layout.
 ///
-/// Bounded on every axis a hostile or broken tracker could exploit: connect
-/// timeout, read timeout, and a response cap.
+/// Uses the same client as `rabbit-tui` ([`rabbithole_directory::fetch`]):
+/// same host default, same timeouts, same size cap. An empty INDEX is a
+/// listing of nobody and is returned as `Some("")`, not `None` — `None` is
+/// only "we could not ask".
 #[tauri::command]
 async fn tracker_index() -> Option<String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
-
-    const HOST: &str = "tracker.rabbit.direct:4655";
-    const CONNECT: std::time::Duration = std::time::Duration::from_secs(3);
-    const IO: std::time::Duration = std::time::Duration::from_secs(5);
-    const MAX: usize = 512 * 1024;
-
-    let mut stream = tokio::time::timeout(CONNECT, TcpStream::connect(HOST))
+    rabbithole_directory::fetch::query_tracker(&tracker_status_addr(), "INDEX")
         .await
-        .ok()?
-        .ok()?;
-    let exchange = async {
-        stream.write_all(b"INDEX\n").await.ok()?;
-        stream.flush().await.ok()?;
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            let n = stream.read(&mut chunk).await.ok()?;
-            if n == 0 {
-                break;
-            }
-            buf.extend_from_slice(&chunk[..n]);
-            if buf.len() > MAX {
-                break;
-            }
-        }
-        String::from_utf8(buf).ok()
-    };
-    tokio::time::timeout(IO, exchange).await.ok()?
+        .ok()
+}
+
+/// Where the shell asks for `INDEX`. Same address the TUI uses for a bare
+/// `tracker.rabbit.direct`.
+fn tracker_status_addr() -> String {
+    rabbithole_directory::fetch::tracker_addr(rabbithole_directory::TRACKER_HOST)
 }
 
 /// A trivial command proving JS→Rust invoke works. Logs on the Rust side so the
@@ -219,7 +200,9 @@ fn tick_ack(payload: String) {
 /// full of text fields — a much worse regression than the wrong app name.
 #[cfg(target_os = "macos")]
 fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+    use tauri::menu::{
+        AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
+    };
 
     let about = AboutMetadataBuilder::new()
         .name(Some("RabbitHole"))
@@ -415,4 +398,25 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running the RabbitHole desktop application");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_shell_asks_the_same_status_port_as_the_tui() {
+        // Hardcoding `tracker.rabbit.direct:4655` here is how the two clients
+        // drifted. The address comes from the shared crate, same as rabbit-tui.
+        assert_eq!(
+            super::tracker_status_addr(),
+            rabbithole_directory::fetch::tracker_addr(rabbithole_directory::TRACKER_HOST)
+        );
+        assert_eq!(
+            super::tracker_status_addr(),
+            format!(
+                "{}:{}",
+                rabbithole_directory::TRACKER_HOST,
+                rabbithole_directory::TRACKER_STATUS_PORT
+            )
+        );
+    }
 }

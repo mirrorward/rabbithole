@@ -21,7 +21,7 @@ Open these on the host/firewall for a public burrow:
 | ---- | ----- | ---------------------------------------------- |
 | 4653 | UDP   | QUIC — primary transport                       |
 | 443  | TCP   | Optional WSS reverse proxy for browser clients |
-| 4655 | TCP   | S2S federation (when enabled)                  |
+| 4655 | TCP   | S2S federation (when enabled). Also the public `looking-glass` status INDEX default — do not run both on one host without moving one of them. `just up` binds tracker status to **5497** for that reason. |
 
 Optional legacy surfaces served by `burrow` when enabled in config: telnet
 (default `0.0.0.0:2323`, TCP) and finger (default `0.0.0.0:7979`, TCP).
@@ -194,10 +194,13 @@ unit and populate it with `RABBITHOLE_*` assignments from the table above.
 ## Running the tracker
 
 `looking-glass` is optional and independent of `burrow`. It exposes its status
-listener on `0.0.0.0:4655` by default (plus HTRK on `5498/tcp` and `5499/udp`):
+listener on `0.0.0.0:4655` by default (plus HTRK on `5498/tcp` and `5499/udp`).
+That default **collides** with the burrow's `federation_addr` (also 4655). On
+a host that runs both, move one of them — `just up` binds status to `5497`:
 
 ```sh
-./target/release/looking-glass --status 0.0.0.0:4655
+./target/release/looking-glass --status 0.0.0.0:4655   # public / standalone
+./target/release/looking-glass --status 0.0.0.0:5497   # beside a federating burrow
 ```
 
 ## Constrained / RF links
