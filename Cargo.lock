@@ -328,6 +328,7 @@ dependencies = [
  "rabbithole-audio",
  "rabbithole-blobs",
  "rabbithole-core",
+ "rabbithole-directory",
  "rabbithole-e2ee",
  "rabbithole-federation",
  "rabbithole-identity",

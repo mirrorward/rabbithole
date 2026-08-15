@@ -932,6 +932,28 @@ mod tests {
     }
 
     #[test]
+    fn feed_authorities_match_the_directory_parser() {
+        // Twin of `rabbithole_directory::split_authority`. A new crate for
+        // forty lines would be worse; this test is what keeps them in step.
+        const CASES: &[(&str, u16)] = &[
+            ("warren.example", 80),
+            ("warren.example:8080", 80),
+            ("[::1]", 443),
+            ("[::1]:8443", 443),
+            ("[2001:db8::1]", 443),
+            ("[2001:db8::1]:8080", 80),
+            ("127.0.0.1:8080", 80),
+        ];
+        for &(auth, default) in CASES {
+            let feed = split_feed_authority(auth, default).expect(auth);
+            let dir = rabbithole_directory::split_authority(auth, default).expect(auth);
+            assert_eq!(feed, dir, "{auth}");
+        }
+        assert!(split_feed_authority("[::1", 443).is_err());
+        assert!(rabbithole_directory::split_authority("[::1", 443).is_err());
+    }
+
+    #[test]
     fn location_resolution() {
         let cur = FeedUrl::parse("https://warren.example:8443/feeds/all.xml").unwrap();
         // Absolute.

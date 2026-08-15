@@ -149,13 +149,23 @@ fn native_shim() -> String {
 /// only "we could not ask".
 #[tauri::command]
 async fn tracker_index() -> Option<String> {
-    rabbithole_directory::fetch::query_tracker(&tracker_status_addr(), "INDEX")
-        .await
-        .ok()
+    // A local `just up` glass first (127.0.0.1 + $RABBIT_TRACKER_STATUS /
+    // .rabbithole/looking-glass-status / 5497). If nothing is listening,
+    // the public glass — so a shipped app still finds tracker.rabbit.direct.
+    match rabbithole_directory::fetch::query_tracker(&local_tracker_status_addr(), "INDEX").await {
+        Ok(text) => Some(text),
+        Err(_) => rabbithole_directory::fetch::query_tracker(&tracker_status_addr(), "INDEX")
+            .await
+            .ok(),
+    }
 }
 
-/// Where the shell asks for `INDEX`. Same address the TUI uses for a bare
-/// `tracker.rabbit.direct`.
+/// Loopback INDEX — same address the TUI uses for a typed `localhost`.
+fn local_tracker_status_addr() -> String {
+    rabbithole_directory::status_addr("127.0.0.1")
+}
+
+/// Where the shell asks the **public** glass for `INDEX`.
 fn tracker_status_addr() -> String {
     rabbithole_directory::fetch::tracker_addr(rabbithole_directory::TRACKER_HOST)
 }
@@ -445,6 +455,16 @@ mod tests {
                 rabbithole_directory::TRACKER_HOST,
                 rabbithole_directory::TRACKER_STATUS_PORT
             )
+        );
+        assert_eq!(
+            super::local_tracker_status_addr(),
+            rabbithole_directory::status_addr("127.0.0.1"),
+            "loopback uses the same port the TUI appends for localhost"
+        );
+        assert_ne!(
+            super::local_tracker_status_addr(),
+            super::tracker_status_addr(),
+            "a local just-up glass is not the public glass"
         );
     }
 }

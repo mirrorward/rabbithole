@@ -204,8 +204,10 @@ a host that runs both, move one of them — `just up` binds status to `5497`:
 ```
 
 Clients follow the same split: a bare public host still dials **4655**;
-`localhost` / `127.0.0.1` / `::1` without a port dial **5497**, so `just up`
-and the TUI agree without typing the port.
+`localhost` / `127.0.0.1` / `::1` without a port dial **5497** (or the port
+in `$RABBIT_TRACKER_STATUS`). `just up` also writes
+`.rabbithole/looking-glass-status` so a TUI or desktop started in another
+terminal finds the same bind; `just tui` / `just desktop` export it.
 
 ## Constrained / RF links
 

@@ -62,6 +62,7 @@ webpki-roots.workspace = true
 [dev-dependencies]
 data-encoding.workspace = true
 rabbithole-core = { workspace = true, features = ["native"] }
+rabbithole-directory.workspace = true
 rabbithole-e2ee.workspace = true
 rabbithole-legacy-hotline.workspace = true
 rabbithole-store-client.workspace = true

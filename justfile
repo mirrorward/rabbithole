@@ -8,6 +8,8 @@
 #   just up         build everything and run the whole stack (burrow + SPA + tracker)
 #   just burrow     just the burrow, serving the web client
 #   just tracker    just the Looking Glass tracker
+#   just tui        terminal client, with the local glass port just up wrote
+#   just desktop    Tauri shell, same local glass port
 #   just check      what CI checks, before you push
 #
 # Requires: cargo. `just web` additionally needs trunk + the wasm target;
@@ -48,13 +50,22 @@ build:
 #
 # Deliberately not a supervisor: two background jobs and a `wait` is the
 # entire requirement, and a process manager would be a subsystem to maintain.
-up: build web
+
+# Persist the local INDEX bind so a TUI/desktop in another terminal
+# finds the same port without re-exporting RABBIT_TRACKER_STATUS.
+[private]
+write-tracker-status:
+    mkdir -p .rabbithole
+    printf '%s\n' "{{tracker_status}}" > .rabbithole/looking-glass-status
+
+up: build web write-tracker-status
     #!/usr/bin/env bash
     set -uo pipefail
     echo "burrow   → quic 4653 · ws 4654 · web {{http_addr}}"
     echo "tracker  → status {{tracker_status}}"
     bind='{{tracker_status}}'
     echo "clients  → 127.0.0.1:${bind##*:}  (public glass stays :4655)"
+    echo "status   → .rabbithole/looking-glass-status"
     echo "data     → {{data_dir}}"
     echo
     ./target/release/burrow --data-dir "{{data_dir}}" \
@@ -74,8 +85,26 @@ burrow: build web
         --http --http-addr "{{http_addr}}" --web-root crates/ui-web/dist run
 
 # Run only the tracker.
-tracker: build
+tracker: build write-tracker-status
     ./target/release/looking-glass --status "{{tracker_status}}"
+
+# Terminal client. Picks up the local glass port `just up` wrote.
+tui: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "${RABBIT_TRACKER_STATUS:-}" ] && [ -f .rabbithole/looking-glass-status ]; then
+      export RABBIT_TRACKER_STATUS="$(tr -d '\r\n' < .rabbithole/looking-glass-status)"
+    fi
+    ./target/release/rabbit-tui
+
+# Desktop shell. Same local glass port as `just tui`.
+desktop:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "${RABBIT_TRACKER_STATUS:-}" ] && [ -f .rabbithole/looking-glass-status ]; then
+      export RABBIT_TRACKER_STATUS="$(tr -d '\r\n' < .rabbithole/looking-glass-status)"
+    fi
+    cd apps/desktop && cargo tauri dev
 
 # The dev loop for the web client: the SPA with seeded demo burrows, on 1420.
 dev-web:

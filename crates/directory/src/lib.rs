@@ -176,6 +176,11 @@ pub const LOCAL_STATUS_PORT: u16 = 5497;
 /// Same name the justfile reads. A host:port, `[v6]:port`, or a bare port.
 pub const TRACKER_STATUS_ENV: &str = "RABBIT_TRACKER_STATUS";
 
+/// Well-known file `just up` writes so a TUI or desktop started in another
+/// terminal still finds the local glass. Relative to the process cwd (the
+/// repo root when launched via `just`).
+pub const LOCAL_STATUS_FILE: &str = ".rabbithole/looking-glass-status";
+
 /// A live discovery answer plus which source produced it.
 ///
 /// [`pick_live_listing`] is the policy: a successful empty listing is not
@@ -320,9 +325,50 @@ pub fn local_status_port_from(override_bind: Option<&str>) -> u16 {
         .unwrap_or(LOCAL_STATUS_PORT)
 }
 
-/// Local-stack status port: [`TRACKER_STATUS_ENV`] when set, else 5497.
+/// Env bind wins; then the well-known file `just up` wrote; then 5497.
+pub fn local_status_port_from_sources(env_bind: Option<&str>, file_bind: Option<&str>) -> u16 {
+    local_status_port_from(env_bind.or(file_bind))
+}
+
+/// Local-stack status port: [`TRACKER_STATUS_ENV`], then [`LOCAL_STATUS_FILE`],
+/// then 5497. Public hosts never consult this.
 pub fn local_status_port() -> u16 {
-    local_status_port_from(std::env::var(TRACKER_STATUS_ENV).ok().as_deref())
+    let env = std::env::var(TRACKER_STATUS_ENV).ok();
+    let file = read_local_status_file();
+    local_status_port_from_sources(env.as_deref(), file.as_deref())
+}
+
+/// Paths that may hold the local-stack bind: `$RABBITHOLE_DATA_DIR` first,
+/// then the repo-relative [`LOCAL_STATUS_FILE`].
+pub fn local_status_file_candidates() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(dir) = std::env::var("RABBITHOLE_DATA_DIR") {
+        if !dir.is_empty() {
+            out.push(std::path::Path::new(&dir).join(".looking-glass-status"));
+        }
+    }
+    out.push(std::path::PathBuf::from(LOCAL_STATUS_FILE));
+    out
+}
+
+/// First line of a status-bind file (`0.0.0.0:5497`).
+pub fn read_status_bind_file(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let line = text.lines().next()?.trim();
+    (!line.is_empty()).then(|| line.to_string())
+}
+
+fn read_local_status_file() -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        local_status_file_candidates()
+            .into_iter()
+            .find_map(|p| read_status_bind_file(&p))
+    }
 }
 
 /// Status port for a bare host: the local-stack port on loopback, 4655 elsewhere.
@@ -961,5 +1007,31 @@ mod tests {
             "tracker.rabbit.direct:4655",
             "a local override must not move the public glass"
         );
+    }
+
+    #[test]
+    fn a_status_file_is_the_port_when_the_env_is_unset() {
+        // just up writes .rabbithole/looking-glass-status; a TUI in another
+        // terminal must not need the env re-exported.
+        assert!(local_status_file_candidates()
+            .iter()
+            .any(|p| p.ends_with(LOCAL_STATUS_FILE)));
+        let path =
+            std::env::temp_dir().join(format!("rh-looking-glass-status-{}", std::process::id()));
+        std::fs::write(&path, "0.0.0.0:7001\n").expect("temp status file");
+        assert_eq!(
+            read_status_bind_file(&path).as_deref(),
+            Some("0.0.0.0:7001")
+        );
+        assert_eq!(
+            local_status_port_from_sources(None, read_status_bind_file(&path).as_deref()),
+            7001
+        );
+        assert_eq!(
+            local_status_port_from_sources(Some("0.0.0.0:6000"), Some("0.0.0.0:7001")),
+            6000,
+            "the env still wins"
+        );
+        let _ = std::fs::remove_file(path);
     }
 }
