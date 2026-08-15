@@ -44,7 +44,9 @@ pub fn section_icon(path: &str) -> String {
             "<path d=\"M16 6.2a3 3 0 0 1 0 5.6M17.5 14.4a5.5 5.5 0 0 1 3 5.1\"/>"
         ),
         // A folder with a tab.
-        "/files" => "<path d=\"M3.5 18.5v-12h5.2l2 2.2h9.8v9.8a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1z\"/>",
+        "/files" => {
+            "<path d=\"M3.5 18.5v-12h5.2l2 2.2h9.8v9.8a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1z\"/>"
+        }
         // A transmitter: mast plus two broadcast arcs.
         "/radio" => concat!(
             "<circle cx=\"12\" cy=\"12\" r=\"2.2\"/>",
@@ -236,9 +238,7 @@ pub fn mode_icon(choice: crate::theme_css::ModeChoice) -> String {
             "<path d=\"M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2\"/>",
             "<path d=\"M5.4 5.4l1.6 1.6M17 17l1.6 1.6M18.6 5.4L17 7M7 17l-1.6 1.6\"/>"
         ),
-        ModeChoice::Dark => {
-            "<path d=\"M20 14.2A8.4 8.4 0 0 1 9.8 4a8.4 8.4 0 1 0 10.2 10.2z\"/>"
-        }
+        ModeChoice::Dark => "<path d=\"M20 14.2A8.4 8.4 0 0 1 9.8 4a8.4 8.4 0 1 0 10.2 10.2z\"/>",
         // Half light, half dark: the disc is outlined, and one side filled.
         ModeChoice::System => concat!(
             "<circle cx=\"12\" cy=\"12\" r=\"8.4\"/>",
@@ -303,7 +303,10 @@ mod tests {
         let mut seen: Vec<String> = Vec::new();
         for p in PATHS {
             let svg = section_icon(p);
-            assert!(!seen.contains(&svg), "{p} duplicates another section's icon");
+            assert!(
+                !seen.contains(&svg),
+                "{p} duplicates another section's icon"
+            );
             seen.push(svg);
         }
     }
@@ -317,7 +320,10 @@ mod tests {
             assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"), "{name}");
             assert!(svg.contains("stroke=\"currentColor\""), "{name}");
             assert!(svg.contains("aria-hidden=\"true\""), "{name}");
-            assert!(svg.contains("viewBox=\"0 0 24 24\""), "{name} shares the grid");
+            assert!(
+                svg.contains("viewBox=\"0 0 24 24\""),
+                "{name} shares the grid"
+            );
             assert!(!svg.contains("http") && !svg.contains("<image"), "{name}");
             assert!(!seen.contains(&svg), "{name} duplicates another rail icon");
             seen.push(svg);
@@ -347,7 +353,11 @@ mod tests {
         // The states must actually differ, or the toggle shows nothing.
         assert_ne!(bell_icon(true), bell_icon(false), "muted adds the slash");
         assert!(bell_icon(false).len() > bell_icon(true).len());
-        assert_ne!(file_icon(true), file_icon(false), "folder and document differ");
+        assert_ne!(
+            file_icon(true),
+            file_icon(false),
+            "folder and document differ"
+        );
     }
 
     #[test]

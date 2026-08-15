@@ -503,10 +503,19 @@ mod tests {
 
     #[test]
     fn filter_matches_name_or_uploader_case_insensitively() {
-        assert!(node_matches("Cool Demo.zip", "rabbit", ""), "empty query matches all");
+        assert!(
+            node_matches("Cool Demo.zip", "rabbit", ""),
+            "empty query matches all"
+        );
         assert!(node_matches("Cool Demo.zip", "rabbit", "demo"));
-        assert!(node_matches("Cool Demo.zip", "rabbit", "DEMO"), "case-insensitive");
-        assert!(node_matches("Cool Demo.zip", "rabbit", "  demo "), "query is trimmed");
+        assert!(
+            node_matches("Cool Demo.zip", "rabbit", "DEMO"),
+            "case-insensitive"
+        );
+        assert!(
+            node_matches("Cool Demo.zip", "rabbit", "  demo "),
+            "query is trimmed"
+        );
         // You often squint for who uploaded it, not just the filename.
         assert!(node_matches("Cool Demo.zip", "rabbit", "rabb"));
         assert!(!node_matches("Cool Demo.zip", "rabbit", "mp3"));
@@ -573,7 +582,10 @@ mod tests {
         assert_eq!(s.transfers.len(), 1);
         assert_eq!(s.transfers[0].id, 42);
         assert_eq!(s.transfers[0].status, TransferStatus::Failed);
-        assert_eq!(s.transfers[0].error.as_deref(), Some("no peer has this file"));
+        assert_eq!(
+            s.transfers[0].error.as_deref(),
+            Some("no peer has this file")
+        );
     }
 
     #[test]

@@ -2760,6 +2760,7 @@ dependencies = [
  "crossterm",
  "looking-glass",
  "rabbithole-core",
+ "rabbithole-directory",
  "rabbithole-proto",
  "ratatui",
  "tokio",
@@ -2810,6 +2811,17 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "rabbithole-directory"
+version = "0.191.0"
+dependencies = [
+ "rustls",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots 1.0.8",
 ]
 
 [[package]]
@@ -3094,6 +3106,7 @@ dependencies = [
  "png",
  "rabbithole-art",
  "rabbithole-core",
+ "rabbithole-directory",
  "rabbithole-proto",
  "serde",
  "serde_json",

@@ -1,0 +1,30 @@
+[package]
+name = "rabbithole-directory"
+version.workspace = true
+edition.workspace = true
+description = "Looking Glass discovery client: read rabbithole.directory, fall back to a tracker"
+
+[dependencies]
+# The pure half deliberately has NO dependencies: it is the same code in the
+# wasm SPA and in the terminal clients, and a discovery parser that only
+# compiles on one of them is a discovery parser that gets forked.
+tokio = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+
+[features]
+default = []
+# Native transport: HTTPS to the directory and TCP to a tracker's status port.
+# Off for wasm, which has neither and uses the browser's own fetch.
+native = [
+    "dep:tokio",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rustls-pki-types",
+    "dep:webpki-roots",
+]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

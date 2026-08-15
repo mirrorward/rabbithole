@@ -170,8 +170,16 @@ mod tests {
     fn forgetting_a_burrow_drops_it_and_its_token() {
         // Leaving a burrow must not leave a resume credential behind.
         let list = vec![
-            RecentBurrow { endpoint: "ws://a".into(), handle: "me".into(), token: Some("t".into()) },
-            RecentBurrow { endpoint: "ws://b".into(), handle: "me".into(), token: None },
+            RecentBurrow {
+                endpoint: "ws://a".into(),
+                handle: "me".into(),
+                token: Some("t".into()),
+            },
+            RecentBurrow {
+                endpoint: "ws://b".into(),
+                handle: "me".into(),
+                token: None,
+            },
         ];
         let after = forget_endpoint(list, "ws://a");
         assert_eq!(after.len(), 1);

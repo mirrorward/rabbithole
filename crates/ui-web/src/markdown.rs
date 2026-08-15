@@ -211,7 +211,10 @@ fn link_at(b: &[char], i: usize) -> Option<(String, String, usize)> {
 
 /// Does a bare URL start at `i`?
 fn starts_url(b: &[char], i: usize) -> bool {
-    let rest: String = b[i..b.len().min(i + 8)].iter().collect::<String>().to_ascii_lowercase();
+    let rest: String = b[i..b.len().min(i + 8)]
+        .iter()
+        .collect::<String>()
+        .to_ascii_lowercase();
     rest.starts_with("http://") || rest.starts_with("https://")
 }
 
@@ -259,11 +262,11 @@ pub fn to_html(src: &str) -> String {
                 i += 1;
             }
             i += 1; // consume the closing fence (or run off the end)
-            // The language becomes a class name, so take only its leading word
-            // and cap it. Filtering non-word characters out of the whole info
-            // string instead keeps every stray letter after them, which turned
-            // `rust" onload="alert(1)` into the class `lang-rustonloadalert1` —
-            // harmless, since the quotes were gone, but nonsense in the DOM.
+                    // The language becomes a class name, so take only its leading word
+                    // and cap it. Filtering non-word characters out of the whole info
+                    // string instead keeps every stray letter after them, which turned
+                    // `rust" onload="alert(1)` into the class `lang-rustonloadalert1` —
+                    // harmless, since the quotes were gone, but nonsense in the DOM.
             let safe: String = lang
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '+')
@@ -317,7 +320,10 @@ pub fn to_html(src: &str) -> String {
                     None => break,
                 }
             }
-            out.push_str(&format!("<blockquote>{}</blockquote>", inline(&body.join("<br/>"))));
+            out.push_str(&format!(
+                "<blockquote>{}</blockquote>",
+                inline(&body.join("<br/>"))
+            ));
             continue;
         }
 
@@ -368,7 +374,10 @@ pub fn inline_to_html(src: &str) -> String {
 /// `#`-count for a heading line, if it is one.
 fn heading_level(line: &str) -> Option<usize> {
     let n = line.chars().take_while(|c| *c == '#').count();
-    (1..=6).contains(&n).then_some(n).filter(|n| line.chars().nth(*n) == Some(' '))
+    (1..=6)
+        .contains(&n)
+        .then_some(n)
+        .filter(|n| line.chars().nth(*n) == Some(' '))
 }
 
 /// The list tag and item text for a list line, if it is one.
@@ -396,8 +405,21 @@ mod tests {
     /// must have come from the input, which is the one thing this module exists
     /// to prevent.
     const ALLOWED: [&str; 15] = [
-        "p", "br", "strong", "em", "del", "code", "pre", "a", "h1", "h2", "h3", "blockquote",
-        "ul", "ol", "li",
+        "p",
+        "br",
+        "strong",
+        "em",
+        "del",
+        "code",
+        "pre",
+        "a",
+        "h1",
+        "h2",
+        "h3",
+        "blockquote",
+        "ul",
+        "ol",
+        "li",
     ];
 
     /// Tag names appearing in `html`, opening and closing.
@@ -440,7 +462,10 @@ mod tests {
                 // Asserting on substrings like "onerror" instead would fail on
                 // an *escaped* payload, where that word is harmless text.
                 for t in tags(&html) {
-                    assert!(ALLOWED.contains(&t.as_str()), "{attack} produced <{t}>: {html}");
+                    assert!(
+                        ALLOWED.contains(&t.as_str()),
+                        "{attack} produced <{t}>: {html}"
+                    );
                 }
                 // The text is still shown — escaped, not swallowed.
                 assert!(html.contains("&lt;"), "{attack} => {html}");
@@ -456,7 +481,10 @@ mod tests {
                    > q\n\n```rust\nfn main(){}\n```\n\n---\n\nhttps://x.test/bare";
         let html = to_html(doc);
         for t in tags(&html) {
-            assert!(ALLOWED.contains(&t.as_str()) || t == "hr", "unexpected <{t}>: {html}");
+            assert!(
+                ALLOWED.contains(&t.as_str()) || t == "hr",
+                "unexpected <{t}>: {html}"
+            );
         }
         for expect in [
             "<h1>",
@@ -493,7 +521,10 @@ mod tests {
         }
         for good in ["http://x.test/a", "https://x.test/a", "mailto:a@x.test"] {
             let html = inline_to_html(&format!("[click]({good})"));
-            assert!(html.contains(&format!("href=\"{good}\"")), "{good} => {html}");
+            assert!(
+                html.contains(&format!("href=\"{good}\"")),
+                "{good} => {html}"
+            );
             // External links must not hand the opener over.
             assert!(html.contains("rel=\"noopener noreferrer nofollow\""));
         }
@@ -529,7 +560,10 @@ mod tests {
     fn code_spans_are_literal() {
         // The single most common way a naive renderer mangles a message.
         assert_eq!(inline_to_html("`a * b * c`"), "<code>a * b * c</code>");
-        assert_eq!(inline_to_html("`**not bold**`"), "<code>**not bold**</code>");
+        assert_eq!(
+            inline_to_html("`**not bold**`"),
+            "<code>**not bold**</code>"
+        );
         // …and markup inside a code span is still escaped.
         let html = inline_to_html("`<script>`");
         assert_eq!(html, "<code>&lt;script&gt;</code>");
@@ -565,7 +599,10 @@ mod tests {
         // as typed. (The bare URL inside it still autolinks — that rule doesn't
         // stop applying just because the surrounding brackets went nowhere.)
         let html = inline_to_html("[a](https://x.test/(");
-        assert!(html.starts_with("[a]("), "the literal text survives: {html}");
+        assert!(
+            html.starts_with("[a]("),
+            "the literal text survives: {html}"
+        );
         assert!(!html.contains("</a>a"), "no truncated link debris: {html}");
     }
 
@@ -601,7 +638,10 @@ mod tests {
     fn an_unclosed_fence_still_terminates() {
         // Otherwise a stray ``` while typing would hang the renderer.
         let html = to_html("```\nstuck");
-        assert!(html.contains("stuck") && html.starts_with("<pre>"), "{html}");
+        assert!(
+            html.contains("stuck") && html.starts_with("<pre>"),
+            "{html}"
+        );
     }
 
     #[test]
@@ -609,7 +649,10 @@ mod tests {
         let html = to_html("- a\n\nafter");
         assert_eq!(html, "<ul><li>a</li></ul><p>after</p>");
         let html = to_html("- a\n# H");
-        assert_eq!(html, "<ul><li>a</li></ul><h1>H</h1>", "a heading ends the list");
+        assert_eq!(
+            html, "<ul><li>a</li></ul><h1>H</h1>",
+            "a heading ends the list"
+        );
         let html = to_html("> a\n> b\n\nafter");
         assert_eq!(html, "<blockquote>a<br/>b</blockquote><p>after</p>");
     }

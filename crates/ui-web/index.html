@@ -18,20 +18,22 @@
     <!-- Trunk: compile this crate's bin to wasm + JS glue (content-hashed
          filenames) and inject the loader here. -->
     <!--
-      data-wasm-opt-params: the wasm32 target enables a set of post-MVP
-      features by default (bulk memory, non-trapping float→int, sign
-      extension, multivalue, reference types, mutable globals), and wasm-opt
-      validates against the MVP unless each is named. So `trunk build
-      --release` failed outright while debug builds — which skip wasm-opt —
-      were fine, meaning release SPA builds were impossible. That is exactly
-      what packaging and deployment need, so the features are listed here
-      rather than reaching for --enable-all, which would also switch on
-      threads and SIMD that this bundle does not use.
+      data-wasm-opt="z": size-first Binaryen pass on release builds (debug
+      skips wasm-opt). data-wasm-opt-params: the wasm32 target enables a set
+      of post-MVP features by default (bulk memory, non-trapping float→int,
+      sign extension, multivalue, reference types, mutable globals), and
+      wasm-opt validates against the MVP unless each is named. So `trunk
+      build --release` failed outright while debug builds were fine, meaning
+      release SPA builds were impossible. That is exactly what packaging and
+      deployment need, so the features are listed here rather than reaching
+      for --enable-all, which would also switch on threads and SIMD that
+      this bundle does not use.
     -->
     <link
       data-trunk
       rel="rust"
       data-bin="rabbithole-ui-web"
+      data-wasm-opt="z"
       data-wasm-opt-params="--enable-bulk-memory-opt --enable-nontrapping-float-to-int --enable-sign-ext --enable-multivalue --enable-reference-types --enable-mutable-globals"
     />
 

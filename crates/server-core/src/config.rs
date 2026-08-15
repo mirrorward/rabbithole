@@ -36,6 +36,12 @@ pub struct FederationPeer {
     pub fingerprint: String,
 }
 
+/// The standard Looking Glass coordinator, and the default entry in
+/// [`ServerConfig::announce_trackers`]. Well-known so a fresh burrow is
+/// discoverable without configuration, and just a default so a warren can run
+/// its own coordinator instead.
+pub const DEFAULT_TRACKER: &str = "tracker.rabbit.direct";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
@@ -49,10 +55,11 @@ pub struct ServerConfig {
     /// Whether guests may sign in.
     pub guest_enabled: bool,
     /// Public hostname advertised in the signed `.well-known/rabbithole/server`
-    /// descriptor (and later tracker registrations), e.g.
-    /// `"rabbithole.example"`. Empty = derive host-based addresses from
-    /// concrete bind IPs and omit them for wildcard (`0.0.0.0`/`::`) binds.
-    /// TOML-only (edited on disk, not via `ctl config set`), like `ftn_areas`.
+    /// descriptor and Looking Glass announces, e.g. `"rabbithole.example"`.
+    /// Empty = derive host-based addresses from concrete bind IPs and omit
+    /// them for wildcard (`0.0.0.0`/`::`) binds. Live: `.well-known` and the
+    /// announce loop re-read it, so a `ctl config set` takes effect without
+    /// a restart. Announcing stays inert while this is empty.
     pub advertise_host: String,
     /// QUIC listener (primary transport).
     pub quic_addr: SocketAddr,
@@ -72,7 +79,8 @@ pub struct ServerConfig {
     pub ws_allowed_origins: Vec<String>,
     /// Public WebSocket URL advertised in discovery, normally the `wss://`
     /// address of a TLS reverse proxy. Empty means no public WS advertisement.
-    /// TOML-only; it is deliberately independent of the backend bind address.
+    /// Deliberately independent of the backend bind address. Live: announce
+    /// and `.well-known` re-read it.
     pub ws_public_url: String,
     /// Where the database, blobs, keys, and ctl socket live.
     pub data_dir: PathBuf,
@@ -309,6 +317,39 @@ pub struct ServerConfig {
     /// Requested lifetime, in seconds, for each mapping. NAT-PMP/PCP leases
     /// are short-lived, so the mapper refreshes at roughly half this interval.
     pub portmap_lifetime_secs: u32,
+    /// Announce this burrow to the configured Looking Glass trackers so it can
+    /// be found by people who don't already know its address.
+    ///
+    /// **On by default**, because a burrow nobody can find is a burrow nobody
+    /// joins. It is nonetheless inert until `advertise_host` is set: announcing
+    /// a burrow whose address we can't state would list something unreachable.
+    ///
+    /// Turning this off is a real opt-out, not just silence. RabbitHole
+    /// discovery is gossip — a visitor who finds your burrow can share it
+    /// onward — so the signed `.well-known` descriptor carries a `noindex`
+    /// feature tag while this is false, and a client that would pass your
+    /// burrow along drops it instead. The wish not to be listed travels with
+    /// your signature rather than depending on everyone who saw you.
+    pub announce_enabled: bool,
+    /// Looking Glass trackers to announce to, as `host`, `host:port`, or a full
+    /// `https://…` base URL. The standard coordinator is the default; add more
+    /// to be listed in several places at once. Serialized as a TOML array and
+    /// edited on disk (like `ftn_areas`), not via `ctl config set`.
+    pub announce_trackers: Vec<String>,
+    /// Seconds between announces. A tracker marks a burrow offline after twice
+    /// this without a fresh one, so it is also the staleness budget. The glass
+    /// protocol accepts 30–3600.
+    pub announce_ttl_secs: u32,
+    /// DNS label to claim on the tracker (`<slug>.glass.rabbit.direct`). Empty
+    /// = let the tracker derive it from the announced name. Live: the next
+    /// announce round picks it up.
+    pub announce_slug: String,
+    /// Operator handle in the announced `handle@host` name, e.g. the `alice` of
+    /// `alice@wonderland`. Empty = derived from the burrow name. Live.
+    pub announce_sysop: String,
+    /// One-line description for the tracker and directory listing (≤240 chars).
+    /// Empty = the welcome ticker, then nothing. Live.
+    pub announce_description: String,
     /// Master switch for token-bucket rate limiting (Wave 13). On by default
     /// with generous per-class budgets; see the `ratelimit_*` knobs below.
     pub ratelimit_enabled: bool,
@@ -468,6 +509,12 @@ impl Default for ServerConfig {
             portmap_enabled: false,
             portmap_gateway: String::new(),
             portmap_lifetime_secs: 7200,
+            announce_enabled: true,
+            announce_trackers: vec![DEFAULT_TRACKER.to_string()],
+            announce_ttl_secs: 120,
+            announce_slug: String::new(),
+            announce_sysop: String::new(),
+            announce_description: String::new(),
             ratelimit_enabled: true,
             ratelimit_conn_per_min: 30,
             ratelimit_conn_burst: 10,
@@ -573,6 +620,13 @@ impl ServerConfig {
             "ws_allow_insecure_remote" => self.ws_allow_insecure_remote.to_string(),
             "ws_allowed_origins" => self.ws_allowed_origins.join(","),
             "ws_public_url" => self.ws_public_url.clone(),
+            "advertise_host" => self.advertise_host.clone(),
+            "announce_enabled" => self.announce_enabled.to_string(),
+            "announce_trackers" => self.announce_trackers.join(","),
+            "announce_ttl_secs" => self.announce_ttl_secs.to_string(),
+            "announce_slug" => self.announce_slug.clone(),
+            "announce_sysop" => self.announce_sysop.clone(),
+            "announce_description" => self.announce_description.clone(),
             "data_dir" => self.data_dir.display().to_string(),
             "session_ttl_secs" => self.session_ttl_secs.to_string(),
             "chat_max_len" => self.chat_max_len.to_string(),
@@ -1031,6 +1085,38 @@ impl ServerConfig {
                 self.portmap_lifetime_secs = parse_u32(key, value)?;
                 Ok(false)
             }
+            // Discovery advertisement. `.well-known` is built per request and
+            // the announce loop re-reads every round, so these apply live —
+            // including `announce_enabled false`, which also stamps `noindex`
+            // into the next signed descriptor.
+            "advertise_host" => {
+                self.advertise_host = value.trim().to_string();
+                Ok(true)
+            }
+            "ws_public_url" => {
+                self.ws_public_url = value.trim().to_string();
+                Ok(true)
+            }
+            "announce_enabled" => {
+                self.announce_enabled = parse_bool(key, value)?;
+                Ok(true)
+            }
+            "announce_ttl_secs" => {
+                self.announce_ttl_secs = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "announce_slug" => {
+                self.announce_slug = value.trim().to_string();
+                Ok(true)
+            }
+            "announce_sysop" => {
+                self.announce_sysop = value.trim().to_string();
+                Ok(true)
+            }
+            "announce_description" => {
+                self.announce_description = value.to_string();
+                Ok(true)
+            }
             // Rate limiting applies live: every check re-reads the config,
             // so a `ctl config set` takes effect on the next request.
             "ratelimit_enabled" => {
@@ -1477,5 +1563,62 @@ mod tests {
             live.set_key("nope", "x"),
             Err(ConfigError::UnknownKey(_))
         ));
+    }
+
+    #[test]
+    fn announce_keys_apply_live_so_a_burrow_can_become_discoverable() {
+        // The announce loop and `.well-known` re-read config every time. If
+        // these keys were unknown to `ctl config set`, the documented
+        // "turning announce off stamps noindex without a restart" path
+        // would be a lie — and a fresh burrow couldn't name its host
+        // without editing TOML.
+        let live = LiveConfig::new(ServerConfig::default());
+        assert_eq!(live.get_key("announce_enabled").unwrap(), "true");
+        assert_eq!(live.get_key("announce_trackers").unwrap(), DEFAULT_TRACKER);
+        assert_eq!(live.get_key("advertise_host").unwrap(), "");
+        assert!(live
+            .set_key("advertise_host", " wonderland.example ")
+            .unwrap());
+        assert_eq!(
+            live.get_key("advertise_host").unwrap(),
+            "wonderland.example"
+        );
+        assert!(live.set_key("announce_sysop", "alice").unwrap());
+        assert!(live
+            .set_key("announce_description", "Down the rabbit hole.")
+            .unwrap());
+        assert!(live.set_key("announce_ttl_secs", "60").unwrap());
+        assert!(live
+            .set_key("ws_public_url", "wss://wonderland.example/rhp")
+            .unwrap());
+        assert!(live.set_key("announce_enabled", "off").unwrap());
+        assert_eq!(live.get_key("announce_enabled").unwrap(), "false");
+        assert_eq!(live.get_key("announce_sysop").unwrap(), "alice");
+        assert_eq!(
+            live.get_key("ws_public_url").unwrap(),
+            "wss://wonderland.example/rhp"
+        );
+        assert!(matches!(
+            live.set_key("announce_enabled", "maybe"),
+            Err(ConfigError::BadValue { .. })
+        ));
+        assert!(matches!(
+            live.set_key("announce_trackers", "other.example"),
+            Err(ConfigError::UnknownKey(_))
+        ));
+    }
+
+    #[test]
+    fn the_flagship_sample_still_loads() {
+        // The sample claims every key is real (`deny_unknown_fields`). A new
+        // announce key that isn't in Default, or a typo in the comments-as-
+        // keys, would refuse to boot a documented config.
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/flagship-burrow.toml");
+        let text = std::fs::read_to_string(&path).expect("flagship sample");
+        let cfg: ServerConfig = toml::from_str(&text).expect("every key in the sample is real");
+        assert_eq!(cfg.advertise_host, "rabbithole.example");
+        assert!(cfg.announce_enabled, "announce stays on in the sample");
+        assert_eq!(cfg.announce_trackers, vec![DEFAULT_TRACKER.to_string()]);
     }
 }

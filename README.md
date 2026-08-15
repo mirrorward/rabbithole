@@ -57,8 +57,9 @@ surface.
   radio player — an installable **PWA** with an offline app-shell, served by
   `burrow --http`.
 - **TUI clients** (`rabbit-tui`): chat/who, a radio now-playing panel with
-  external-player handoff, and a **Looking Glass** server browser
-  (INDEX/CATEGORIES/HEALTH with an uptime sparkline).
+  external-player handoff, and a **Looking Glass** server browser that
+  opens on `rabbithole.directory` (INDEX/CATEGORIES/HEALTH on a named
+  tracker, with an uptime sparkline).
 - **`rabbit` CLI**: login (password/guest, QUIC or WS), chat, boards, files,
   swarm, transfer queue, wishing well, `--json` mode.
 - **`looking-glass` tracker**: signed self-certifying descriptors, UDP gossip
@@ -110,7 +111,8 @@ Native transports and rate limiting are the only things on out of the box;
 | Radio DJ source + `updinfo` | 8001 (`radio_source_addr`) | `radio_source_enabled` | off |
 | RSS/Atom syndication | — (outbound fetcher) | `syndication_enabled` | off |
 | QWK/QWKE offline mail | — (telnet `[M]` + `ctl`) | `qwk_enabled` | off |
-| Looking Glass tracker | 5498 TCP / 5499 UDP + 4656 UDP gossip | (`looking-glass` daemon) | — |
+| Looking Glass tracker | 5498 TCP / 5499 UDP + 4656 UDP gossip; status INDEX on 4655 | (`looking-glass` daemon) | — |
+| Looking Glass announce | outbound HTTPS `POST /api/announce` | `announce_enabled` (needs `advertise_host`) | **on**, inert until a public host is set |
 
 Federation also requires a restart-only `federation_origin`. This immutable
 lowercase namespace is bound to the server key in protocol-v2 handshakes and

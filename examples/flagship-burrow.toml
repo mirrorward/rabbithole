@@ -48,10 +48,12 @@ uploads. Moderators' decisions are final. Have fun.
 # guest_enabled = true
 
 # Public hostname advertised in the signed /.well-known/rabbithole/server
-# discovery descriptor (served when http_enabled). Set this to your real
-# domain so peers, trackers, and clients get usable scheme://host:port
-# endpoints; empty = derive from concrete bind IPs, and omit host-based
-# addresses for wildcard (0.0.0.0) binds. TOML-only (restart to change).
+# discovery descriptor (served when http_enabled) and in Looking Glass
+# announces. Set this to your real domain so peers, trackers, and clients
+# get usable scheme://host:port endpoints; empty = derive from concrete
+# bind IPs, and omit host-based addresses for wildcard (0.0.0.0) binds.
+# Live: .well-known and the announce loop re-read it. Announcing stays
+# inert while this is empty.
 advertise_host = "rabbithole.example"
 
 # Registration policy: "open" | "invite" | "closed". A public flagship that
@@ -90,7 +92,7 @@ advertise_host = "rabbithole.example"
 # Exact browser/app origins accepted by the handshake (TOML-only). Add the
 # Tauri values only when packaged desktop/mobile clients are supported.
 # ws_allowed_origins = ["https://bbs.example", "tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]
-# External discovery URL; never derived from the backend bind (TOML-only).
+# External discovery URL; never derived from the backend bind. (live)
 # ws_public_url = "wss://bbs.example/rhp"
 # Break-glass only: permits a non-loopback plaintext bind. (restart)
 # ws_allow_insecure_remote = false
@@ -320,6 +322,25 @@ radio_source_password = "CHANGE-ME-to-a-strong-source-password"
 
 # syndication_enabled = false
 # syndication_poll_secs = 1800         # base interval; backoff/TTL stretch it
+
+
+# -----------------------------------------------------------------------------
+# Looking Glass announce  (live; inert until advertise_host is set)
+# -----------------------------------------------------------------------------
+# Tell public coordinators this burrow exists so people who don't already
+# know its address can find it. On by default. Turning it off is a real
+# opt-out: the signed .well-known descriptor gains a `noindex` feature tag,
+# and clients that would pass you along drop you instead.
+#
+# announce_trackers is TOML-only (an array). Everything else is live via
+# `ctl config set`.
+
+# announce_enabled = true
+# announce_ttl_secs = 120              # 30–3600; the glass marks you offline after 2×
+# announce_sysop = ""                  # handle in alice@host; empty = slug of name
+# announce_description = ""            # ≤240 chars; empty = welcome_ticker
+# announce_slug = ""                   # DNS label on the glass; empty = derived
+# announce_trackers = ["tracker.rabbit.direct"]
 
 
 # -----------------------------------------------------------------------------

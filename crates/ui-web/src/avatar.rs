@@ -62,7 +62,8 @@ const GLYPHS: [(&str, [&str; 8]); 16] = [
     (
         "owl",
         [
-            ".#....#.", ".######.", "#**##**#", "#*o##o*#", "##o##o##", "#.####.#", ".######.", "..#..#..",
+            ".#....#.", ".######.", "#**##**#", "#*o##o*#", "##o##o##", "#.####.#", ".######.",
+            "..#..#..",
         ],
     ),
     (
@@ -82,25 +83,29 @@ const GLYPHS: [(&str, [&str; 8]); 16] = [
     (
         "bee",
         [
-            "..o..o..", "*.####.*", "**####**", "..oooo..", "..####..", "..oooo..", "..####..", "...##...",
+            "..o..o..", "*.####.*", "**####**", "..oooo..", "..####..", "..oooo..", "..####..",
+            "...##...",
         ],
     ),
     (
         "bird",
         [
-            "........", "##....##", ".##..##.", "..####..", "...##...", "........", "........", "........",
+            "........", "##....##", ".##..##.", "..####..", "...##...", "........", "........",
+            "........",
         ],
     ),
     (
         "mushroom",
         [
-            "..####..", ".#*##*#.", "########", "#*####*#", ".######.", "...##...", "...##...", "..####..",
+            "..####..", ".#*##*#.", "########", "#*####*#", ".######.", "...##...", "...##...",
+            "..####..",
         ],
     ),
     (
         "heart",
         [
-            ".##..##.", "########", "########", "########", ".######.", "..####..", "...##...", "........",
+            ".##..##.", "########", "########", "########", ".######.", "..####..", "...##...",
+            "........",
         ],
     ),
     (
@@ -113,7 +118,8 @@ const GLYPHS: [(&str, [&str; 8]); 16] = [
     (
         "star",
         [
-            "...##...", "...##...", "..####..", "########", "########", "..####..", "...##...", "...##...",
+            "...##...", "...##...", "..####..", "########", "########", "..####..", "...##...",
+            "...##...",
         ],
     ),
     (
@@ -133,7 +139,8 @@ const GLYPHS: [(&str, [&str; 8]); 16] = [
     (
         "crown",
         [
-            "........", "#..##..#", "##.##.##", "########", "########", "#*#**#*#", "########", "........",
+            "........", "#..##..#", "##.##.##", "########", "########", "#*#**#*#", "########",
+            "........",
         ],
     ),
     (
@@ -317,7 +324,11 @@ mod tests {
         for (name, rows) in GLYPHS {
             assert_eq!(rows.len(), 8, "{name} is not 8 rows");
             for (y, row) in rows.iter().enumerate() {
-                assert_eq!(row.chars().count(), 8, "{name} row {y} is not 8 cells: {row:?}");
+                assert_eq!(
+                    row.chars().count(),
+                    8,
+                    "{name} row {y} is not 8 cells: {row:?}"
+                );
                 for c in row.chars() {
                     assert!(
                         matches!(c, '.' | '#' | 'o' | '*'),
@@ -334,7 +345,11 @@ mod tests {
         // a duplicate claims two people differ when they don't.
         let mut seen: Vec<&[&str; 8]> = Vec::new();
         for (name, rows) in &GLYPHS {
-            let filled = rows.iter().flat_map(|r| r.chars()).filter(|c| *c != '.').count();
+            let filled = rows
+                .iter()
+                .flat_map(|r| r.chars())
+                .filter(|c| *c != '.')
+                .count();
             assert!(filled > 8, "{name} is nearly blank ({filled} cells)");
             assert!(filled < 60, "{name} is nearly solid ({filled} cells)");
             assert!(!seen.contains(&rows), "{name} duplicates another sprite");
@@ -372,8 +387,14 @@ mod tests {
             glyphs[m.glyph] += 1;
             colors[m.color] += 1;
         }
-        assert!(glyphs.iter().all(|n| *n > 0), "some sprite is never chosen: {glyphs:?}");
-        assert!(colors.iter().all(|n| *n > 0), "some colour is never chosen: {colors:?}");
+        assert!(
+            glyphs.iter().all(|n| *n > 0),
+            "some sprite is never chosen: {glyphs:?}"
+        );
+        assert!(
+            colors.iter().all(|n| *n > 0),
+            "some colour is never chosen: {colors:?}"
+        );
     }
 
     #[test]
@@ -382,15 +403,25 @@ mod tests {
         // else taking your handle elsewhere doesn't get it.
         assert_eq!(seed_for(Some("ABCD"), "alice"), "abcd");
         assert_eq!(seed_for(None, "Alice"), "alice");
-        assert_eq!(seed_for(Some("  "), "alice"), "alice", "a blank key is no key");
+        assert_eq!(
+            seed_for(Some("  "), "alice"),
+            "alice",
+            "a blank key is no key"
+        );
     }
 
     #[test]
     fn the_svg_is_self_contained_and_silent_to_screen_readers() {
         let svg = mark_svg("alice", 28);
         assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"));
-        assert!(!svg.contains("http") && !svg.contains("<image"), "reaches off-page");
-        assert!(svg.contains("aria-hidden=\"true\""), "the name beside it is the label");
+        assert!(
+            !svg.contains("http") && !svg.contains("<image"),
+            "reaches off-page"
+        );
+        assert!(
+            svg.contains("aria-hidden=\"true\""),
+            "the name beside it is the label"
+        );
         assert!(svg.contains("width=\"28\" height=\"28\""));
         assert!(svg.contains("crispEdges"), "8x8 art must not be blurred");
     }

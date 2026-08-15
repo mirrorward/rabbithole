@@ -83,8 +83,9 @@ mod browser {
         let name = file.name();
         let size = file.size() as u64;
         if let Err(msg) = super::check_upload(&name, size) {
-            app.toasts
-                .update(|q| { q.push(crate::toasts::ToastKind::Warn, msg); });
+            app.toasts.update(|q| {
+                q.push(crate::toasts::ToastKind::Warn, msg);
+            });
             return;
         }
         spawn_local(async move {
@@ -121,7 +122,10 @@ mod tests {
 
         let too_big = check_upload("huge.iso", MAX_INLINE_UPLOAD + 1).unwrap_err();
         assert!(too_big.contains("huge.iso"), "names the file: {too_big}");
-        assert!(too_big.contains("limited to"), "explains the limit: {too_big}");
+        assert!(
+            too_big.contains("limited to"),
+            "explains the limit: {too_big}"
+        );
 
         assert!(check_upload("empty.txt", 0).unwrap_err().contains("empty"));
         assert!(check_upload("   ", 10).unwrap_err().contains("no name"));

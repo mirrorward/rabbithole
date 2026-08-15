@@ -40,6 +40,52 @@ use tokio::net::TcpStream;
 /// Environment variable holding the default tracker address.
 pub const TRACKER_ENV: &str = "RABBIT_TRACKER";
 
+/// Ask the wide sources who is out there: `rabbithole.directory` over HTTPS,
+/// falling back to the standard Looking Glass when it can't be reached.
+///
+/// This is what the browser opens on. Pointing it at a specific tracker
+/// (`a`, or `$RABBIT_TRACKER`) switches to that coordinator's `INDEX` instead,
+/// with no fallback — asking for a particular tracker is a choice, and quietly
+/// answering from somewhere else would be a different answer.
+///
+/// Returns the rows plus which source answered and, when the fallback was used,
+/// why — because "the directory is down" and "there is nobody out there" look
+/// identical in a list otherwise.
+pub async fn fetch_wide_directory() -> Result<(Vec<IndexEntry>, String, Option<String>), String> {
+    // A terminal client speaks QUIC as well as WebSocket, so it keeps the
+    // rows a browser has to skip.
+    let listing = rabbithole_directory::fetch::discover(None, &["ws", "quic"]).await?;
+    let rows: Vec<IndexEntry> = listing.servers.iter().map(directory_row).collect();
+    Ok((
+        rows,
+        listing.source.label().to_string(),
+        listing.fallback_reason,
+    ))
+}
+
+/// Map a directory row onto the browser's table shape.
+///
+/// The fields the directory doesn't publish stay empty rather than being
+/// filled with defaults: `last_seen` is 0 and `signed` is false because the
+/// directory reports neither, and a `✓` this client did not verify would be
+/// exactly the badge people should be able to trust.
+fn directory_row(s: &rabbithole_directory::DirectoryServer) -> IndexEntry {
+    IndexEntry {
+        name: s.name.clone(),
+        addr: s.endpoint.clone(),
+        users: s.users_online.map(u64::from),
+        categories: s.listeners.clone(),
+        uptime_pct: s
+            .uptime_pct
+            .map(|p| format!("{:.1}", f64::from(p)))
+            .unwrap_or_else(|| "-".into()),
+        last_seen_secs: 0,
+        signed: false,
+        key_prefix: None,
+        generation: None,
+    }
+}
+
 /// The tracker's classic native status port, appended when the user types a
 /// bare host with no `:port`.
 pub const STATUS_PORT: u16 = 4655;
@@ -63,9 +109,14 @@ const MAX_RESPONSE: u64 = 512 * 1024;
 pub struct IndexEntry {
     pub name: String,
     /// `ip:port` as printed by the tracker (kept as text — it is display
-    /// data and the `HEALTH` argument, not something we dial).
+    /// data and the `HEALTH` argument, not something we dial). Directory rows
+    /// put their dialable URI here, which is also what they are known by.
     pub addr: String,
-    pub users: u64,
+    /// Members online, when the source reports it. `None` where it doesn't —
+    /// rabbithole.directory publishes uptime and listeners but no population,
+    /// and printing a confident `0` for "not reported" would be this client
+    /// inventing a fact on the directory's behalf.
+    pub users: Option<u64>,
     pub categories: Vec<String>,
     /// Observed 24 h uptime as the tracker rendered it (e.g. `"100.0"`,
     /// a percent with one decimal). Validated numeric, kept verbatim.
@@ -132,6 +183,7 @@ pub fn parse_index_line(line: &str) -> Option<IndexEntry> {
         return None;
     }
     let users: u64 = cols[2].trim().parse().ok()?;
+    let users = Some(users);
     let categories = parse_categories_field(cols[3]);
     let uptime_pct = cols[4].trim();
     // Validate numeric (the tracker prints a percent like "97.5") but keep
@@ -320,6 +372,8 @@ pub type IndexPayload = (Vec<IndexEntry>, Option<Vec<CategoryCount>>);
 #[derive(Debug)]
 pub enum Outcome {
     Index(Result<IndexPayload, String>),
+    /// The wide view: rows plus the source label and, on fallback, why.
+    Wide(Result<(Vec<IndexEntry>, String, Option<String>), String>),
     Health(Result<HealthDetail, String>),
 }
 
@@ -339,8 +393,14 @@ pub struct BrowserState {
     pub addr_input: String,
     /// Whether the address line currently captures keystrokes.
     pub editing_addr: bool,
-    /// The connected (normalized) tracker address, once committed.
+    /// The connected (normalized) tracker address, once committed. `None` =
+    /// the wide view: rabbithole.directory with the standard tracker behind it.
     pub addr: Option<String>,
+    /// Which source the current rows came from, for the pane title. "Who told
+    /// you this" is part of the answer to "who is out there".
+    pub source: Option<String>,
+    /// Why the fallback was used, when the wider source didn't answer.
+    pub fallback_note: Option<String>,
     /// `INDEX` rows exactly as served (tracker sort order preserved).
     pub rows: Vec<IndexEntry>,
     /// `CATEGORIES` rows for the filter cycle.
@@ -362,9 +422,14 @@ impl BrowserState {
     /// Fresh state; `env_addr` (from `$RABBIT_TRACKER`) prefille the address
     /// input, which starts in editing mode until an address is committed.
     pub fn new(env_addr: Option<String>) -> Self {
+        let addr_input = env_addr.map(|s| s.trim().to_string()).unwrap_or_default();
+        // With no tracker named, open on the wide view rather than an empty
+        // address prompt: "who is out there" should have an answer before the
+        // user has to know what a coordinator is.
+        let editing_addr = !addr_input.is_empty();
         Self {
-            addr_input: env_addr.map(|s| s.trim().to_string()).unwrap_or_default(),
-            editing_addr: true,
+            addr_input,
+            editing_addr,
             ..Self::default()
         }
     }
@@ -395,6 +460,23 @@ impl BrowserState {
                 self.error = None;
             }
             Outcome::Index(Err(err)) => self.error = Some(err),
+            Outcome::Wide(Ok((rows, source, fallback))) => {
+                self.rows = rows;
+                // The directory publishes no categories, so the filter row
+                // from a previous tracker session would be a lie here.
+                self.categories = Vec::new();
+                self.filter = None;
+                self.selected = self.selected.min(self.rows.len().saturating_sub(1));
+                self.health = None;
+                self.error = None;
+                self.source = Some(source);
+                self.fallback_note = fallback;
+            }
+            Outcome::Wide(Err(err)) => {
+                self.error = Some(err);
+                self.source = None;
+                self.fallback_note = None;
+            }
             Outcome::Health(Ok(detail)) => {
                 self.health = Some(detail);
                 self.error = None;
@@ -459,7 +541,10 @@ pub fn format_row(entry: &IndexEntry) -> String {
         "{:<18.18} {:<21.21} {:>5} {:>6.6} {:>5}s  {:<3} {}",
         entry.name,
         entry.addr,
-        entry.users,
+        // "-" rather than "0": the directory doesn't count people.
+        entry
+            .users
+            .map_or_else(|| "-".to_string(), |u| u.to_string()),
         entry.uptime_pct,
         entry.last_seen_secs,
         if entry.signed { "✓" } else { "-" },
@@ -528,7 +613,7 @@ mod tests {
         let row = parse_index_line(SIGNED_ROW).unwrap();
         assert_eq!(row.name, "Wonderland");
         assert_eq!(row.addr, "10.0.0.1:5500");
-        assert_eq!(row.users, 12);
+        assert_eq!(row.users, Some(12));
         assert_eq!(row.categories, vec!["chat".to_string()]);
         assert_eq!(row.uptime_pct, "100.0");
         assert_eq!(row.last_seen_secs, 0);
@@ -711,6 +796,138 @@ mod tests {
 
     fn row(name: &str) -> IndexEntry {
         parse_index_line(&format!("{name}\t10.0.0.1:5500\t1\t-\t100.0\t0\tno\t-\t-")).unwrap()
+    }
+
+    #[test]
+    fn with_no_tracker_named_the_browser_opens_on_the_wide_view() {
+        // "Who is out there" should have an answer before the user has to know
+        // what a coordinator is — so no address prompt with nothing behind it.
+        let state = BrowserState::new(None);
+        assert!(!state.editing_addr, "no empty prompt to dismiss");
+        assert!(state.addr.is_none(), "nothing named = the wide sources");
+
+        // Naming one via $RABBIT_TRACKER is still an explicit choice, and the
+        // prompt lets the user confirm or change it before dialing.
+        let state = BrowserState::new(Some(" glass.example ".into()));
+        assert!(state.editing_addr);
+        assert_eq!(state.addr_input, "glass.example");
+    }
+
+    #[test]
+    fn a_directory_listing_names_its_source_and_drops_tracker_only_state() {
+        let mut state = BrowserState::new(None);
+        // Arrive carrying a previous tracker session's categories and filter.
+        state.categories = vec![CategoryCount {
+            name: "chat".into(),
+            count: 3,
+        }];
+        state.filter = Some("chat".into());
+        let seq = state.begin();
+
+        state.apply(Fetched {
+            seq,
+            outcome: Outcome::Wide(Ok((
+                vec![row("Wonderland")],
+                "rabbithole.directory".into(),
+                None,
+            ))),
+        });
+
+        assert_eq!(state.source.as_deref(), Some("rabbithole.directory"));
+        assert_eq!(state.rows.len(), 1);
+        assert!(!state.loading);
+        // The directory publishes no categories, so keeping the tracker's
+        // would be a filter row that filters nothing.
+        assert!(state.categories.is_empty());
+        assert!(state.filter.is_none());
+    }
+
+    #[test]
+    fn falling_back_to_the_tracker_says_why() {
+        // "The directory is down" and "there is nobody out there" look
+        // identical in a list, so the reason has to survive to the pane.
+        let mut state = BrowserState::new(None);
+        let seq = state.begin();
+        state.apply(Fetched {
+            seq,
+            outcome: Outcome::Wide(Ok((
+                vec![row("Night Pool")],
+                "tracker.rabbit.direct".into(),
+                Some("connect rabbithole.directory:443: refused".into()),
+            ))),
+        });
+        assert_eq!(state.source.as_deref(), Some("tracker.rabbit.direct"));
+        assert!(state.fallback_note.unwrap().contains("refused"));
+    }
+
+    #[test]
+    fn both_sources_failing_is_an_error_with_no_stale_source_label() {
+        let mut state = BrowserState::new(None);
+        let seq = state.begin();
+        state.apply(Fetched {
+            seq,
+            outcome: Outcome::Wide(Ok((vec![row("A")], "rabbithole.directory".into(), None))),
+        });
+        let seq = state.begin();
+        state.apply(Fetched {
+            seq,
+            outcome: Outcome::Wide(Err("nothing answered".into())),
+        });
+        assert_eq!(state.error.as_deref(), Some("nothing answered"));
+        assert!(
+            state.source.is_none(),
+            "a stale label would credit a source that said nothing"
+        );
+        assert!(!state.loading);
+    }
+
+    #[test]
+    fn a_source_that_does_not_count_people_renders_a_dash_not_a_zero() {
+        // rabbithole.directory publishes uptime and listeners, not population.
+        // "0" would be this client inventing a fact on its behalf.
+        let mut entry = row("Quiet");
+        entry.users = None;
+        let line = format_row(&entry);
+        assert!(line.contains('-'), "{line}");
+        assert!(!line.contains(" 0 "), "{line}");
+
+        entry.users = Some(7);
+        assert!(format_row(&entry).contains('7'));
+    }
+
+    #[test]
+    fn a_directory_row_never_claims_a_signature_this_client_did_not_check() {
+        let mapped = directory_row(&rabbithole_directory::DirectoryServer {
+            name: "alice@wonderland".into(),
+            endpoint: "ws://wonderland.co:4654".into(),
+            description: "The flagship.".into(),
+            users_online: None,
+            listeners: vec!["quic".into(), "ws".into()],
+            uptime_pct: Some(99),
+            reachable: true,
+        });
+        assert_eq!(mapped.name, "alice@wonderland");
+        assert_eq!(mapped.addr, "ws://wonderland.co:4654");
+        assert_eq!(mapped.users, None);
+        assert_eq!(mapped.categories, vec!["quic", "ws"]);
+        assert_eq!(mapped.uptime_pct, "99.0");
+        // The ✓ means "this client verified a signed descriptor". The
+        // directory doesn't ship one, so the badge stays off.
+        assert!(!mapped.signed);
+        assert!(mapped.key_prefix.is_none());
+        assert!(selection_detail(&mapped).contains("unsigned"));
+
+        // A glass reports liveness, not a history. "-" not "0.0".
+        let glass = directory_row(&rabbithole_directory::DirectoryServer {
+            name: "chesire@woods".into(),
+            endpoint: "quic://c.example:4653".into(),
+            description: "Cryptic boards.".into(),
+            users_online: None,
+            listeners: vec!["quic".into()],
+            uptime_pct: None,
+            reachable: false,
+        });
+        assert_eq!(glass.uptime_pct, "-");
     }
 
     #[test]
@@ -908,7 +1125,7 @@ mod tests {
         let rows = parse_index(&index).expect("parse INDEX");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "Warren");
-        assert_eq!(rows[0].users, 4);
+        assert_eq!(rows[0].users, Some(4));
         assert!(!rows[0].signed);
 
         let health = query(&tracker, &format!("HEALTH {}", rows[0].addr))

@@ -89,10 +89,7 @@ pub fn clamp_max_sources(n: u32) -> u32 {
 /// one spelling wins.
 pub fn normalize_tracker(input: &str) -> Option<String> {
     let s = input.trim();
-    let s = s
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(s);
+    let s = s.split_once("://").map(|(_, rest)| rest).unwrap_or(s);
     let s = s.split(['/', '?', '#']).next().unwrap_or("").trim();
     if s.is_empty() {
         return None;
@@ -154,7 +151,10 @@ mod tests {
         let s: Settings = serde_json::from_str(old).expect("older blobs still parse");
         assert_eq!(s.trackers.len(), 1);
         assert!(!s.reconnect_on_launch);
-        assert_eq!(s.max_sources, DEFAULT_MAX_SOURCES, "new field takes its default");
+        assert_eq!(
+            s.max_sources, DEFAULT_MAX_SOURCES,
+            "new field takes its default"
+        );
     }
 
     #[test]
@@ -205,7 +205,10 @@ mod tests {
     #[test]
     fn adding_is_idempotent_and_refuses_junk() {
         let mut list = vec![Tracker::new(DEFAULT_TRACKER)];
-        assert!(!add_tracker(&mut list, "https://tracker.rabbit.direct/"), "already there");
+        assert!(
+            !add_tracker(&mut list, "https://tracker.rabbit.direct/"),
+            "already there"
+        );
         assert!(!add_tracker(&mut list, "   "), "junk");
         assert!(add_tracker(&mut list, "tracker.example"));
         assert_eq!(list.len(), 2);

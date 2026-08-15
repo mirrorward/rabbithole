@@ -124,7 +124,10 @@ mod tests {
         assert!(should_notify(false, "alice", "bob"));
         // Away, but it's your own line echoed back: not news.
         assert!(!should_notify(false, "bob", "bob"));
-        assert!(!should_notify(false, "BOB", "bob"), "handle case-insensitive");
+        assert!(
+            !should_notify(false, "BOB", "bob"),
+            "handle case-insensitive"
+        );
         // A line with no sender (system/blank) never notifies.
         assert!(!should_notify(false, "", "bob"));
     }
@@ -150,7 +153,10 @@ mod tests {
 
     #[test]
     fn title_names_the_sender_and_burrow() {
-        assert_eq!(notification_title("alice", "The Warren"), "alice · The Warren");
+        assert_eq!(
+            notification_title("alice", "The Warren"),
+            "alice · The Warren"
+        );
         // Before the burrow name is known, the sender alone is enough.
         assert_eq!(notification_title("alice", ""), "alice");
     }

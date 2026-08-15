@@ -146,9 +146,6 @@ impl App {
         self.status = None;
         self.base_edit = None;
         self.view = if self.view == view { View::Lobby } else { view };
-        if self.view == View::Browser && self.browser.addr.is_none() {
-            self.browser.editing_addr = true;
-        }
     }
 }
 
@@ -336,6 +333,13 @@ async fn handle_key(
         }
         KeyCode::Char('b') if ctrl => {
             app.switch_view(View::Browser);
+            // Opening the browser asks the question. "Who is out there" should
+            // have an answer on screen before the user has to know what a
+            // coordinator is, or press anything.
+            if app.view == View::Browser && !app.browser.editing_addr && app.browser.rows.is_empty()
+            {
+                start_index_fetch(app, fetch_tx);
+            }
             return Ok(());
         }
         _ => {}
@@ -562,6 +566,12 @@ fn handle_browser_key(
     match key.code {
         KeyCode::Esc => app.view = View::Lobby,
         KeyCode::Char('a') => app.browser.editing_addr = true,
+        // Back to the wide view from a named tracker.
+        KeyCode::Char('d') => {
+            app.browser.addr = None;
+            app.browser.addr_input.clear();
+            start_index_fetch(app, fetch_tx);
+        }
         KeyCode::Char('r') => start_index_fetch(app, fetch_tx),
         KeyCode::Char('c') => {
             if app.browser.categories.is_empty() && app.browser.filter.is_none() {
@@ -581,8 +591,18 @@ fn handle_browser_key(
 /// Spawn one `INDEX` (+ best-effort `CATEGORIES`) exchange; the reply comes
 /// back through the fetch channel tagged with a sequence number.
 fn start_index_fetch(app: &mut App, fetch_tx: &UnboundedSender<browser::Fetched>) {
+    // No tracker named: ask the wide sources — rabbithole.directory, with the
+    // standard Looking Glass behind it. Naming a tracker (`a`) is a choice to
+    // ask that one coordinator instead.
     let Some(addr) = app.browser.addr.clone() else {
-        app.status("no tracker address yet — press a");
+        let seq = app.browser.begin();
+        let tx = fetch_tx.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(browser::Fetched {
+                seq,
+                outcome: browser::Outcome::Wide(browser::fetch_wide_directory().await),
+            });
+        });
         return;
     };
     let seq = app.browser.begin();
@@ -618,7 +638,7 @@ fn start_index_fetch(app: &mut App, fetch_tx: &UnboundedSender<browser::Fetched>
 /// Spawn a `HEALTH <ip:port>` exchange for the selected row.
 fn start_health_fetch(app: &mut App, fetch_tx: &UnboundedSender<browser::Fetched>) {
     let Some(addr) = app.browser.addr.clone() else {
-        app.status("no tracker address yet — press a");
+        app.status("health is a tracker probe — press a to name a coordinator");
         return;
     };
     let Some(row) = app.browser.selected_row() else {
@@ -851,16 +871,40 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Styl
             }
             None => format!("all ({} cats)", b.categories.len()),
         };
-        Line::from(vec![
-            Span::styled("tracker: ", muted),
-            Span::styled(b.addr.clone().unwrap_or_else(|| "—".into()), accent),
-            Span::styled(format!("  · filter: {filter}"), muted),
-        ])
+        match (&b.addr, &b.source) {
+            // Pointed at one coordinator: name it, and the filter it serves.
+            (Some(addr), _) => Line::from(vec![
+                Span::styled("tracker: ", muted),
+                Span::styled(addr.clone(), accent),
+                Span::styled(format!("  · filter: {filter}"), muted),
+            ]),
+            // The wide view. Say which source answered — a fallback listing is
+            // a different answer, not the same one arriving late.
+            (None, Some(source)) => Line::from(vec![
+                Span::styled("source: ", muted),
+                Span::styled(source.clone(), accent),
+                Span::styled(
+                    b.fallback_note
+                        .as_ref()
+                        .map(|why| format!("  · fell back: {why}"))
+                        .unwrap_or_default(),
+                    muted,
+                ),
+            ]),
+            (None, None) => Line::from(Span::styled(
+                "source: rabbithole.directory (r to look)",
+                muted,
+            )),
+        }
     };
     let bar_title = if b.editing_addr {
         " tracker address — Enter connect · Esc cancel "
     } else {
-        " server browser — a addr · r refresh · c filter · h health · Esc back "
+        if b.addr.is_some() {
+            " server browser — a tracker · d directory · r refresh · c filter · h health · Esc back "
+        } else {
+            " server browser — a tracker · d directory · r refresh · Esc back "
+        }
     };
     f.render_widget(
         Paragraph::new(bar).block(
@@ -885,12 +929,10 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Styl
         muted.add_modifier(Modifier::BOLD),
     ))));
     if b.rows.is_empty() {
-        let placeholder = if b.addr.is_none() {
-            "(no tracker yet — press a to enter one, or set $RABBIT_TRACKER)"
-        } else if b.loading {
+        let placeholder = if b.loading {
             "(fetching…)"
         } else if b.error.is_none() {
-            "(no servers listed — r to refresh)"
+            "(no burrows listed — r to refresh, a to name a tracker)"
         } else {
             ""
         };
@@ -918,7 +960,7 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Styl
         }
     }
     let table_title = format!(
-        " servers {}{} — sorted by tracker · uptime is tracker-observed ",
+        " burrows {}{} — as served · uptime is the source's own observation ",
         b.rows.len(),
         if b.loading { " · fetching…" } else { "" }
     );

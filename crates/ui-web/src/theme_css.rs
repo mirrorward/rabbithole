@@ -1180,7 +1180,10 @@ mod tests {
                     bg.starts_with('#') || bg.starts_with("rgb") || bg.starts_with("color"),
                     "{pack:?}/{mode:?} background looks wrong: {bg:?}"
                 );
-                assert!(!bg.contains("--"), "{pack:?}/{mode:?} grabbed a var, not a value");
+                assert!(
+                    !bg.contains("--"),
+                    "{pack:?}/{mode:?} grabbed a var, not a value"
+                );
             }
         }
         // Absent or malformed: fall back to the pre-boot backdrop, never panic.
