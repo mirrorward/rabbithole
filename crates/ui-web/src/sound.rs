@@ -140,7 +140,10 @@ mod tests {
         assert_eq!(dm.len(), 2, "a DM rises");
         assert!(dm[1].0 > dm[0].0, "the second note is higher");
         assert!(dm[1].1 > dm[0].1, "…and lands after the first");
-        assert!(dm_peak > chat_peak, "a DM is addressed to you, so slightly louder");
+        assert!(
+            dm_peak > chat_peak,
+            "a DM is addressed to you, so slightly louder"
+        );
         // Quiet by design: a chime should never startle.
         assert!(dm_peak <= 0.1 && chat_peak <= 0.1, "peak gain stays gentle");
         // (NOTE_SECS is guarded at compile time below — a runtime assert on a

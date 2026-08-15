@@ -631,7 +631,7 @@ fn build_request(
 }
 
 /// Connect, send the request, and read the raw response to EOF (size-capped).
-async fn exchange(target: &FeedUrl, request: &[u8]) -> Result<Vec<u8>> {
+pub(crate) async fn exchange(target: &FeedUrl, request: &[u8]) -> Result<Vec<u8>> {
     let tcp = TcpStream::connect((target.host.as_str(), target.port))
         .await
         .map_err(|e| anyhow!("connect {}:{}: {e}", target.host, target.port))?;

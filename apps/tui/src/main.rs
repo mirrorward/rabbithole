@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 mod browser;
+mod chatlog;
 mod handoff;
 mod radio;
 
@@ -93,6 +94,12 @@ enum View {
 
 struct App {
     lines: Vec<(String, String)>, // (from, text); from "" = system
+    /// Where the chat log is scrolled to. Follows the newest line unless the
+    /// reader deliberately scrolls back (see [`chatlog`]).
+    scroll: chatlog::Scroll,
+    /// Rows the chat pane had at the last draw — scrolling is measured in
+    /// screen rows, and only the renderer knows how many there are.
+    chat_height: usize,
     online: Vec<String>,
     input: String,
     pack: ThemePack,
@@ -124,7 +131,9 @@ impl App {
     }
 
     fn sys(&mut self, text: impl Into<String>) {
-        self.lines.push((String::new(), text.into()));
+        let before = self.lines.len();
+        chatlog::push_trimmed(&mut self.lines, (String::new(), text.into()));
+        self.scroll.on_appended(1, before);
     }
 
     fn status(&mut self, text: impl Into<String>) {
@@ -137,9 +146,6 @@ impl App {
         self.status = None;
         self.base_edit = None;
         self.view = if self.view == view { View::Lobby } else { view };
-        if self.view == View::Browser && self.browser.addr.is_none() {
-            self.browser.editing_addr = true;
-        }
     }
 }
 
@@ -180,6 +186,8 @@ async fn main() -> Result<()> {
 
     let mut app = App {
         lines: history.into_iter().map(|m| (m.from, m.text)).collect(),
+        scroll: chatlog::Scroll::new(),
+        chat_height: 0,
         online,
         input: String::new(),
         pack: ThemePack::Clean,
@@ -267,7 +275,9 @@ async fn run(
 fn apply_push(app: &mut App, frame: &rabbithole_proto::Frame) {
     if let Some(Ok(m)) = frame.decode::<ChatMessage>() {
         if m.room == "lobby" {
-            app.lines.push((m.from, m.text));
+            let before = app.lines.len();
+            chatlog::push_trimmed(&mut app.lines, (m.from, m.text));
+            app.scroll.on_appended(1, before);
         }
     } else if let Some(Ok(j)) = frame.decode::<UserJoined>() {
         if !app.online.contains(&j.user.screen_name) {
@@ -323,6 +333,13 @@ async fn handle_key(
         }
         KeyCode::Char('b') if ctrl => {
             app.switch_view(View::Browser);
+            // Opening the browser asks the question. "Who is out there" should
+            // have an answer on screen before the user has to know what a
+            // coordinator is, or press anything.
+            if app.view == View::Browser && !app.browser.editing_addr && app.browser.rows.is_empty()
+            {
+                start_index_fetch(app, fetch_tx);
+            }
             return Ok(());
         }
         _ => {}
@@ -341,6 +358,36 @@ async fn handle_lobby_key(
     key: KeyEvent,
     ctrl: bool,
 ) -> Result<()> {
+    // Scrollback first: these keys never reach the input line, so reading
+    // history can't accidentally type into the room.
+    let page = app.chat_height.max(1);
+    match key.code {
+        KeyCode::PageUp => {
+            app.scroll.up(page, app.lines.len(), app.chat_height);
+            return Ok(());
+        }
+        KeyCode::PageDown => {
+            app.scroll.down(page);
+            return Ok(());
+        }
+        KeyCode::Up => {
+            app.scroll.up(1, app.lines.len(), app.chat_height);
+            return Ok(());
+        }
+        KeyCode::Down => {
+            app.scroll.down(1);
+            return Ok(());
+        }
+        KeyCode::Home => {
+            app.scroll.jump_top(app.lines.len(), app.chat_height);
+            return Ok(());
+        }
+        KeyCode::End => {
+            app.scroll.jump_bottom();
+            return Ok(());
+        }
+        _ => {}
+    }
     match key.code {
         KeyCode::Esc => app.should_quit = true,
         KeyCode::Backspace => {
@@ -519,6 +566,12 @@ fn handle_browser_key(
     match key.code {
         KeyCode::Esc => app.view = View::Lobby,
         KeyCode::Char('a') => app.browser.editing_addr = true,
+        // Back to the wide view from a named tracker.
+        KeyCode::Char('d') => {
+            app.browser.addr = None;
+            app.browser.addr_input.clear();
+            start_index_fetch(app, fetch_tx);
+        }
         KeyCode::Char('r') => start_index_fetch(app, fetch_tx),
         KeyCode::Char('c') => {
             if app.browser.categories.is_empty() && app.browser.filter.is_none() {
@@ -538,8 +591,18 @@ fn handle_browser_key(
 /// Spawn one `INDEX` (+ best-effort `CATEGORIES`) exchange; the reply comes
 /// back through the fetch channel tagged with a sequence number.
 fn start_index_fetch(app: &mut App, fetch_tx: &UnboundedSender<browser::Fetched>) {
+    // No tracker named: ask the wide sources — rabbithole.directory, with the
+    // standard Looking Glass behind it. Naming a tracker (`a`) is a choice to
+    // ask that one coordinator instead.
     let Some(addr) = app.browser.addr.clone() else {
-        app.status("no tracker address yet — press a");
+        let seq = app.browser.begin();
+        let tx = fetch_tx.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(browser::Fetched {
+                seq,
+                outcome: browser::Outcome::Wide(browser::fetch_wide_directory().await),
+            });
+        });
         return;
     };
     let seq = app.browser.begin();
@@ -575,7 +638,7 @@ fn start_index_fetch(app: &mut App, fetch_tx: &UnboundedSender<browser::Fetched>
 /// Spawn a `HEALTH <ip:port>` exchange for the selected row.
 fn start_health_fetch(app: &mut App, fetch_tx: &UnboundedSender<browser::Fetched>) {
     let Some(addr) = app.browser.addr.clone() else {
-        app.status("no tracker address yet — press a");
+        app.status("health is a tracker probe — press a to name a coordinator");
         return;
     };
     let Some(row) = app.browser.selected_row() else {
@@ -601,7 +664,7 @@ fn start_health_fetch(app: &mut App, fetch_tx: &UnboundedSender<browser::Fetched
 // Rendering.
 // ---------------------------------------------------------------------------
 
-fn draw(f: &mut Frame, app: &App) {
+fn draw(f: &mut Frame, app: &mut App) {
     let pal = app.palette();
     let bg = Style::default()
         .bg(to_color(pal.background))
@@ -617,6 +680,8 @@ fn draw(f: &mut Frame, app: &App) {
     let muted = Style::default().fg(to_color(pal.muted));
     let text = Style::default().fg(to_color(pal.text));
 
+    // The lobby records its pane height as it draws (scrolling is measured in
+    // screen rows), so it takes the mutable borrow; the others only read.
     match app.view {
         View::Lobby => draw_lobby(f, app, bands[0], accent, muted, text),
         View::Radio => draw_radio(f, app, bands[0], accent, muted),
@@ -625,7 +690,7 @@ fn draw(f: &mut Frame, app: &App) {
     draw_status_bar(f, app, bands[1], accent, muted);
 }
 
-fn draw_lobby(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Style, text: Style) {
+fn draw_lobby(f: &mut Frame, app: &mut App, area: Rect, accent: Style, muted: Style, text: Style) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(20), Constraint::Length(22)])
@@ -635,9 +700,15 @@ fn draw_lobby(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Style,
         .constraints([Constraint::Min(3), Constraint::Length(3)])
         .split(cols[0]);
 
-    // Chat log (tail to fit).
-    let log: Vec<ListItem> = app
-        .lines
+    // Chat log — the window the scroll model picked. `rows[0]` includes the
+    // block's top and bottom borders, so the text area is two rows shorter;
+    // getting that wrong hides the newest line.
+    let height = rows[0].height.saturating_sub(2) as usize;
+    // Remember it: scrolling is measured in screen rows, and only the
+    // renderer knows how many the pane has.
+    app.chat_height = height;
+    let (first, last) = app.scroll.window(app.lines.len(), height);
+    let log: Vec<ListItem> = app.lines[first..last]
         .iter()
         .map(|(from, line)| {
             if from.is_empty() {
@@ -650,7 +721,14 @@ fn draw_lobby(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Style,
             }
         })
         .collect();
-    let title = format!(" {} — lobby ", app.server_name);
+    let behind = app.lines.len().saturating_sub(last);
+    let title = if app.scroll.at_bottom() {
+        format!(" {} — lobby ", app.server_name)
+    } else {
+        // Scrolled back: say how much is below, so a busy room can't look
+        // idle just because you were reading something older.
+        format!(" {} — lobby — {behind} below (End) ", app.server_name)
+    };
     f.render_widget(
         List::new(log).block(
             Block::default()
@@ -793,16 +871,40 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Styl
             }
             None => format!("all ({} cats)", b.categories.len()),
         };
-        Line::from(vec![
-            Span::styled("tracker: ", muted),
-            Span::styled(b.addr.clone().unwrap_or_else(|| "—".into()), accent),
-            Span::styled(format!("  · filter: {filter}"), muted),
-        ])
+        match (&b.addr, &b.source) {
+            // Pointed at one coordinator: name it, and the filter it serves.
+            (Some(addr), _) => Line::from(vec![
+                Span::styled("tracker: ", muted),
+                Span::styled(addr.clone(), accent),
+                Span::styled(format!("  · filter: {filter}"), muted),
+            ]),
+            // The wide view. Say which source answered — a fallback listing is
+            // a different answer, not the same one arriving late.
+            (None, Some(source)) => Line::from(vec![
+                Span::styled("source: ", muted),
+                Span::styled(source.clone(), accent),
+                Span::styled(
+                    b.fallback_note
+                        .as_ref()
+                        .map(|why| format!("  · fell back: {why}"))
+                        .unwrap_or_default(),
+                    muted,
+                ),
+            ]),
+            (None, None) => Line::from(Span::styled(
+                "source: rabbithole.directory (r to look)",
+                muted,
+            )),
+        }
     };
     let bar_title = if b.editing_addr {
         " tracker address — Enter connect · Esc cancel "
     } else {
-        " server browser — a addr · r refresh · c filter · h health · Esc back "
+        if b.addr.is_some() {
+            " server browser — a tracker · d directory · r refresh · c filter · h health · Esc back "
+        } else {
+            " server browser — a tracker · d directory · r refresh · Esc back "
+        }
     };
     f.render_widget(
         Paragraph::new(bar).block(
@@ -827,12 +929,10 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Styl
         muted.add_modifier(Modifier::BOLD),
     ))));
     if b.rows.is_empty() {
-        let placeholder = if b.addr.is_none() {
-            "(no tracker yet — press a to enter one, or set $RABBIT_TRACKER)"
-        } else if b.loading {
+        let placeholder = if b.loading {
             "(fetching…)"
         } else if b.error.is_none() {
-            "(no servers listed — r to refresh)"
+            "(no burrows listed — r to refresh, a to name a tracker)"
         } else {
             ""
         };
@@ -860,7 +960,7 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Styl
         }
     }
     let table_title = format!(
-        " servers {}{} — sorted by tracker · uptime is tracker-observed ",
+        " burrows {}{} — as served · uptime is the source's own observation ",
         b.rows.len(),
         if b.loading { " · fetching…" } else { "" }
     );

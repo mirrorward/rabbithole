@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod admin_store;
+pub mod announce;
 pub mod backup;
 pub mod ctl;
 pub mod doors;
@@ -483,6 +484,27 @@ impl Burrow {
             ));
             tracing::info!("syndication feed ingest running");
         }
+        // Looking Glass announce: tell the trackers this burrow exists so it
+        // can be found by people who don't already know its address. The task
+        // re-reads config every round, so it is spawned unconditionally and
+        // stays inert while announcing is off or `advertise_host` is unset.
+        {
+            let cfg = shared.config.read();
+            if cfg.announce_enabled {
+                if cfg.advertise_host.trim().is_empty() {
+                    tracing::info!(
+                        "announce is on but advertise_host is unset — not listing an address \
+                         we cannot state; set advertise_host to be discoverable"
+                    );
+                } else {
+                    tracing::info!(
+                        trackers = ?cfg.announce_trackers,
+                        "announcing to Looking Glass"
+                    );
+                }
+            }
+        }
+        tasks.push(announce::spawn_announce(shared.clone()));
         let mut federation_addr = None;
         if let Some(addr) = federation {
             let (bound, handle) =

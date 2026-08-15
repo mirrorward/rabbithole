@@ -9,7 +9,9 @@
 use rabbithole_ui_web::avatar::{glyph_name, glyph_svg, GLYPH_COUNT, PALETTE};
 
 fn main() {
-    let out = std::env::args().nth(1).unwrap_or_else(|| "sprites.html".into());
+    let out = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "sprites.html".into());
     let mut h = String::from(
         "<!doctype html><meta charset=utf-8><title>Warren marks</title>\
          <body style='background:#fff;font:12px system-ui;padding:24px'>\

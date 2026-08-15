@@ -640,7 +640,11 @@ pub fn PersonPage() -> impl IntoView {
             .or_else(|| trail().map(|t| t.name))
             .unwrap_or_else(seed)
     };
-    let status = move || peer_key().map(|k| app.friendship(&k)).unwrap_or(Status::None);
+    let status = move || {
+        peer_key()
+            .map(|k| app.friendship(&k))
+            .unwrap_or(Status::None)
+    };
     // You appear in your own People list (you're on those burrows too). The
     // page still reads usefully — where you're known from — but befriending or
     // DMing yourself is nonsense, so those actions go.
@@ -1614,9 +1618,13 @@ pub fn CommandPalette() -> impl IntoView {
         let i = selected.get();
         let Some(list) = list_ref.get() else { return };
         let items = list.children();
-        let Some(item) = items.item(i as u32) else { return };
+        let Some(item) = items.item(i as u32) else {
+            return;
+        };
         use wasm_bindgen::JsCast;
-        let Ok(item) = item.dyn_into::<web_sys::HtmlElement>() else { return };
+        let Ok(item) = item.dyn_into::<web_sys::HtmlElement>() else {
+            return;
+        };
         let (top, height) = (item.offset_top(), item.offset_height());
         let (view_top, view_h) = (list.scroll_top(), list.client_height());
         if top < view_top {
@@ -2203,7 +2211,6 @@ pub fn Lobby() -> impl IntoView {
         </main>
     }
 }
-
 
 /// A **rich text composer**: a formatting bar over a growing text area, with an
 /// optional live preview.
@@ -2979,7 +2986,8 @@ pub fn Directory() -> impl IntoView {
 /// The Looking Glass **server browser**: search + a ranked list of public
 /// servers, each with a Connect action that hands its endpoint to the login
 /// screen (which prefills on its next mount). Directory data is the host-tested
-/// [`crate::servers`] model, seeded in dev until a tracker transport lands.
+/// [`crate::servers`] model, filled from rabbithole.directory (then the
+/// standard Looking Glass, then a native status-port INDEX) on arrival.
 #[component]
 pub fn ServerBrowser() -> impl IntoView {
     let app = expect_context::<AppState>();
@@ -3033,7 +3041,7 @@ pub fn ServerBrowser() -> impl IntoView {
                             let endpoint = s.endpoint.clone();
                             let dot = if s.reachable { "rh-dot on" } else { "rh-dot off" };
                             let presence = if s.reachable { "Online:" } else { "Offline:" };
-                            let uptime = crate::servers::uptime_label(s.uptime_pct);
+                            let uptime = s.uptime_pct.map(crate::servers::uptime_label);
                             view! {
                                 <li class="rh-server-card">
                                     <div class="rh-server-head">
@@ -3050,7 +3058,9 @@ pub fn ServerBrowser() -> impl IntoView {
                                         view! { <p class="rh-server-listeners">{list}</p> }
                                     })}
                                     <div class="rh-server-foot">
-                                        <span class="rh-server-uptime">{uptime}</span>
+                                        {uptime.map(|label| view! {
+                                            <span class="rh-server-uptime">{label}</span>
+                                        })}
                                         <code class="rh-server-endpoint">{s.endpoint.clone()}</code>
                                         <button
                                             class="rh-btn"

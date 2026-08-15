@@ -15,8 +15,11 @@
 //! Encoding writes into an in-memory `Vec<u8>` (an infallible sink), so the
 //! function is total — arbitrary canvases render, never panic.
 
+#[cfg(feature = "png")]
 use crate::ansi::{Attrs, Canvas, Cell};
+#[cfg(feature = "png")]
 use crate::cp437::unicode_to_cp437;
+#[cfg(feature = "png")]
 use crate::font::{FONT_8X16, GLYPH_HEIGHT, GLYPH_WIDTH};
 
 /// The canonical IBM VGA/DOS 16-color palette as RGB triples, indexed by
@@ -42,11 +45,14 @@ pub const PALETTE: [[u8; 3]; 16] = [
 
 /// Upper bound on the per-cell scale factor (keeps `GLYPH_* * scale` well
 /// away from overflow and absurd allocations).
+#[cfg(feature = "png")]
 const MAX_SCALE: u32 = 64;
 /// Hard ceiling for [`PngOptions::max_dimension`] regardless of caller.
+#[cfg(feature = "png")]
 const MAX_DIMENSION_CAP: u32 = 16_384;
 
 /// Options controlling [`render_png`].
+#[cfg(feature = "png")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PngOptions {
     /// Integer scale factor applied to each cell. `1` yields the native
@@ -59,6 +65,7 @@ pub struct PngOptions {
     pub max_dimension: u32,
 }
 
+#[cfg(feature = "png")]
 impl Default for PngOptions {
     fn default() -> Self {
         PngOptions {
@@ -68,6 +75,7 @@ impl Default for PngOptions {
     }
 }
 
+#[cfg(feature = "png")]
 impl PngOptions {
     /// Options for a small preview: native cell size, tight dimension cap.
     pub fn thumbnail() -> Self {
@@ -82,6 +90,7 @@ impl PngOptions {
 /// 16-color VGA palette, honoring foreground/background and the reverse
 /// attribute. Returns the encoded PNG bytes (empty only if encoding fails,
 /// which cannot happen for the in-memory sink).
+#[cfg(feature = "png")]
 pub fn render_png(canvas: &Canvas, opts: &PngOptions) -> Vec<u8> {
     let scale = opts.scale.clamp(1, MAX_SCALE);
     let max_dim = opts.max_dimension.clamp(1, MAX_DIMENSION_CAP);
@@ -132,6 +141,7 @@ pub fn render_png(canvas: &Canvas, opts: &PngOptions) -> Vec<u8> {
 }
 
 /// Resolve a cell's foreground/background RGB, applying reverse video.
+#[cfg(feature = "png")]
 fn cell_colors(cell: &Cell) -> ([u8; 3], [u8; 3]) {
     let fg = PALETTE[cell.fg as usize & 0x0F];
     let bg = PALETTE[cell.bg as usize & 0x0F];
@@ -143,6 +153,7 @@ fn cell_colors(cell: &Cell) -> ([u8; 3], [u8; 3]) {
 }
 
 /// The 8×16 bitmap for `ch`, or a blank glyph when it has no CP437 byte.
+#[cfg(feature = "png")]
 fn glyph_for(ch: char) -> &'static [u8; GLYPH_HEIGHT] {
     match unicode_to_cp437(ch) {
         Some(byte) => &FONT_8X16[byte as usize],
@@ -151,6 +162,7 @@ fn glyph_for(ch: char) -> &'static [u8; GLYPH_HEIGHT] {
 }
 
 /// Encode a tightly-packed RGB8 buffer as a PNG into a fresh `Vec<u8>`.
+#[cfg(feature = "png")]
 fn encode_rgb(width: u32, height: u32, buf: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, width, height);
@@ -163,7 +175,7 @@ fn encode_rgb(width: u32, height: u32, buf: &[u8]) -> Vec<u8> {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "png"))]
 mod tests {
     use super::*;
     use crate::ansi::parse;

@@ -63,7 +63,11 @@ pub fn connect_native(endpoint: &str, token: &str) {
     // The SPA dials over ws://, which needs no pinned cert fingerprint.
     let _ = js_sys::Reflect::set(&args, &JsValue::from_str("fingerprint"), &JsValue::NULL);
     // The resume token authenticates the native session onto the same account.
-    let _ = js_sys::Reflect::set(&args, &JsValue::from_str("token"), &JsValue::from_str(token));
+    let _ = js_sys::Reflect::set(
+        &args,
+        &JsValue::from_str("token"),
+        &JsValue::from_str(token),
+    );
     if let Ok(ret) = invoke.call2(&b, &JsValue::from_str("connect_native"), &args) {
         if let Ok(promise) = ret.dyn_into::<js_sys::Promise>() {
             spawn_local(async move {

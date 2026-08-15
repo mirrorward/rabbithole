@@ -8,6 +8,7 @@ services:
     restart: unless-stopped
     ports:
       - "4653:4653/udp"   # QUIC — primary transport
+      - "8080:8080/tcp"   # the web client + /files handoff
     volumes:
       - burrow-data:/data
     environment:
@@ -20,6 +21,28 @@ services:
       RABBITHOLE_QUIC_ADDR: "0.0.0.0:4653"
       RABBITHOLE_WS_ADDR: "127.0.0.1:4654"
       RABBITHOLE_DATA_DIR: "/data"
+    # The web client, served by the burrow itself (see apps/server/src/http.rs).
+    # The image bakes the built SPA at /srv/web; `http_web_root` points there.
+    command: ["run", "--http", "--http-addr", "0.0.0.0:8080", "--web-root", "/srv/web"]
+
+  # The Looking Glass tracker: the directory clients ask "who is out there".
+  # Independent of the burrow — a burrow works with no tracker, and a tracker
+  # serves many burrows — but `docker compose up` should give you the whole
+  # server side, which is the point of this file.
+  tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: rabbithole/looking-glass:latest
+    container_name: looking-glass
+    restart: unless-stopped
+    entrypoint: ["looking-glass"]
+    command: ["--status", "0.0.0.0:4655", "--htrk-tcp", "0.0.0.0:5498", "--htrk-udp", "0.0.0.0:5499"]
+    ports:
+      - "4655:4655/tcp"   # status port — INDEX / HEALTH
+      - "5498:5498/tcp"   # HTRK listing (classic Hotline tracker clients)
+      - "5499:5499/udp"   # HTRK registration
 
 volumes:
   burrow-data:

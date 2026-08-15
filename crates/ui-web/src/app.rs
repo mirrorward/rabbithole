@@ -16,9 +16,8 @@ use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
     About, Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby,
-    Login,
-    Nav, People, PersonPage, Radio, ServerBrowser, Settings, Toasts, Transfers, WelcomeSheet,
-    You,
+    Login, Nav, People, PersonPage, Radio, ServerBrowser, Settings, Toasts, Transfers,
+    WelcomeSheet, You,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -624,12 +623,8 @@ impl AppState {
                                 crate::notify::TAG_CHAT,
                             );
                         }
-                        if crate::sound::should_chime(
-                            sound_on.get_untracked(),
-                            focused,
-                            from,
-                            &me,
-                        ) {
+                        if crate::sound::should_chime(sound_on.get_untracked(), focused, from, &me)
+                        {
                             crate::sound::play(crate::sound::Chime::Chat);
                         }
                     }
@@ -718,7 +713,9 @@ impl AppState {
                     if let Some(me) = fr_app.you.get_untracked().map(|y| y.public_hex) {
                         if crate::friend::verify_half(&their_pub, &me, &sig) {
                             fr_app.friends.update(|list| {
-                                crate::friend::record_their_offer(list, &their_pub, &msg.from, &sig);
+                                crate::friend::record_their_offer(
+                                    list, &their_pub, &msg.from, &sig,
+                                );
                             });
                             crate::friend::storage::save(&fr_app.friends.get_untracked());
                         }
@@ -737,12 +734,8 @@ impl AppState {
                         crate::notify::TAG_DM,
                     );
                 }
-                if crate::sound::should_chime(
-                    dm_sound_on.get_untracked(),
-                    focused,
-                    &msg.from,
-                    &me,
-                ) {
+                if crate::sound::should_chime(dm_sound_on.get_untracked(), focused, &msg.from, &me)
+                {
                     crate::sound::play(crate::sound::Chime::Dm);
                 }
                 state.update(|s| s.receive_dm(&peer, msg))
@@ -820,7 +813,8 @@ impl AppState {
         if id == ServerId::local() {
             return;
         }
-        self.sessions.update(|list| list.retain(|(sid, _)| *sid != id));
+        self.sessions
+            .update(|list| list.retain(|(sid, _)| *sid != id));
         if self.focused_id.get_untracked() == id {
             let next = self
                 .sessions
@@ -1280,9 +1274,9 @@ impl AppState {
     /// Resolve a person page's `:seed` to the live [`Person`] if they're
     /// currently on any connected burrow (their presence + which burrows).
     pub fn person_by_seed(&self, seed: &str) -> Option<crate::state::Person> {
-        self.people().into_iter().find(|p| {
-            crate::sightings::seed_of(p.key.as_deref(), &p.screen_name) == seed
-        })
+        self.people()
+            .into_iter()
+            .find(|p| crate::sightings::seed_of(p.key.as_deref(), &p.screen_name) == seed)
     }
 
     /// Files on the focused burrow uploaded by a person, matched by the handle
@@ -1307,21 +1301,22 @@ impl AppState {
         if handle.is_empty() {
             return None;
         }
-        self.focused().state.with_untracked(|s| {
-            s.dm_threads.iter().find(|t| t.peer == handle).cloned()
-        })
+        self.focused()
+            .state
+            .with_untracked(|s| s.dm_threads.iter().find(|t| t.peer == handle).cloned())
     }
 
     /// Refresh the Looking Glass from the network.
     ///
-    /// Two sources, two protocols, in preference order:
+    /// Three sources, in preference order:
     ///
     /// 1. **rabbithole.directory** over HTTPS+JSON. CORS is open, so this
     ///    works in a browser tab and in the shell alike.
-    /// 2. **A Looking Glass tracker** (`tracker.rabbit.direct`) — whose status
-    ///    port is a *line-oriented TCP* protocol, not HTTP. A browser cannot
-    ///    dial it at all, so this leg exists only in the native shell, which
-    ///    does the socket in Rust.
+    /// 2. **The standard Looking Glass** (`tracker.rabbit.direct`) over HTTPS
+    ///    JSON — a different shape from the directory's (nested endpoints),
+    ///    also CORS-open, so a plain tab can use it.
+    /// 3. **A Looking Glass status port** — line-oriented TCP (`INDEX`). A
+    ///    browser cannot dial it; this leg exists only in the native shell.
     ///
     /// Neither reachable leaves the seeded sample in place, labelled as such:
     /// an empty browser would look like "nobody is out there", which is a
@@ -1343,7 +1338,21 @@ impl AppState {
                         return;
                     }
                 }
-                // The tracker speaks TCP; only the shell can reach it.
+                // The standard Looking Glass, over HTTPS with CORS open — so
+                // this fallback works in a plain browser tab, not only in the
+                // native shell. Its reply is a *different shape* from the
+                // directory's (a glass relays announced descriptors, so the
+                // endpoints are nested), hence a different parser.
+                if let Some(text) = crate::net::fetch_text(crate::servers::TRACKER_URL).await {
+                    if let Ok(rows) = crate::servers::parse_glass_json(&text, &["ws"]) {
+                        servers.set(rows);
+                        source.set(crate::servers::DirectorySource::Tracker);
+                        loading.set(false);
+                        return;
+                    }
+                }
+                // Last: the shell's TCP status-port INDEX. `None` in a browser
+                // tab, where there is no shell to ask.
                 if let Some(text) = crate::native::tracker_index().await {
                     if let Ok(rows) = crate::servers::parse_tracker_index(&text) {
                         servers.set(rows);
@@ -1438,11 +1447,10 @@ impl AppState {
     pub fn offer_friendship(&self, peer_pub: &str, peer_name: &str, handle: &str) {
         #[cfg(target_arch = "wasm32")]
         {
-            let sig = self.identity.with_value(|id| {
-                id.as_ref().map(|id| crate::friend::sign(id, peer_pub))
-            });
-            let (Some(sig), Some(me)) =
-                (sig, self.you.get_untracked().map(|y| y.public_hex))
+            let sig = self
+                .identity
+                .with_value(|id| id.as_ref().map(|id| crate::friend::sign(id, peer_pub)));
+            let (Some(sig), Some(me)) = (sig, self.you.get_untracked().map(|y| y.public_hex))
             else {
                 self.toasts.update(|q| {
                     q.push(
@@ -1460,12 +1468,11 @@ impl AppState {
             // involvement beyond delivering a message they can already receive.
             let offer = crate::friend::encode_offer(&me, &sig);
             if self.focused().live.get_untracked() && !handle.is_empty() {
-                self.focused().ws.update_value(|c| c.send_dm(handle, &offer));
+                self.focused()
+                    .ws
+                    .update_value(|c| c.send_dm(handle, &offer));
             }
-            let mutual = matches!(
-                self.friendship(peer_pub),
-                crate::friend::Status::Mutual
-            );
+            let mutual = matches!(self.friendship(peer_pub), crate::friend::Status::Mutual);
             self.toasts.update(|q| {
                 q.push(
                     crate::toasts::ToastKind::Success,
@@ -1521,9 +1528,8 @@ impl AppState {
                         t.node_id = Some(id);
                     }
                 });
-                let max_sources = crate::settings::clamp_max_sources(
-                    self.settings.get_untracked().max_sources,
-                );
+                let max_sources =
+                    crate::settings::clamp_max_sources(self.settings.get_untracked().max_sources);
                 crate::native::start_swarm_download(
                     *self,
                     transfer_id,
@@ -2135,9 +2141,8 @@ fn BurrowRail() -> impl IntoView {
     };
     // Which scope the rail is showing: in a burrow, the focused tile is where
     // you are; in the warren, one of the warren icons is.
-    let in_burrow = move || {
-        crate::palette::scope_of(&location.pathname.get()) == crate::palette::Scope::Burrow
-    };
+    let in_burrow =
+        move || crate::palette::scope_of(&location.pathname.get()) == crate::palette::Scope::Burrow;
     view! {
         <nav
             class="rh-rail"

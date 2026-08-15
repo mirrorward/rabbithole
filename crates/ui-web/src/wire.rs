@@ -166,9 +166,7 @@ pub fn welcome_screen_request(id: RequestId) -> Result<Frame, ProtoError> {
 
 /// Decode a [`WelcomeScreen`](rabbithole_proto::welcome::WelcomeScreen) reply
 /// into its widgets, if this frame is one.
-pub fn frame_to_front_page(
-    frame: &Frame,
-) -> Option<Vec<rabbithole_proto::welcome::WelcomeWidget>> {
+pub fn frame_to_front_page(frame: &Frame) -> Option<Vec<rabbithole_proto::welcome::WelcomeWidget>> {
     Some(
         frame
             .decode::<rabbithole_proto::welcome::WelcomeScreen>()?

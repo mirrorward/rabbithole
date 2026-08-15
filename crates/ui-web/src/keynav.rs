@@ -119,9 +119,17 @@ mod tests {
     fn arrows_walk_the_list_and_clamp_at_the_edges() {
         // Finder's contract: holding ↓ parks on the last row, no wrap.
         assert_eq!(next_index(Some(0), 5, "ArrowDown"), Some(1));
-        assert_eq!(next_index(Some(4), 5, "ArrowDown"), Some(4), "clamps, never wraps");
+        assert_eq!(
+            next_index(Some(4), 5, "ArrowDown"),
+            Some(4),
+            "clamps, never wraps"
+        );
         assert_eq!(next_index(Some(4), 5, "ArrowUp"), Some(3));
-        assert_eq!(next_index(Some(0), 5, "ArrowUp"), Some(0), "clamps at the top");
+        assert_eq!(
+            next_index(Some(0), 5, "ArrowUp"),
+            Some(0),
+            "clamps at the top"
+        );
     }
 
     #[test]

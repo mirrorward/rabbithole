@@ -99,7 +99,13 @@ pub fn note(
     entry.burrows.truncate(MAX_BURROWS_PER_PERSON);
     if ledger.len() > MAX_PEOPLE {
         // Drop the person least recently seen anywhere.
-        ledger.sort_by_key(|s| -s.burrows.iter().map(|b| b.last_seen_unix_ms).max().unwrap_or(0));
+        ledger.sort_by_key(|s| {
+            -s.burrows
+                .iter()
+                .map(|b| b.last_seen_unix_ms)
+                .max()
+                .unwrap_or(0)
+        });
         ledger.truncate(MAX_PEOPLE);
     }
 }
@@ -217,7 +223,10 @@ mod tests {
         }
         let s = burrows_for(&l, "k").unwrap();
         assert_eq!(s.burrows.len(), MAX_BURROWS_PER_PERSON);
-        assert_eq!(s.burrows[0].last_seen_unix_ms, MAX_BURROWS_PER_PERSON as i64 + 5);
+        assert_eq!(
+            s.burrows[0].last_seen_unix_ms,
+            MAX_BURROWS_PER_PERSON as i64 + 5
+        );
         // The people list caps too, dropping the least recently seen.
         let mut l = Vec::new();
         for i in 0..(MAX_PEOPLE as i64 + 10) {

@@ -276,7 +276,7 @@ impl WsClient {
                 file_sink: None,
                 notice_sink: None,
                 who_sink: None,
-            front_page_sink: None,
+                front_page_sink: None,
                 presence_sink: None,
                 board_sink: None,
                 thread_sink: None,

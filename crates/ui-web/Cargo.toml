@@ -13,19 +13,20 @@ publish.workspace = true
 # can show fabricated data as if it were real. Dev workflows opt in:
 #   trunk serve --features demo
 # `cargo tauri dev` does this via beforeDevCommand; `cargo tauri build` runs
-# the plain `trunk build`, so a packaged app never contains it.
+# `trunk build --release`, so a packaged app never contains it.
 demo = []
 
 [dependencies]
+rabbithole-directory.workspace = true
 leptos.workspace = true
 leptos_router.workspace = true
 # rabbithole-core WITHOUT the "native" feature: this crate must stay
 # wasm-clean (no tokio / net / store-client pulled in).
 rabbithole-core.workspace = true
 rabbithole-proto.workspace = true
-# CP437/ANSI cell + palette model reused by `src/art.rs`. Pure Rust (its only
-# dependency is `png`), so it stays wasm-clean and we avoid duplicating the
-# ANSI parser that already lives here.
+# CP437/ANSI cell + palette model reused by `src/art.rs`. Workspace members
+# get this crate without the `png` thumbnail feature (see root Cargo.toml),
+# so the wasm bundle does not carry `png` + flate.
 rabbithole-art.workspace = true
 # Theme-pack token files: packs round-trip as JSON (`src/packs.rs`) — the seam
 # a future server theme bundle plugs into. Both wasm-clean.

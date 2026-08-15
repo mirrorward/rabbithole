@@ -4,6 +4,7 @@
 .DS_Store
 /dist
 node_modules
+.trunk/
 
 # Agent worktrees and local session state
 .claude/

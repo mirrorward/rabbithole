@@ -113,7 +113,11 @@ pub fn apply(text: &str, start: usize, end: usize, fmt: Format) -> Edit {
 
 /// Keep a selection inside the text and the right way round.
 fn clamp(len: usize, start: usize, end: usize) -> (usize, usize) {
-    let (a, b) = if start <= end { (start, end) } else { (end, start) };
+    let (a, b) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
     (a.min(len), b.min(len))
 }
 
@@ -128,11 +132,21 @@ fn apply_marker(chars: &[char], start: usize, end: usize, marker: &str) -> Edit 
     let selected = slice(chars, start, end);
 
     // Already wrapped, markers *inside* the selection: `**bold**` selected whole.
-    if selected.starts_with(marker) && selected.ends_with(marker) && selected.chars().count() >= 2 * n
+    if selected.starts_with(marker)
+        && selected.ends_with(marker)
+        && selected.chars().count() >= 2 * n
     {
         let inner = slice(chars, start + n, end - n);
-        let text = format!("{}{inner}{}", slice(chars, 0, start), slice(chars, end, chars.len()));
-        return Edit { text, start, end: end - 2 * n };
+        let text = format!(
+            "{}{inner}{}",
+            slice(chars, 0, start),
+            slice(chars, end, chars.len())
+        );
+        return Edit {
+            text,
+            start,
+            end: end - 2 * n,
+        };
     }
     // Already wrapped, markers *outside* the selection: `bold` selected, `**`
     // sitting either side of it.
@@ -146,7 +160,11 @@ fn apply_marker(chars: &[char], start: usize, end: usize, marker: &str) -> Edit 
             slice(chars, 0, start - n),
             slice(chars, end + n, chars.len())
         );
-        return Edit { text, start: start - n, end: end - n };
+        return Edit {
+            text,
+            start: start - n,
+            end: end - n,
+        };
     }
 
     let text = format!(
@@ -156,14 +174,22 @@ fn apply_marker(chars: &[char], start: usize, end: usize, marker: &str) -> Edit 
     );
     // Empty selection: park the caret between the markers so typing lands
     // inside them. Otherwise keep the selection, so formats can be stacked.
-    Edit { text, start: start + n, end: end + n }
+    Edit {
+        text,
+        start: start + n,
+        end: end + n,
+    }
 }
 
 /// Wrap the selection in a link, leaving the caret in the URL slot — which is
 /// the part you always have to fill in.
 fn apply_link(chars: &[char], start: usize, end: usize) -> Edit {
     let selected = slice(chars, start, end);
-    let label = if selected.is_empty() { "text" } else { &selected };
+    let label = if selected.is_empty() {
+        "text"
+    } else {
+        &selected
+    };
     let text = format!(
         "{}[{label}](){}",
         slice(chars, 0, start),
@@ -171,7 +197,11 @@ fn apply_link(chars: &[char], start: usize, end: usize) -> Edit {
     );
     // `[label](` is label.len() + 3 characters; the caret goes after it.
     let caret = start + label.chars().count() + 3;
-    Edit { text, start: caret, end: caret }
+    Edit {
+        text,
+        start: caret,
+        end: caret,
+    }
 }
 
 /// Add — or, if every line already has it, remove — a prefix on each line the
@@ -201,7 +231,11 @@ fn apply_line_prefix(chars: &[char], start: usize, end: usize, prefix: &str) -> 
         slice(chars, to, chars.len())
     );
     // Move the selection with the text so it still covers the same words.
-    let shift = if all_prefixed { -(prefix.chars().count() as isize) } else { prefix.chars().count() as isize };
+    let shift = if all_prefixed {
+        -(prefix.chars().count() as isize)
+    } else {
+        prefix.chars().count() as isize
+    };
     Edit {
         text,
         start: (start as isize + shift).max(from as isize) as usize,
@@ -211,12 +245,20 @@ fn apply_line_prefix(chars: &[char], start: usize, end: usize, prefix: &str) -> 
 
 /// Index of the start of the line containing `i`.
 fn line_start(chars: &[char], i: usize) -> usize {
-    chars[..i].iter().rposition(|c| *c == '\n').map(|p| p + 1).unwrap_or(0)
+    chars[..i]
+        .iter()
+        .rposition(|c| *c == '\n')
+        .map(|p| p + 1)
+        .unwrap_or(0)
 }
 
 /// Index of the end of the line containing `i`.
 fn line_end(chars: &[char], i: usize) -> usize {
-    chars[i..].iter().position(|c| *c == '\n').map(|p| i + p).unwrap_or(chars.len())
+    chars[i..]
+        .iter()
+        .position(|c| *c == '\n')
+        .map(|p| i + p)
+        .unwrap_or(chars.len())
 }
 
 /// Should this keystroke send the message, rather than insert a newline?
@@ -230,7 +272,9 @@ pub fn sends_on_enter(key: &str, shift: bool) -> bool {
 /// The `Format` bound to a keyboard shortcut, if any.
 pub fn shortcut(key: &str) -> Option<Format> {
     let k = key.to_ascii_lowercase();
-    TOOLBAR.into_iter().find(|f| f.button().2 == k.chars().next())
+    TOOLBAR
+        .into_iter()
+        .find(|f| f.button().2 == k.chars().next())
 }
 
 #[cfg(test)]
@@ -243,7 +287,11 @@ mod tests {
     /// `str::find` would return a byte offset and quietly mis-place the
     /// selection the moment the text contains anything non-ASCII.
     fn at(text: &str, fmt: Format) -> String {
-        let pos = |s: &str| s.chars().position(|c| c == '|').expect("mark the selection");
+        let pos = |s: &str| {
+            s.chars()
+                .position(|c| c == '|')
+                .expect("mark the selection")
+        };
         let start = pos(text);
         let rest = text.replacen('|', "", 1);
         let end = pos(&rest);
@@ -260,10 +308,19 @@ mod tests {
     #[test]
     fn wrapping_a_selection_keeps_it_selected() {
         // So you can hit Bold then Italic without reselecting.
-        assert_eq!(at("say |hello| there", Format::Bold), "say **|hello|** there");
-        assert_eq!(at("say |hello| there", Format::Italic), "say *|hello|* there");
+        assert_eq!(
+            at("say |hello| there", Format::Bold),
+            "say **|hello|** there"
+        );
+        assert_eq!(
+            at("say |hello| there", Format::Italic),
+            "say *|hello|* there"
+        );
         assert_eq!(at("say |hello| there", Format::Code), "say `|hello|` there");
-        assert_eq!(at("say |hello| there", Format::Strike), "say ~~|hello|~~ there");
+        assert_eq!(
+            at("say |hello| there", Format::Strike),
+            "say ~~|hello|~~ there"
+        );
     }
 
     #[test]
@@ -276,9 +333,15 @@ mod tests {
     #[test]
     fn pressing_the_same_button_again_removes_the_formatting() {
         // Selection covering the markers…
-        assert_eq!(at("say |**hello**| there", Format::Bold), "say |hello| there");
+        assert_eq!(
+            at("say |**hello**| there", Format::Bold),
+            "say |hello| there"
+        );
         // …and selection covering only the text between them.
-        assert_eq!(at("say **|hello|** there", Format::Bold), "say |hello| there");
+        assert_eq!(
+            at("say **|hello|** there", Format::Bold),
+            "say |hello| there"
+        );
         assert_eq!(at("say `|code|` there", Format::Code), "say |code| there");
     }
 
@@ -344,7 +407,10 @@ mod tests {
     #[test]
     fn enter_sends_and_shift_enter_does_not() {
         assert!(sends_on_enter("Enter", false));
-        assert!(!sends_on_enter("Enter", true), "Shift+Enter makes a newline");
+        assert!(
+            !sends_on_enter("Enter", true),
+            "Shift+Enter makes a newline"
+        );
         assert!(!sends_on_enter("a", false));
     }
 
@@ -376,15 +442,24 @@ mod tests {
         // syntax the renderer doesn't accept, both halves would still pass their
         // own tests and the feature would be broken.
         let e = apply("hello", 0, 5, Format::Bold);
-        assert_eq!(crate::markdown::inline_to_html(&e.text), "<strong>hello</strong>");
+        assert_eq!(
+            crate::markdown::inline_to_html(&e.text),
+            "<strong>hello</strong>"
+        );
         let e = apply("hello", 0, 5, Format::Italic);
         assert_eq!(crate::markdown::inline_to_html(&e.text), "<em>hello</em>");
         let e = apply("hello", 0, 5, Format::Code);
-        assert_eq!(crate::markdown::inline_to_html(&e.text), "<code>hello</code>");
+        assert_eq!(
+            crate::markdown::inline_to_html(&e.text),
+            "<code>hello</code>"
+        );
         let e = apply("hello", 0, 5, Format::Strike);
         assert_eq!(crate::markdown::inline_to_html(&e.text), "<del>hello</del>");
         let e = apply("hello", 0, 5, Format::Quote);
-        assert_eq!(crate::markdown::to_html(&e.text), "<blockquote>hello</blockquote>");
+        assert_eq!(
+            crate::markdown::to_html(&e.text),
+            "<blockquote>hello</blockquote>"
+        );
         let e = apply("hello", 0, 5, Format::Bullet);
         assert_eq!(crate::markdown::to_html(&e.text), "<ul><li>hello</li></ul>");
         let e = apply("hello", 0, 5, Format::Heading);

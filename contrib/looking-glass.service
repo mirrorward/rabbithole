@@ -1,0 +1,53 @@
+[Unit]
+Description=RabbitHole Looking Glass tracker
+Documentation=https://github.com/mirrorward/rabbithole
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=burrow
+Group=burrow
+ExecStart=/usr/bin/looking-glass --status 0.0.0.0:4655
+Restart=on-failure
+RestartSec=5s
+
+# The tracker keeps its directory in memory and takes its listeners from the
+# command line, so there is nothing to configure by environment.
+# EnvironmentFile=-/etc/burrow/looking-glass.env
+
+# The tracker holds no persistent state; it still gets a private directory so
+# ProtectSystem=strict has somewhere writable rather than an exception.
+StateDirectory=looking-glass
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/looking-glass
+
+# --- Sandboxing / hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ReadWritePaths=/var/lib/looking-glass
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

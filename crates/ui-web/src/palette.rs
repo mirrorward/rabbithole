@@ -239,12 +239,18 @@ mod tests {
     fn digit_shortcuts_follow_the_burrow_sidebar() {
         // Cmd-1 is the first row of the burrow sidebar -- the only sidebar
         // there is. The shortcut is only learnable if those two agree.
-        assert_eq!(section_for_digit("1").unwrap().route, BURROW_SECTIONS[0].route);
+        assert_eq!(
+            section_for_digit("1").unwrap().route,
+            BURROW_SECTIONS[0].route
+        );
         assert_eq!(section_for_digit("1").unwrap().label, "Lobby");
         // You leads the warren list: it's the one entry that is always about
         // you, so it sits first.
         assert_eq!(WARREN_SECTIONS[0].label, "You");
-        assert_eq!(section_for_digit("2").unwrap().route, BURROW_SECTIONS[1].route);
+        assert_eq!(
+            section_for_digit("2").unwrap().route,
+            BURROW_SECTIONS[1].route
+        );
         // Nothing silly at the edges: no wrap-around, no Cmd-0.
         assert_eq!(section_for_digit("0"), None);
         assert_eq!(
@@ -262,7 +268,13 @@ mod tests {
         assert!(is_chromeless("/about"));
         assert!(is_chromeless("/about/"));
         // Everything else is a place inside the app and keeps its chrome.
-        for p in ["/lobby", "/people", "/settings", "/boards/general", "/aboutish"] {
+        for p in [
+            "/lobby",
+            "/people",
+            "/settings",
+            "/boards/general",
+            "/aboutish",
+        ] {
             assert!(!is_chromeless(p), "{p}");
         }
     }
@@ -298,7 +310,11 @@ mod tests {
         let all = all_sections();
         assert_eq!(all.len(), BURROW_SECTIONS.len() + WARREN_SECTIONS.len() + 2);
         for s in BURROW_SECTIONS.iter().chain(WARREN_SECTIONS) {
-            assert!(all.iter().any(|a| a.route == s.route), "{} missing", s.route);
+            assert!(
+                all.iter().any(|a| a.route == s.route),
+                "{} missing",
+                s.route
+            );
         }
         assert!(all.iter().any(|a| a.route == ADMIN_SECTION.route));
         assert!(all.iter().any(|a| a.route == SETTINGS_SECTION.route));

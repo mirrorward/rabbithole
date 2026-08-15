@@ -1,6 +1,6 @@
 [Unit]
 Description=RabbitHole burrow server
-Documentation=https://github.com/kevinelliott/RabbitHole
+Documentation=https://github.com/mirrorward/rabbithole
 After=network-online.target
 Wants=network-online.target
 
@@ -8,7 +8,12 @@ Wants=network-online.target
 Type=simple
 User=burrow
 Group=burrow
-ExecStart=/usr/local/bin/burrow --data-dir /var/lib/burrow run
+# /usr/bin is where the distro packages install; a from-source install into
+# /usr/local/bin should edit this line (or use a drop-in).
+ExecStart=/usr/bin/burrow --data-dir /var/lib/burrow run
+# Serving the web client too? Point --web-root at a built SPA and add:
+#   ExecStart=/usr/bin/burrow --data-dir /var/lib/burrow \
+#       --http --http-addr 0.0.0.0:8080 --web-root /var/lib/burrow/web run
 Restart=on-failure
 RestartSec=5s
 

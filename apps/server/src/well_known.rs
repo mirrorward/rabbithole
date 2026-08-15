@@ -96,7 +96,14 @@ fn advertised_features(cfg: &ServerConfig) -> Vec<String> {
         .iter()
         .map(|s| s.to_string())
         .collect();
+    // The gossip opt-out. Discovery here is word of mouth — anyone who visits
+    // can pass this burrow along to a tracker or a friend — so a burrow that
+    // does not want to be listed has to say so somewhere that travels with it.
+    // Inside the signed descriptor, the wish is attributable to the burrow
+    // itself and survives every retelling, instead of depending on the good
+    // behaviour of whoever happens to be sharing it.
     for (on, tag) in [
+        (!cfg.announce_enabled, "noindex"),
         (cfg.guest_enabled, "guest"),
         (cfg.federation_enabled, "federation"),
         (cfg.radio_enabled, "radio"),
@@ -157,6 +164,24 @@ mod tests {
                 "fed+quic://rabbithole.example:4655",
             ]
         );
+    }
+
+    #[test]
+    fn opting_out_of_announcing_stamps_noindex_into_the_signed_descriptor() {
+        // A burrow that doesn't want to be listed can't rely on everyone who
+        // visits behaving well — discovery here is gossip. The tag rides inside
+        // the burrow's own signature, so a client holding a shared discovery
+        // can check the wish against the descriptor it fetches and drop it.
+        let mut c = cfg();
+        assert!(
+            !advertised_features(&c).contains(&"noindex".to_string()),
+            "announcing is on by default, so nothing to say"
+        );
+
+        c.announce_enabled = false;
+        let f = advertised_features(&c);
+        assert_eq!(f.first().map(String::as_str), Some("boards"), "core intact");
+        assert!(f.contains(&"noindex".to_string()));
     }
 
     #[test]

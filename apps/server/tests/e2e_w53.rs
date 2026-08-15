@@ -263,7 +263,10 @@ async fn resume_token_authorizes_a_second_concurrent_session() {
     // The resumed session must be able to make the PRIVILEGED swarm calls the
     // download path needs — not merely be connected.
     let list = native.swarm_find([9u8; 32]).await.unwrap();
-    assert_eq!(list.root, [9u8; 32], "swarm_find answered the native session");
+    assert_eq!(
+        list.root, [9u8; 32],
+        "swarm_find answered the native session"
+    );
     native.swarm_ticket([9u8; 32]).await.unwrap();
 
     // And session 1 is unharmed by session 2's resume.

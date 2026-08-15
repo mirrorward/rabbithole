@@ -28,6 +28,13 @@ jobs:
             target: x86_64-unknown-linux-musl
             archive: tar.gz
             musl: true
+            packages: true
+          # arm64 Linux — the prerequisite for arm64 .deb/.apk and multi-arch
+          # images, which had no upstream binary at all before this.
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            packages: true
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
@@ -91,6 +98,22 @@ jobs:
             sha256 "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
           fi
 
+      # Distro packages, from the binaries this job just built. One nfpm
+      # config yields deb + apk + rpm, so the file list, maintainer scripts
+      # and systemd units cannot drift between formats — the failure mode of
+      # keeping a debian/ tree, an APKBUILD and a .spec in parallel.
+      - name: Build distro packages
+        if: matrix.packages
+        run: |
+          set -euo pipefail
+          # dpkg's own architecture name is what nfpm's .deb assets use, so
+          # this resolves on both amd64 and arm64 runners without a case.
+          arch="$(dpkg --print-architecture)"
+          curl -sfL -o /tmp/nfpm.deb \
+            "https://github.com/goreleaser/nfpm/releases/latest/download/nfpm_${arch}.deb"
+          sudo dpkg -i /tmp/nfpm.deb
+          PKG_TARGET="${{ matrix.target }}" scripts/package.sh
+
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -98,4 +121,7 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.sha256
-          fail_on_unmatched_files: true
+            dist/*.deb
+            dist/*.apk
+            dist/*.rpm
+          fail_on_unmatched_files: false

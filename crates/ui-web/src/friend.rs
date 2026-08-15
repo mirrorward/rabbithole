@@ -127,12 +127,17 @@ pub fn verify_half(signer_pub_hex: &str, other_pub_hex: &str, sig_hex: &str) -> 
         return false;
     };
     let msg = attestation_message(signer_pub_hex, other_pub_hex);
-    vk.verify_strict(&msg, &Signature::from_bytes(&sig_bytes)).is_ok()
+    vk.verify_strict(&msg, &Signature::from_bytes(&sig_bytes))
+        .is_ok()
 }
 
 /// Encode an offer for transport as a DM body.
 pub fn encode_offer(my_pub_hex: &str, sig_hex: &str) -> String {
-    format!("{PAYLOAD_PREFIX}{} {}", my_pub_hex.to_lowercase(), sig_hex.to_lowercase())
+    format!(
+        "{PAYLOAD_PREFIX}{} {}",
+        my_pub_hex.to_lowercase(),
+        sig_hex.to_lowercase()
+    )
 }
 
 /// Parse a DM body as a friendship offer: `(sender_pub_hex, sig_hex)`.
@@ -248,7 +253,10 @@ mod tests {
     use crate::identity::Identity;
 
     fn pair() -> (Identity, Identity) {
-        (Identity::from_seed([7u8; 32]), Identity::from_seed([9u8; 32]))
+        (
+            Identity::from_seed([7u8; 32]),
+            Identity::from_seed([9u8; 32]),
+        )
     }
 
     #[test]
@@ -260,8 +268,7 @@ mod tests {
             attestation_message(&b.public_hex(), &a.public_hex()),
         );
         // …and the domain separator keeps it disjoint from key-auth signing.
-        assert!(attestation_message(&a.public_hex(), &b.public_hex())
-            .starts_with(FRIEND_DOMAIN));
+        assert!(attestation_message(&a.public_hex(), &b.public_hex()).starts_with(FRIEND_DOMAIN));
     }
 
     #[test]
@@ -284,13 +291,25 @@ mod tests {
         for bad in ["", "zz", "deadbeef", &"f".repeat(127), &"g".repeat(128)] {
             assert!(!verify_half(&a.public_hex(), &b.public_hex(), bad));
         }
-        assert!(!verify_half("nothex", &b.public_hex(), &sign(&a, &b.public_hex())));
+        assert!(!verify_half(
+            "nothex",
+            &b.public_hex(),
+            &sign(&a, &b.public_hex())
+        ));
         // The small-order forgery: an all-zeros key "verifies" an all-zeros
         // signature under the default equation. Strict verification + weak-key
         // rejection is what makes this false.
-        assert!(!verify_half(&"0".repeat(64), &b.public_hex(), &"0".repeat(128)));
+        assert!(!verify_half(
+            &"0".repeat(64),
+            &b.public_hex(),
+            &"0".repeat(128)
+        ));
         // ...and an honest signature still passes strict verification.
-        assert!(verify_half(&a.public_hex(), &b.public_hex(), &sign(&a, &b.public_hex())));
+        assert!(verify_half(
+            &a.public_hex(),
+            &b.public_hex(),
+            &sign(&a, &b.public_hex())
+        ));
     }
 
     #[test]
@@ -304,7 +323,13 @@ mod tests {
         // Ordinary chat never parses as an offer — including near-misses.
         assert!(parse_offer("hey, friend request?").is_none());
         assert!(parse_offer("\u{1f91d}rh-friend-v1 tooshort sig").is_none());
-        assert!(parse_offer(&format!("{}{} {} extra", "\u{1f91d}rh-friend-v1 ", "a".repeat(64), "b".repeat(128))).is_none());
+        assert!(parse_offer(&format!(
+            "{}{} {} extra",
+            "\u{1f91d}rh-friend-v1 ",
+            "a".repeat(64),
+            "b".repeat(128)
+        ))
+        .is_none());
     }
 
     #[test]
@@ -338,15 +363,26 @@ mod tests {
         let for_carol = sign(&bob, &carol.public_hex());
         let dm = encode_offer(&bob.public_hex(), &for_carol);
         let (pk, sig) = parse_offer(&dm).unwrap();
-        assert!(!verify_half(&pk, &me.public_hex(), &sig), "not addressed to me");
-        assert!(verify_half(&pk, &carol.public_hex(), &sig), "genuine for carol");
+        assert!(
+            !verify_half(&pk, &me.public_hex(), &sig),
+            "not addressed to me"
+        );
+        assert!(
+            verify_half(&pk, &carol.public_hex(), &sig),
+            "genuine for carol"
+        );
     }
 
     #[test]
     fn my_offer_alone_is_not_friendship_either() {
         let (a, b) = pair();
         let mut store = Vec::new();
-        record_my_sig(&mut store, &b.public_hex(), "bob", &sign(&a, &b.public_hex()));
+        record_my_sig(
+            &mut store,
+            &b.public_hex(),
+            "bob",
+            &sign(&a, &b.public_hex()),
+        );
         assert_eq!(status_of(&store, &b.public_hex()), Status::OfferedByMe);
     }
 }

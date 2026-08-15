@@ -9,7 +9,7 @@
       "cwd": "../../crates/ui-web"
     },
     "beforeBuildCommand": {
-      "script": "trunk build",
+      "script": "trunk build --release",
       "cwd": "../../crates/ui-web"
     },
     "devUrl": "http://localhost:1420",

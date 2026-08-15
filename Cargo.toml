@@ -12,6 +12,7 @@ members = [
     "crates/store-client",
     "crates/swarm",
     "crates/federation",
+    "crates/directory",
     "crates/reticulum",
     "crates/art",
     "crates/screen",
@@ -39,7 +40,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.189.0"
+version = "0.191.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]
@@ -59,9 +60,10 @@ rabbithole-blobs = { path = "crates/blobs" }
 rabbithole-store-server = { path = "crates/store-server" }
 rabbithole-store-client = { path = "crates/store-client" }
 rabbithole-swarm = { path = "crates/swarm" }
+rabbithole-directory = { path = "crates/directory" }
 rabbithole-federation = { path = "crates/federation" }
 rabbithole-reticulum = { path = "crates/reticulum" }
-rabbithole-art = { path = "crates/art" }
+rabbithole-art = { path = "crates/art", default-features = false }
 rabbithole-screen = { path = "crates/screen" }
 rabbithole-audio = { path = "crates/audio" }
 rabbithole-radio = { path = "crates/radio" }
@@ -168,6 +170,28 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 [profile.release]
 lto = "thin"
 strip = "symbols"
+codegen-units = 1
+
+# The wasm SPA is the download. Native binaries keep rustc's default opt-level
+# (3) so the burrow stays fast; only the frontend crate-graph is size-tuned.
+# `trunk build --release` plus wasm-opt -Oz (see crates/ui-web/index.html) do
+# the rest.
+[profile.release.package.rabbithole-ui-web]
+opt-level = "z"
+[profile.release.package.leptos]
+opt-level = "z"
+[profile.release.package.leptos_router]
+opt-level = "z"
+[profile.release.package.wasm-bindgen]
+opt-level = "z"
+[profile.release.package.wasm-bindgen-futures]
+opt-level = "z"
+[profile.release.package.js-sys]
+opt-level = "z"
+[profile.release.package.web-sys]
+opt-level = "z"
+[profile.release.package.gloo-timers]
+opt-level = "z"
 
 [profile.dev.package."*"]
 opt-level = 1

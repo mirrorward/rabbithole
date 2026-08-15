@@ -192,7 +192,10 @@ mod tests {
         // "this bug is still there" report during the black-margin hunt was
         // this. Web deployments keep it; the shell must not.
         assert!(super::sw_allowed(false), "web keeps its offline shell");
-        assert!(!super::sw_allowed(true), "the native shell must never cache-first itself");
+        assert!(
+            !super::sw_allowed(true),
+            "the native shell must never cache-first itself"
+        );
     }
 
     use super::*;
@@ -302,7 +305,33 @@ mod tests {
     fn index_html_wires_the_pwa_through_trunk() {
         // The rust link builds this crate's bin; the copy-file links land the
         // shell assets at the dist root, where SW_URL/MANIFEST_URL expect them.
-        assert!(INDEX_HTML.contains(r#"data-trunk rel="rust""#));
+        // Matched per attribute rather than as one literal: the tag spans
+        // several lines and a reformat is not a regression.
+        assert!(INDEX_HTML.contains("data-trunk"));
+        assert!(INDEX_HTML.contains(r#"rel="rust""#));
+        assert!(INDEX_HTML.contains(r#"data-bin="rabbithole-ui-web""#));
+        // Size-first Binaryen pass on `trunk build --release` (debug skips it).
+        assert!(
+            INDEX_HTML.contains(r#"data-wasm-opt="z""#),
+            "release SPA builds should run wasm-opt -Oz"
+        );
+        // Load-bearing, not cosmetic: wasm-opt validates against the MVP
+        // feature set by default and rejects what the toolchain now emits, so
+        // without these flags `trunk build --release` fails outright and there
+        // is no release SPA at all.
+        for feature in [
+            "--enable-bulk-memory-opt",
+            "--enable-nontrapping-float-to-int",
+            "--enable-sign-ext",
+            "--enable-multivalue",
+            "--enable-reference-types",
+            "--enable-mutable-globals",
+        ] {
+            assert!(
+                INDEX_HTML.contains(feature),
+                "release builds need wasm-opt {feature}"
+            );
+        }
         for asset in [
             "assets/sw.js",
             "assets/manifest.webmanifest",
