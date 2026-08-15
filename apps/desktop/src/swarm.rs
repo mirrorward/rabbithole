@@ -3,6 +3,8 @@
 //! command surface (Slice 4) just calls [`run_swarm_download`] and forwards a
 //! progress `emit`; the ui-web `TransferBackend` (Slice 5) drives it over IPC.
 
+#![cfg_attr(rustfmt, rustfmt_skip)]
+
 use std::path::Path;
 
 use rabbithole_core::{Client, ClientError};

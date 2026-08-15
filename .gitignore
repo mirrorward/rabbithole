@@ -8,8 +8,8 @@ node_modules
 
 # Agent worktrees and local session state
 .claude/
-# just up writes the local Looking Glass bind here so TUI/desktop
-# in another terminal find the same port without re-exporting env.
+# just up writes the local Looking Glass bind here (and a copy under
+# ~/.rabbithole or $XDG_STATE_HOME/rabbithole, outside the repo).
 .rabbithole/
 
 # mdBook rendered output

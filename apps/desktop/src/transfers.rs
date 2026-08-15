@@ -6,6 +6,8 @@
 //! this layer is Tauri glue (managed state + serialization + event emission),
 //! best exercised end-to-end with `cargo tauri dev` (see the design doc).
 
+#![cfg_attr(rustfmt, rustfmt_skip)]
+
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 

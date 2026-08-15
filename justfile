@@ -51,12 +51,15 @@ build:
 # Deliberately not a supervisor: two background jobs and a `wait` is the
 # entire requirement, and a process manager would be a subsystem to maintain.
 
-# Persist the local INDEX bind so a TUI/desktop in another terminal
-# finds the same port without re-exporting RABBIT_TRACKER_STATUS.
+# Persist the local INDEX bind (git toplevel + ~/.rabbithole) so a TUI
+# started outside the repo still finds it. Cleared when the stack stops.
 [private]
 write-tracker-status:
-    mkdir -p .rabbithole
-    printf '%s\n' "{{tracker_status}}" > .rabbithole/looking-glass-status
+    scripts/local-tracker-status.sh write "{{tracker_status}}"
+
+[private]
+clear-tracker-status:
+    scripts/local-tracker-status.sh clear
 
 up: build web write-tracker-status
     #!/usr/bin/env bash
@@ -65,18 +68,23 @@ up: build web write-tracker-status
     echo "tracker  → status {{tracker_status}}"
     bind='{{tracker_status}}'
     echo "clients  → 127.0.0.1:${bind##*:}  (public glass stays :4655)"
-    echo "status   → .rabbithole/looking-glass-status"
+    echo "status   → $(scripts/local-tracker-status.sh print)"
     echo "data     → {{data_dir}}"
     echo
+    cleanup() {
+      kill $burrow_pid $tracker_pid 2>/dev/null
+      scripts/local-tracker-status.sh clear
+    }
     ./target/release/burrow --data-dir "{{data_dir}}" \
         --http --http-addr "{{http_addr}}" --web-root crates/ui-web/dist run &
     burrow_pid=$!
     ./target/release/looking-glass --status "{{tracker_status}}" &
     tracker_pid=$!
-    # One Ctrl-C stops the stack, not just whichever job had the terminal.
-    trap 'kill $burrow_pid $tracker_pid 2>/dev/null' INT TERM
+    # One Ctrl-C stops the stack and drops the status files so a stale
+    # bind is not what typed localhost follows.
+    trap cleanup INT TERM
     wait -n $burrow_pid $tracker_pid
-    kill $burrow_pid $tracker_pid 2>/dev/null
+    cleanup
     wait
 
 # Run only the burrow, serving the web client.
@@ -86,24 +94,18 @@ burrow: build web
 
 # Run only the tracker.
 tracker: build write-tracker-status
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'scripts/local-tracker-status.sh clear' INT TERM EXIT
     ./target/release/looking-glass --status "{{tracker_status}}"
 
-# Terminal client. Picks up the local glass port `just up` wrote.
+# Terminal client. The binary reads the status file (and probes it);
+# we do not export a stale bind into the env.
 tui: build
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ -z "${RABBIT_TRACKER_STATUS:-}" ] && [ -f .rabbithole/looking-glass-status ]; then
-      export RABBIT_TRACKER_STATUS="$(tr -d '\r\n' < .rabbithole/looking-glass-status)"
-    fi
     ./target/release/rabbit-tui
 
-# Desktop shell. Same local glass port as `just tui`.
+# Desktop shell. Same status-file discovery as the TUI.
 desktop:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ -z "${RABBIT_TRACKER_STATUS:-}" ] && [ -f .rabbithole/looking-glass-status ]; then
-      export RABBIT_TRACKER_STATUS="$(tr -d '\r\n' < .rabbithole/looking-glass-status)"
-    fi
     cd apps/desktop && cargo tauri dev
 
 # The dev loop for the web client: the SPA with seeded demo burrows, on 1420.

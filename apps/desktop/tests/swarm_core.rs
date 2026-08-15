@@ -5,6 +5,8 @@
 //! it verifies fully headlessly. Mirrors the harness in `crates/swarm/tests/sim.rs`,
 //! kept small (few peers, few units) so it runs reliably rather than as a soak.
 
+#![cfg_attr(rustfmt, rustfmt_skip)]
+
 use std::path::Path;
 use std::sync::Arc;
 

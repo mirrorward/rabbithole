@@ -1,0 +1,8 @@
+# Isolated workspace: `cargo fmt` here used to rewrite swarm.rs / transfers.rs
+# / tests/swarm_core.rs (those files opt out via rustfmt::skip). `cargo test`
+# must not format; format only when you mean to.
+edition = "2021"
+max_width = 100
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true

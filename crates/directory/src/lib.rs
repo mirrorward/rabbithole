@@ -176,10 +176,12 @@ pub const LOCAL_STATUS_PORT: u16 = 5497;
 /// Same name the justfile reads. A host:port, `[v6]:port`, or a bare port.
 pub const TRACKER_STATUS_ENV: &str = "RABBIT_TRACKER_STATUS";
 
-/// Well-known file `just up` writes so a TUI or desktop started in another
-/// terminal still finds the local glass. Relative to the process cwd (the
-/// repo root when launched via `just`).
+/// Repo-relative status file (`just up` also writes a user-level copy so a
+/// TUI started outside the repo still finds the bind).
 pub const LOCAL_STATUS_FILE: &str = ".rabbithole/looking-glass-status";
+
+/// Filename under `$XDG_STATE_HOME/rabbithole/` or `~/.rabbithole/`.
+pub const USER_STATUS_FILE: &str = "looking-glass-status";
 
 /// A live discovery answer plus which source produced it.
 ///
@@ -330,16 +332,49 @@ pub fn local_status_port_from_sources(env_bind: Option<&str>, file_bind: Option<
     local_status_port_from(env_bind.or(file_bind))
 }
 
-/// Local-stack status port: [`TRACKER_STATUS_ENV`], then [`LOCAL_STATUS_FILE`],
-/// then 5497. Public hosts never consult this.
+/// Local-stack status port: [`TRACKER_STATUS_ENV`] (always honored), then a
+/// **live** file bind, then 5497. A stale file after `just up` dies is not
+/// a port — typed `localhost` must not follow it.
 pub fn local_status_port() -> u16 {
-    let env = std::env::var(TRACKER_STATUS_ENV).ok();
-    let file = read_local_status_file();
-    local_status_port_from_sources(env.as_deref(), file.as_deref())
+    if let Ok(bind) = std::env::var(TRACKER_STATUS_ENV) {
+        return local_status_port_from(Some(bind.as_str()));
+    }
+    if let Some(bind) = read_local_status_file() {
+        if let Some(port) = live_local_port_from_bind(&bind) {
+            return port;
+        }
+    }
+    LOCAL_STATUS_PORT
 }
 
-/// Paths that may hold the local-stack bind: `$RABBITHOLE_DATA_DIR` first,
-/// then the repo-relative [`LOCAL_STATUS_FILE`].
+/// File bind as a port only when loopback answers. Dead bind → `None`.
+pub fn live_local_port_from_bind(bind: &str) -> Option<u16> {
+    live_local_port_from_bind_if(bind, loopback_port_is_live)
+}
+
+/// Same as [`live_local_port_from_bind`] with an injected liveness check.
+pub fn live_local_port_from_bind_if(bind: &str, is_live: fn(u16) -> bool) -> Option<u16> {
+    let port = local_status_port_from(Some(bind));
+    is_live(port).then_some(port)
+}
+
+/// Is anything accepting TCP on `127.0.0.1:port`? Short timeout: a hint,
+/// not a hang. Wasm cannot dial; treated as not live.
+pub fn loopback_port_is_live(port: u16) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = port;
+        false
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(150)).is_ok()
+    }
+}
+
+/// Paths that may hold the local-stack bind, durable first:
+/// `$RABBITHOLE_DATA_DIR`, git toplevel, cwd, then the user-level file.
 pub fn local_status_file_candidates() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Ok(dir) = std::env::var("RABBITHOLE_DATA_DIR") {
@@ -347,8 +382,53 @@ pub fn local_status_file_candidates() -> Vec<std::path::PathBuf> {
             out.push(std::path::Path::new(&dir).join(".looking-glass-status"));
         }
     }
-    out.push(std::path::PathBuf::from(LOCAL_STATUS_FILE));
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Some(root) = git_toplevel() {
+            out.push(root.join(LOCAL_STATUS_FILE));
+        }
+        out.push(std::path::PathBuf::from(LOCAL_STATUS_FILE));
+        if let Some(user) = user_status_file() {
+            out.push(user);
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        out.push(std::path::PathBuf::from(LOCAL_STATUS_FILE));
+    }
     out
+}
+
+/// `$XDG_STATE_HOME/rabbithole/looking-glass-status`, else `~/.rabbithole/…`.
+pub fn user_status_file() -> Option<std::path::PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+        if !xdg.is_empty() {
+            return Some(
+                std::path::Path::new(&xdg)
+                    .join("rabbithole")
+                    .join(USER_STATUS_FILE),
+            );
+        }
+    }
+    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty())?;
+    Some(
+        std::path::Path::new(&home)
+            .join(".rabbithole")
+            .join(USER_STATUS_FILE),
+    )
+}
+
+fn git_toplevel() -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = String::from_utf8(out.stdout).ok()?;
+    let p = p.trim();
+    (!p.is_empty()).then(|| std::path::PathBuf::from(p))
 }
 
 /// First line of a status-bind file (`0.0.0.0:5497`).
@@ -1033,5 +1113,47 @@ mod tests {
             "the env still wins"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_dead_file_bind_is_not_a_port() {
+        // After just up exits, the file can linger. Typed localhost must
+        // not follow a bind nothing answers.
+        assert_eq!(
+            live_local_port_from_bind_if("0.0.0.0:7001", |_| false),
+            None
+        );
+        assert_eq!(
+            live_local_port_from_bind_if("0.0.0.0:7001", |_| true),
+            Some(7001)
+        );
+        assert!(
+            !loopback_port_is_live(1),
+            "port 1 on loopback refuses — not a glass"
+        );
+    }
+
+    #[test]
+    fn a_listening_loopback_port_counts_as_live() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral");
+        let port = listener.local_addr().expect("addr").port();
+        assert!(loopback_port_is_live(port));
+        drop(listener);
+        assert!(!loopback_port_is_live(port));
+    }
+
+    #[test]
+    fn status_file_candidates_include_the_user_level_path() {
+        let paths = local_status_file_candidates();
+        assert!(
+            paths.iter().any(|p| p.ends_with(LOCAL_STATUS_FILE)),
+            "repo/cwd copy: {paths:?}"
+        );
+        if let Some(user) = user_status_file() {
+            assert!(
+                paths.iter().any(|p| p == &user),
+                "user-level copy {user:?} missing from {paths:?}"
+            );
+        }
     }
 }

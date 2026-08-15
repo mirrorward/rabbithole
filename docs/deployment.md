@@ -205,9 +205,11 @@ a host that runs both, move one of them — `just up` binds status to `5497`:
 
 Clients follow the same split: a bare public host still dials **4655**;
 `localhost` / `127.0.0.1` / `::1` without a port dial **5497** (or the port
-in `$RABBIT_TRACKER_STATUS`). `just up` also writes
-`.rabbithole/looking-glass-status` so a TUI or desktop started in another
-terminal finds the same bind; `just tui` / `just desktop` export it.
+in `$RABBIT_TRACKER_STATUS`). `just up` writes the bind to the git
+toplevel `.rabbithole/looking-glass-status` **and**
+`~/.rabbithole/looking-glass-status` (or `$XDG_STATE_HOME/rabbithole/`),
+and removes both when the stack stops. A leftover file is ignored unless
+loopback still answers — typed `localhost` will not follow a dead port.
 
 ## Constrained / RF links
 
