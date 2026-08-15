@@ -170,7 +170,9 @@ fn tracker_err(text: &str) -> Option<String> {
 /// nine-column shape — the caller skips such lines rather than panicking.
 pub fn parse_index_line(line: &str) -> Option<IndexEntry> {
     let cols: Vec<&str> = line.split('\t').collect();
-    if cols.len() != 9 {
+    // Nine columns today; extra columns a later glass adds must not
+    // blank the row — same policy as `rabbithole_directory::parse_tracker_index`.
+    if cols.len() < 9 {
         return None;
     }
     let name = cols[0].trim();
@@ -638,15 +640,15 @@ mod tests {
 
     #[test]
     fn parse_index_line_rejects_malformed() {
-        // Wrong column count (8 and 10).
+        // Too few columns.
         assert_eq!(
             parse_index_line("A\t1.2.3.4:1\t1\t-\t100.0\t0\tno\t-"),
             None
         );
-        assert_eq!(
-            parse_index_line("A\t1.2.3.4:1\t1\t-\t100.0\t0\tno\t-\t-\textra"),
-            None
-        );
+        // A later glass adding a column must not blank a good row.
+        let extra = parse_index_line("A\t1.2.3.4:1\t1\t-\t100.0\t0\tno\t-\t-\textra").unwrap();
+        assert_eq!(extra.name, "A");
+        assert_eq!(extra.addr, "1.2.3.4:1");
         // Non-numeric users / uptime / last_seen.
         assert_eq!(
             parse_index_line("A\t1.2.3.4:1\tmany\t-\t100.0\t0\tno\t-\t-"),

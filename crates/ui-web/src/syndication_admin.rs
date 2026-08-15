@@ -38,12 +38,15 @@
 //!
 //! ## Feed monitor
 //!
-//! No live feed-stats wire message exists yet, so the monitor renders
-//! per-feed **configured** state only (mapping, the global enabled flag and
-//! poll interval). Live stats (last poll, conditional-GET 304s, dedupe hits)
-//! are a clearly-labeled seam for a future server slice.
+//! Live counters ride [`AdminCommand::GetGatewayStats`] →
+//! [`AdminEvent::GatewayStatsLoaded`] (ADMIN 45/46). The panel asks on load
+//! and folds last-poll / status / seen / posted / dupes per feed plus the
+//! per-gateway activity rows. Configured state (enabled + poll interval)
+//! remains the fallback when a snapshot has not arrived.
 
 use std::collections::BTreeMap;
+
+use rabbithole_proto::admin::{FeedStat, GatewayStat, GatewayStatsReply};
 
 use crate::admin::ConfigEntry;
 use crate::wire::{AdminCommand, AdminEvent};
@@ -167,6 +170,8 @@ pub struct SynAdminState {
     pub learned_live: BTreeMap<String, bool>,
     /// One-line status for the panel.
     pub status: String,
+    /// Latest live gateway/feed snapshot, if one has arrived.
+    pub stats: Option<GatewayStatsReply>,
 }
 
 impl SynAdminState {
@@ -174,12 +179,14 @@ impl SynAdminState {
     /// [`LOAD_KEYS`]. The caller pairs each command's replies back through
     /// [`apply_get_reply`](Self::apply_get_reply) with the same key.
     pub fn load_commands() -> Vec<AdminCommand> {
-        LOAD_KEYS
+        let mut cmds: Vec<AdminCommand> = LOAD_KEYS
             .iter()
             .map(|key| AdminCommand::GetConfig {
                 key: (*key).to_string(),
             })
-            .collect()
+            .collect();
+        cmds.push(AdminCommand::GetGatewayStats);
+        cmds
     }
 
     /// Fold the reply events of a `GetConfig` for `key`. Total: unknown or
@@ -207,9 +214,37 @@ impl SynAdminState {
                         self.status = format!("Error loading {key}: {detail}");
                     }
                 }
+                AdminEvent::GatewayStatsLoaded(reply) => {
+                    self.stats = Some(reply.clone());
+                }
                 // Acks and other admin replies carry nothing for a get.
                 _ => {}
             }
+        }
+    }
+
+    /// Fold a live (or mock) admin reply that may be a config get, a config
+    /// set, or the gateway-stats snapshot. `key` is the in-flight config key
+    /// when the transport paired the request; `None` for unpaired snapshots.
+    pub fn apply_live(&mut self, key: Option<&str>, events: &[AdminEvent]) {
+        if events
+            .iter()
+            .any(|e| matches!(e, AdminEvent::GatewayStatsLoaded(_)))
+        {
+            self.apply_get_reply("", events);
+            return;
+        }
+        if let Some(k) = key {
+            if events
+                .iter()
+                .any(|e| matches!(e, AdminEvent::ConfigApplied { .. }))
+            {
+                self.apply_set_reply(k, events);
+            } else {
+                self.apply_get_reply(k, events);
+            }
+        } else {
+            self.apply_get_reply("", events);
         }
     }
 
@@ -343,8 +378,8 @@ impl SynAdminState {
     }
 
     /// One-line configured state shared by every feed row: whether the
-    /// poller is on and how often it fires. Purely config-derived — live
-    /// per-feed stats have no wire message yet.
+    /// poller is on and how often it fires. Used when no live snapshot
+    /// has arrived yet.
     pub fn feed_state_line(&self) -> String {
         match (self.enabled(), self.poll_secs()) {
             (Some(true), Some(secs)) => format!("polling every {secs} s"),
@@ -353,6 +388,55 @@ impl SynAdminState {
             (None, _) => "poller state unknown".to_string(),
         }
     }
+
+    /// Live stats for `url`, if the latest snapshot mentioned it.
+    pub fn feed_stat(&self, url: &str) -> Option<&FeedStat> {
+        self.stats.as_ref()?.feeds.iter().find(|f| f.url == url)
+    }
+
+    /// Per-gateway activity rows from the latest snapshot.
+    pub fn gateway_stats(&self) -> &[GatewayStat] {
+        self.stats
+            .as_ref()
+            .map(|s| s.gateways.as_slice())
+            .unwrap_or(&[])
+    }
+}
+
+/// Human last-poll label. `now_ms <= 0` (host tests / unknown clock) falls
+/// back to a UTC time-of-day so the string stays deterministic.
+pub fn last_poll_label(last_poll_ms: i64, now_ms: i64) -> String {
+    if last_poll_ms <= 0 {
+        return "never".to_string();
+    }
+    if now_ms <= 0 {
+        return crate::clock::utc_hhmm(last_poll_ms);
+    }
+    let ago_s = now_ms.saturating_sub(last_poll_ms) / 1000;
+    if ago_s < 60 {
+        format!("{ago_s}s ago")
+    } else if ago_s < 3600 {
+        format!("{}m ago", ago_s / 60)
+    } else if ago_s < 86_400 {
+        format!("{}h ago", ago_s / 3600)
+    } else {
+        format!("{}d ago", ago_s / 86_400)
+    }
+}
+
+/// One-line live outcome for a feed row.
+pub fn feed_stat_line(stat: &FeedStat) -> String {
+    let status = match stat.last_status.as_str() {
+        "" if stat.last_poll_ms == 0 => return "never polled".to_string(),
+        "ok" => "ok",
+        "not_modified" => "not modified",
+        "error" => "error",
+        other => other,
+    };
+    format!(
+        "{status} · {} seen · {} posted · {} dupes",
+        stat.items_seen, stat.items_posted, stat.dupes_dropped
+    )
 }
 
 /// Validate a poll-interval draft: a positive integer number of seconds
@@ -532,7 +616,7 @@ mod tests {
     #[test]
     fn load_commands_cover_every_panel_key() {
         let cmds = SynAdminState::load_commands();
-        assert_eq!(cmds.len(), LOAD_KEYS.len());
+        assert_eq!(cmds.len(), LOAD_KEYS.len() + 1);
         for (cmd, key) in cmds.iter().zip(LOAD_KEYS) {
             assert_eq!(
                 cmd,
@@ -541,6 +625,7 @@ mod tests {
                 }
             );
         }
+        assert_eq!(cmds.last(), Some(&AdminCommand::GetGatewayStats));
         // The feeds key is asked for even though today's server refuses it.
         assert!(LOAD_KEYS.contains(&KEY_FEEDS));
     }
@@ -764,6 +849,37 @@ mod tests {
         assert_eq!(s.feed_state_line(), "polling (interval unknown)");
         s.apply_get_reply(KEY_POLL_SECS, &loaded(KEY_POLL_SECS, "1800"));
         assert_eq!(s.feed_state_line(), "polling every 1800 s");
+    }
+
+    #[test]
+    fn live_stats_fold_onto_the_matching_feed() {
+        let mut s = loaded_state();
+        let reply = GatewayStatsReply {
+            generated_at_ms: 1_700_000_000_000,
+            feeds: vec![FeedStat {
+                url: "https://a.example/feed.xml".into(),
+                last_poll_ms: 1_700_000_000_000,
+                last_status: "ok".into(),
+                items_seen: 12,
+                items_posted: 9,
+                dupes_dropped: 3,
+            }],
+            gateways: vec![GatewayStat {
+                name: "nntp".into(),
+                enabled: true,
+                counters: vec![("posts".into(), 4), ("sessions".into(), 7)],
+            }],
+        };
+        s.apply_live(None, &[AdminEvent::GatewayStatsLoaded(reply)]);
+        let stat = s.feed_stat("https://a.example/feed.xml").expect("row");
+        assert_eq!(stat.items_posted, 9);
+        assert_eq!(feed_stat_line(stat), "ok · 12 seen · 9 posted · 3 dupes");
+        assert_eq!(s.gateway_stats().len(), 1);
+        assert_eq!(s.gateway_stats()[0].name, "nntp");
+        assert_eq!(last_poll_label(0, 1_700_000_000_000), "never");
+        assert_eq!(last_poll_label(1_783_780_507_000, 0), "14:35");
+        assert_eq!(last_poll_label(1_000, 61_000), "1m ago");
+        assert_eq!(feed_stat_line(&FeedStat::default()), "never polled");
     }
 
     #[test]

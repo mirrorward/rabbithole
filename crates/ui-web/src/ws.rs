@@ -21,7 +21,9 @@
 //! 3. Each inbound binary message is decoded once to a [`Frame`] and fanned out:
 //!    [`wire::frame_to_events`](crate::wire::frame_to_events) → the api-event
 //!    sink, [`wire::frame_to_file_events`](crate::wire::frame_to_file_events)
-//!    → the FILE-family sink, and
+//!    → the FILE-family sink,
+//!    [`wire::frame_to_admin_events`](crate::wire::frame_to_admin_events) →
+//!    the ADMIN-family sink, and
 //!    [`wire::frame_to_notice_route`](crate::wire::frame_to_notice_route) →
 //!    the notice sink (radio bridge updates vs. operator notices, pre-split).
 //! 4. [`Command::Disconnect`] clears "connection wanted" and closes the socket
@@ -49,11 +51,12 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::{BinaryType, CloseEvent, Event as WebEvent, MessageEvent, WebSocket};
 
 use rabbithole_core::api::{Command, Event};
-use rabbithole_proto::{decode_frame, encode_frame, RequestId};
+use rabbithole_proto::{decode_frame, encode_frame, Family, RequestId};
 
 use crate::conn::{backoff_delay, ConnState};
 use crate::wire::{
-    self, EventClient, EventSink, FileCommand, FileEvent, NoticeRoute, PresenceDelta,
+    self, AdminCommand, AdminEvent, EventClient, EventSink, FileCommand, FileEvent, NoticeRoute,
+    PresenceDelta,
 };
 
 /// Keepalive interval, milliseconds.
@@ -65,6 +68,10 @@ const WS_OPEN: u16 = 1;
 pub type ConnSink = Rc<dyn Fn(ConnState)>;
 /// A sink the transport pushes decoded [`FileEvent`]s into.
 pub type FileSink = Rc<dyn Fn(FileEvent)>;
+/// A sink the transport pushes decoded [`AdminEvent`]s into. The optional
+/// key is the in-flight `GetConfig`/`SetConfig` key (FIFO-paired), so a
+/// `Failed` reply still knows which read it belongs to.
+pub type AdminSink = Rc<dyn Fn((Option<String>, Vec<AdminEvent>))>;
 /// A sink the transport pushes routed `ServerNotice` pushes into (radio
 /// bridge updates vs. operator notices, already split by
 /// [`wire::frame_to_notice_route`]).
@@ -117,6 +124,10 @@ struct Inner {
     sink: Option<EventSink>,
     conn_sink: Option<ConnSink>,
     file_sink: Option<FileSink>,
+    admin_sink: Option<AdminSink>,
+    /// In-flight admin config keys, FIFO. `GetConfig`/`SetConfig` push
+    /// `Some(key)`; other admin verbs push `None`.
+    pending_admin: RefCell<VecDeque<Option<String>>>,
     notice_sink: Option<NoticeSink>,
     who_sink: Option<WhoSink>,
     front_page_sink: Option<FrontPageSink>,
@@ -176,6 +187,12 @@ impl Inner {
     fn emit_file(&self, event: FileEvent) {
         if let Some(sink) = &self.file_sink {
             sink(event);
+        }
+    }
+
+    fn emit_admin(&self, batch: (Option<String>, Vec<AdminEvent>)) {
+        if let Some(sink) = &self.admin_sink {
+            sink(batch);
         }
     }
 
@@ -274,6 +291,8 @@ impl WsClient {
                 sink: None,
                 conn_sink: None,
                 file_sink: None,
+                admin_sink: None,
+                pending_admin: RefCell::new(VecDeque::new()),
                 notice_sink: None,
                 who_sink: None,
                 front_page_sink: None,
@@ -549,6 +568,38 @@ impl WsClient {
         }
     }
 
+    /// Register the ADMIN-family sink. Most recent wins.
+    pub fn on_admin(&mut self, sink: AdminSink) {
+        self.inner.borrow_mut().admin_sink = Some(sink);
+    }
+
+    /// Drive one [`AdminCommand`]: encode it via the host-tested
+    /// [`wire::admin_command_to_frame`] and write it to the open socket.
+    /// Replies arrive asynchronously through the admin sink.
+    pub fn dispatch_admin(&self, command: &AdminCommand) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        let pending = match command {
+            AdminCommand::GetConfig { key } | AdminCommand::SetConfig { key, .. } => {
+                Some(key.clone())
+            }
+            _ => None,
+        };
+        match wire::admin_command_to_frame(command, id) {
+            Ok(Some(frame)) => match encode_frame(&frame) {
+                Ok(bytes) => {
+                    b.pending_admin.borrow_mut().push_back(pending);
+                    Self::write(&mut b, &bytes);
+                }
+                Err(err) => {
+                    b.emit_admin((pending, vec![AdminEvent::Failed(format!("encode: {err}"))]))
+                }
+            },
+            Ok(None) => {}
+            Err(err) => b.emit_admin((pending, vec![AdminEvent::Failed(format!("map: {err}"))])),
+        }
+    }
+
     /// Drive one [`FileCommand`]: encode it via the host-tested
     /// [`wire::file_command_to_frame`] and write it to the open socket. Replies
     /// arrive asynchronously through the FILE-family sink.
@@ -696,6 +747,16 @@ impl WsClient {
                         }
                         for event in wire::frame_to_file_events(&frame) {
                             b.emit_file(event);
+                        }
+                        if frame.family == Family::ADMIN {
+                            let mut events = wire::frame_to_admin_events(&frame);
+                            let key = b.pending_admin.borrow_mut().pop_front();
+                            if events.is_empty() && frame.error.is_none() {
+                                events.push(AdminEvent::Ack("Done.".into()));
+                            }
+                            if !events.is_empty() {
+                                b.emit_admin((key.flatten(), events));
+                            }
                         }
                         // A FileContent reply only arrives in response to a user
                         // Download; deliver its bytes to the browser as a file

@@ -65,6 +65,8 @@ impl AdminState {
             }
             AdminEvent::Ack(msg) => self.status = msg.clone(),
             AdminEvent::Failed(detail) => self.status = format!("Error: {detail}"),
+            // Live feed/gateway counters belong to the syndication panel.
+            AdminEvent::GatewayStatsLoaded(_) => {}
         }
     }
 

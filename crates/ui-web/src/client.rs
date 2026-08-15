@@ -17,7 +17,8 @@
 
 use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::admin::{
-    AccountEntry, AccountList, ClassEntry, ClassList, ConfigApplied, ConfigValue, InviteCode,
+    AccountEntry, AccountList, ClassEntry, ClassList, ConfigApplied, ConfigValue, FeedStat,
+    GatewayStat, GatewayStatsReply, InviteCode,
 };
 use rabbithole_proto::filelib::{
     AreaList, FileAdded, FileAreaView, FileContent, FileNodeView, NodeList, NodeReply,
@@ -606,6 +607,47 @@ impl MockClient {
         ]
     }
 
+    fn seeded_gateway_stats() -> GatewayStatsReply {
+        GatewayStatsReply {
+            generated_at_ms: 1_783_780_507_000,
+            feeds: vec![
+                FeedStat {
+                    url: "https://blog.example.org/feed.xml".into(),
+                    last_poll_ms: 1_783_780_507_000,
+                    last_status: "ok".into(),
+                    items_seen: 14,
+                    items_posted: 11,
+                    dupes_dropped: 3,
+                },
+                FeedStat {
+                    url: "https://warren.example/atom.xml".into(),
+                    last_poll_ms: 1_783_780_200_000,
+                    last_status: "not_modified".into(),
+                    items_seen: 4,
+                    items_posted: 4,
+                    dupes_dropped: 0,
+                },
+            ],
+            gateways: vec![
+                GatewayStat {
+                    name: "nntp".into(),
+                    enabled: true,
+                    counters: vec![("posts".into(), 3), ("sessions".into(), 8)],
+                },
+                GatewayStat {
+                    name: "qwk".into(),
+                    enabled: true,
+                    counters: vec![("packets_built".into(), 2), ("replies_ingested".into(), 1)],
+                },
+                GatewayStat {
+                    name: "syndication".into(),
+                    enabled: true,
+                    counters: vec![("polls".into(), 6)],
+                },
+            ],
+        }
+    }
+
     /// Serve an [`AdminCommand`] from the in-memory admin console.
     ///
     /// Replies that carry a payload (`ClassList`, `AccountList`, `ConfigValue`,
@@ -689,6 +731,7 @@ impl MockClient {
                     .unwrap_or_else(|| !key.starts_with("listen."));
                 admin_events(&ConfigApplied::new(live))
             }
+            AdminCommand::GetGatewayStats => admin_events(&Self::seeded_gateway_stats()),
         }
     }
 
@@ -1304,8 +1347,15 @@ mod tests {
             });
             s.apply_get_reply(key, &events);
         }
+        let stats = c.dispatch_admin(AdminCommand::GetGatewayStats);
+        s.apply_live(None, &stats);
         assert_eq!(s.enabled(), Some(true));
         assert_eq!(s.poll_secs(), Some(1800));
+        assert_eq!(
+            s.feed_stat("https://blog.example.org/feed.xml")
+                .map(|f| f.items_posted),
+            Some(11)
+        );
         // The seeded TOML table body parses into read-only feed rows whose
         // destinations are real seeded boards.
         let rows = s.feed_rows();

@@ -21,7 +21,7 @@ use rabbithole_core::theme::{Mode, ThemePack};
 use crate::a11y;
 use crate::app::AppState;
 use crate::files::{human_size, node_kind_label, TransferStatus, KIND_FOLDER};
-use crate::syndication_admin::FeedsStatus;
+use crate::syndication_admin::{feed_stat_line, last_poll_label, FeedsStatus};
 use crate::theme_css::{mode_name, pack_label};
 use crate::theme_editor::{contrast_warnings, EditorAction, EditorState};
 
@@ -3826,12 +3826,10 @@ pub fn Admin() -> impl IntoView {
 
 /// Syndication & Gateways: the per-network gateway matrix (enabled state,
 /// listener port, live/restart badge, toggle), the poll-interval editor with
-/// inline validation, and the read-only feeds table + monitor. All state and
-/// logic live in the host-tested [`crate::syndication_admin`]; the panel
-/// rides the **existing** ADMIN config get/set vocabulary — no new wire
-/// messages. Feeds are honest about being TOML-only server-side, and live
-/// per-feed stats are a clearly-labeled seam for a future server slice.
-/// Admin-gated by rendering inside [`Admin`]'s capability guard.
+/// inline validation, the read-only feeds table, and the live feed/gateway
+/// monitor (ADMIN 45/46). All state and logic live in the host-tested
+/// [`crate::syndication_admin`]. Feeds are honest about being TOML-only
+/// server-side. Admin-gated by rendering inside [`Admin`]'s capability guard.
 #[component]
 fn SyndicationPanel() -> impl IntoView {
     let app = expect_context::<AppState>();
@@ -3846,7 +3844,8 @@ fn SyndicationPanel() -> impl IntoView {
     let feeds_unavailable = move || syn.with(|s| s.feeds == FeedsStatus::Unavailable);
     let feeds_loaded = move || syn.with(|s| matches!(s.feeds, FeedsStatus::Listed(_)));
     let feed_rows = move || syn.with(|s| s.feed_rows());
-    let feed_state = move || syn.with(|s| s.feed_state_line());
+    let has_stats = move || syn.with(|s| s.stats.is_some());
+    let gateway_stats = move || syn.with(|s| s.gateway_stats().to_vec());
 
     view! {
         <h2 class="rh-panel-title">"Syndication & gateways"</h2>
@@ -3967,6 +3966,7 @@ fn SyndicationPanel() -> impl IntoView {
                         <tr>
                             <th scope="col">"Feed URL"</th>
                             <th scope="col">"Board"</th>
+                            <th scope="col">"Last poll"</th>
                             <th scope="col">"State"</th>
                         </tr>
                     </thead>
@@ -3974,12 +3974,33 @@ fn SyndicationPanel() -> impl IntoView {
                         <For
                             each=feed_rows
                             key=|f| f.url.clone()
-                            children=move |f| view! {
-                                <tr>
-                                    <td class="rh-member-name">{f.url}</td>
-                                    <td class="rh-member-handle">{f.board}</td>
-                                    <td class="rh-file-meta">{feed_state}</td>
-                                </tr>
+                            children=move |f| {
+                                let url = f.url.clone();
+                                let last = {
+                                    let url = url.clone();
+                                    move || syn.with(|s| match s.feed_stat(&url) {
+                                        Some(stat) => last_poll_label(
+                                            stat.last_poll_ms,
+                                            crate::clock::now_ms(),
+                                        ),
+                                        None => "\u{2014}".to_string(),
+                                    })
+                                };
+                                let state = {
+                                    let url = url.clone();
+                                    move || syn.with(|s| match s.feed_stat(&url) {
+                                        Some(stat) => feed_stat_line(stat),
+                                        None => s.feed_state_line(),
+                                    })
+                                };
+                                view! {
+                                    <tr>
+                                        <td class="rh-member-name">{f.url}</td>
+                                        <td class="rh-member-handle">{f.board}</td>
+                                        <td class="rh-file-meta">{last}</td>
+                                        <td class="rh-file-meta">{state}</td>
+                                    </tr>
+                                }
                             }
                         />
                     </tbody>
@@ -3993,12 +4014,68 @@ fn SyndicationPanel() -> impl IntoView {
         </Show>
 
         <h3 class="rh-panel-title">"Feed monitor"</h3>
-        <p class="rh-hint">
-            "Configured state only. Live per-feed stats (last poll, \
-             conditional-GET 304s, dedupe hits) land with a future server \
-             slice \u{2014} no feed-stats wire message exists yet, and this \
-             panel does not invent one."
-        </p>
+        <Show
+            when=has_stats
+            fallback=|| view! {
+                <p class="rh-hint">
+                    "Waiting for a live snapshot of poll outcomes and \
+                     gateway counters."
+                </p>
+            }
+        >
+            <Show
+                when=move || !gateway_stats().is_empty()
+                fallback=|| view! {
+                    <p class="rh-hint">"No gateway activity recorded this run."</p>
+                }
+            >
+                <table class="rh-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">"Gateway"</th>
+                            <th scope="col">"State"</th>
+                            <th scope="col">"Counters"</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <For
+                            each=gateway_stats
+                            key=|g| g.name.clone()
+                            children=move |g| {
+                                let (dot, state_text) = if g.enabled {
+                                    ("rh-dot on", "enabled")
+                                } else {
+                                    ("rh-dot off", "disabled")
+                                };
+                                let counters = if g.counters.is_empty() {
+                                    "\u{2014}".to_string()
+                                } else {
+                                    g.counters
+                                        .iter()
+                                        .map(|(n, v)| format!("{n} {v}"))
+                                        .collect::<Vec<_>>()
+                                        .join(" \u{00b7} ")
+                                };
+                                view! {
+                                    <tr>
+                                        <td class="rh-member-name">{g.name}</td>
+                                        <td>
+                                            <span class=dot aria-hidden="true"></span>
+                                            <span class="rh-visually-hidden">{state_text}</span>
+                                        </td>
+                                        <td class="rh-file-meta">{counters}</td>
+                                    </tr>
+                                }
+                            }
+                        />
+                    </tbody>
+                </table>
+            </Show>
+            <p class="rh-hint">
+                "In-memory this run: last poll, conditional-GET 304s, and \
+                 dedupe hits reset when the burrow restarts."
+            </p>
+        </Show>
     }
 }
 

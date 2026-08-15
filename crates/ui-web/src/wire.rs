@@ -75,8 +75,8 @@ use std::rc::Rc;
 use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::admin::{
     AccountEntry, AccountList, AccountListRequest, AccountSet, Broadcast, ClassEntry, ClassList,
-    ClassListRequest, ClassSet, ConfigApplied, ConfigGet, ConfigSet, ConfigValue, InviteCode,
-    InviteCreate, Kick,
+    ClassListRequest, ClassSet, ConfigApplied, ConfigGet, ConfigSet, ConfigValue,
+    GatewayStatsReply, GatewayStatsRequest, InviteCode, InviteCreate, Kick,
 };
 use rabbithole_proto::board::{
     BoardList, BoardListRequest, PostCreate, ThreadList, ThreadListRequest, ThreadPosts,
@@ -1185,6 +1185,8 @@ pub enum AdminCommand {
         /// New value.
         value: String,
     },
+    /// Live syndication + gateway counters. → [`GatewayStatsReply`].
+    GetGatewayStats,
 }
 
 /// An administration event decoded from an inbound ADMIN-family [`Frame`] by
@@ -1222,6 +1224,8 @@ pub enum AdminEvent {
     Ack(String),
     /// An ADMIN request failed.
     Failed(String),
+    /// A live gateway/feed snapshot arrived.
+    GatewayStatsLoaded(GatewayStatsReply),
 }
 
 /// Map an [`AdminCommand`] to the ADMIN-family request [`Frame`] that carries
@@ -1259,6 +1263,7 @@ pub fn admin_command_to_frame(
         AdminCommand::SetConfig { key, value } => {
             Frame::request(id, &ConfigSet::new(key.clone(), value.clone()))?
         }
+        AdminCommand::GetGatewayStats => Frame::request(id, &GatewayStatsRequest)?,
     };
     Ok(Some(frame))
 }
@@ -1295,6 +1300,9 @@ pub fn frame_to_admin_events(frame: &Frame) -> Vec<AdminEvent> {
         return vec![AdminEvent::ConfigApplied {
             applied_live: m.applied_live,
         }];
+    }
+    if let Some(Ok(m)) = frame.decode::<GatewayStatsReply>() {
+        return vec![AdminEvent::GatewayStatsLoaded(m)];
     }
     Vec::new()
 }
@@ -2078,6 +2086,7 @@ mod tests {
             AdminCommand::GetConfig {
                 key: "server.name".into(),
             },
+            AdminCommand::GetGatewayStats,
         ] {
             let frame = admin_command_to_frame(&cmd, RequestId(1))
                 .unwrap()
@@ -2202,6 +2211,33 @@ mod tests {
                 applied_live: false
             }]
         );
+
+        let stats = Frame::push(&GatewayStatsReply {
+            generated_at_ms: 1_700_000_000_000,
+            feeds: vec![rabbithole_proto::admin::FeedStat {
+                url: "https://example.org/feed.xml".into(),
+                last_poll_ms: 1_700_000_000_000,
+                last_status: "ok".into(),
+                items_seen: 12,
+                items_posted: 9,
+                dupes_dropped: 3,
+            }],
+            gateways: vec![rabbithole_proto::admin::GatewayStat {
+                name: "nntp".into(),
+                enabled: true,
+                counters: vec![("posts".into(), 4)],
+            }],
+        })
+        .unwrap();
+        let ev = frame_to_admin_events(&stats);
+        match ev.as_slice() {
+            [AdminEvent::GatewayStatsLoaded(reply)] => {
+                assert_eq!(reply.feeds.len(), 1);
+                assert_eq!(reply.feeds[0].items_posted, 9);
+                assert_eq!(reply.gateways[0].name, "nntp");
+            }
+            other => panic!("expected gateway stats, got {other:?}"),
+        }
     }
 
     #[test]

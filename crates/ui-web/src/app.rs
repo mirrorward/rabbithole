@@ -743,6 +743,16 @@ impl AppState {
             ws.on_file_event(std::rc::Rc::new(move |event| {
                 files.update(|f| f.apply(&event))
             }));
+            let admin_sig = self.admin;
+            let syn_sig = self.syndication;
+            ws.on_admin(std::rc::Rc::new(move |(key, events)| {
+                admin_sig.update(|a| {
+                    for event in &events {
+                        a.apply(event);
+                    }
+                });
+                syn_sig.update(|s| s.apply_live(key.as_deref(), &events));
+            }));
             ws.on_members(std::rc::Rc::new(move |members| {
                 // `online` is recomputed from the live roster at render time
                 // (UiState::matching_members), so presence deltas keep the
@@ -1638,9 +1648,18 @@ impl AppState {
     }
 
     /// Drive one [`AdminCommand`] through the seam and fold its admin events
-    /// into the [`AdminState`].
+    /// into the [`AdminState`]. Live: write over the socket; replies fold
+    /// through the admin sink registered in `connect_live`.
     fn dispatch_admin(&self, command: AdminCommand) {
+        #[cfg(target_arch = "wasm32")]
+        if self.focused().live.get_untracked() {
+            self.focused()
+                .ws
+                .update_value(|c| c.dispatch_admin(&command));
+            return;
+        }
         let admin = self.admin;
+        let syndication = self.syndication;
         self.focused().client.update_value(|client| {
             let events: Vec<AdminEvent> = client.dispatch_admin(command);
             admin.update(|a| {
@@ -1648,6 +1667,7 @@ impl AppState {
                     a.apply(event);
                 }
             });
+            syndication.update(|s| s.apply_live(None, &events));
         });
     }
 
@@ -1727,11 +1747,19 @@ impl AppState {
     /// its replies — paired with the requested `key` so the reducer knows
     /// which read failed (the wire's `Failed` carries no key).
     fn dispatch_syn_get(&self, key: &str) {
+        let command = AdminCommand::GetConfig {
+            key: key.to_string(),
+        };
+        #[cfg(target_arch = "wasm32")]
+        if self.focused().live.get_untracked() {
+            self.focused()
+                .ws
+                .update_value(|c| c.dispatch_admin(&command));
+            return;
+        }
         let syndication = self.syndication;
         self.focused().client.update_value(|client| {
-            let events = client.dispatch_admin(AdminCommand::GetConfig {
-                key: key.to_string(),
-            });
+            let events = client.dispatch_admin(command);
             syndication.update(|s| s.apply_get_reply(key, &events));
         });
     }
@@ -1739,6 +1767,14 @@ impl AppState {
     /// Drive one `SetConfig` for the panel, fold the paired reply, then
     /// re-read the key so the panel shows the authoritative stored value.
     fn dispatch_syn_set(&self, key: &str, command: AdminCommand) {
+        #[cfg(target_arch = "wasm32")]
+        if self.focused().live.get_untracked() {
+            self.focused()
+                .ws
+                .update_value(|c| c.dispatch_admin(&command));
+            self.dispatch_syn_get(key);
+            return;
+        }
         let syndication = self.syndication;
         self.focused().client.update_value(|client| {
             let events = client.dispatch_admin(command);
@@ -1748,12 +1784,13 @@ impl AppState {
     }
 
     /// Load every key the Syndication & Gateways panel shows (gateway
-    /// toggles, listener addresses, the syndication knobs, and the
-    /// TOML-only `syndication_feeds` attempt).
+    /// toggles, listener addresses, the syndication knobs, the TOML-only
+    /// `syndication_feeds` attempt, and the live gateway-stats snapshot).
     pub fn load_syndication(&self) {
         for key in crate::syndication_admin::LOAD_KEYS {
             self.dispatch_syn_get(key);
         }
+        self.dispatch_admin(AdminCommand::GetGatewayStats);
     }
 
     /// Flip a gateway/syndication boolean key, if it is loaded and parsable.
