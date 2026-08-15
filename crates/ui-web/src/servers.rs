@@ -12,8 +12,9 @@
 //! [`crate::components`].
 
 pub use rabbithole_directory::{
-    browse, parse_directory_json, parse_glass_json, parse_tracker_index, DirectoryServer,
-    DirectorySource, DIRECTORY_URL, TRACKER_HOST, TRACKER_STATUS_PORT, TRACKER_URL,
+    browse, parse_directory_json, parse_glass_json, parse_tracker_index, pick_live_listing,
+    DirectoryServer, DirectorySource, LiveListing, DIRECTORY_URL, TRACKER_HOST,
+    TRACKER_STATUS_PORT, TRACKER_URL,
 };
 
 /// Percent-encode a value for a query string. Only the characters that would
@@ -179,5 +180,22 @@ mod tests {
         let (rows, source) = keep_live_or_sample(None, sample);
         assert!(!rows.is_empty(), "unreachable → sample");
         assert_eq!(source, DirectorySource::Seeded);
+    }
+
+    #[test]
+    fn an_empty_directory_does_not_hide_a_glass_with_listings() {
+        let empty_dir = parse_directory_json(r#"{"ok":true,"burrows":[]}"#).unwrap();
+        let glass = parse_glass_json(
+            r#"{"ok":true,"burrows":[{"name":"Warren","endpoints":{"ws":"ws://w:1"},"status":"online"}]}"#,
+            &["ws"],
+        )
+        .unwrap();
+        let picked = pick_live_listing([
+            Ok((empty_dir, DirectorySource::Directory)),
+            Ok((glass, DirectorySource::standard_glass())),
+        ])
+        .expect("glass has rows");
+        assert_eq!(picked.servers[0].name, "Warren");
+        assert_eq!(picked.source, DirectorySource::standard_glass());
     }
 }

@@ -206,7 +206,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
 
     let about = AboutMetadataBuilder::new()
         .name(Some("RabbitHole"))
-        .version(Some(env!("CARGO_PKG_VERSION")))
+        .version(Some(env!("RH_VERSION")))
         .copyright(Some("© Mirrorward"))
         // `credits` is the one rich field macOS renders here, so it carries
         // what the panel is for: what this program *is*. One paragraph per

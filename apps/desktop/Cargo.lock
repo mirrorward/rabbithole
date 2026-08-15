@@ -3004,7 +3004,7 @@ dependencies = [
 
 [[package]]
 name = "rabbithole-desktop"
-version = "0.105.0"
+version = "0.191.0"
 dependencies = [
  "blake3",
  "rabbithole-core",

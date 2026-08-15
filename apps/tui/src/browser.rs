@@ -86,10 +86,6 @@ fn directory_row(s: &rabbithole_directory::DirectoryServer) -> IndexEntry {
     }
 }
 
-/// The tracker's classic native status port, appended when the user types a
-/// bare host with no `:port`.
-pub const STATUS_PORT: u16 = 4655;
-
 /// How long a connect may take before it is reported as timed out.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -343,20 +339,16 @@ fn parse_prefixed_u64(field: &str, prefix: &str) -> Option<u64> {
     field.strip_prefix(prefix)?.trim().parse().ok()
 }
 
-/// Normalize a typed tracker address: trim, and append the classic status
-/// port when no `:` is present (bare hostname/IPv4). Anything already
-/// containing a `:` — including bracketed IPv6 — is passed through and left
-/// to the connector to accept or reject. `None` for blank input.
+/// Normalize a typed tracker address: trim, and append the status port when
+/// the user typed a bare host. Public hosts get 4655; loopback (`localhost`,
+/// `127.0.0.1`, `::1`) gets 5497 so `just up` and a typed local glass agree.
+/// `None` for blank input.
 pub fn normalize_tracker_addr(input: &str) -> Option<String> {
     let s = input.trim();
     if s.is_empty() {
         return None;
     }
-    if s.contains(':') {
-        Some(s.to_string())
-    } else {
-        Some(format!("{s}:{STATUS_PORT}"))
-    }
+    Some(rabbithole_directory::status_addr(s))
 }
 
 // ---------------------------------------------------------------------------
@@ -783,6 +775,15 @@ mod tests {
             Some("tracker.example:4655")
         );
         assert_eq!(
+            normalize_tracker_addr("localhost").as_deref(),
+            Some("localhost:5497"),
+            "just up binds INDEX on 5497"
+        );
+        assert_eq!(
+            normalize_tracker_addr("127.0.0.1").as_deref(),
+            Some("127.0.0.1:5497")
+        );
+        assert_eq!(
             normalize_tracker_addr(" 10.0.0.1:9999 ").as_deref(),
             Some("10.0.0.1:9999")
         );
@@ -790,6 +791,7 @@ mod tests {
             normalize_tracker_addr("[::1]:4655").as_deref(),
             Some("[::1]:4655")
         );
+        assert_eq!(normalize_tracker_addr("::1").as_deref(), Some("[::1]:5497"));
         assert_eq!(normalize_tracker_addr("   "), None);
         assert_eq!(normalize_tracker_addr(""), None);
     }

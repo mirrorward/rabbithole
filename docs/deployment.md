@@ -203,6 +203,10 @@ a host that runs both, move one of them — `just up` binds status to `5497`:
 ./target/release/looking-glass --status 0.0.0.0:5497   # beside a federating burrow
 ```
 
+Clients follow the same split: a bare public host still dials **4655**;
+`localhost` / `127.0.0.1` / `::1` without a port dial **5497**, so `just up`
+and the TUI agree without typing the port.
+
 ## Constrained / RF links
 
 For running RabbitHole reachability over Reticulum on LoRa, packet radio, and

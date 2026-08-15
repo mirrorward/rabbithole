@@ -1,7 +1,7 @@
 [package]
 name = "rabbithole-desktop"
 description = "RabbitHole — Tauri v2 desktop + mobile shell wrapping the ui-web Leptos SPA"
-version = "0.105.0"
+version = "0.191.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]

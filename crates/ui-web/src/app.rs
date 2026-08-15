@@ -1318,7 +1318,9 @@ impl AppState {
     /// 3. **A Looking Glass status port** — line-oriented TCP (`INDEX`). A
     ///    browser cannot dial it; this leg exists only in the native shell.
     ///
-    /// Neither reachable leaves the seeded sample in place, labelled as such:
+    /// A live source that answers empty is not exclusive: the next source is
+    /// asked, so an empty directory cannot hide a glass that has listings.
+    /// Nothing reachable leaves the seeded sample in place, labelled as such:
     /// an empty browser would look like "nobody is out there", which is a
     /// different and wrong claim.
     pub fn load_directory(&self) {
@@ -1330,36 +1332,63 @@ impl AppState {
             let app = *self;
             loading.set(true);
             wasm_bindgen_futures::spawn_local(async move {
-                if let Some(text) = crate::net::fetch_text(crate::servers::DIRECTORY_URL).await {
-                    if let Ok(rows) = crate::servers::parse_directory_json(&text) {
-                        servers.set(rows);
-                        source.set(crate::servers::DirectorySource::Directory);
-                        loading.set(false);
-                        return;
-                    }
+                let mut answers = Vec::new();
+                match crate::net::fetch_text(crate::servers::DIRECTORY_URL).await {
+                    Some(text) => answers.push(
+                        crate::servers::parse_directory_json(&text)
+                            .map(|rows| (rows, crate::servers::DirectorySource::Directory)),
+                    ),
+                    None => answers.push(Err("rabbithole.directory did not answer".into())),
+                }
+                // Non-empty directory is enough. Empty or failed: ask the glass.
+                if answers
+                    .last()
+                    .and_then(|a| a.as_ref().ok())
+                    .is_some_and(|(rows, _)| !rows.is_empty())
+                {
+                    let listing = crate::servers::pick_live_listing(answers).expect("rows");
+                    servers.set(listing.servers);
+                    source.set(listing.source);
+                    loading.set(false);
+                    return;
                 }
                 // The standard Looking Glass, over HTTPS with CORS open — so
                 // this fallback works in a plain browser tab, not only in the
                 // native shell. Its reply is a *different shape* from the
                 // directory's (a glass relays announced descriptors, so the
                 // endpoints are nested), hence a different parser.
-                if let Some(text) = crate::net::fetch_text(crate::servers::TRACKER_URL).await {
-                    if let Ok(rows) = crate::servers::parse_glass_json(&text, &["ws"]) {
-                        servers.set(rows);
-                        source.set(crate::servers::DirectorySource::standard_glass());
-                        loading.set(false);
-                        return;
-                    }
+                match crate::net::fetch_text(crate::servers::TRACKER_URL).await {
+                    Some(text) => answers.push(
+                        crate::servers::parse_glass_json(&text, &["ws"])
+                            .map(|rows| (rows, crate::servers::DirectorySource::standard_glass())),
+                    ),
+                    None => answers.push(Err("the looking glass did not answer".into())),
+                }
+                if answers
+                    .last()
+                    .and_then(|a| a.as_ref().ok())
+                    .is_some_and(|(rows, _)| !rows.is_empty())
+                {
+                    let listing = crate::servers::pick_live_listing(answers).expect("rows");
+                    servers.set(listing.servers);
+                    source.set(listing.source);
+                    loading.set(false);
+                    return;
                 }
                 // Last: the shell's TCP status-port INDEX. `None` in a browser
                 // tab, where there is no shell to ask.
-                if let Some(text) = crate::native::tracker_index().await {
-                    if let Ok(rows) = crate::servers::parse_tracker_index(&text) {
-                        servers.set(rows);
-                        source.set(crate::servers::DirectorySource::standard_glass());
-                        loading.set(false);
-                        return;
-                    }
+                match crate::native::tracker_index().await {
+                    Some(text) => answers.push(
+                        crate::servers::parse_tracker_index(&text)
+                            .map(|rows| (rows, crate::servers::DirectorySource::standard_glass())),
+                    ),
+                    None => answers.push(Err("the status port did not answer".into())),
+                }
+                if let Some(listing) = crate::servers::pick_live_listing(answers) {
+                    servers.set(listing.servers);
+                    source.set(listing.source);
+                    loading.set(false);
+                    return;
                 }
                 app.notify(
                     crate::toasts::ToastKind::Warn,

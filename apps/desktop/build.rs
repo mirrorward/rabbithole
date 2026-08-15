@@ -1,13 +1,12 @@
 //! Build script: stamp the *workspace* version into the desktop app.
 //!
 //! `apps/desktop` is its own cargo workspace (it has to be — Tauri's bundler
-//! and the wasm SPA can't share one), so it can't inherit
-//! `version.workspace = true`. Its own `version` therefore drifts: the About
-//! panel was reporting 0.105.0 while the app it shipped was 0.185.0.
-//!
-//! So the version comes from the root workspace manifest at build time, plus a
-//! git short SHA on debug builds — "0.185.0 (dev 1a2b3c4)" tells you exactly
-//! what you're running, which is the entire point of a version in an About box.
+//! and wry/webkit must not join `cargo build --workspace` at the repo root),
+//! so it can't inherit `version.workspace = true`. Keep this crate's
+//! `version` and `tauri.conf.json` equal to the product workspace version
+//! anyway; About also stamps `RH_VERSION` from the root manifest at build
+//! time so a drift cannot hide in the panel. A git short SHA is appended on
+//! debug builds.
 
 use std::process::Command;
 

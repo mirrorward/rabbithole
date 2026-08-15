@@ -54,8 +54,8 @@
 //! - **Feed-declared TTLs**: [`PollState`] honors a `feed_ttl_secs` argument,
 //!   but wiring RSS `<ttl>` / `sy:updatePeriod` out of the document into it is
 //!   left for a later pass (`None` is passed today).
-//! - **IPv6 literal hosts** in feed URLs (bracketed authorities) are not
-//!   parsed; use a hostname.
+//! - **IPv6 literal hosts** in feed URLs are accepted as `[::1]` /
+//!   `[2001:db8::1]:8080` (same authority split as directory discovery).
 //! - **Compressed responses**: no `Accept-Encoding` is sent, so servers must
 //!   reply with identity bodies (they do when the header is absent).
 
@@ -483,7 +483,7 @@ pub struct FeedUrl {
 }
 
 impl FeedUrl {
-    /// Parse `http://host[:port]/path` / `https://…`. No IPv6 literals.
+    /// Parse `http://host[:port]/path` / `https://…`, including bracketed IPv6.
     pub fn parse(url: &str) -> Result<FeedUrl> {
         let (tls, rest) = if let Some(r) = url.strip_prefix("https://") {
             (true, r)
@@ -500,14 +500,8 @@ impl FeedUrl {
             bail!("feed url has no host: {url}");
         }
         let default_port = if tls { 443 } else { 80 };
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => (
-                h.to_string(),
-                p.parse::<u16>()
-                    .map_err(|_| anyhow!("bad port in feed url: {url}"))?,
-            ),
-            _ => (authority.to_string(), default_port),
-        };
+        let (host, port) = split_feed_authority(authority, default_port)
+            .map_err(|e| anyhow!("bad feed url {url}: {e}"))?;
         if host.is_empty() {
             bail!("feed url has no host: {url}");
         }
@@ -520,14 +514,52 @@ impl FeedUrl {
     }
 
     /// The `Host` header value: the port is included only when non-default.
+    /// IPv6 hosts are bracketed (`[::1]`, `[::1]:8080`).
     pub fn host_header(&self) -> String {
         let default_port = if self.tls { 443 } else { 80 };
-        if self.port == default_port {
-            self.host.clone()
+        let name = if self.host.contains(':') {
+            format!("[{}]", self.host)
         } else {
-            format!("{}:{}", self.host, self.port)
+            self.host.clone()
+        };
+        if self.port == default_port {
+            name
+        } else {
+            format!("{name}:{}", self.port)
         }
     }
+}
+
+/// Split `host`, `host:port`, `[v6]`, or `[v6]:port`. Host is unbracketed.
+fn split_feed_authority(authority: &str, default_port: u16) -> Result<(String, u16)> {
+    let a = authority.trim();
+    if let Some(rest) = a.strip_prefix('[') {
+        let close = rest
+            .find(']')
+            .ok_or_else(|| anyhow!("{a} is a broken IPv6 literal"))?;
+        let host = rest[..close].to_string();
+        if host.is_empty() {
+            bail!("empty IPv6 host");
+        }
+        let after = &rest[close + 1..];
+        if after.is_empty() {
+            return Ok((host, default_port));
+        }
+        let port = after
+            .strip_prefix(':')
+            .ok_or_else(|| anyhow!("{a} has junk after the IPv6 literal"))?;
+        let port: u16 = port.parse().map_err(|_| anyhow!("bad port in {a}"))?;
+        return Ok((host, port));
+    }
+    if a.matches(':').count() == 1 {
+        if let Some((h, p)) = a.rsplit_once(':') {
+            if !h.is_empty() && !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) {
+                let port: u16 = p.parse().map_err(|_| anyhow!("bad port in {a}"))?;
+                return Ok((h.to_string(), port));
+            }
+        }
+    }
+    Ok((a.to_string(), default_port))
 }
 
 /// Resolve a `Location` header against the current URL: absolute URLs are
@@ -881,6 +913,17 @@ mod tests {
         assert!(FeedUrl::parse("ftp://x/").is_err());
         assert!(FeedUrl::parse("http:///nohost").is_err());
         assert!(FeedUrl::parse("http://host:99999/").is_err());
+
+        let u = FeedUrl::parse("https://[::1]/feed.xml").unwrap();
+        assert_eq!(u.host, "::1");
+        assert_eq!(u.port, 443);
+        assert_eq!(u.host_header(), "[::1]");
+
+        let u = FeedUrl::parse("http://[2001:db8::1]:8080/f.xml").unwrap();
+        assert_eq!(u.host, "2001:db8::1");
+        assert_eq!(u.port, 8080);
+        assert_eq!(u.host_header(), "[2001:db8::1]:8080");
+        assert!(FeedUrl::parse("http://[::1/feed.xml").is_err());
     }
 
     #[test]

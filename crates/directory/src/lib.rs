@@ -14,10 +14,16 @@
 //!   this workspace also serves a line-oriented TCP protocol on port 4655
 //!   (`INDEX` in, tab-separated rows out). A browser tab has no TCP, so this
 //!   one is native-only, and it is what a user gets when they name their own
-//!   coordinator.
+//!   coordinator. Beside a federating burrow (`just up`) the status port
+//!   moves to **5497** so it does not collide with `federation_addr`; a
+//!   loopback host without a port uses that local port, every other bare
+//!   host still gets 4655.
 //!
 //! So: directory first, the standard glass behind it, and the UI says which
 //! answered — "who told you this" is part of the answer to "who is out there".
+//! A live source that answers `[]` is not the last word: the next live
+//! source is asked, because an empty directory must not hide a glass that
+//! has listings. Sample rows appear only when nothing answered.
 //!
 //! # Why this is its own crate
 //!
@@ -156,8 +162,180 @@ pub const TRACKER_HOST: &str = "tracker.rabbit.direct";
 /// directory's — see [`parse_glass_json`]).
 pub const TRACKER_URL: &str = "https://tracker.rabbit.direct/api/burrows";
 /// A self-hosted `looking-glass`'s line-oriented TCP status port. Native only:
-/// a browser tab has no TCP.
+/// a browser tab has no TCP. This is the **public** default; a loopback
+/// host without a port uses [`LOCAL_STATUS_PORT`] instead, matching `just up`.
 pub const TRACKER_STATUS_PORT: u16 = 4655;
+
+/// Status port `just up` / `just tracker` bind so INDEX does not sit on the
+/// burrow's `federation_addr` (4655). Public looking-glass stays on 4655.
+pub const LOCAL_STATUS_PORT: u16 = 5497;
+
+/// A live discovery answer plus which source produced it.
+///
+/// [`pick_live_listing`] is the policy: a successful empty listing is not
+/// exclusive — a later source with rows wins — and the sample is not this
+/// type's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveListing {
+    pub servers: Vec<DirectoryServer>,
+    pub source: DirectorySource,
+    /// Why a wider source was not used, when a narrower one answered.
+    pub fallback_reason: Option<String>,
+}
+
+/// Combine sequential live discovery attempts.
+///
+/// A source that answered with rows wins, even if an earlier source answered
+/// empty. An empty answer is still live: if every source is empty (or later
+/// ones failed), the first empty listing is kept. Only when nothing answered
+/// at all is this `None` — the caller may then show a sample.
+pub fn pick_live_listing<I>(answers: I) -> Option<LiveListing>
+where
+    I: IntoIterator<Item = Result<(Vec<DirectoryServer>, DirectorySource), String>>,
+{
+    let mut first_empty: Option<DirectorySource> = None;
+    let mut first_error: Option<String> = None;
+    for answer in answers {
+        match answer {
+            Ok((servers, source)) if !servers.is_empty() => {
+                let fallback_reason = if let Some(empty) = &first_empty {
+                    Some(format!("{} listed nobody", empty.label()))
+                } else {
+                    first_error.clone()
+                };
+                return Some(LiveListing {
+                    servers,
+                    source,
+                    fallback_reason,
+                });
+            }
+            Ok((_, source)) => {
+                if first_empty.is_none() {
+                    first_empty = Some(source);
+                }
+            }
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+    }
+    first_empty.map(|source| LiveListing {
+        servers: Vec::new(),
+        source,
+        fallback_reason: first_error,
+    })
+}
+
+/// Split an HTTP authority into `(host, port)`.
+///
+/// The host is unbracketed (`::1`, `example.com`) so TLS and `TcpStream`
+/// can use it directly. IPv6 literals may arrive as `[::1]` or `[::1]:8443`;
+/// splitting on the last colon would eat a hextet.
+pub fn split_authority(authority: &str, default_port: u16) -> Result<(String, u16), String> {
+    let a = authority.trim();
+    if a.is_empty() {
+        return Err("empty host".to_string());
+    }
+    if let Some(rest) = a.strip_prefix('[') {
+        let close = rest
+            .find(']')
+            .ok_or_else(|| format!("{a} is a broken IPv6 literal"))?;
+        let host = &rest[..close];
+        if host.is_empty() {
+            return Err("empty IPv6 host".to_string());
+        }
+        let after = &rest[close + 1..];
+        if after.is_empty() {
+            return Ok((host.to_string(), default_port));
+        }
+        let port = after
+            .strip_prefix(':')
+            .ok_or_else(|| format!("{a} has junk after the IPv6 literal"))?;
+        let port: u16 = port.parse().map_err(|_| format!("bad port in {a}"))?;
+        return Ok((host.to_string(), port));
+    }
+    if a.matches(':').count() == 1 {
+        if let Some((h, p)) = a.rsplit_once(':') {
+            if !h.is_empty() && !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) {
+                let port: u16 = p.parse().map_err(|_| format!("bad port in {a}"))?;
+                return Ok((h.to_string(), port));
+            }
+        }
+    }
+    Ok((a.to_string(), default_port))
+}
+
+/// `Host` header value: bracket IPv6, include a non-default port.
+pub fn host_header(host: &str, port: u16, default_port: u16) -> String {
+    let name = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    if port == default_port {
+        name
+    } else {
+        format!("{name}:{port}")
+    }
+}
+
+/// Loopback names and addresses: `localhost`, `127.0.0.0/8`, `::1`.
+pub fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim().trim_matches(|c| c == '[' || c == ']');
+    if h.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    h.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Status port for a bare host: 5497 on loopback (`just up`), 4655 elsewhere.
+pub fn default_status_port(host: &str) -> u16 {
+    if is_loopback_host(host) {
+        LOCAL_STATUS_PORT
+    } else {
+        TRACKER_STATUS_PORT
+    }
+}
+
+/// Normalize a tracker entry to a dialable `host:port` (bracketed IPv6).
+///
+/// A URL's scheme colon is not a port. A bare public host gets 4655; a bare
+/// loopback host gets 5497 so `just up` and a typed `localhost` agree.
+pub fn status_addr(entry: &str) -> String {
+    let e = host_port_of(entry);
+    if has_explicit_status_port(e) {
+        return e.to_string();
+    }
+    let host = e.trim_matches(|c| c == '[' || c == ']');
+    let port = default_status_port(host);
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// Strip a scheme and path so `https://glass.example:8443/api/burrows` becomes
+/// `glass.example:8443`.
+fn host_port_of(entry: &str) -> &str {
+    let e = entry.trim();
+    let e = e
+        .strip_prefix("https://")
+        .or_else(|| e.strip_prefix("http://"))
+        .unwrap_or(e);
+    e.split('/').next().unwrap_or(e)
+}
+
+fn has_explicit_status_port(e: &str) -> bool {
+    if e.starts_with('[') {
+        e.rfind("]:").is_some()
+    } else {
+        e.matches(':').count() == 1
+    }
+}
 
 /// Parse `rabbithole.directory`'s JSON into directory rows.
 ///
@@ -352,7 +530,8 @@ pub fn parse_tracker_index(text: &str) -> Result<Vec<DirectoryServer>, String> {
 /// The `burrows` array from a directory or glass JSON document.
 ///
 /// Missing or non-array is a broken reply. Present-and-empty is a successful
-/// listing of nobody — callers must not treat that as "try the next source".
+/// listing of nobody — the parser must not invent rows. Discovery
+/// ([`pick_live_listing`]) may still consult a later source.
 fn listed_burrows<'a>(doc: &'a json::Json, kind: &str) -> Result<&'a [json::Json], String> {
     match doc.get("burrows") {
         Some(json::Json::Arr(items)) => Ok(items),
@@ -624,5 +803,98 @@ mod tests {
         assert_eq!(browse(&servers, "hub")[0].name, "Hollow");
         assert_eq!(browse(&servers, "   ").len(), 2, "blank = all");
         assert!(browse(&servers, "nope").is_empty());
+    }
+
+    fn row(name: &str) -> DirectoryServer {
+        srv(name, "", 0, 100, true)
+    }
+
+    #[test]
+    fn an_empty_live_source_does_not_hide_a_later_one_with_rows() {
+        // rabbithole.directory answering `[]` used to be treated as the last
+        // word, so a glass with listings never got asked.
+        let empty_dir = Ok((Vec::new(), DirectorySource::Directory));
+        let glass = Ok((vec![row("Warren")], DirectorySource::standard_glass()));
+        let picked = pick_live_listing([empty_dir, glass]).expect("glass has rows");
+        assert_eq!(picked.servers[0].name, "Warren");
+        assert_eq!(picked.source.label(), "tracker.rabbit.direct");
+        assert!(
+            picked
+                .fallback_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("rabbithole.directory"),
+            "{:?}",
+            picked.fallback_reason
+        );
+    }
+
+    #[test]
+    fn every_live_source_empty_stays_empty_not_a_sample() {
+        let picked = pick_live_listing([
+            Ok((Vec::new(), DirectorySource::Directory)),
+            Ok((Vec::new(), DirectorySource::standard_glass())),
+        ])
+        .expect("empty is still a live answer");
+        assert!(picked.servers.is_empty());
+        assert_eq!(picked.source, DirectorySource::Directory);
+        assert!(picked.fallback_reason.is_none());
+    }
+
+    #[test]
+    fn nothing_answered_is_none_so_the_caller_may_show_a_sample() {
+        assert!(
+            pick_live_listing([Err("directory down".into()), Err("glass down".into()),]).is_none()
+        );
+    }
+
+    #[test]
+    fn a_failed_directory_and_an_empty_glass_keep_the_empty_glass() {
+        let picked = pick_live_listing([
+            Err("directory down".into()),
+            Ok((Vec::new(), DirectorySource::standard_glass())),
+        ])
+        .expect("empty glass is live");
+        assert!(picked.servers.is_empty());
+        assert_eq!(picked.source.label(), "tracker.rabbit.direct");
+        assert_eq!(picked.fallback_reason.as_deref(), Some("directory down"));
+    }
+
+    #[test]
+    fn ipv6_authorities_keep_their_hextets() {
+        assert_eq!(split_authority("[::1]", 443).unwrap(), ("::1".into(), 443));
+        assert_eq!(
+            split_authority("[::1]:8443", 443).unwrap(),
+            ("::1".into(), 8443)
+        );
+        assert_eq!(
+            split_authority("[2001:db8::1]", 443).unwrap(),
+            ("2001:db8::1".into(), 443)
+        );
+        assert_eq!(
+            split_authority("glass.example:8443", 443).unwrap(),
+            ("glass.example".into(), 8443)
+        );
+        assert!(split_authority("[::1", 443).is_err());
+        assert_eq!(host_header("::1", 443, 443), "[::1]");
+        assert_eq!(host_header("::1", 8443, 443), "[::1]:8443");
+        assert_eq!(host_header("glass.example", 443, 443), "glass.example");
+    }
+
+    #[test]
+    fn loopback_bare_hosts_use_the_local_stack_port() {
+        assert_eq!(status_addr("localhost"), "localhost:5497");
+        assert_eq!(status_addr("127.0.0.1"), "127.0.0.1:5497");
+        assert_eq!(status_addr("::1"), "[::1]:5497");
+        assert_eq!(status_addr("[::1]"), "[::1]:5497");
+        assert_eq!(
+            status_addr("tracker.rabbit.direct"),
+            "tracker.rabbit.direct:4655"
+        );
+        assert_eq!(status_addr("[::1]:4655"), "[::1]:4655");
+        assert_eq!(
+            status_addr("https://tracker.rabbit.direct/api/burrows"),
+            "tracker.rabbit.direct:4655"
+        );
     }
 }

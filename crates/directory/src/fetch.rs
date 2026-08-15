@@ -17,8 +17,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::{
-    parse_directory_json_with, parse_glass_json, parse_tracker_index, DirectoryServer,
-    DirectorySource, DIRECTORY_URL, TRACKER_STATUS_PORT, TRACKER_URL,
+    host_header, parse_directory_json_with, parse_glass_json, parse_tracker_index,
+    pick_live_listing, split_authority, status_addr, DirectoryServer, DirectorySource,
+    DIRECTORY_URL, TRACKER_URL,
 };
 
 /// Overall budget for one source. Discovery is something a person is waiting
@@ -57,30 +58,38 @@ pub async fn discover(tracker: Option<&str>, endpoint_fields: &[&str]) -> Result
         return named_tracker(named, endpoint_fields).await;
     }
 
-    let directory_error = match fetch_directory(endpoint_fields).await {
-        Ok(servers) => {
-            return Ok(Listing {
-                servers,
-                source: DirectorySource::Directory,
-                fallback_reason: None,
-            })
-        }
-        Err(e) => e,
+    let directory = match fetch_directory(endpoint_fields).await {
+        Ok(servers) => Ok((servers, DirectorySource::Directory)),
+        Err(e) => Err(e),
+    };
+    // A live empty directory is not the last word — ask the glass too.
+    // A directory with rows is; skip the extra round-trip.
+    let glass = match &directory {
+        Ok((servers, _)) if !servers.is_empty() => None,
+        _ => Some(match fetch_glass(TRACKER_URL, endpoint_fields).await {
+            Ok(servers) => Ok((servers, DirectorySource::standard_glass())),
+            Err(e) => Err(e),
+        }),
     };
 
-    match fetch_glass(TRACKER_URL, endpoint_fields).await {
-        Ok(servers) => Ok(Listing {
-            servers,
-            source: DirectorySource::standard_glass(),
-            fallback_reason: Some(directory_error),
-        }),
-        // Both failed. Lead with the directory's failure: it is what the user
-        // expected to see, and burying that under the fallback's error hides
-        // the real problem.
-        Err(glass_error) => Err(format!(
-            "{directory_error} The tracker didn't answer either: {glass_error}"
-        )),
-    }
+    let directory_error = directory.as_ref().err().cloned();
+    let glass_error = glass.as_ref().and_then(|g| g.as_ref().err().cloned());
+    let answers = std::iter::once(directory).chain(glass);
+    pick_live_listing(answers)
+        .map(|live| Listing {
+            servers: live.servers,
+            source: live.source,
+            fallback_reason: live.fallback_reason,
+        })
+        .ok_or_else(|| {
+            let directory_error = directory_error.unwrap_or_else(|| "directory silent".into());
+            match glass_error {
+                Some(glass_error) => {
+                    format!("{directory_error} The tracker didn't answer either: {glass_error}")
+                }
+                None => directory_error,
+            }
+        })
 }
 
 /// Ask one named coordinator. HTTPS first (what a hosted glass serves), then
@@ -102,28 +111,42 @@ async fn named_tracker(entry: &str, endpoint_fields: &[&str]) -> Result<Listing,
             format!("https://{}/api/burrows", entry.trim_end_matches('/'))
         };
         match fetch_glass(&url, endpoint_fields).await {
-            Ok(servers) => {
+            Ok(servers) if !servers.is_empty() => {
                 return Ok(Listing {
                     servers,
                     source: DirectorySource::looking_glass(entry),
                     fallback_reason: None,
                 })
             }
+            Ok(_) => "listed nobody".to_string(),
             Err(e) => e,
         }
     };
 
+    let https = if https_error == "not tried (plaintext entry)" {
+        Err(https_error.clone())
+    } else if https_error == "listed nobody" {
+        Ok((Vec::new(), DirectorySource::looking_glass(entry)))
+    } else {
+        Err(https_error.clone())
+    };
+
     let addr = tracker_addr(entry);
-    let text = query_tracker(&addr, "INDEX").await.map_err(|e| {
-        format!("{entry} didn't answer over HTTPS ({https_error}) or on {addr}: {e}")
-    })?;
-    parse_tracker_index(&text).map(|servers| Listing {
-        servers,
-        source: DirectorySource::looking_glass(entry),
-        // HTTPS was the wider try on this coordinator; the status port
-        // answering is a narrower path, and the reason belongs on the listing.
-        fallback_reason: (https_error != "not tried (plaintext entry)").then_some(https_error),
-    })
+    let tcp = match query_tracker(&addr, "INDEX").await {
+        Ok(text) => parse_tracker_index(&text)
+            .map(|servers| (servers, DirectorySource::looking_glass(entry))),
+        Err(e) => Err(e),
+    };
+
+    pick_live_listing([https, tcp])
+        .map(|live| Listing {
+            servers: live.servers,
+            source: live.source,
+            fallback_reason: live
+                .fallback_reason
+                .filter(|_| https_error != "not tried (plaintext entry)"),
+        })
+        .ok_or_else(|| format!("{entry} didn't answer over HTTPS ({https_error}) or on {addr}"))
 }
 
 /// Fetch and parse a Looking Glass listing over HTTPS.
@@ -146,33 +169,10 @@ pub async fn fetch_directory(endpoint_fields: &[&str]) -> Result<Vec<DirectorySe
 }
 
 /// Normalize a tracker entry into `host:port`, appending the status port when
-/// the user typed a bare host.
+/// the user typed a bare host. Loopback uses 5497 (`just up`); everyone else
+/// uses the public 4655.
 pub fn tracker_addr(entry: &str) -> String {
-    let e = host_port_of(entry);
-    // An IPv6 literal is bracketed; a bare `::1` has colons but no port, and
-    // splitting on the last colon would silently eat a hextet.
-    let has_port = if e.starts_with('[') {
-        e.rfind("]:").is_some()
-    } else {
-        e.matches(':').count() == 1
-    };
-    if has_port {
-        e.to_string()
-    } else {
-        format!("{e}:{TRACKER_STATUS_PORT}")
-    }
-}
-
-/// Strip a scheme and path so `https://glass.example:8443/api/burrows` becomes
-/// `glass.example:8443`. A `https://` entry has a colon in the scheme; treating
-/// that as "already has a port" would dial the URL string as a TCP address.
-fn host_port_of(entry: &str) -> &str {
-    let e = entry.trim();
-    let e = e
-        .strip_prefix("https://")
-        .or_else(|| e.strip_prefix("http://"))
-        .unwrap_or(e);
-    e.split('/').next().unwrap_or(e)
+    status_addr(entry)
 }
 
 /// One command/reply exchange with a tracker's status port.
@@ -217,7 +217,8 @@ async fn https_get(url: &str) -> Result<String, String> {
             .await
             .map_err(|e| format!("connect {host}:{port}: {e}"))?;
         let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: rabbithole/{}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+            "GET {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: rabbithole/{}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+            host_header(&host, port, 443),
             env!("CARGO_PKG_VERSION"),
         );
         let raw = tls_exchange(tcp, &host, request.as_bytes()).await?;
@@ -243,13 +244,7 @@ fn split_url(url: &str) -> Result<(String, u16, String), String> {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) if !h.is_empty() => (
-            h.to_string(),
-            p.parse().map_err(|_| format!("bad port in {url}"))?,
-        ),
-        _ => (authority.to_string(), 443),
-    };
+    let (host, port) = split_authority(authority, 443).map_err(|e| format!("{url}: {e}"))?;
     if host.is_empty() {
         return Err(format!("{url} has no host"));
     }
@@ -409,12 +404,16 @@ mod tests {
             "tracker.rabbit.direct:4655"
         );
         assert_eq!(tracker_addr("http://127.0.0.1:3000/"), "127.0.0.1:3000");
+        assert_eq!(tracker_addr("localhost"), "localhost:5497");
+        assert_eq!(tracker_addr("127.0.0.1"), "127.0.0.1:5497");
     }
 
     #[test]
     fn ipv6_literals_keep_their_hextets() {
         // Splitting on the last colon would turn `::1` into host `:` port `1`.
-        assert_eq!(tracker_addr("::1"), "::1:4655");
+        // Loopback without a port is the local stack (5497), bracketed so
+        // TcpStream::connect can parse it.
+        assert_eq!(tracker_addr("::1"), "[::1]:5497");
         assert_eq!(tracker_addr("[::1]:4655"), "[::1]:4655");
     }
 
@@ -427,6 +426,14 @@ mod tests {
         assert_eq!(
             split_url("https://glass.example:8443").unwrap(),
             ("glass.example".into(), 8443, "/".into())
+        );
+        assert_eq!(
+            split_url("https://[::1]/api/burrows").unwrap(),
+            ("::1".into(), 443, "/api/burrows".into())
+        );
+        assert_eq!(
+            split_url("https://[2001:db8::1]:8443/api").unwrap(),
+            ("2001:db8::1".into(), 8443, "/api".into())
         );
         // Plaintext would make a downgrade one config typo away.
         assert!(split_url("http://rabbithole.directory/api/burrows").is_err());
