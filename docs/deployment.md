@@ -210,6 +210,10 @@ toplevel `.rabbithole/looking-glass-status` **and**
 `~/.rabbithole/looking-glass-status` (or `$XDG_STATE_HOME/rabbithole/`),
 and removes both when the stack stops. A leftover file is ignored unless
 loopback still answers — typed `localhost` will not follow a dead port.
+`just up` also binds `POST /api/announce` on **5496** and points the burrow
+at `http://127.0.0.1:5496` with `advertise_host=127.0.0.1`, so the local
+glass lists that burrow. A standalone public `looking-glass` does not
+open that listener unless you pass `--announce`.
 
 ## Constrained / RF links
 

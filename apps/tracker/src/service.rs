@@ -1,6 +1,6 @@
 //! The async listeners that glue sockets to the [`Registry`].
 //!
-//! Four tiny services, each an infinite loop over a pre-bound socket
+//! Five tiny services, each an infinite loop over a pre-bound socket
 //! (binding is the caller's job so tests can use ephemeral `127.0.0.1:0`
 //! ports and read back the real address):
 //!
@@ -11,6 +11,9 @@
 //!   lines out (until the RHP tracker family lands).
 //! - [`run_gossip_udp`] — signed announces from servers plus digest/want/
 //!   batch exchanges with peer trackers (see [`crate::gossip`]).
+//! - [`run_announce_http`] — optional `POST /api/announce` (the burrow
+//!   coordinator document) so a local `just up` glass can list the burrow
+//!   beside it. Off unless the caller binds a listener.
 //!
 //! Malformed input never takes a listener down: bad datagrams are logged and
 //! dropped, bad TCP sessions are logged and closed.
@@ -24,6 +27,7 @@ use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
+use crate::announce::ingest_announce;
 use crate::gossip::{self, GossipMessage, MAX_GOSSIP_DATAGRAM};
 use crate::health;
 use crate::htrk;
@@ -158,6 +162,112 @@ async fn serve_status(stream: TcpStream, registry: &Registry) -> Result<()> {
     let out = status_response(registry, line.trim());
     write.write_all(out.as_bytes()).await?;
     write.shutdown().await?;
+    Ok(())
+}
+
+/// Largest coordinator announce we accept (a signed JSON descriptor).
+const MAX_ANNOUNCE_BODY: usize = 64 * 1024;
+
+/// Runs the optional HTTP announce listener: `POST /api/announce` in,
+/// registry update out. Other paths are 404; bad bodies are 400. The
+/// listener never dies on a bad request.
+pub async fn run_announce_http(listener: TcpListener, registry: Arc<Registry>) -> Result<()> {
+    loop {
+        let (stream, from) = listener.accept().await?;
+        let registry = Arc::clone(&registry);
+        tokio::spawn(async move {
+            if let Err(err) = serve_announce(stream, &registry).await {
+                tracing::debug!(%from, %err, "announce session ended early");
+            }
+        });
+    }
+}
+
+async fn serve_announce(mut stream: TcpStream, registry: &Registry) -> Result<()> {
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buf[..n]);
+        if raw.len() > MAX_ANNOUNCE_BODY + 4096 {
+            http_reply(&mut stream, 413, "payload too large").await?;
+            return Ok(());
+        }
+        if let Some((head, body)) = split_http(&raw) {
+            let len = content_length(head).unwrap_or(0);
+            if len > MAX_ANNOUNCE_BODY {
+                http_reply(&mut stream, 413, "payload too large").await?;
+                return Ok(());
+            }
+            if body.len() >= len {
+                let body = &body[..len];
+                return answer_announce(&mut stream, registry, head, body).await;
+            }
+        }
+    }
+    http_reply(&mut stream, 400, "truncated request").await
+}
+
+async fn answer_announce(
+    stream: &mut TcpStream,
+    registry: &Registry,
+    head: &str,
+    body: &[u8],
+) -> Result<()> {
+    let request_line = head.lines().next().unwrap_or("");
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+    if method != "POST" || path != "/api/announce" {
+        http_reply(stream, 404, "not found").await?;
+        return Ok(());
+    }
+    let text = std::str::from_utf8(body).unwrap_or("");
+    match ingest_announce(text) {
+        Ok(entry) => {
+            tracing::info!(addr = %entry.addr, name = %entry.name, "http announce");
+            registry.register_unsigned(entry);
+            http_reply(stream, 200, r#"{"ok":true}"#).await
+        }
+        Err(err) => {
+            tracing::debug!(%err, "http announce refused");
+            http_reply(stream, 400, &err.to_string()).await
+        }
+    }
+}
+
+fn split_http(raw: &[u8]) -> Option<(&str, &[u8])> {
+    let pos = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = std::str::from_utf8(&raw[..pos]).ok()?;
+    Some((head, &raw[pos + 4..]))
+}
+
+fn content_length(head: &str) -> Option<usize> {
+    head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.eq_ignore_ascii_case("content-length")
+            .then(|| v.trim().parse().ok())
+            .flatten()
+    })
+}
+
+async fn http_reply(stream: &mut TcpStream, status: u16, body: &str) -> Result<()> {
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        413 => "Payload Too Large",
+        _ => "Error",
+    };
+    let resp = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    stream.shutdown().await?;
     Ok(())
 }
 

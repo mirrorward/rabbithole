@@ -30,6 +30,7 @@
 //! | Client listing       | TCP       | 5498         | [`service`] |
 //! | Native status (stub) | TCP       | 4655         | [`service`] |
 //! | Gossip + announces   | UDP       | 4656         | [`service`] |
+//! | HTTP announce        | TCP       | off          | [`announce`] |
 //!
 //! ## Module map
 //!
@@ -49,6 +50,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod announce;
 pub mod descriptor;
 pub mod gossip;
 pub mod health;
@@ -56,6 +58,7 @@ pub mod htrk;
 pub mod registry;
 pub mod service;
 
+pub use announce::{canonical_json, ingest_announce, parse_endpoint, AnnounceError};
 pub use descriptor::{Descriptor, DescriptorError, SignedDescriptor, DESCRIPTOR_CONTEXT};
 pub use gossip::{GossipBatch, GossipDigest, GossipMessage, Want};
 pub use health::{HealthLog, HealthReport};

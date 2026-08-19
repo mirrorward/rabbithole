@@ -18,7 +18,7 @@
 use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::admin::{
     AccountEntry, AccountList, ClassEntry, ClassList, ConfigApplied, ConfigValue, FeedStat,
-    GatewayStat, GatewayStatsReply, InviteCode,
+    GatewayStat, GatewayStatsReply, InviteCode, ThemeBundleInfo,
 };
 use rabbithole_proto::filelib::{
     AreaList, FileAdded, FileAreaView, FileContent, FileNodeView, NodeList, NodeReply,
@@ -732,6 +732,15 @@ impl MockClient {
                 admin_events(&ConfigApplied::new(live))
             }
             AdminCommand::GetGatewayStats => admin_events(&Self::seeded_gateway_stats()),
+            AdminCommand::SetThemeBundle { bundle } => {
+                let name = postcard::from_bytes::<ThemeBundle>(&bundle)
+                    .map(|b| b.name)
+                    .unwrap_or_else(|_| "theme".into());
+                let mut info = ThemeBundleInfo::default();
+                info.present = true;
+                info.name = name;
+                admin_events(&info)
+            }
         }
     }
 
@@ -1425,6 +1434,20 @@ mod tests {
             other => panic!("unexpected: {other:?}"),
         };
         assert_ne!(code(&first), code(&second));
+    }
+
+    #[test]
+    fn admin_publish_theme_names_the_bundle() {
+        let mut c = MockClient::new();
+        let bundle = postcard::to_allocvec(&ThemeBundle::new("Wonderland")).unwrap();
+        let ev = c.dispatch_admin(AdminCommand::SetThemeBundle { bundle });
+        match ev.as_slice() {
+            [AdminEvent::ThemeBundleApplied(info)] => {
+                assert!(info.present);
+                assert_eq!(info.name, "Wonderland");
+            }
+            other => panic!("expected theme applied, got {other:?}"),
+        }
     }
 
     #[test]

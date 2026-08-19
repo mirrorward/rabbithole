@@ -33,6 +33,11 @@ struct Cli {
     /// Seconds a registration stays listed without a fresh heartbeat.
     #[arg(long, default_value_t = 360)]
     ttl: u64,
+    /// Optional HTTP `POST /api/announce` bind (the burrow coordinator
+    /// document). Off by default so a public glass is unchanged; `just up`
+    /// turns it on so the local burrow can list itself.
+    #[arg(long)]
+    announce: Option<SocketAddr>,
 }
 
 #[tokio::main]
@@ -75,10 +80,19 @@ async fn main() -> Result<()> {
     let mut status = tokio::spawn(service::run_status_tcp(status, registry.clone()));
     let mut gossip = tokio::spawn(service::run_gossip_udp(
         gossip,
-        registry,
+        registry.clone(),
         cli.gossip_peers,
         Duration::from_secs(cli.gossip_interval.max(1)),
     ));
+    let mut announce = if let Some(addr) = cli.announce {
+        let listener = TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("binding announce HTTP {addr}"))?;
+        tracing::info!(addr = %addr, "announce (HTTP) listening");
+        Some(tokio::spawn(service::run_announce_http(listener, registry)))
+    } else {
+        None
+    };
 
     tracing::info!("press Ctrl-C to shut down");
     tokio::select! {
@@ -98,11 +112,22 @@ async fn main() -> Result<()> {
         result = &mut gossip => {
             result.context("gossip listener panicked")??;
         }
+        result = async {
+            match &mut announce {
+                Some(task) => task.await,
+                None => std::future::pending().await,
+            }
+        } => {
+            result.context("announce listener panicked")??;
+        }
     }
 
     registration.abort();
     listing.abort();
     status.abort();
     gossip.abort();
+    if let Some(task) = announce {
+        task.abort();
+    }
     Ok(())
 }

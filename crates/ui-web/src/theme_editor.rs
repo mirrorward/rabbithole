@@ -23,8 +23,10 @@
 //! the operator's prerogative.
 
 use rabbithole_core::theme::{Mode, ThemePack};
+use rabbithole_proto::welcome::ThemeBundle;
 
 use crate::packs::PackTokens;
+use crate::wire::AdminCommand;
 
 /// The WCAG AA threshold for normal text; ratios below this warn.
 pub const MIN_CONTRAST: f64 = 4.5;
@@ -152,6 +154,91 @@ impl EditorState {
     pub fn export_json(&self) -> String {
         self.working.to_tokens_json()
     }
+
+    /// Postcard bytes for [`AdminCommand::SetThemeBundle`]: only the closed
+    /// server grammar (hex colours, `none` background, CSS-length metrics).
+    /// Extra editor tokens (fonts, shadows, scanlines) are dropped rather
+    /// than sent — the server would refuse them as free-form CSS.
+    pub fn publish_bundle(&self) -> Result<Vec<u8>, String> {
+        let bundle = server_theme_bundle(&self.working);
+        postcard::to_allocvec(&bundle).map_err(|e| format!("could not encode theme: {e}"))
+    }
+
+    /// The admin command that publishes this working pack. `None` if the
+    /// postcard encode failed (the error is parked on [`Self::error`]).
+    pub fn publish_command(&mut self) -> Option<AdminCommand> {
+        match self.publish_bundle() {
+            Ok(bundle) => {
+                self.error = None;
+                Some(AdminCommand::SetThemeBundle { bundle })
+            }
+            Err(e) => {
+                self.error = Some(e);
+                None
+            }
+        }
+    }
+}
+
+/// Colour tokens the server will accept (plus `--rh-bg-image` only as `none`).
+const SERVER_COLOR_VARS: &[&str] = &[
+    "--rh-bg",
+    "--rh-surface",
+    "--rh-text",
+    "--rh-muted",
+    "--rh-accent",
+    "--rh-error",
+];
+
+/// Shared metric tokens the server will accept.
+const SERVER_LENGTH_VARS: &[&str] = &[
+    "--rh-space-1",
+    "--rh-space-2",
+    "--rh-space-3",
+    "--rh-space-4",
+    "--rh-space-6",
+    "--rh-radius",
+    "--rh-radius-lg",
+    "--rh-font-size",
+    "--rh-font-sm",
+    "--rh-font-xs",
+];
+
+/// Map a working pack onto the server's closed theme-bundle grammar.
+pub fn server_theme_bundle(pack: &PackTokens) -> ThemeBundle {
+    let mut bundle = ThemeBundle::new(pack.name.clone());
+    if let Some((r, g, b)) = pack.light.get("--rh-accent").and_then(|v| parse_hex(v)) {
+        bundle.accent_rgb = Some([r, g, b]);
+    }
+    bundle.tokens_light = color_tokens(&pack.light);
+    bundle.tokens_dark = color_tokens(&pack.dark);
+    bundle.tokens_shared = length_tokens(&pack.shared);
+    bundle
+}
+
+fn color_tokens(map: &crate::packs::VarMap) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for var in SERVER_COLOR_VARS {
+        if let Some(value) = map.get(*var) {
+            if parse_hex(value).is_some() {
+                out.push(((*var).to_string(), value.clone()));
+            }
+        }
+    }
+    if let Some("none") = map.get("--rh-bg-image").map(String::as_str) {
+        out.push(("--rh-bg-image".into(), "none".into()));
+    }
+    out
+}
+
+fn length_tokens(map: &crate::packs::VarMap) -> Vec<(String, String)> {
+    SERVER_LENGTH_VARS
+        .iter()
+        .filter_map(|var| {
+            let value = map.get(*var)?;
+            is_css_length(value).then(|| ((*var).to_string(), value.clone()))
+        })
+        .collect()
 }
 
 /// Validate a colour-map value: `--rh-bg-image` is free-form (gradients,
@@ -572,5 +659,36 @@ mod tests {
             .dark
             .insert("--rh-bg".into(), "not-a-colour".into());
         assert_eq!(contrast_warnings(&e.working), vec![]);
+    }
+
+    #[test]
+    fn publish_bundle_keeps_only_the_server_grammar() {
+        let e = EditorState::new(ThemePack::Retro);
+        let bundle = server_theme_bundle(&e.working);
+        assert_eq!(bundle.name, e.working.name);
+        assert!(bundle.accent_rgb.is_some());
+        assert!(bundle
+            .tokens_light
+            .iter()
+            .all(|(k, _)| SERVER_COLOR_VARS.contains(&k.as_str()) || k == "--rh-bg-image"));
+        assert!(
+            !bundle
+                .tokens_light
+                .iter()
+                .any(|(k, v)| k == "--rh-bg-image" && v != "none"),
+            "scanlines must not travel — the server refuses free-form CSS"
+        );
+        assert!(bundle
+            .tokens_shared
+            .iter()
+            .all(|(k, _)| SERVER_LENGTH_VARS.contains(&k.as_str())));
+        let bytes = e.publish_bundle().expect("postcard");
+        let decoded: ThemeBundle = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.name, bundle.name);
+        let mut e = e;
+        assert!(matches!(
+            e.publish_command(),
+            Some(AdminCommand::SetThemeBundle { .. })
+        ));
     }
 }

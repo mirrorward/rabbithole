@@ -1743,6 +1743,12 @@ impl AppState {
         self.dispatch_admin(AdminCommand::Kick { session_id });
     }
 
+    /// Publish a postcard theme bundle to the focused burrow (empty
+    /// signature — the server signs at serve time).
+    pub fn publish_theme(&self, bundle: Vec<u8>) {
+        self.dispatch_admin(AdminCommand::SetThemeBundle { bundle });
+    }
+
     /// Drive one `GetConfig` for the Syndication & Gateways panel and fold
     /// its replies — paired with the requested `key` so the reducer knows
     /// which read failed (the wire's `Failed` carries no key).

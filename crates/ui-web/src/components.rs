@@ -24,6 +24,7 @@ use crate::files::{human_size, node_kind_label, TransferStatus, KIND_FOLDER};
 use crate::syndication_admin::{feed_stat_line, last_poll_label, FeedsStatus};
 use crate::theme_css::{mode_name, pack_label};
 use crate::theme_editor::{contrast_warnings, EditorAction, EditorState};
+use crate::wire::AdminCommand;
 
 /// Strip a `ws://`/`wss://` endpoint down to a readable `host:port` for chips.
 fn endpoint_host(endpoint: &str) -> String {
@@ -4284,8 +4285,13 @@ fn ThemeEditorPanel() -> impl IntoView {
                 <button class="rh-btn small ghost" on:click=revert_session>"Revert session"</button>
                 <button
                     class="rh-btn small ghost"
-                    disabled=true
-                    title="server theme bundles land with the W8 bundle-application slice"
+                    title="Apply this pack as the burrow theme (CONFIG_ADMIN). Scanlines, fonts, and shadows stay local — the server only accepts hex colours and CSS lengths."
+                    on:click=move |_| {
+                        let cmd = editor.try_update(|e| e.publish_command()).flatten();
+                        if let Some(AdminCommand::SetThemeBundle { bundle }) = cmd {
+                            app.publish_theme(bundle);
+                        }
+                    }
                 >
                     "Publish to server"
                 </button>

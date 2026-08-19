@@ -76,7 +76,8 @@ use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::admin::{
     AccountEntry, AccountList, AccountListRequest, AccountSet, Broadcast, ClassEntry, ClassList,
     ClassListRequest, ClassSet, ConfigApplied, ConfigGet, ConfigSet, ConfigValue,
-    GatewayStatsReply, GatewayStatsRequest, InviteCode, InviteCreate, Kick,
+    GatewayStatsReply, GatewayStatsRequest, InviteCode, InviteCreate, Kick, ThemeBundleInfo,
+    ThemeBundleSet,
 };
 use rabbithole_proto::board::{
     BoardList, BoardListRequest, PostCreate, ThreadList, ThreadListRequest, ThreadPosts,
@@ -1187,6 +1188,12 @@ pub enum AdminCommand {
     },
     /// Live syndication + gateway counters. → [`GatewayStatsReply`].
     GetGatewayStats,
+    /// Publish a postcard [`rabbithole_proto::welcome::ThemeBundle`].
+    /// Empty signature: the server signs at serve time.
+    SetThemeBundle {
+        /// Postcard-encoded theme bundle.
+        bundle: Vec<u8>,
+    },
 }
 
 /// An administration event decoded from an inbound ADMIN-family [`Frame`] by
@@ -1226,6 +1233,8 @@ pub enum AdminEvent {
     Failed(String),
     /// A live gateway/feed snapshot arrived.
     GatewayStatsLoaded(GatewayStatsReply),
+    /// A theme bundle was applied (or inspected).
+    ThemeBundleApplied(ThemeBundleInfo),
 }
 
 /// Map an [`AdminCommand`] to the ADMIN-family request [`Frame`] that carries
@@ -1264,6 +1273,9 @@ pub fn admin_command_to_frame(
             Frame::request(id, &ConfigSet::new(key.clone(), value.clone()))?
         }
         AdminCommand::GetGatewayStats => Frame::request(id, &GatewayStatsRequest)?,
+        AdminCommand::SetThemeBundle { bundle } => {
+            Frame::request(id, &ThemeBundleSet::new(bundle.clone(), Vec::new()))?
+        }
     };
     Ok(Some(frame))
 }
@@ -1303,6 +1315,9 @@ pub fn frame_to_admin_events(frame: &Frame) -> Vec<AdminEvent> {
     }
     if let Some(Ok(m)) = frame.decode::<GatewayStatsReply>() {
         return vec![AdminEvent::GatewayStatsLoaded(m)];
+    }
+    if let Some(Ok(m)) = frame.decode::<ThemeBundleInfo>() {
+        return vec![AdminEvent::ThemeBundleApplied(m)];
     }
     Vec::new()
 }
@@ -2087,6 +2102,9 @@ mod tests {
                 key: "server.name".into(),
             },
             AdminCommand::GetGatewayStats,
+            AdminCommand::SetThemeBundle {
+                bundle: vec![1, 2, 3],
+            },
         ] {
             let frame = admin_command_to_frame(&cmd, RequestId(1))
                 .unwrap()
@@ -2238,6 +2256,59 @@ mod tests {
             }
             other => panic!("expected gateway stats, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn admin_theme_and_stats_round_trip_the_command_reply_path() {
+        // The live WS path is encode → socket → decode. Lock both new
+        // verbs here so a wasm-only transport cannot drift from the
+        // host-tested mapping.
+        let stats_req = admin_command_to_frame(&AdminCommand::GetGatewayStats, RequestId(9))
+            .unwrap()
+            .unwrap();
+        assert!(stats_req.decode::<GatewayStatsRequest>().is_some());
+
+        let reply = GatewayStatsReply {
+            generated_at_ms: 7,
+            feeds: vec![rabbithole_proto::admin::FeedStat {
+                url: "https://a.example/feed.xml".into(),
+                last_poll_ms: 7,
+                last_status: "ok".into(),
+                items_seen: 2,
+                items_posted: 1,
+                dupes_dropped: 1,
+            }],
+            gateways: vec![],
+        };
+        let frame = Frame::reply_to(&stats_req, &reply).unwrap();
+        let ev = frame_to_admin_events(&frame);
+        let mut syn = crate::syndication_admin::SynAdminState::default();
+        syn.apply_live(None, &ev);
+        assert_eq!(
+            syn.feed_stat("https://a.example/feed.xml")
+                .map(|f| f.items_posted),
+            Some(1)
+        );
+
+        let set = admin_command_to_frame(
+            &AdminCommand::SetThemeBundle {
+                bundle: vec![9, 8, 7],
+            },
+            RequestId(10),
+        )
+        .unwrap()
+        .unwrap();
+        let decoded = set.decode::<ThemeBundleSet>().unwrap().unwrap();
+        assert_eq!(decoded.bundle, vec![9, 8, 7]);
+        assert!(decoded.signature.is_empty());
+        let mut info = ThemeBundleInfo::default();
+        info.present = true;
+        info.name = "Wonderland".into();
+        let applied = Frame::reply_to(&set, &info).unwrap();
+        assert!(matches!(
+            frame_to_admin_events(&applied).as_slice(),
+            [AdminEvent::ThemeBundleApplied(i)] if i.name == "Wonderland"
+        ));
     }
 
     #[test]

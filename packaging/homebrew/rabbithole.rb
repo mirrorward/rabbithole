@@ -11,7 +11,7 @@
 class Rabbithole < Formula
   desc "Community server and clients in the lineage of BBSs and Hotline"
   homepage "https://rabbit.direct"
-  version "0.191.0"
+  version "0.192.0"
   license "AGPL-3.0-or-later"
 
   # Prebuilt archives per platform. Homebrew picks the matching one; building

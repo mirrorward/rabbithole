@@ -38,6 +38,7 @@ serde_json.workspace = true
 ed25519-dalek.workspace = true
 blake3.workspace = true
 hex.workspace = true
+postcard.workspace = true
 
 # The browser WebSocket transport (`src/ws.rs`) plus the wasm-only DOM glue in
 # `src/art.rs` (canvas) and `src/theme.rs` (localStorage / matchMedia). These

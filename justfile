@@ -25,6 +25,9 @@ data_dir := env_var_or_default("RABBITHOLE_DATA_DIR", "./burrow-data")
 # looking-glass still defaults to 4655; this is only the side-by-side recipe.
 # Override with RABBIT_TRACKER_STATUS.
 tracker_status := env_var_or_default("RABBIT_TRACKER_STATUS", "0.0.0.0:5497")
+# HTTP POST /api/announce for the local glass. Off on a public looking-glass
+# (no --announce). just up turns it on so the burrow can list itself.
+tracker_announce := env_var_or_default("RABBIT_TRACKER_ANNOUNCE", "0.0.0.0:5496")
 # Where `just up` serves the web client.
 http_addr := env_var_or_default("RABBITHOLE_HTTP_ADDR", "0.0.0.0:8080")
 
@@ -65,7 +68,7 @@ up: build web write-tracker-status
     #!/usr/bin/env bash
     set -uo pipefail
     echo "burrow   → quic 4653 · ws 4654 · web {{http_addr}}"
-    echo "tracker  → status {{tracker_status}}"
+    echo "tracker  → status {{tracker_status}} · announce {{tracker_announce}}"
     bind='{{tracker_status}}'
     echo "clients  → 127.0.0.1:${bind##*:}  (public glass stays :4655)"
     echo "status   → $(scripts/local-tracker-status.sh print)"
@@ -75,10 +78,14 @@ up: build web write-tracker-status
       kill $burrow_pid $tracker_pid 2>/dev/null
       scripts/local-tracker-status.sh clear
     }
+    announce='{{tracker_announce}}'
     ./target/release/burrow --data-dir "{{data_dir}}" \
-        --http --http-addr "{{http_addr}}" --web-root crates/ui-web/dist run &
+        --http --http-addr "{{http_addr}}" --web-root crates/ui-web/dist \
+        --advertise-host 127.0.0.1 \
+        --announce-tracker "http://127.0.0.1:${announce##*:}" run &
     burrow_pid=$!
-    ./target/release/looking-glass --status "{{tracker_status}}" &
+    ./target/release/looking-glass --status "{{tracker_status}}" \
+        --announce "{{tracker_announce}}" &
     tracker_pid=$!
     # One Ctrl-C stops the stack and drops the status files so a stale
     # bind is not what typed localhost follows.
@@ -89,15 +96,21 @@ up: build web write-tracker-status
 
 # Run only the burrow, serving the web client.
 burrow: build web
+    #!/usr/bin/env bash
+    set -euo pipefail
+    announce='{{tracker_announce}}'
     ./target/release/burrow --data-dir "{{data_dir}}" \
-        --http --http-addr "{{http_addr}}" --web-root crates/ui-web/dist run
+        --http --http-addr "{{http_addr}}" --web-root crates/ui-web/dist \
+        --advertise-host 127.0.0.1 \
+        --announce-tracker "http://127.0.0.1:${announce##*:}" run
 
 # Run only the tracker.
 tracker: build write-tracker-status
     #!/usr/bin/env bash
     set -euo pipefail
     trap 'scripts/local-tracker-status.sh clear' INT TERM EXIT
-    ./target/release/looking-glass --status "{{tracker_status}}"
+    ./target/release/looking-glass --status "{{tracker_status}}" \
+        --announce "{{tracker_announce}}"
 
 # Terminal client. The binary reads the status file (and probes it);
 # we do not export a stale bind into the env.

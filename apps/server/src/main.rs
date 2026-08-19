@@ -27,6 +27,15 @@ struct Cli {
     /// Overrides `http_web_root`; relative paths resolve under --data-dir.
     #[arg(long, value_name = "DIR")]
     web_root: Option<PathBuf>,
+    /// Host this burrow lists as its public address (implies announce).
+    /// A `just up` stack sets `127.0.0.1` so the local glass can list it.
+    #[arg(long, value_name = "HOST")]
+    advertise_host: Option<String>,
+    /// Looking Glass to announce to (`host` or `http://…`). Replaces the
+    /// default public coordinator so a local stack does not publish
+    /// `127.0.0.1` to the world.
+    #[arg(long, value_name = "URL")]
+    announce_tracker: Option<String>,
     #[command(subcommand)]
     command: Option<Cmd>,
 }
@@ -81,6 +90,12 @@ async fn main() -> Result<()> {
     }
     if let Some(root) = cli.web_root {
         config.http_web_root = root;
+    }
+    if let Some(host) = cli.advertise_host {
+        config.advertise_host = host;
+    }
+    if let Some(tracker) = cli.announce_tracker {
+        config.announce_trackers = vec![tracker];
     }
 
     match cli.command.unwrap_or(Cmd::Run) {

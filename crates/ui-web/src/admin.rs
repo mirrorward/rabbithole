@@ -67,6 +67,13 @@ impl AdminState {
             AdminEvent::Failed(detail) => self.status = format!("Error: {detail}"),
             // Live feed/gateway counters belong to the syndication panel.
             AdminEvent::GatewayStatsLoaded(_) => {}
+            AdminEvent::ThemeBundleApplied(info) => {
+                self.status = if info.present {
+                    format!("Published theme {}.", info.name)
+                } else {
+                    "Theme cleared.".to_string()
+                };
+            }
         }
     }
 
@@ -95,6 +102,7 @@ impl AdminState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rabbithole_proto::admin::ThemeBundleInfo;
 
     #[test]
     fn classes_and_accounts_replace_state() {
@@ -170,5 +178,15 @@ mod tests {
         assert_eq!(s.status, "Broadcast sent.");
         s.apply(&AdminEvent::Failed("nope".into()));
         assert!(s.status.contains("nope"));
+    }
+
+    #[test]
+    fn published_theme_names_itself_on_status() {
+        let mut s = AdminState::default();
+        let mut info = ThemeBundleInfo::default();
+        info.present = true;
+        info.name = "Wonderland".into();
+        s.apply(&AdminEvent::ThemeBundleApplied(info));
+        assert_eq!(s.status, "Published theme Wonderland.");
     }
 }
