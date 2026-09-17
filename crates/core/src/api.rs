@@ -121,8 +121,17 @@ pub enum Event {
     },
     /// Authentication succeeded. `token` is the resume bearer token (empty for
     /// guests, which aren't resumable); the client persists it per-endpoint to
-    /// auto-reconnect on next load.
-    Authenticated { token: String, screen_name: String },
+    /// auto-reconnect on next load. `role` is the account's role ordinal
+    /// (0 guest, 1 user, 2 moderator, 3 admin, 4 superuser) and `caps` the
+    /// session's effective capability bitmask — both straight off the
+    /// server's `AuthOk`, so a frontend can show operator surfaces to the
+    /// people who actually hold them.
+    Authenticated {
+        token: String,
+        screen_name: String,
+        role: u8,
+        caps: u64,
+    },
 }
 
 #[cfg(test)]

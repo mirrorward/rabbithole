@@ -672,6 +672,8 @@ pub fn frame_to_events(frame: &Frame) -> Vec<Event> {
         return vec![Event::Authenticated {
             token: ok.token,
             screen_name: ok.screen_name,
+            role: ok.role,
+            caps: ok.caps,
         }];
     }
 

@@ -1127,3 +1127,28 @@ mod tests {
         assert_eq!(derive_server_name("wss://a.b.c/path"), "a.b.c");
     }
 }
+
+/// Role ordinal for admin, as the wire defines it (`AuthOk.role`: 0 guest,
+/// 1 user, 2 moderator, 3 admin, 4 superuser).
+pub const ROLE_ADMIN: u8 = 3;
+
+/// Does this role ordinal unlock the operator console? Admin and superuser
+/// do; moderators get their tools inside the surfaces they moderate, not a
+/// server-configuration console.
+pub fn role_is_operator(role: u8) -> bool {
+    role >= ROLE_ADMIN
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::role_is_operator;
+
+    #[test]
+    fn only_admin_and_above_are_operators() {
+        assert!(!role_is_operator(0), "guest");
+        assert!(!role_is_operator(1), "user");
+        assert!(!role_is_operator(2), "moderator");
+        assert!(role_is_operator(3), "admin");
+        assert!(role_is_operator(4), "superuser");
+    }
+}

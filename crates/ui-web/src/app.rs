@@ -31,7 +31,7 @@ use crate::wire::{AdminCommand, AdminEvent, FileCommand, FileEvent, NoticeRoute}
 /// Identifies one connected burrow (a live server session). For now the initial
 /// session is [`ServerId::local`]; live sessions will key on their normalized
 /// dial endpoint (see `docs/design/client-experience.md`, the WarrenState refactor).
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ServerId(pub String);
 
 impl ServerId {
@@ -515,6 +515,7 @@ impl AppState {
         let radio = self.radio;
         let files = self.focused().files;
         let session_name = self.focused().name;
+        let is_admin = self.focused().is_admin;
         let presence = self.presence;
         let ws_sv = self.focused().ws;
         // Endpoint captured for both the "connected" toast/label and, on a
@@ -593,9 +594,19 @@ impl AppState {
                             });
                         }
                     }
-                    Event::Authenticated { token, screen_name } => {
+                    Event::Authenticated {
+                        token,
+                        screen_name,
+                        role,
+                        ..
+                    } => {
                         authed.set(true);
                         *my_handle.borrow_mut() = screen_name.clone();
+                        // Operators get the console. The server already told
+                        // us the role; the sidebar used to ignore it, so a
+                        // live admin never saw an Admin entry at all (only the
+                        // demo's seeded "rabbit" handle did).
+                        is_admin.set(crate::state::role_is_operator(*role));
                         // Persist the session so a reload auto-reconnects: the
                         // handle (from the persona) + the resume token (empty for
                         // guests → cleared). Never the password.
@@ -1082,6 +1093,10 @@ impl AppState {
                 self.focused().ws.update_value(|c| {
                     c.send_reply(&board, root, body);
                     c.request_posts(root);
+                    // The thread list shows a reply count and last-activity
+                    // time; refresh it so the row you just replied to agrees
+                    // with the reader.
+                    c.request_threads(&board);
                 });
             }
             return;
@@ -1627,7 +1642,7 @@ impl AppState {
         let (area, parent) = self
             .focused()
             .files
-            .with(|f| (f.current_area.clone(), join_path(&f.path)));
+            .with_untracked(|f| (f.current_area.clone(), join_path(&f.path)));
         let Some(area) = area else {
             return;
         };
@@ -2099,34 +2114,46 @@ pub fn App() -> impl IntoView {
                     <SideNav/>
                     <div class="rh-shell-main">
                         <WelcomeSheet/>
-                        {move || {
-                            // Remount the place when the focused burrow changes,
-                            // so each view re-binds the newly-focused session's
-                            // signals. The URL is unchanged (it lives on <Router>),
-                            // so the same route re-renders against the new session.
-                            let _ = app.focused_id.get();
-                            view! {
-                                <Routes>
-                                    <Route path="/" view=Login/>
-                                    <Route path="/about" view=About/>
-                                    <Route path="/settings" view=Settings/>
-                                    <Route path="/people" view=People/>
-                                    <Route path="/people/:seed" view=PersonPage/>
-                                    <Route path="/transfers" view=Transfers/>
-                                    <Route path="/you" view=You/>
-                                    <Route path="/lobby" view=Lobby/>
-                                    <Route path="/boards" view=Boards/>
-                                    <Route path="/boards/:slug" view=BoardView/>
-                                    <Route path="/dms" view=Dms/>
-                                    <Route path="/directory" view=Directory/>
-                                    <Route path="/files" view=Files/>
-                                    <Route path="/radio" view=Radio/>
-                                    <Route path="/servers" view=ServerBrowser/>
-                                    <Route path="/art" view=ArtGallery/>
-                                    <Route path="/admin" view=Admin/>
-                                </Routes>
+                        // Remount the place when the focused burrow changes,
+                        // so each view re-binds the newly-focused session's
+                        // signals. The URL is unchanged (it lives on <Router>),
+                        // so the same route re-renders against the new session.
+                        //
+                        // A keyed <For>, not a `move ||` child: a dynamic
+                        // child wrapping <Routes> re-ran on *every* navigation
+                        // (leptos_router warned "only render <Routes/> once" on
+                        // each click, even with nothing tracked), rebuilding the
+                        // whole routed tree twice per click and panicking any
+                        // effect the first build had queued (OwnerDisposed). A
+                        // keyed list only rebuilds its child when the key — the
+                        // focused burrow — actually changes.
+                        <For
+                            each=move || vec![app.focused_id.get()]
+                            key=|id| id.clone()
+                            children=move |_| {
+                                view! {
+                                    <Routes>
+                                        <Route path="/" view=Login/>
+                                        <Route path="/about" view=About/>
+                                        <Route path="/settings" view=Settings/>
+                                        <Route path="/people" view=People/>
+                                        <Route path="/people/:seed" view=PersonPage/>
+                                        <Route path="/transfers" view=Transfers/>
+                                        <Route path="/you" view=You/>
+                                        <Route path="/lobby" view=Lobby/>
+                                        <Route path="/boards" view=Boards/>
+                                        <Route path="/boards/:slug" view=BoardView/>
+                                        <Route path="/dms" view=Dms/>
+                                        <Route path="/directory" view=Directory/>
+                                        <Route path="/files" view=Files/>
+                                        <Route path="/radio" view=Radio/>
+                                        <Route path="/servers" view=ServerBrowser/>
+                                        <Route path="/art" view=ArtGallery/>
+                                        <Route path="/admin" view=Admin/>
+                                    </Routes>
+                                }
                             }
-                        }}
+                        />
                     </div>
                 </div>
             </div>
