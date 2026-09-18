@@ -120,8 +120,13 @@ pub fn ThemeToggle() -> impl IntoView {
 /// tear it down and rebuild it.
 #[component]
 pub fn Nav() -> impl IntoView {
-    use crate::palette::{sections_for, Scope};
+    use crate::palette::{scope_of, sections_for, Scope};
     let app = expect_context::<AppState>();
+    let location = leptos_router::use_location();
+    // Which scope's sections to list. On a desktop this nav only shows in
+    // burrow scope; on a phone it is the bottom tab bar everywhere, so in
+    // the warren it lists the warren's screens instead.
+    let scope = move || scope_of(&location.pathname.get());
     // The sidebar is mounted once by the shell and outlives every burrow, so
     // it must read the focused session *reactively* (`focused_tracked`), not
     // capture one session's signals at mount. Captured, it stayed bound to
@@ -152,26 +157,40 @@ pub fn Nav() -> impl IntoView {
     };
     view! {
         <nav class="rh-subnav" aria-label="Primary">
+            // Phone only (the stylesheet hides it wider): opens the warren
+            // sheet, which is the burrow rail's job where no rail fits.
+            <button
+                type="button"
+                class="rh-subnav-link rh-subnav-warren"
+                aria-haspopup="dialog"
+                aria-expanded=move || app.switcher_open.get().to_string()
+                on:click=move |_| app.switcher_open.update(|o| *o = !*o)
+            >
+                <span class="rh-subnav-icon" inner_html=crate::icons::rail_icon("home")></span>
+                <span class="rh-subnav-label">"Warren"</span>
+            </button>
             <span class="rh-subnav-scope">
                 // focused_tracked(), not focused(): the latter reads the id
                 // untracked, so this label was computed once at mount and
                 // never followed a burrow switch.
-                {move || {
-                    app.focused_tracked()
+                {move || match scope() {
+                    Scope::Burrow => app
+                        .focused_tracked()
                         .name
                         .get()
-                        .unwrap_or_else(|| "This burrow".into())
+                        .unwrap_or_else(|| "This burrow".into()),
+                    Scope::Warren => "Warren".to_string(),
                 }}
             </span>
             <For
-                each=|| sections_for(Scope::Burrow).to_vec()
+                each=move || sections_for(scope()).to_vec()
                 key=|s| s.route
                 children=move |s| view! {
                     <NavLink path=s.route label=s.label unread=unread_for(s.route)/>
                 }
             />
-            // The operator console, for operators.
-            <Show when=is_admin fallback=|| ()>
+            // The operator console, for operators — a burrow's, so only there.
+            <Show when=move || { is_admin() && scope() == Scope::Burrow } fallback=|| ()>
                 <div class="rh-subnav-rule" aria-hidden="true"></div>
                 <NavLink path="/admin" label="Admin" unread=None/>
             </Show>

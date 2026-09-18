@@ -132,6 +132,10 @@ pub struct AppState {
     /// Whether the ⌘K command palette overlay is open. Shared so both the
     /// header affordance and the global key binding drive the one overlay.
     pub palette_open: RwSignal<bool>,
+    /// Whether the phone-width **warren sheet** is open — the bottom sheet
+    /// that stands in for the burrow rail where there is no room for one
+    /// ([`WarrenSheet`]).
+    pub switcher_open: RwSignal<bool>,
     /// The Looking Glass server-browser directory ([`crate::servers`]).
     pub servers: RwSignal<Vec<crate::servers::DirectoryServer>>,
     /// Where the current listing came from — shown, because "who told you
@@ -199,6 +203,7 @@ impl AppState {
             admin: create_rw_signal(AdminState::default()),
             syndication: create_rw_signal(SynAdminState::default()),
             palette_open: create_rw_signal(false),
+            switcher_open: create_rw_signal(false),
             servers: create_rw_signal(crate::servers::sample_directory()),
             directory_source: create_rw_signal(crate::servers::DirectorySource::Seeded),
             directory_loading: create_rw_signal(false),
@@ -2128,6 +2133,7 @@ pub fn App() -> impl IntoView {
                 <RouteFocus/>
                 <PlaceGuard/>
                 <CommandPalette/>
+                <WarrenSheet/>
                 <Toasts/>
                 <div class="rh-shell">
                     <BurrowRail/>
@@ -2204,19 +2210,157 @@ fn is_native() -> bool {
 #[component]
 fn SideNav() -> impl IntoView {
     let location = leptos_router::use_location();
-    let show = move || {
-        let path = location.pathname.get();
-        !crate::palette::is_chromeless(&path)
-            && crate::palette::scope_of(&path) == crate::palette::Scope::Burrow
-    };
+    let chromeless = move || crate::palette::is_chromeless(&location.pathname.get());
+    let warren =
+        move || crate::palette::scope_of(&location.pathname.get()) == crate::palette::Scope::Warren;
     // Hidden with CSS, not unmounted: a <Show> would tear the nav down on
     // every warren-scope route and remount it on return, replaying the pips'
     // arrival animation on plain navigation — the exact replay-on-remount
     // class of motion 0.179 removed.
+    //
+    // Warren scope is a *class*, and the stylesheet decides: on a desktop the
+    // sidebar disappears there (People, Transfers, You and Servers are each
+    // one screen); on a phone the same element is the bottom tab bar, the
+    // only navigation there is, so it stays and lists the warren's sections.
     view! {
-        <div class="rh-sidenav-slot" class:rh-hidden=move || { !show() }>
+        <div class="rh-sidenav-slot" class:rh-hidden=chromeless class:warren-scope=warren>
             <Nav/>
         </div>
+    }
+}
+
+/// The phone-width **warren sheet**: what the burrow rail is on a desktop,
+/// as a bottom sheet, because a 3.4rem rail beside a 390px screen is a
+/// quarter of it gone. Opened from the "Warren" tab the bottom bar grows at
+/// that width. Lists your burrows (switch, or add one), the warren's own
+/// screens, Settings, and Leave for the burrow you're in — the one header
+/// control that doesn't fit a phone's title row.
+#[component]
+fn WarrenSheet() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let open = app.switcher_open;
+    let navigate = leptos_router::use_navigate();
+    let go = Callback::new(move |route: String| {
+        open.set(false);
+        navigate(&route, Default::default());
+    });
+    // Escape closes, like the palette. wasm only: the host has no window.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let handle = window_event_listener(leptos::ev::keydown, move |ev| {
+            if ev.key() == "Escape" && open.get_untracked() {
+                ev.prevent_default();
+                open.set(false);
+            }
+        });
+        on_cleanup(move || handle.remove());
+    }
+    let warren_rows: [(&str, &str, &str); 4] = [
+        ("/people", "People", "people"),
+        ("/transfers", "Transfers", "transfers"),
+        ("/you", "You", "you"),
+        ("/settings", "Settings", "settings"),
+    ];
+    view! {
+        <Show when=move || open.get() fallback=|| ()>
+            <div class="rh-sheet-backdrop" on:click=move |_| open.set(false)>
+                <div
+                    class="rh-sheet"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="Your warren"
+                    on:click=|ev| ev.stop_propagation()
+                >
+                    <h2 class="rh-sheet-title">"Burrows"</h2>
+                    <ul class="rh-sheet-list">
+                        <For
+                            each=move || app.burrow_tiles()
+                            key=|(id, name, focused, conn, unread)| {
+                                (id.0.clone(), name.clone(), *focused, *conn, *unread)
+                            }
+                            children=move |(id, name, focused, conn, unread)| {
+                                let glyph = name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                                let dot = if conn.is_live() {
+                                    "rh-rail-dot on"
+                                } else if conn.is_pending() {
+                                    "rh-rail-dot pending"
+                                } else {
+                                    "rh-rail-dot off"
+                                };
+                                let badge = crate::state::unread_badge(unread);
+                                let status = conn.label();
+                                let click_id = id.clone();
+                                view! {
+                                    <li>
+                                        <button
+                                            class="rh-sheet-row"
+                                            class:active=move || { focused }
+                                            aria-current=move || focused.then_some("true")
+                                            on:click=move |_| {
+                                                app.focus(&click_id);
+                                                go.call("/lobby".to_string());
+                                            }
+                                        >
+                                            <span class="rh-sheet-tile">
+                                                {glyph}
+                                                <span class=dot aria-hidden="true"></span>
+                                            </span>
+                                            <span class="rh-sheet-name">{name}</span>
+                                            <span class="rh-sheet-meta">{status}</span>
+                                            {badge.map(|b| view! {
+                                                <span class="rh-pip" aria-label=format!("{unread} unread")>{b}</span>
+                                            })}
+                                        </button>
+                                    </li>
+                                }
+                            }
+                        />
+                        <li>
+                            <button class="rh-sheet-row" on:click=move |_| go.call("/servers".to_string())>
+                                <span class="rh-sheet-tile rh-sheet-add" inner_html=crate::icons::rail_icon("add")></span>
+                                <span class="rh-sheet-name">"Add a burrow"</span>
+                            </button>
+                        </li>
+                    </ul>
+                    <h2 class="rh-sheet-title">"Warren"</h2>
+                    <ul class="rh-sheet-list">
+                        {warren_rows
+                            .into_iter()
+                            .map(|(route, label, icon)| {
+                                let svg = if icon == "settings" {
+                                    crate::icons::settings_icon()
+                                } else {
+                                    crate::icons::rail_icon(icon)
+                                };
+                                view! {
+                                    <li>
+                                        <button class="rh-sheet-row" on:click=move |_| go.call(route.to_string())>
+                                            <span class="rh-sheet-tile rh-sheet-icon" inner_html=svg></span>
+                                            <span class="rh-sheet-name">{label}</span>
+                                        </button>
+                                    </li>
+                                }
+                            })
+                            .collect_view()}
+                    </ul>
+                    <Show when=move || { app.can_leave() } fallback=|| ()>
+                        <button
+                            class="rh-btn ghost rh-sheet-leave"
+                            on:click=move |_| {
+                                let id = app.focused_endpoint();
+                                app.disconnect(&ServerId(id));
+                                open.set(false);
+                            }
+                        >
+                            {move || format!(
+                                "Leave {}",
+                                app.focused_tracked().name.get().unwrap_or_else(|| "this burrow".into())
+                            )}
+                        </button>
+                    </Show>
+                </div>
+            </div>
+        </Show>
     }
 }
 
