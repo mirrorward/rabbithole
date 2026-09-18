@@ -94,6 +94,9 @@ pub struct Post {
     pub author: String,
     /// Post body text.
     pub body: String,
+    /// When it was posted, unix milliseconds (0 when unknown). The wire has
+    /// always carried this; the reader used to drop it.
+    pub at_unix_ms: i64,
 }
 
 /// One message in a direct-message conversation.
@@ -840,6 +843,7 @@ mod tests {
             thread: "1".into(),
             author: "alice".into(),
             body: "first".into(),
+            at_unix_ms: 0,
         }];
         s.open_thread("1".into(), posts.clone());
         assert_eq!(s.selected_thread.as_deref(), Some("1"));

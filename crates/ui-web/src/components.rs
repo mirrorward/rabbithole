@@ -241,12 +241,12 @@ pub fn People() -> impl IntoView {
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"People"</h1>
             <section class="rh-panel">
-                <h2 class="rh-panel-title">"People · across your burrows"</h2>
+                <h2 class="rh-panel-title">"People"<span class="rh-panel-sub">"across your burrows"</span></h2>
                 <Show
                     when=move || !app.people().is_empty()
                     fallback=|| view! {
                         <EmptyState
-                            mark="\u{263a}"
+                            icon="/people"
                             title="No one's around yet"
                             sub="Your people across every connected burrow gather here."
                         />
@@ -279,7 +279,7 @@ pub fn People() -> impl IntoView {
                                         <span
                                             class="rh-person-idkey"
                                             title=format!("identity key {fp} — possession proven, not relay-proof")
-                                        >"\u{26bf}"</span>
+                                         inner_html=crate::icons::key_icon()></span>
                                     }
                                 });
                                 let mark = crate::avatar::mark_svg(
@@ -710,7 +710,7 @@ pub fn PersonPage() -> impl IntoView {
                 {move || format!("{} \u{2014} person", display_name())}
             </h1>
             <section class="rh-panel">
-                <A href="/people" class="rh-back">"\u{2190} People"</A>
+                <A href="/people" class="rh-back"><span class="rh-back-icon" inner_html=crate::icons::chevron_left_icon()></span>"People"</A>
                 <header class="rh-person-hero">
                     <span
                         class="rh-mark rh-person-hero-mark"
@@ -741,7 +741,7 @@ pub fn PersonPage() -> impl IntoView {
                         {move || peer_key().map(|k| {
                             let fp = crate::identity::short_fingerprint(&k);
                             view! {
-                                <div class="rh-person-hero-key" title=k>"\u{26bf} "{fp}</div>
+                                <div class="rh-person-hero-key" title=k><span class="rh-inline-icon" inner_html=crate::icons::key_icon()></span>{fp}</div>
                             }
                         })}
                         <div class="rh-person-hero-presence">
@@ -910,12 +910,12 @@ pub fn Transfers() -> impl IntoView {
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Transfers"</h1>
             <section class="rh-panel">
-                <h2 class="rh-panel-title">"Transfers · across your burrows"</h2>
+                <h2 class="rh-panel-title">"Transfers"<span class="rh-panel-sub">"across your burrows"</span></h2>
                 <Show
                     when=move || !app.all_transfers().is_empty()
                     fallback=|| view! {
                         <EmptyState
-                            mark="\u{2193}"
+                            icon="/transfers"
                             title="No transfers yet"
                             sub="Downloads and uploads from every burrow land here."
                         />
@@ -947,8 +947,8 @@ pub fn Transfers() -> impl IntoView {
                                     "rh-bar-fill"
                                 };
                                 let arrow = match t.dir {
-                                    TransferDir::Download => "\u{2193}",
-                                    TransferDir::Upload => "\u{2191}",
+                                    TransferDir::Download => crate::icons::arrow_down_icon(),
+                                    TransferDir::Upload => crate::icons::arrow_up_icon(),
                                 };
                                 // Content id (blake3), the swarm de-dup key, when known.
                                 let hash = t.hash.as_ref().map(|h| {
@@ -972,11 +972,11 @@ pub fn Transfers() -> impl IntoView {
                                 view! {
                                     <li class="rh-xfer-item">
                                         <div class="rh-xfer-row">
-                                            <span class="rh-xfer-dir" aria-hidden="true">{arrow}</span>
+                                            <span class="rh-xfer-dir" aria-hidden="true" inner_html=arrow></span>
                                             <span class="rh-xfer-name">{t.name}</span>
                                             <span class="rh-xfer-burrow">{burrow.clone()}</span>
                                             <div class="rh-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=pct.to_string()>
-                                                <div class=fill style=format!("width:{pct}%")></div>
+                                                <div class=fill style=format!("transform:scaleX({})", f64::from(pct) / 100.0)></div>
                                             </div>
                                             <span class="rh-xfer-pct">{format!("{pct}%")}</span>
                                             <span class=status_cls>{status_txt}</span>
@@ -1064,11 +1064,11 @@ fn FrontPage() -> impl IntoView {
                                 } else {
                                     format!("{count} here now \u{2014} {who}")
                                 };
-                                view! { <p class="rh-front-line">"\u{25cf} "{line}</p> }.into_view()
+                                view! { <p class="rh-front-line"><span class="rh-pres on rh-inline-dot" aria-hidden="true"></span>{line}</p> }.into_view()
                             }
                             WelcomeWidget::UnreadDms(n) => view! {
                                 <p class="rh-front-line">
-                                    "\u{2709} "
+                                    <span class="rh-inline-icon" inner_html=crate::icons::section_icon("/dms")></span>
                                     {format!("{n} conversation{} waiting", if n == 1 { "" } else { "s" })}
                                 </p>
                             }
@@ -1130,7 +1130,7 @@ pub fn WelcomeSheet() -> impl IntoView {
                                 class="rh-welcome-x"
                                 aria-label="Dismiss"
                                 on:click=dismiss
-                            >"\u{00d7}"</button>
+                            ><span inner_html=crate::icons::close_icon()></span></button>
                         </div>
                         // Agreement servers show the MOTD above the agreement text.
                         {has_agreement.then(|| {
@@ -1830,9 +1830,7 @@ pub fn Toasts() -> impl IntoView {
                                 class="rh-toast-close"
                                 aria-label="Dismiss notification"
                                 on:click=move |_| app.dismiss_toast(id)
-                            >
-                                "\u{00d7}"
-                            </button>
+                            ><span inner_html=crate::icons::close_icon()></span></button>
                         </div>
                     }
                 }
@@ -2123,8 +2121,10 @@ fn Skeleton(
 /// reads the same.
 #[component]
 fn EmptyState(
-    /// Decorative glyph shown above the headline.
-    mark: &'static str,
+    /// The section this empty state belongs to (a route path): its drawn
+    /// icon is the mark. It used to be a dingbat, which rendered as whatever
+    /// glyph the platform font had and matched nothing else in the app.
+    icon: &'static str,
     /// One-line headline.
     #[prop(into)]
     title: String,
@@ -2134,7 +2134,7 @@ fn EmptyState(
 ) -> impl IntoView {
     view! {
         <div class="rh-chat-empty">
-            <div class="rh-chat-empty-mark" aria-hidden="true">{mark}</div>
+            <div class="rh-chat-empty-mark" aria-hidden="true" inner_html=crate::icons::section_icon(icon)></div>
             <p class="rh-chat-empty-title">{title}</p>
             <p class="rh-chat-empty-sub">{sub}</p>
         </div>
@@ -2188,7 +2188,7 @@ pub fn Lobby() -> impl IntoView {
                         fallback=|| ()
                     >
                         <EmptyState
-                            mark="\u{273f}"
+                            icon="/lobby"
                             title="Quiet in here"
                             sub="Say hello \u{2014} the lobby's yours to open."
                         />
@@ -2251,7 +2251,7 @@ pub fn Lobby() -> impl IntoView {
                 </div>
                 <Show when=move || log.unseen.get() fallback=|| ()>
                     <button class="rh-jump-new" on:click=move |_| log.jump()>
-                        "\u{2193} New messages"
+                        <span class="rh-btn-icon" inner_html=crate::icons::arrow_down_icon()></span>"New messages"
                     </button>
                 </Show>
                 <Composer
@@ -2362,7 +2362,11 @@ pub fn Composer(
                                 on:mousedown=move |ev| ev.prevent_default()
                                 on:click=move |_| format(f)
                             >
-                                {glyph}
+                                {if matches!(f, Format::Link) {
+                                    view! { <span inner_html=crate::icons::link_icon()></span> }.into_view()
+                                } else {
+                                    glyph.into_view()
+                                }}
                             </button>
                         }
                     })
@@ -2461,7 +2465,7 @@ pub fn Boards() -> impl IntoView {
                     fallback=|| ()
                 >
                     <EmptyState
-                        mark="\u{270e}"
+                        icon="/boards"
                         title="No boards yet"
                         sub="This burrow hasn't opened any boards to post on."
                     />
@@ -2477,9 +2481,15 @@ pub fn Boards() -> impl IntoView {
                                     // (Router <A> takes no tabindex in leptos 0.6, so board rows stay
                                     // individual Tab stops — a board list is a handful of rows, not a
                                     // forty-row file table, so the cost is small. Arrows still work.)
-                                    <A href=href class="rh-board-link">
-                                        <span class="rh-board-name">{b.name}</span>
-                                        <span class="rh-board-desc">{b.description}</span>
+                                    <A href=href class="rh-board-link rh-row">
+                                        <span class="rh-row-icon" inner_html=crate::icons::section_icon("/boards")></span>
+                                        <span class="rh-row-main">
+                                            <span class="rh-board-name">{b.name}</span>
+                                            <span class="rh-board-desc">{b.description}</span>
+                                        </span>
+                                        {crate::state::unread_badge(b.unread as usize).map(|n| view! {
+                                            <span class="rh-pip" aria-label=format!("{} unread", b.unread)>{n}</span>
+                                        })}
                                     </A>
                                 </li>
                             }
@@ -2545,7 +2555,7 @@ pub fn BoardView() -> impl IntoView {
         <StatusBar/>
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <section class="rh-panel rh-threads" aria-label="Threads">
-                <A href="/boards" class="rh-back">"\u{2190} All boards"</A>
+                <A href="/boards" class="rh-back"><span class="rh-back-icon" inner_html=crate::icons::chevron_left_icon()></span>"All boards"</A>
                 <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">{board_name}</h1>
                 <Show when=move || state.with(|s| s.loading.threads) fallback=|| ()>
                     <Skeleton rows=3/>
@@ -2642,7 +2652,7 @@ pub fn BoardView() -> impl IntoView {
                     when=move || state.with(|s| s.selected_thread.is_some())
                     fallback=|| view! {
                         <EmptyState
-                            mark="\u{270e}"
+                            icon="/boards"
                             title="Nothing open"
                             sub="Pick a thread on the left to read it."
                         />
@@ -2652,14 +2662,28 @@ pub fn BoardView() -> impl IntoView {
                         <For
                             each=move || state.with(|s| s.posts.clone())
                             key=|p| p.id.clone()
-                            children=move |p| view! {
-                                <article class="rh-post">
-                                    <span class="rh-from">{p.author}</span>
-                                    <div
-                                        class="rh-rich rh-post-body"
-                                        inner_html=crate::markdown::to_html(&p.body)
-                                    ></div>
-                                </article>
+                            children=move |p| {
+                                let mark = crate::avatar::mark_svg(&p.author, 22);
+                                let when = (p.at_unix_ms != 0).then(|| {
+                                    let day = crate::files::relative_day(
+                                        p.at_unix_ms / 1000,
+                                        crate::clock::now_ms() / 1000,
+                                    );
+                                    format!("{day} \u{00b7} {}", crate::clock::local_hhmm(p.at_unix_ms))
+                                });
+                                view! {
+                                    <article class="rh-post">
+                                        <header class="rh-post-head">
+                                            <span class="rh-mark" inner_html=mark></span>
+                                            <span class="rh-from">{p.author}</span>
+                                            {when.map(|w| view! { <span class="rh-post-when">{w}</span> })}
+                                        </header>
+                                        <div
+                                            class="rh-rich rh-post-body"
+                                            inner_html=crate::markdown::to_html(&p.body)
+                                        ></div>
+                                    </article>
+                                }
                             }
                         />
                     </div>
@@ -2818,7 +2842,7 @@ pub fn Dms() -> impl IntoView {
                     when=move || state.with(|s| s.selected_dm.is_some())
                     fallback=|| view! {
                         <EmptyState
-                            mark="\u{2709}"
+                            icon="/dms"
                             title="No conversation open"
                             sub="Choose someone on the left, or start a new one below."
                         />
@@ -2885,7 +2909,7 @@ pub fn Dms() -> impl IntoView {
                     </div>
                     <Show when=move || log.unseen.get() fallback=|| ()>
                         <button class="rh-jump-new" on:click=move |_| log.jump()>
-                            "\u{2193} New messages"
+                            <span class="rh-btn-icon" inner_html=crate::icons::arrow_down_icon()></span>"New messages"
                         </button>
                     </Show>
                     <Composer
@@ -2942,7 +2966,7 @@ pub fn Directory() -> impl IntoView {
                         } else if s.members.is_empty() {
                             view! {
                                 <EmptyState
-                                    mark="\u{263a}"
+                                    icon="/directory"
                                     title="Nobody here yet"
                                     sub="Members appear here as they join this burrow."
                                 />
@@ -3001,6 +3025,7 @@ pub fn Directory() -> impl IntoView {
                                         tabindex="-1"
                                         on:click=move |_| app.select_member(&handle)
                                     >
+                                        <span class="rh-mark" inner_html=crate::avatar::mark_svg(&crate::avatar::seed_for(None, &m.handle), 22)></span>
                                         <span class=dot aria-hidden="true"></span>
                                         <span class="rh-visually-hidden">{spoken}</span>
                                         <span class="rh-member-name">{m.display_name}</span>
@@ -3019,7 +3044,7 @@ pub fn Directory() -> impl IntoView {
                     }
                     fallback=|| view! {
                         <EmptyState
-                            mark="\u{263a}"
+                            icon="/directory"
                             title="No one selected"
                             sub="Pick a member to see their profile card."
                         />
@@ -3144,27 +3169,31 @@ pub fn ServerBrowser() -> impl IntoView {
                             let presence = if s.reachable { "Online:" } else { "Offline:" };
                             let uptime = s.uptime_pct.map(crate::servers::uptime_label);
                             view! {
-                                <li class="rh-server-card">
-                                    <div class="rh-server-head">
-                                        <span class=dot aria-hidden="true"></span>
-                                        <span class="rh-visually-hidden">{presence}</span>
-                                        <span class="rh-server-name">{s.name.clone()}</span>
-                                        {s.users_online.map(|n| view! {
-                                            <span class="rh-server-users">{n}" online"</span>
-                                        })}
+                                <li class="rh-server-row">
+                                    <span class=dot aria-hidden="true"></span>
+                                    <span class="rh-visually-hidden">{presence}</span>
+                                    <div class="rh-server-main">
+                                        <div class="rh-server-head">
+                                            <span class="rh-server-name">{s.name.clone()}</span>
+                                            {s.users_online.map(|n| view! {
+                                                <span class="rh-server-users">{n}" online"</span>
+                                            })}
+                                            {uptime.map(|label| view! {
+                                                <span class="rh-server-uptime">{label}</span>
+                                            })}
+                                        </div>
+                                        <p class="rh-server-desc">{s.description.clone()}</p>
+                                        <p class="rh-server-listeners">
+                                            {(!s.listeners.is_empty()).then(|| {
+                                                let list = s.listeners.join(" \u{00b7} ");
+                                                view! { <span>{list}<span class="rh-dot-sep" aria-hidden="true">" \u{00b7} "</span></span> }
+                                            })}
+                                            <code class="rh-server-endpoint">{s.endpoint.clone()}</code>
+                                        </p>
                                     </div>
-                                    <p class="rh-server-desc">{s.description.clone()}</p>
-                                    {(!s.listeners.is_empty()).then(|| {
-                                        let list = s.listeners.join(" \u{00b7} ");
-                                        view! { <p class="rh-server-listeners">{list}</p> }
-                                    })}
                                     <div class="rh-server-foot">
-                                        {uptime.map(|label| view! {
-                                            <span class="rh-server-uptime">{label}</span>
-                                        })}
-                                        <code class="rh-server-endpoint">{s.endpoint.clone()}</code>
                                         <button
-                                            class="rh-btn"
+                                            class="rh-btn ghost small"
                                             // The pick travels in the URL, not a
                                             // signal: setting a signal and
                                             // navigating in the same handler
@@ -3237,7 +3266,7 @@ fn AreaList() -> impl IntoView {
         <h2 class="rh-panel-title">"File areas"</h2>
         <Show when=move || files.with(|f| f.areas.is_empty()) fallback=|| ()>
             <EmptyState
-                mark="\u{2750}"
+                icon="/files"
                 title="No file areas yet"
                 sub="This burrow hasn't opened a file library."
             />
@@ -3251,11 +3280,14 @@ fn AreaList() -> impl IntoView {
                     view! {
                         <li class="rh-tree-item">
                             <button
-                                class="rh-board-link"
+                                class="rh-board-link rh-row"
                                 on:click=move |_| app.open_area(&slug)
                             >
-                                <span class="rh-board-name">{a.title}</span>
-                                <span class="rh-board-desc">{a.description}</span>
+                                <span class="rh-row-icon" inner_html=crate::icons::section_icon("/files")></span>
+                                <span class="rh-row-main">
+                                    <span class="rh-board-name">{a.title}</span>
+                                    <span class="rh-board-desc">{a.description}</span>
+                                </span>
                             </button>
                         </li>
                     }
@@ -3350,7 +3382,7 @@ fn FolderBrowser() -> impl IntoView {
                 }
             }
         >
-        <button class="rh-back" on:click=leave>"\u{2190} All areas"</button>
+        <button class="rh-back" on:click=leave><span class="rh-back-icon" inner_html=crate::icons::chevron_left_icon()></span>"All areas"</button>
         <nav class="rh-crumbs" aria-label="Folder path">
             <For
                 each=move || {
@@ -3409,7 +3441,7 @@ fn FolderBrowser() -> impl IntoView {
                     }
                 }
             >
-                "\u{2191} Upload\u{2026}"
+                <span class="rh-btn-icon" inner_html=crate::icons::upload_icon()></span>"Upload\u{2026}"
             </button>
             <span class="rh-toolbar-hint">"or drop files here"</span>
         </div>
@@ -3426,7 +3458,7 @@ fn FolderBrowser() -> impl IntoView {
         />
         <Show when=move || files.with(|f| f.nodes.is_empty()) fallback=|| ()>
             <EmptyState
-                mark="\u{2750}"
+                icon="/files"
                 title="Nothing in here"
                 sub="This folder has no files yet."
             />
@@ -3555,7 +3587,7 @@ fn FileDetail() -> impl IntoView {
             when=move || files.with(|f| f.selected_node().is_some())
             fallback=|| view! {
                 <EmptyState
-                    mark="\u{2750}"
+                    icon="/files"
                     title="No file selected"
                     sub="Choose a file to see its details."
                 />
@@ -3618,7 +3650,7 @@ fn TransferQueue() -> impl IntoView {
                             TransferStatus::Done => "done",
                             TransferStatus::Failed => "failed",
                         };
-                        let width = format!("width:{pct}%");
+                        let width = format!("transform:scaleX({})", f64::from(pct) / 100.0);
                         let bar_label = format!("{} transfer progress", t.name);
                         view! {
                             <li class="rh-queue-item">
@@ -4472,7 +4504,7 @@ fn AdminConfigPanel() -> impl IntoView {
                                 prop:value=move || draft.get()
                                 on:input=move |ev| draft.set(event_target_value(&ev))
                             />
-                            <button class="rh-btn small" on:click=save>"Save"</button>
+                            <button class="rh-btn ghost small" on:click=save>"Save"</button>
                         </li>
                     }
                 }

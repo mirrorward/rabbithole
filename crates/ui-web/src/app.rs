@@ -1133,6 +1133,7 @@ impl AppState {
                 thread: thread_id,
                 author: "you".to_string(),
                 body,
+                at_unix_ms: crate::clock::now_ms(),
             });
         });
     }

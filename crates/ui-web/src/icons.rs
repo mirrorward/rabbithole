@@ -182,6 +182,54 @@ pub fn copy_icon() -> String {
     )
 }
 
+/// A back affordance: a chevron pointing where you came from.
+pub fn chevron_left_icon() -> String {
+    format!("{OPEN}<path d=\"M14.5 6.5L9 12l5.5 5.5\"/></svg>")
+}
+
+/// Upload: an arrow rising out of a tray.
+pub fn upload_icon() -> String {
+    format!("{OPEN}<path d=\"M12 15.5V4.5m0 0l-4 4m4-4l4 4M4.5 19.5h15\"/></svg>")
+}
+
+/// Downward arrow: a download, or "newer lines below".
+pub fn arrow_down_icon() -> String {
+    format!("{OPEN}<path d=\"M12 4.5v15m0 0l-5.5-5.5M12 19.5l5.5-5.5\"/></svg>")
+}
+
+/// Upward arrow: an upload in the transfer list.
+pub fn arrow_up_icon() -> String {
+    format!("{OPEN}<path d=\"M12 19.5v-15m0 0L6.5 10M12 4.5l5.5 5.5\"/></svg>")
+}
+
+/// Two links of a chain — the formatting bar's link button.
+pub fn link_icon() -> String {
+    format!(
+        "{OPEN}{}</svg>",
+        concat!(
+            "<path d=\"M10 14a4 4 0 0 0 5.66 0l2.83-2.83a4 4 0 0 0-5.66-5.66l-1.4 1.4\"/>",
+            "<path d=\"M14 10a4 4 0 0 0-5.66 0l-2.83 2.83a4 4 0 0 0 5.66 5.66l1.4-1.4\"/>"
+        )
+    )
+}
+
+/// Dismiss: a plain cross, for toasts and sheets.
+pub fn close_icon() -> String {
+    format!("{OPEN}<path d=\"M6.5 6.5l11 11m0-11l-11 11\"/></svg>")
+}
+
+/// An identity key, for the hint beside a person whose key possession the
+/// burrow proved at handshake.
+pub fn key_icon() -> String {
+    format!(
+        "{OPEN}{}</svg>",
+        concat!(
+            "<circle cx=\"8\" cy=\"14\" r=\"3.6\"/>",
+            "<path d=\"M10.6 11.4L19 3m-3 3l2.6 2.6M13.5 8.5L16 11\"/>"
+        )
+    )
+}
+
 /// The tick a copy control shows for a moment instead of a notification.
 pub fn check_icon() -> String {
     format!("{OPEN}<path d=\"M4.8 12.6l4.6 4.6L19.2 7.4\"/></svg>")
@@ -365,5 +413,34 @@ mod tests {
         // A new route added without an icon should look plain, not broken.
         let svg = section_icon("/wishing-well");
         assert!(svg.starts_with("<svg") && svg.contains("circle"));
+    }
+}
+
+#[cfg(test)]
+mod furniture_icon_tests {
+    use super::*;
+
+    #[test]
+    fn the_furniture_icons_are_self_contained() {
+        for (name, svg) in [
+            ("chevron", chevron_left_icon()),
+            ("upload", upload_icon()),
+            ("down", arrow_down_icon()),
+            ("up", arrow_up_icon()),
+            ("link", link_icon()),
+            ("close", close_icon()),
+            ("key", key_icon()),
+        ] {
+            assert!(svg.starts_with("<svg"), "{name} is not an svg");
+            assert!(svg.ends_with("</svg>"), "{name} is unterminated");
+            assert!(
+                svg.contains("aria-hidden=\"true\""),
+                "{name} would be read aloud"
+            );
+            assert!(
+                svg.contains("stroke=\"currentColor\""),
+                "{name} ignores the theme"
+            );
+        }
     }
 }

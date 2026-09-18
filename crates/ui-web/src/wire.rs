@@ -366,6 +366,7 @@ pub fn frame_to_posts(frame: &Frame) -> Option<Vec<crate::state::Post>> {
                 thread: id_to_hex(&p.root.unwrap_or(p.id)),
                 author: p.author,
                 body: p.body,
+                at_unix_ms: p.created_at_unix_ms,
             })
             .collect(),
     )

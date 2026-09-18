@@ -318,24 +318,28 @@ impl MockClient {
                 thread: "t1".to_string(),
                 author: "rabbit".to_string(),
                 body: "Be excellent to each other. No spam.".to_string(),
+                at_unix_ms: 0,
             },
             Post {
                 id: "p12".to_string(),
                 thread: "t1".to_string(),
                 author: "alice".to_string(),
                 body: "Sounds good to me!".to_string(),
+                at_unix_ms: 0,
             },
             Post {
                 id: "p21".to_string(),
                 thread: "t2".to_string(),
                 author: "alice".to_string(),
                 body: "Hi, I'm Alice. Long-time lurker.".to_string(),
+                at_unix_ms: 0,
             },
             Post {
                 id: "p31".to_string(),
                 thread: "t3".to_string(),
                 author: "bob".to_string(),
                 body: "Here's how I set up my burrow behind NAT.".to_string(),
+                at_unix_ms: 0,
             },
         ]
     }
