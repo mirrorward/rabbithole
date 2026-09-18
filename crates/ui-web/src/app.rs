@@ -15,9 +15,9 @@ use rabbithole_proto::welcome::ThemeBundle;
 use crate::admin::AdminState;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
-    About, Admin, ArtGallery, BoardView, Boards, CommandPalette, Directory, Dms, Files, Lobby,
-    Login, Nav, People, PersonPage, Radio, ServerBrowser, Settings, Toasts, Transfers,
-    WelcomeSheet, You,
+    About, Admin, ArtGallery, BoardView, Boards, CommandPalette, ConfirmDialog, Directory, Dms,
+    Files, Lobby, Login, Nav, People, PersonPage, Radio, ServerBrowser, Settings, Toasts,
+    Transfers, WelcomeSheet, You,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -154,6 +154,9 @@ pub struct AppState {
     /// wrong ("Your session on Wonderland expired. Sign in again."). Shown
     /// once by the form, then cleared.
     pub pending_notice: RwSignal<Option<String>>,
+    /// A question the app is asking before it does something that can't be
+    /// taken back (leaving a burrow). `None` = no dialog.
+    pub confirm: RwSignal<Option<ConfirmAsk>>,
     /// Transient toast notifications — humanized-event moments
     /// ([`crate::toasts`]).
     pub toasts: RwSignal<crate::toasts::ToastQueue>,
@@ -218,6 +221,7 @@ impl AppState {
             directory_loading: create_rw_signal(false),
             pending_endpoint: create_rw_signal(None),
             pending_notice: create_rw_signal(None),
+            confirm: create_rw_signal(None),
             toasts: create_rw_signal(crate::toasts::ToastQueue::default()),
             theme: create_rw_signal(initial_theme_choice()),
             custom_pack: create_rw_signal(None),
@@ -971,6 +975,27 @@ impl AppState {
             self.pending_endpoint.set(Some(id.0.clone()));
             self.pending_notice.set(Some(notice));
             self.drop_session(&id);
+        }
+    }
+
+    /// Ask before leaving the focused burrow.
+    pub fn ask_leave(&self) {
+        let id = ServerId(self.focused_endpoint());
+        let name = self.focused().name.get_untracked().unwrap_or_default();
+        self.confirm.set(Some(ConfirmAsk::leave(id, &name)));
+    }
+
+    /// The person answered the open question. `true` carries out its intent.
+    pub fn answer_confirm(&self, yes: bool) {
+        let Some(ask) = self.confirm.get_untracked() else {
+            return;
+        };
+        self.confirm.set(None);
+        if !yes {
+            return;
+        }
+        match ask.intent {
+            ConfirmIntent::Leave(id) => self.disconnect(&id),
         }
     }
 
@@ -2252,6 +2277,7 @@ pub fn App() -> impl IntoView {
                 <RouteFocus/>
                 <PlaceGuard/>
                 <CommandPalette/>
+                <ConfirmDialog/>
                 <WarrenSheet/>
                 <Toasts/>
                 <div class="rh-shell">
@@ -2307,26 +2333,45 @@ pub fn App() -> impl IntoView {
     }
 }
 
-/// Ask before leaving a burrow. Leave closes the socket and drops the
-/// session token; it was a small ghost button on every screen that did that
-/// on a single click. The message says what is kept, because that is the
-/// question a leaver has. Always true on the host (no window to ask).
-pub fn confirm_leave(name: &str) -> bool {
-    #[cfg(target_arch = "wasm32")]
-    {
-        web_sys::window()
-            .map(|w| {
-                w.confirm_with_message(&format!(
-                    "Leave {name}?\n\nYou can rejoin from the Looking Glass or your recent burrows; your handle is remembered."
-                ))
-                .unwrap_or(false)
-            })
-            .unwrap_or(true)
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = name;
-        true
+/// What a confirmed question does. An intent the app carries out itself, not
+/// a closure: the view that asked can be gone by the time the answer comes (a
+/// route change, a burrow switch), and a callback owned by a disposed scope
+/// panics when called.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmIntent {
+    /// Leave this burrow: close its socket, drop its session and its token.
+    Leave(ServerId),
+}
+
+/// A question put to the person before something irreversible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmAsk {
+    pub title: String,
+    /// What happens, and what is kept: the question a person actually has.
+    pub body: String,
+    /// The confirming button's label: the verb, not "OK".
+    pub action: String,
+    pub intent: ConfirmIntent,
+}
+
+impl ConfirmAsk {
+    /// "Leave {name}?" This used to be `window.confirm()`, which a desktop
+    /// webview answers `false` to without showing anything, so in the app the
+    /// Leave button did nothing at all.
+    pub fn leave(id: ServerId, name: &str) -> Self {
+        let name = if name.trim().is_empty() {
+            "this burrow"
+        } else {
+            name.trim()
+        };
+        ConfirmAsk {
+            title: format!("Leave {name}?"),
+            body: "You will be signed out of it here. Your handle is remembered, and you \
+                   can rejoin from your burrows on the connect window."
+                .to_string(),
+            action: "Leave".to_string(),
+            intent: ConfirmIntent::Leave(id),
+        }
     }
 }
 
@@ -2580,16 +2625,8 @@ fn WarrenSheet() -> impl IntoView {
                         <button
                             class="rh-btn ghost rh-sheet-leave"
                             on:click=move |_| {
-                                let name = app
-                                    .focused()
-                                    .name
-                                    .get_untracked()
-                                    .unwrap_or_else(|| "this burrow".into());
-                                if confirm_leave(&name) {
-                                    let id = app.focused_endpoint();
-                                    app.disconnect(&ServerId(id));
-                                    open.set(false);
-                                }
+                                open.set(false);
+                                app.ask_leave();
                             }
                         >
                             {move || format!(

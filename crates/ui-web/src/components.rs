@@ -1517,29 +1517,181 @@ fn copy_text(text: &str, app: AppState) {
 /// The user's presence status — a single control that fans the chosen status
 /// (Online / Away / Invisible) to **every** connected burrow via
 /// [`AppState::set_presence`]. Invisible is Cheshire mode.
+///
+/// A button and a listbox rather than a `<select>`: an `<option>` cannot carry
+/// the status colour, and the native control's label sat visibly low in the
+/// header's pill. Click or Return opens it, arrows move, Return or click
+/// chooses, Escape or a click anywhere else closes it.
 #[component]
 fn PresenceControl() -> impl IntoView {
     use rabbithole_proto::presence::PresenceState;
+    const CHOICES: [(PresenceState, &str, &str); 3] = [
+        (PresenceState::Online, "Online", "rh-pres on"),
+        (PresenceState::Away, "Away", "rh-pres away"),
+        (PresenceState::Invisible, "Invisible", "rh-pres hidden"),
+    ];
     let app = expect_context::<AppState>();
-    let value = move || match app.presence.get() {
-        PresenceState::Away => "away",
-        PresenceState::Invisible => "invisible",
-        _ => "online",
+    let open = create_rw_signal(false);
+    let current = move || {
+        let now = app.presence.get();
+        CHOICES
+            .iter()
+            .copied()
+            .find(|(state, _, _)| *state == now)
+            .unwrap_or(CHOICES[0])
     };
-    let on_change = move |ev: leptos::ev::Event| {
-        let state = match event_target_value(&ev).as_str() {
-            "away" => PresenceState::Away,
-            "invisible" => PresenceState::Invisible,
-            _ => PresenceState::Online,
-        };
-        app.set_presence(state);
-    };
+    // Open onto the current choice, the way a Mac pop-up button does.
+    create_effect(move |_| {
+        if open.get() {
+            crate::a11y::focus_id("rh-presence-current");
+        }
+    });
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+        let away = window_event_listener(leptos::ev::mousedown, move |ev| {
+            if !open.get_untracked() {
+                return;
+            }
+            let inside = ev
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .and_then(|el| el.closest(".rh-presence-wrap").ok().flatten())
+                .is_some();
+            if !inside {
+                open.set(false);
+            }
+        });
+        on_cleanup(move || away.remove());
+    }
     view! {
-        <select class="rh-presence" aria-label="Your status" prop:value=value on:change=on_change>
-            <option value="online">"Online"</option>
-            <option value="away">"Away"</option>
-            <option value="invisible">"Invisible"</option>
-        </select>
+        <div
+            class="rh-presence-wrap"
+            on:keydown=move |ev| {
+                if ev.key() == "Escape" && open.get_untracked() {
+                    ev.prevent_default();
+                    open.set(false);
+                    crate::a11y::focus_id("rh-presence-button");
+                } else if ev.key() == "Tab" {
+                    open.set(false);
+                }
+            }
+        >
+            <button
+                type="button"
+                id="rh-presence-button"
+                class="rh-presence"
+                aria-haspopup="listbox"
+                aria-expanded=move || if open.get() { "true" } else { "false" }
+                aria-label=move || format!("Your status: {}", current().1)
+                on:click=move |_| open.update(|o| *o = !*o)
+            >
+                <span class=move || current().2 aria-hidden="true"></span>
+                <span>{move || current().1}</span>
+                <span class="rh-presence-chevron" aria-hidden="true" inner_html=crate::icons::chevron_down_icon()></span>
+            </button>
+            <Show when=move || open.get() fallback=|| ()>
+                <ul
+                    class="rh-menu"
+                    role="listbox"
+                    aria-label="Your status"
+                    on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-menu-item")
+                >
+                    {CHOICES
+                        .iter()
+                        .copied()
+                        .map(|(state, label, dot)| {
+                            let chosen = move || app.presence.get() == state;
+                            view! {
+                                <li role="none">
+                                    <button
+                                        type="button"
+                                        class="rh-menu-item"
+                                        role="option"
+                                        id=move || chosen().then_some("rh-presence-current")
+                                        aria-selected=move || if chosen() { "true" } else { "false" }
+                                        on:click=move |_| {
+                                            app.set_presence(state);
+                                            open.set(false);
+                                            crate::a11y::focus_id("rh-presence-button");
+                                        }
+                                    >
+                                        <span class=dot aria-hidden="true"></span>
+                                        <span class="rh-menu-label">{label}</span>
+                                        <span class="rh-menu-check" aria-hidden="true">
+                                            {move || chosen().then(|| view! {
+                                                <span inner_html=crate::icons::check_icon()></span>
+                                            })}
+                                        </span>
+                                    </button>
+                                </li>
+                            }
+                        })
+                        .collect_view()}
+                </ul>
+            </Show>
+        </div>
+    }
+}
+
+/// The app's one confirmation dialog, for the things that can't be taken
+/// back. `window.confirm()` is not an option: a desktop webview answers it
+/// `false` without showing anything, which is how Leave came to do nothing in
+/// the app. A modal is right here and nowhere else in this client: the choice
+/// needs protected focus. Cancel is the default, as on a Mac; Escape and a
+/// click outside cancel too.
+#[component]
+pub fn ConfirmDialog() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let ask = app.confirm;
+    create_effect(move |_| {
+        if ask.with(Option::is_some) {
+            crate::a11y::focus_id("rh-confirm-cancel");
+        }
+    });
+    view! {
+        <Show when=move || ask.with(Option::is_some) fallback=|| ()>
+            <div class="rh-confirm-backdrop" on:click=move |_| app.answer_confirm(false)>
+                <div
+                    class="rh-confirm"
+                    role="alertdialog"
+                    aria-modal="true"
+                    aria-labelledby="rh-confirm-title"
+                    aria-describedby="rh-confirm-body"
+                    on:click=|ev| ev.stop_propagation()
+                    on:keydown=move |ev| {
+                        if ev.key() == "Escape" {
+                            ev.prevent_default();
+                            app.answer_confirm(false);
+                        }
+                    }
+                >
+                    <h2 id="rh-confirm-title">
+                        {move || ask.with(|a| a.as_ref().map(|a| a.title.clone()))}
+                    </h2>
+                    <p id="rh-confirm-body">
+                        {move || ask.with(|a| a.as_ref().map(|a| a.body.clone()))}
+                    </p>
+                    <div class="rh-confirm-actions">
+                        <button
+                            type="button"
+                            id="rh-confirm-cancel"
+                            class="rh-btn ghost"
+                            on:click=move |_| app.answer_confirm(false)
+                        >
+                            "Cancel"
+                        </button>
+                        <button
+                            type="button"
+                            class="rh-btn danger"
+                            on:click=move |_| app.answer_confirm(true)
+                        >
+                            {move || ask.with(|a| a.as_ref().map(|a| a.action.clone()))}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </Show>
     }
 }
 
@@ -1607,14 +1759,7 @@ pub fn StatusBar() -> impl IntoView {
                 <button
                     class="rh-btn ghost rh-leave"
                     title="Leave this burrow"
-                    on:click=move |_| {
-                        let name = state.with_untracked(|s| s.server_name.clone());
-                        let name = if name.is_empty() { "this burrow".to_string() } else { name };
-                        if crate::app::confirm_leave(&name) {
-                            let id = app.focused_endpoint();
-                            app.disconnect(&crate::app::ServerId(id));
-                        }
-                    }
+                    on:click=move |_| app.ask_leave()
                 >
                     "Leave"
                 </button>
@@ -2394,11 +2539,17 @@ pub fn WhoList() -> impl IntoView {
                             &crate::avatar::seed_for(p.key.as_deref(), &p.screen_name),
                             22,
                         );
+                        let href = format!(
+                            "/people/{}",
+                            crate::sightings::seed_of(p.key.as_deref(), &p.screen_name),
+                        );
                         view! {
-                            <li class="rh-who-row">
-                                <span class="rh-mark" inner_html=mark></span>
-                                <span class=dot aria-hidden="true"></span>
-                                {p.screen_name}
+                            <li>
+                                <A href=href class="rh-who-row">
+                                    <span class="rh-mark" inner_html=mark></span>
+                                    <span class=dot aria-hidden="true"></span>
+                                    <span class="rh-who-name">{p.screen_name}</span>
+                                </A>
                             </li>
                         }
                     }
@@ -2570,8 +2721,22 @@ pub fn Lobby() -> impl IntoView {
                                         let mark = crate::avatar::mark_svg(&line.from, 20);
                                         view! { <span class="rh-mark rh-line-mark" inner_html=mark></span> }
                                     })}
-                                    {head.then(|| view! {
-                                        <span class="rh-from">{line.from.clone()}</span>
+                                    // The name opens the person. Keyed the
+                                    // way People keys them: their identity
+                                    // when the roster knows it, else the
+                                    // handle, so a rename doesn't lose them.
+                                    {head.then(|| {
+                                        let key = state.with_untracked(|s| {
+                                            s.who
+                                                .iter()
+                                                .find(|p| p.screen_name == line.from)
+                                                .and_then(|p| p.key.clone())
+                                        });
+                                        let href = format!(
+                                            "/people/{}",
+                                            crate::sightings::seed_of(key.as_deref(), &line.from),
+                                        );
+                                        view! { <A href=href class="rh-from">{line.from.clone()}</A> }
                                     })}
                                     {(line.at_unix_ms != 0).then(|| view! {
                                         <span class="rh-line-time">

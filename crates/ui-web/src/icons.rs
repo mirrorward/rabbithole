@@ -187,6 +187,11 @@ pub fn chevron_left_icon() -> String {
     format!("{OPEN}<path d=\"M14.5 6.5L9 12l5.5 5.5\"/></svg>")
 }
 
+/// Downward chevron: a pop-up button's "there is a menu here".
+pub fn chevron_down_icon() -> String {
+    format!("{OPEN}<path d=\"M6.5 9.5L12 15l5.5-5.5\"/></svg>")
+}
+
 /// Upload: an arrow rising out of a tray.
 pub fn upload_icon() -> String {
     format!("{OPEN}<path d=\"M12 15.5V4.5m0 0l-4 4m4-4l4 4M4.5 19.5h15\"/></svg>")
@@ -446,6 +451,7 @@ mod furniture_icon_tests {
     fn the_furniture_icons_are_self_contained() {
         for (name, svg) in [
             ("chevron", chevron_left_icon()),
+            ("chevron-down", chevron_down_icon()),
             ("upload", upload_icon()),
             ("down", arrow_down_icon()),
             ("up", arrow_up_icon()),
