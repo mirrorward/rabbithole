@@ -547,6 +547,9 @@ pub fn content_type_for(name: &str) -> &'static str {
         "json" => "application/json",
         "webmanifest" => "application/manifest+json",
         "txt" => "text/plain; charset=utf-8",
+        // The SPA ships its display face.
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
         _ => "application/octet-stream",
     }
 }
@@ -687,6 +690,7 @@ mod tests {
             content_type_for("manifest.webmanifest"),
             "application/manifest+json"
         );
+        assert_eq!(content_type_for("space-grotesk-latin.woff2"), "font/woff2");
         assert_eq!(content_type_for("readme.txt"), "text/plain; charset=utf-8");
         assert_eq!(content_type_for("blob.bin"), "application/octet-stream");
         assert_eq!(content_type_for("no-extension"), "application/octet-stream");

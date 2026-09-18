@@ -71,10 +71,20 @@ impl Default for PackTokens {
 /// `--rh-surface` in every built-in pack × mode (see the tests below). It is
 /// a distinct token so custom packs can tune the outline independently; the
 /// theme editor validates and contrast-warns on it like any other colour.
-fn colour_vars(p: &Palette, bg_image: &str) -> VarMap {
+fn colour_vars(p: &Palette, bg_image: &str, layers: Layers) -> VarMap {
     let mut m = VarMap::new();
     m.insert("--rh-bg".into(), hex(p.background));
     m.insert("--rh-surface".into(), hex(p.surface));
+    // The warren layer's own colour and its own surface (design spec §8).
+    // Ember owns the rail, the unified screens and transfers: "you,
+    // everywhere"; the accent owns the inside of a burrow. Packs with one
+    // voice (Retro, High Contrast) collapse brand into accent and the second
+    // surface into the first.
+    m.insert("--rh-brand".into(), hex(layers.brand.unwrap_or(p.accent)));
+    m.insert(
+        "--rh-surface-2".into(),
+        hex(layers.surface2.unwrap_or(p.surface)),
+    );
     m.insert("--rh-text".into(), hex(p.text));
     m.insert("--rh-muted".into(), hex(p.muted));
     m.insert("--rh-accent".into(), hex(p.accent));
@@ -82,6 +92,15 @@ fn colour_vars(p: &Palette, bg_image: &str) -> VarMap {
     m.insert("--rh-focus".into(), hex(p.accent));
     m.insert("--rh-bg-image".into(), bg_image.into());
     m
+}
+
+/// The warren layer's colours for one mode, when a pack has them: the brand
+/// ember and the second surface the rail sits on. `None` collapses into the
+/// pack's accent and surface.
+#[derive(Clone, Copy, Default)]
+struct Layers {
+    brand: Option<Rgb>,
+    surface2: Option<Rgb>,
 }
 
 /// The mode-independent tokens a pack contributes: the type scale, the
@@ -92,6 +111,10 @@ fn colour_vars(p: &Palette, bg_image: &str) -> VarMap {
 struct SharedSpec {
     font_sans: &'static str,
     font_mono: &'static str,
+    /// The display face: the wordmark, burrow names, view titles. Body
+    /// stays on the system face; this is the one place the product speaks
+    /// in its own letterforms.
+    font_display: &'static str,
     /// Type scale: xs < sm < base < lg < xl < 2xl < 3xl.
     font_xs: &'static str,
     font_sm: &'static str,
@@ -129,6 +152,7 @@ fn shared_vars(s: &SharedSpec) -> VarMap {
     m.insert("--rh-radius-xl".into(), s.radius_xl.into());
     m.insert("--rh-radius-full".into(), s.radius_full.into());
     m.insert("--rh-font-sans".into(), s.font_sans.into());
+    m.insert("--rh-font-display".into(), s.font_display.into());
     m.insert("--rh-font-mono".into(), s.font_mono.into());
     m.insert("--rh-font-xs".into(), s.font_xs.into());
     m.insert("--rh-font-sm".into(), s.font_sm.into());
@@ -155,6 +179,17 @@ const CLEAN_SHADOW_3: &str =
 const SANS: &str = "system-ui,-apple-system,'Segoe UI',Roboto,sans-serif";
 /// The mono stack; Retro also uses it as its body face.
 const MONO: &str = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
+/// The display face (Clean and High Contrast): Space Grotesk, self-hosted
+/// (`assets/space-grotesk-latin.woff2`, OFL), over the system sans while it
+/// loads or for scripts it doesn't cover.
+const DISPLAY: &str = "'Space Grotesk',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif";
+/// Clean's ember, per mode (design spec §8).
+const CLEAN_BRAND_LIGHT: Rgb = Rgb(0xe8, 0x6a, 0x1f);
+const CLEAN_BRAND_DARK: Rgb = Rgb(0xff, 0x8a, 0x3d);
+/// Clean's second surface: a cooler step for the rail and sidebar, so the
+/// warren layer reads as a different material from the burrow's pane.
+const CLEAN_SURFACE2_LIGHT: Rgb = Rgb(0xee, 0xf1, 0xf6);
+const CLEAN_SURFACE2_DARK: Rgb = Rgb(0x24, 0x28, 0x33);
 
 /// CRT scanlines: a repeating 3px horizontal gradient over `--rh-bg`.
 fn scanlines(alpha: &str) -> String {
@@ -173,6 +208,7 @@ impl PackTokens {
                 shared: shared_vars(&SharedSpec {
                     font_sans: SANS,
                     font_mono: MONO,
+                    font_display: DISPLAY,
                     font_xs: ".75rem",
                     font_sm: ".875rem",
                     font_size: "1rem",
@@ -189,8 +225,22 @@ impl PackTokens {
                     shadow_2: CLEAN_SHADOW_2,
                     shadow_3: CLEAN_SHADOW_3,
                 }),
-                light: colour_vars(&Palette::builtin(ThemePack::Clean, Mode::Light), "none"),
-                dark: colour_vars(&Palette::builtin(ThemePack::Clean, Mode::Dark), "none"),
+                light: colour_vars(
+                    &Palette::builtin(ThemePack::Clean, Mode::Light),
+                    "none",
+                    Layers {
+                        brand: Some(CLEAN_BRAND_LIGHT),
+                        surface2: Some(CLEAN_SURFACE2_LIGHT),
+                    },
+                ),
+                dark: colour_vars(
+                    &Palette::builtin(ThemePack::Clean, Mode::Dark),
+                    "none",
+                    Layers {
+                        brand: Some(CLEAN_BRAND_DARK),
+                        surface2: Some(CLEAN_SURFACE2_DARK),
+                    },
+                ),
             },
             // CP437/BBS: monospace body, boxy corners, ANSI-palette accents,
             // and scanlines. Dark is the core Retro palette (dark navy field,
@@ -201,6 +251,7 @@ impl PackTokens {
                 shared: shared_vars(&SharedSpec {
                     font_sans: MONO,
                     font_mono: MONO,
+                    font_display: MONO,
                     font_xs: ".8rem",
                     font_sm: ".85rem",
                     font_size: ".95rem",
@@ -227,10 +278,12 @@ impl PackTokens {
                         error: Rgb(0xaa, 0x00, 0x00),  // ANSI red
                     },
                     &scanlines(".05"),
+                    Layers::default(),
                 ),
                 dark: colour_vars(
                     &Palette::builtin(ThemePack::Retro, Mode::Dark),
                     &scanlines(".22"),
+                    Layers::default(),
                 ),
             },
             // WCAG-AAA-leaning: pure black/white fields, no texture, and a
@@ -240,6 +293,7 @@ impl PackTokens {
                 shared: shared_vars(&SharedSpec {
                     font_sans: SANS,
                     font_mono: MONO,
+                    font_display: DISPLAY,
                     font_xs: ".85rem",
                     font_sm: ".9rem",
                     font_size: "1.05rem",
@@ -259,10 +313,12 @@ impl PackTokens {
                 light: colour_vars(
                     &Palette::builtin(ThemePack::HighContrast, Mode::Light),
                     "none",
+                    Layers::default(),
                 ),
                 dark: colour_vars(
                     &Palette::builtin(ThemePack::HighContrast, Mode::Dark),
                     "none",
+                    Layers::default(),
                 ),
             },
         }

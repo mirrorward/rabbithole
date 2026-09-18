@@ -2372,7 +2372,7 @@ fn PhoneTabBar() -> impl IntoView {
             </button>
             <button
                 type="button"
-                class="rh-tab"
+                class="rh-tab rh-tab-burrow"
                 class:active=in_burrow
                 aria-current=move || in_burrow().then_some("page")
                 on:click=move |_| {
