@@ -230,6 +230,17 @@ pub fn key_icon() -> String {
     )
 }
 
+/// Send: a paper plane, for the chat composer's one button.
+pub fn send_icon() -> String {
+    format!(
+        "{OPEN}{}</svg>",
+        concat!(
+            "<path d=\"M4.5 11.6L19.5 4.8l-4.6 14.7-3.4-5.2-7-2.7z\"/>",
+            "<path d=\"M11.5 14.3l8-9.5\"/>"
+        )
+    )
+}
+
 /// The tick a copy control shows for a moment instead of a notification.
 pub fn check_icon() -> String {
     format!("{OPEN}<path d=\"M4.8 12.6l4.6 4.6L19.2 7.4\"/></svg>")
@@ -430,6 +441,7 @@ mod furniture_icon_tests {
             ("link", link_icon()),
             ("close", close_icon()),
             ("key", key_icon()),
+            ("send", send_icon()),
         ] {
             assert!(svg.starts_with("<svg"), "{name} is not an svg");
             assert!(svg.ends_with("</svg>"), "{name} is unterminated");

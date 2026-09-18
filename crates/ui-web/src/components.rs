@@ -2329,6 +2329,7 @@ pub fn Lobby() -> impl IntoView {
                         app.online() && !draft.get().trim().is_empty()
                     })
                     send_label="Send"
+                    chat=true
                 />
             </section>
             <WhoList/>
@@ -2376,9 +2377,17 @@ pub fn Composer(
     /// Start tall (a post) rather than one line (a chat message).
     #[prop(optional)]
     tall: bool,
+    /// A chat line, not a document: one growing row with a send button,
+    /// the formatting bar folded behind an "Aa" toggle, no hint line.
+    /// A lobby message should feel like typing into a room; the full
+    /// post editor above an empty scrollback was the heaviest thing on
+    /// the screen.
+    #[prop(optional)]
+    chat: bool,
 ) -> impl IntoView {
     use crate::compose::{Format, TOOLBAR};
     let markdown_mode = create_rw_signal(false);
+    let bar_open = create_rw_signal(false);
     let area = create_node_ref::<leptos::html::Textarea>();
 
     // Apply a toolbar format to the current selection, then put the caret back
@@ -2406,8 +2415,10 @@ pub fn Composer(
         }
     };
 
-    view! {
-        <div class="rh-composer" class:markdown=move || markdown_mode.get()>
+    // The formatting bar and the text area are one thing each, used by both
+    // layouts, so they are built by closures rather than written twice.
+    let bar = move || {
+        view! {
             <div class="rh-format-bar" role="toolbar" aria-label="Formatting">
                 {TOOLBAR
                     .into_iter()
@@ -2449,12 +2460,17 @@ pub fn Composer(
                     "Markdown"
                 </button>
             </div>
+        }
+    };
+    let field = move || {
+        view! {
             <textarea
                 node_ref=area
                 class="rh-input rh-compose-area"
                 class:tall=move || { tall }
                 aria-label=label
                 placeholder=placeholder
+                prop:rows=move || if chat { crate::compose::rows_for(&draft.get()) } else { 2 }
                 prop:value=draft
                 on:input=move |ev| draft.set(event_target_value(&ev))
                 on:keydown=move |ev| {
@@ -2474,37 +2490,78 @@ pub fn Composer(
                     }
                 }
             ></textarea>
-            // The preview renders the same markdown the recipient will see, so
-            // "what it looks like" is never a guess.
-            <Show
-                when=move || { preview && !markdown_mode.get() && !draft.get().trim().is_empty() }
-                fallback=|| ()
-            >
-                <div class="rh-preview">
-                    <span class="rh-preview-label">"Preview"</span>
-                    <div
-                        class="rh-rich"
-                        inner_html=move || crate::markdown::to_html(&draft.get())
-                    ></div>
-                </div>
-            </Show>
-            <div class="rh-compose-actions">
-                <span class="rh-compose-hint">
-                    {move || if markdown_mode.get() {
-                        "Markdown \u{2014} Enter to send, Shift+Enter for a new line"
-                    } else {
-                        "Enter to send, Shift+Enter for a new line"
-                    }}
-                </span>
-                <button
-                    class="rh-btn"
-                    type="button"
-                    prop:disabled=move || !can_send.get()
-                    on:click=move |_| on_send.call(())
-                >
-                    {send_label}
-                </button>
-            </div>
+        }
+    };
+
+    view! {
+        <div class="rh-composer" class:markdown=move || markdown_mode.get() class:chat=move || { chat }>
+            {if chat {
+                view! {
+                    <Show when=move || bar_open.get() fallback=|| ()>{bar()}</Show>
+                    <div class="rh-compose-row">
+                        <button
+                            type="button"
+                            class="rh-compose-iconbtn"
+                            class:on=move || bar_open.get()
+                            aria-pressed=move || bar_open.get().to_string()
+                            title="Formatting"
+                            aria-label="Formatting"
+                            on:mousedown=move |ev| ev.prevent_default()
+                            on:click=move |_| bar_open.update(|o| *o = !*o)
+                        >
+                            "Aa"
+                        </button>
+                        {field()}
+                        <button
+                            type="button"
+                            class="rh-compose-iconbtn rh-compose-send"
+                            title=send_label
+                            aria-label=send_label
+                            prop:disabled=move || !can_send.get()
+                            on:click=move |_| on_send.call(())
+                            inner_html=crate::icons::send_icon()
+                        ></button>
+                    </div>
+                }
+                .into_view()
+            } else {
+                view! {
+                    {bar()}
+                    {field()}
+                    // The preview renders the same markdown the recipient will
+                    // see, so "what it looks like" is never a guess.
+                    <Show
+                        when=move || { preview && !markdown_mode.get() && !draft.get().trim().is_empty() }
+                        fallback=|| ()
+                    >
+                        <div class="rh-preview">
+                            <span class="rh-preview-label">"Preview"</span>
+                            <div
+                                class="rh-rich"
+                                inner_html=move || crate::markdown::to_html(&draft.get())
+                            ></div>
+                        </div>
+                    </Show>
+                    <div class="rh-compose-actions">
+                        <span class="rh-compose-hint">
+                            {move || if markdown_mode.get() {
+                                "Markdown \u{2014} Enter to send, Shift+Enter for a new line"
+                            } else {
+                                "Enter to send, Shift+Enter for a new line"
+                            }}
+                        </span>
+                        <button
+                            class="rh-btn"
+                            type="button"
+                            prop:disabled=move || !can_send.get()
+                            on:click=move |_| on_send.call(())
+                        >
+                            {send_label}
+                        </button>
+                    </div>
+                }
+                .into_view()
+            }}
         </div>
     }
 }
@@ -2593,11 +2650,16 @@ pub fn BoardView() -> impl IntoView {
 
     let new_subject = create_rw_signal(String::new());
     let new_body = create_rw_signal(String::new());
+    // The new-thread form opens on request. Always open, it was a subject
+    // field plus a tall editor sitting under every thread list whether or
+    // not you had anything to say.
+    let new_open = create_rw_signal(false);
     let post = move || {
         let slug = state.with(|s| s.selected_board.clone()).unwrap_or_default();
         app.post_thread(&slug, &new_subject.get(), &new_body.get());
         new_subject.set(String::new());
         new_body.set(String::new());
+        new_open.set(false);
     };
 
     let reply_body = create_rw_signal(String::new());
@@ -2625,7 +2687,18 @@ pub fn BoardView() -> impl IntoView {
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <section class="rh-panel rh-threads" aria-label="Threads">
                 <A href="/boards" class="rh-back"><span class="rh-back-icon" inner_html=crate::icons::chevron_left_icon()></span>"All boards"</A>
-                <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">{board_name}</h1>
+                <div class="rh-panel-head">
+                    <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">{board_name}</h1>
+                    <button
+                        type="button"
+                        class="rh-btn ghost small"
+                        aria-expanded=move || new_open.get().to_string()
+                        prop:disabled=move || !app.online()
+                        on:click=move |_| new_open.update(|o| *o = !*o)
+                    >
+                        {move || if new_open.get() { "Cancel" } else { "New thread" }}
+                    </button>
+                </div>
                 <Show when=move || state.with(|s| s.loading.threads) fallback=|| ()>
                     <Skeleton rows=3/>
                 </Show>
@@ -2683,6 +2756,7 @@ pub fn BoardView() -> impl IntoView {
                         }
                     />
                 </ul>
+                <Show when=move || new_open.get() fallback=|| ()>
                 <div class="rh-newthread">
                     <input
                         class="rh-input"
@@ -2715,6 +2789,7 @@ pub fn BoardView() -> impl IntoView {
                         tall=true
                     />
                 </div>
+                </Show>
             </section>
             <section class="rh-panel rh-reader" aria-label="Thread posts">
                 <Show
@@ -2993,6 +3068,7 @@ pub fn Dms() -> impl IntoView {
                             app.online() && !draft.get().trim().is_empty()
                         })
                         send_label="Send"
+                        chat=true
                     />
                 </Show>
             </section>

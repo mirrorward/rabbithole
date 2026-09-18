@@ -269,6 +269,14 @@ pub fn sends_on_enter(key: &str, shift: bool) -> bool {
     key == "Enter" && !shift
 }
 
+/// How many rows a chat composer shows for `text`: one for a line, growing
+/// with each line break, capped so a pasted essay doesn't push the room off
+/// the screen. Pure, so the field never needs to measure itself.
+pub fn rows_for(text: &str) -> u32 {
+    let lines = text.split('\n').count() as u32;
+    lines.clamp(1, 6)
+}
+
 /// The `Format` bound to a keyboard shortcut, if any.
 pub fn shortcut(key: &str) -> Option<Format> {
     let k = key.to_ascii_lowercase();
@@ -280,6 +288,14 @@ pub fn shortcut(key: &str) -> Option<Format> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chat_line_grows_with_line_breaks_and_stops_at_six() {
+        assert_eq!(rows_for(""), 1);
+        assert_eq!(rows_for("hello"), 1);
+        assert_eq!(rows_for("a\nb"), 2);
+        assert_eq!(rows_for(&"x\n".repeat(20)), 6);
+    }
 
     /// Apply a format to `text` where the selection is marked by `|…|`.
     ///
