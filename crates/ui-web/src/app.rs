@@ -147,6 +147,10 @@ pub struct AppState {
     pub directory_source: RwSignal<crate::servers::DirectorySource>,
     /// Whether a directory refresh is in flight.
     pub directory_loading: RwSignal<bool>,
+    /// The burrows you chose to keep ([`crate::bookmarks`]), persisted.
+    pub bookmarks: RwSignal<Vec<crate::bookmarks::Bookmark>>,
+    /// What knocking on unlisted burrows found ([`crate::probe`]).
+    pub probes: RwSignal<crate::connect::Probes>,
     /// An endpoint chosen in the server browser, handed to the login screen to
     /// prefill on its next mount (then cleared).
     pub pending_endpoint: RwSignal<Option<String>>,
@@ -219,6 +223,17 @@ impl AppState {
             servers: create_rw_signal(crate::servers::sample_directory()),
             directory_source: create_rw_signal(crate::servers::DirectorySource::Seeded),
             directory_loading: create_rw_signal(false),
+            bookmarks: create_rw_signal({
+                #[cfg(target_arch = "wasm32")]
+                {
+                    crate::bookmarks::load()
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    Vec::new()
+                }
+            }),
+            probes: create_rw_signal(Default::default()),
             pending_endpoint: create_rw_signal(None),
             pending_notice: create_rw_signal(None),
             confirm: create_rw_signal(None),
@@ -975,6 +990,68 @@ impl AppState {
             self.pending_endpoint.set(Some(id.0.clone()));
             self.pending_notice.set(Some(notice));
             self.drop_session(&id);
+        }
+    }
+
+    /// Keep a burrow. `Err` says why not, in words for the person.
+    pub fn add_bookmark(
+        &self,
+        endpoint: &str,
+        name: &str,
+    ) -> Result<(), crate::bookmarks::AddError> {
+        let list = crate::bookmarks::add(self.bookmarks.get_untracked(), endpoint, name)?;
+        self.store_bookmarks(list);
+        // A new bookmark's status is unknown until someone knocks.
+        self.knock_on(vec![endpoint.trim().to_string()]);
+        Ok(())
+    }
+
+    /// Stop keeping a burrow.
+    pub fn remove_bookmark(&self, endpoint: &str) {
+        let list = crate::bookmarks::remove(self.bookmarks.get_untracked(), endpoint);
+        self.store_bookmarks(list);
+    }
+
+    /// Call a kept burrow something else.
+    pub fn rename_bookmark(&self, endpoint: &str, name: &str) {
+        let list = crate::bookmarks::rename(self.bookmarks.get_untracked(), endpoint, name);
+        self.store_bookmarks(list);
+    }
+
+    fn store_bookmarks(&self, list: Vec<crate::bookmarks::Bookmark>) {
+        #[cfg(target_arch = "wasm32")]
+        crate::bookmarks::save(&list);
+        self.bookmarks.set(list);
+    }
+
+    /// Knock on these burrows and record who answered. A place reads
+    /// "checking" until its knock settles, never "down" by default.
+    pub fn knock_on(&self, endpoints: Vec<String>) {
+        if endpoints.is_empty() {
+            return;
+        }
+        self.probes.update(|p| {
+            for e in &endpoints {
+                p.insert(crate::connect::probe_key(e), crate::probe::Probe::Checking);
+            }
+        });
+        #[cfg(target_arch = "wasm32")]
+        for endpoint in endpoints {
+            let probes = self.probes;
+            let key = crate::connect::probe_key(&endpoint);
+            crate::probe::knock(&endpoint, move |up| {
+                // `try_update`: the app outlives every view, but be exact.
+                let _ = probes.try_update(|p| {
+                    p.insert(
+                        key,
+                        if up {
+                            crate::probe::Probe::Up
+                        } else {
+                            crate::probe::Probe::Down
+                        },
+                    );
+                });
+            });
         }
     }
 

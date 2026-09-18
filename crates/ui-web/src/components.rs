@@ -2000,27 +2000,45 @@ pub fn Toasts() -> impl IntoView {
     }
 }
 
-/// One line of the connect window's burrow browser.
-///
-/// A Mac list row, not a web card: one click (or arrowing onto it) selects,
-/// which puts the burrow's address in the form; a double-click or Return
-/// connects. The selected row opens up to show the whole description and the
-/// address, so the list stays dense and nothing is hidden for good.
-#[component]
-fn GlassRow(
-    row: crate::connect::Row,
-    /// The connect form's address. A row is selected when it is this place.
+/// What a row of the burrow browser needs from the window it sits in.
+#[derive(Clone, Copy)]
+struct Browsing {
+    /// The selected place. On the connect window this *is* the form's address.
     endpoint: RwSignal<String>,
     /// The connect form's handle; a saved burrow brings its own.
     handle: RwSignal<String>,
+    /// The burrows signed into before, so "Forget" can take one off the shelf.
+    recent: RwSignal<Vec<crate::recent::RecentBurrow>>,
     /// Connect to the selected burrow now.
-    #[prop(into)]
     on_open: Callback<()>,
-) -> impl IntoView {
+    /// Standing alone (the in-app Looking Glass) there is no form beside the
+    /// list, so a selected row carries its own Connect button.
+    standalone: bool,
+}
+
+/// One line of the burrow browser.
+///
+/// A Mac list row, not a web card: one click (or arrowing onto it) selects,
+/// which puts the burrow's address in the form; a double-click or Return
+/// connects. The selected row opens up to show the whole description, the
+/// address, and what can be done with it (bookmark, rename, forget), so the
+/// list stays dense and nothing is hidden for good.
+#[component]
+fn GlassRow(row: crate::connect::Row, browsing: Browsing) -> impl IntoView {
     use crate::connect::Shelf;
+    let app = expect_context::<AppState>();
+    let Browsing {
+        endpoint,
+        handle,
+        recent,
+        on_open,
+        standalone,
+    } = browsing;
     let place = store_value(row.endpoint.clone());
+    let name = store_value(row.name.clone());
     let saved_handle = store_value(match &row.shelf {
         Shelf::Yours { handle } => Some(handle.clone()),
+        Shelf::Bookmark { handle } => handle.clone(),
         _ => None,
     });
     let selected =
@@ -2055,13 +2073,26 @@ fn GlassRow(
     let description = row.description.clone();
     let address = row.endpoint.clone();
     let listeners = row.listeners.join(" \u{00b7} ");
-    let demo = row.shelf == Shelf::Demo;
+    let shelf = store_value(row.shelf.clone());
+    let renaming = create_rw_signal(false);
+    let new_name = create_rw_signal(row.name.clone());
+    let bookmark = move |_| {
+        if let Err(why) = place.with_value(|p| name.with_value(|n| app.add_bookmark(p, n))) {
+            app.notify(crate::toasts::ToastKind::Warn, why.message().to_string());
+        }
+    };
+    let forget = move |_| {
+        place.with_value(|p| {
+            #[cfg(target_arch = "wasm32")]
+            crate::recent::forget(p);
+            recent.update(|l| l.retain(|r| !crate::connect::same_place(&r.endpoint, p)));
+        });
+    };
     view! {
-        <li>
+        <li class="rh-glass-item" class:selected=selected>
             <button
                 type="button"
                 class="rh-glass-row"
-                class:selected=selected
                 class:off=down
                 tabindex="-1"
                 aria-pressed=move || if selected() { "true" } else { "false" }
@@ -2105,14 +2136,101 @@ fn GlassRow(
                         {u}<span class="rh-visually-hidden">" uptime"</span>
                     })}
                 </span>
-                <Show when=selected fallback=|| ()>
-                    <span class="rh-glass-more">
+            </button>
+            // The opened row. A sibling of the button, not inside it, so its
+            // controls are real controls.
+            <Show when=selected fallback=|| ()>
+                <div class="rh-glass-detail">
+                    <p class="rh-glass-more">
                         <code>{address.clone()}</code>
                         {(!listeners.is_empty()).then(|| view! { <span>{listeners.clone()}</span> })}
-                        {demo.then(|| view! { <span>"seeded demo"</span> })}
-                    </span>
-                </Show>
-            </button>
+                        {(shelf.get_value() == Shelf::Demo).then(|| view! { <span>"seeded demo"</span> })}
+                    </p>
+                    <Show
+                        when=move || renaming.get()
+                        fallback=move || view! {
+                            <div class="rh-glass-actions">
+                                {standalone.then(|| view! {
+                                    <button
+                                        type="button"
+                                        class="rh-btn small"
+                                        on:click=move |_| on_open.call(())
+                                    >
+                                        "Connect\u{2026}"
+                                    </button>
+                                })}
+                                {match shelf.get_value() {
+                                    Shelf::Bookmark { .. } => view! {
+                                        <button
+                                            type="button"
+                                            class="rh-btn ghost small"
+                                            on:click=move |_| {
+                                                new_name.set(name.get_value());
+                                                renaming.set(true);
+                                            }
+                                        >
+                                            "Rename"
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="rh-btn ghost small"
+                                            on:click=move |_| place.with_value(|p| app.remove_bookmark(p))
+                                        >
+                                            "Remove bookmark"
+                                        </button>
+                                    }
+                                    .into_view(),
+                                    Shelf::Yours { .. } => view! {
+                                        <button type="button" class="rh-btn ghost small" on:click=bookmark>
+                                            "Bookmark"
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="rh-btn ghost small"
+                                            title="Take it off this list and drop its saved session"
+                                            on:click=forget
+                                        >
+                                            "Forget"
+                                        </button>
+                                    }
+                                    .into_view(),
+                                    Shelf::Listed => view! {
+                                        <button type="button" class="rh-btn ghost small" on:click=bookmark>
+                                            "Bookmark"
+                                        </button>
+                                    }
+                                    .into_view(),
+                                    Shelf::Demo => ().into_view(),
+                                }}
+                            </div>
+                        }
+                    >
+                        <form
+                            class="rh-glass-rename"
+                            on:submit=move |ev: leptos::ev::SubmitEvent| {
+                                ev.prevent_default();
+                                place.with_value(|p| app.rename_bookmark(p, &new_name.get_untracked()));
+                                renaming.set(false);
+                            }
+                        >
+                            <input
+                                class="rh-input"
+                                aria-label="Bookmark name"
+                                prop:value=new_name
+                                on:input=move |ev| new_name.set(event_target_value(&ev))
+                            />
+                            <button type="submit" class="rh-btn small">"Save"</button>
+                            <button
+                                type="button"
+                                class="rh-btn ghost small"
+                                on:click=move |_| renaming.set(false)
+                            >
+                                "Cancel"
+                            </button>
+                        </form>
+                    </Show>
+                </div>
+            </Show>
         </li>
     }
 }
@@ -2122,9 +2240,7 @@ fn GlassRow(
 fn GlassShelf(
     title: &'static str,
     #[prop(into)] rows: Signal<Vec<crate::connect::Row>>,
-    endpoint: RwSignal<String>,
-    handle: RwSignal<String>,
-    #[prop(into)] on_open: Callback<()>,
+    browsing: Browsing,
 ) -> impl IntoView {
     view! {
         <Show when=move || rows.with(|r| !r.is_empty()) fallback=|| ()>
@@ -2133,10 +2249,284 @@ fn GlassShelf(
                 <For
                     each=move || rows.get()
                     key=|r| r.key()
-                    children=move |row| view! { <GlassRow row endpoint handle on_open/> }
+                    children=move |row| view! { <GlassRow row browsing/> }
                 />
             </ul>
         </Show>
+    }
+}
+
+/// The burrow browser: Hotline's tracker window and its bookmarks, as one
+/// list (design spec §3). *Bookmarks* you chose to keep, *Recent* burrows you
+/// have signed into, and *Discover*, what a live directory lists. One dense
+/// list with a face per burrow, a filter, a way to add a bookmark by address,
+/// and a status strip that says where the listing came from.
+///
+/// It fills in a form rather than owning one: the connect window puts it
+/// beside the sign-in form, and the in-app Looking Glass stands it alone.
+#[component]
+fn BurrowBrowser(
+    endpoint: RwSignal<String>,
+    handle: RwSignal<String>,
+    recent: RwSignal<Vec<crate::recent::RecentBurrow>>,
+    #[prop(into)] on_open: Callback<()>,
+    #[prop(optional)] standalone: bool,
+) -> impl IntoView {
+    use crate::servers::DirectorySource;
+    let app = expect_context::<AppState>();
+    let browsing = Browsing {
+        endpoint,
+        handle,
+        recent,
+        on_open,
+        standalone,
+    };
+    let listed = app.servers;
+    let source = app.directory_source;
+    let loading = app.directory_loading;
+    let bookmarks = app.bookmarks;
+    let probes = app.probes;
+    // Ask the network on arrival: what is in memory may be the built-in
+    // sample, which this list never shows as places. A render effect so a
+    // route re-entry doesn't fire it against a disposed view.
+    create_render_effect(move |seen: Option<bool>| {
+        if seen.is_none() {
+            app.load_directory();
+        }
+        true
+    });
+    // Knock on the places no directory vouches for, once each: when this
+    // opens, when a listing arrives, when a bookmark is added. Probes are read
+    // untracked so a settling knock doesn't ask for another.
+    let knock_unknown = move |again: bool| {
+        let wanted = bookmarks.with(|b| {
+            recent.with(|r| listed.with(|l| source.with(|s| crate::connect::to_knock(b, r, l, s))))
+        });
+        let wanted = if again {
+            wanted
+        } else {
+            probes.with_untracked(|known| {
+                wanted
+                    .into_iter()
+                    .filter(|e| !known.contains_key(&crate::connect::probe_key(e)))
+                    .collect()
+            })
+        };
+        app.knock_on(wanted);
+    };
+    create_render_effect(move |_| knock_unknown(false));
+
+    let filter_text = create_rw_signal(String::new());
+    let kept = Signal::derive(move || {
+        crate::connect::filter(
+            bookmarks.with(|b| {
+                recent.with(|r| {
+                    listed.with(|l| probes.with(|p| crate::connect::bookmarked(b, r, l, p)))
+                })
+            }),
+            &filter_text.get(),
+        )
+    });
+    let yours = Signal::derive(move || {
+        crate::connect::filter(
+            bookmarks.with(|b| {
+                recent.with(|r| listed.with(|l| probes.with(|p| crate::connect::yours(r, l, b, p))))
+            }),
+            &filter_text.get(),
+        )
+    });
+    let discover = Signal::derive(move || {
+        crate::connect::filter(
+            bookmarks.with(|b| {
+                recent.with(|r| {
+                    listed.with(|l| source.with(|s| crate::connect::discover(l, s, r, b)))
+                })
+            }),
+            &filter_text.get(),
+        )
+    });
+    let demos =
+        Signal::derive(move || crate::connect::filter(crate::connect::demos(), &filter_text.get()));
+    let nothing_shown = move || {
+        kept.with(Vec::is_empty)
+            && yours.with(Vec::is_empty)
+            && discover.with(Vec::is_empty)
+            && demos.with(Vec::is_empty)
+    };
+    let unanswered = move || source.with(|s| *s == DirectorySource::Seeded);
+    let filtering = move || !filter_text.with(|q| q.trim().is_empty());
+
+    // Adding a bookmark by address: the burrow that isn't on any list.
+    let adding = create_rw_signal(false);
+    let add_name = create_rw_signal(String::new());
+    let add_address = create_rw_signal(String::new());
+    let add_error = create_rw_signal(None::<&'static str>);
+    let open_add = move |_| {
+        // Whatever address is already in hand is the likely one to keep.
+        let current = endpoint.get_untracked();
+        let fresh = !crate::connect::is_demo(&current)
+            && !bookmarks.with_untracked(|b| crate::bookmarks::is_bookmarked(b, &current));
+        add_address.set(if fresh { current } else { String::new() });
+        add_name.set(String::new());
+        add_error.set(None);
+        adding.update(|a| *a = !*a);
+        if adding.get_untracked() {
+            crate::a11y::focus_id("rh-glass-add-address");
+        }
+    };
+    let submit_add = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        match app.add_bookmark(&add_address.get_untracked(), &add_name.get_untracked()) {
+            Ok(()) => {
+                endpoint.set(add_address.get_untracked().trim().to_string());
+                adding.set(false);
+            }
+            Err(why) => add_error.set(Some(why.message())),
+        }
+    };
+
+    view! {
+        <section class="rh-connect-main" aria-label="Burrows">
+            <header class="rh-glass-head" data-tauri-drag-region="true">
+                <h2>"Looking Glass"</h2>
+                // A <label>, so a click on the lens lands in the field.
+                <label class="rh-glass-search">
+                    <span inner_html=crate::icons::search_icon()></span>
+                    <input
+                        class="rh-input"
+                        type="search"
+                        aria-label="Filter burrows"
+                        placeholder="Filter"
+                        prop:value=filter_text
+                        on:input=move |ev| filter_text.set(event_target_value(&ev))
+                    />
+                </label>
+                <button
+                    type="button"
+                    class="rh-glass-tool"
+                    aria-label="Add a bookmark by address"
+                    title="Add a bookmark by address"
+                    aria-expanded=move || if adding.get() { "true" } else { "false" }
+                    on:click=open_add
+                >
+                    <span inner_html=crate::icons::plus_icon()></span>
+                </button>
+                <button
+                    type="button"
+                    class="rh-glass-tool rh-glass-refresh"
+                    class:busy=move || loading.get()
+                    aria-label="Refresh the list"
+                    title="Refresh the list"
+                    prop:disabled=move || loading.get()
+                    on:click=move |_| {
+                        app.load_directory();
+                        knock_unknown(true);
+                    }
+                >
+                    <span inner_html=crate::icons::refresh_icon()></span>
+                </button>
+            </header>
+            <div class="rh-glass-cols" aria-hidden="true">
+                <span></span>
+                <span>"Burrow"</span>
+                <span>"About"</span>
+                <span class="num">"Online"</span>
+                <span class="num uptime">"Uptime"</span>
+            </div>
+            <div
+                class="rh-glass-scroll"
+                tabindex="0"
+                role="group"
+                aria-label="Burrows to connect to. Arrow keys move, Return connects."
+                on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-glass-row")
+            >
+                <Show when=move || adding.get() fallback=|| ()>
+                    <form class="rh-glass-add" on:submit=submit_add>
+                        <input
+                            class="rh-input"
+                            aria-label="Name for the bookmark (optional)"
+                            placeholder="Name (optional)"
+                            prop:value=add_name
+                            on:input=move |ev| add_name.set(event_target_value(&ev))
+                        />
+                        <input
+                            id="rh-glass-add-address"
+                            class="rh-input rh-login-address"
+                            aria-label="Burrow address"
+                            autocapitalize="off"
+                            spellcheck="false"
+                            placeholder="wss://burrow.example"
+                            prop:value=add_address
+                            on:input=move |ev| {
+                                add_error.set(None);
+                                add_address.set(event_target_value(&ev));
+                            }
+                        />
+                        <button type="submit" class="rh-btn small">"Add bookmark"</button>
+                        <button
+                            type="button"
+                            class="rh-btn ghost small"
+                            on:click=move |_| adding.set(false)
+                        >
+                            "Cancel"
+                        </button>
+                        {move || add_error.get().map(|why| view! {
+                            <p class="rh-field-hint error" role="alert">{why}</p>
+                        })}
+                    </form>
+                </Show>
+                <GlassShelf title="Bookmarks" rows=kept browsing/>
+                <GlassShelf title="Recent" rows=yours browsing/>
+                <GlassShelf title="Demo burrows" rows=demos browsing/>
+                <GlassShelf title="Discover" rows=discover browsing/>
+                // The listing is on its way and there is nothing to show
+                // yet: row-shaped placeholders, not an empty pane.
+                <Show when=move || loading.get() && unanswered() && !filtering() fallback=|| ()>
+                    <h3 class="rh-glass-group">"Discover"</h3>
+                    <Skeleton rows=5/>
+                </Show>
+                // Nobody answered. Say so, and say what still works.
+                <Show when=move || !loading.get() && unanswered() && !filtering() fallback=|| ()>
+                    <EmptyState
+                        icon="/servers"
+                        title="No directory answered"
+                        sub="The looking glass is how public burrows get found. You can still connect to any burrow by its address, and bookmark it."
+                        action=view! {
+                            <button
+                                type="button"
+                                class="rh-btn ghost small"
+                                on:click=move |_| app.load_directory()
+                            >
+                                "Try again"
+                            </button>
+                        }.into_view()
+                    />
+                </Show>
+                <Show when=move || filtering() && nothing_shown() fallback=|| ()>
+                    <p class="rh-empty">"No burrow matches that filter."</p>
+                </Show>
+                <Show
+                    when=move || {
+                        !loading.get() && !unanswered() && !filtering() && discover.with(Vec::is_empty)
+                    }
+                    fallback=|| ()
+                >
+                    <p class="rh-empty">"No other burrows are listed right now."</p>
+                </Show>
+            </div>
+            <footer class="rh-glass-status" role="status">
+                <span>
+                    {move || listed.with(|l| source.with(|s| {
+                        crate::connect::status_line(loading.get(), s, l)
+                    }))}
+                </span>
+                <Show when=move || !unanswered() fallback=|| ()>
+                    <span class="rh-glass-via">
+                        "via "{move || source.with(|s| s.label().to_string())}
+                    </span>
+                </Show>
+            </footer>
+        </section>
     }
 }
 
@@ -2152,7 +2542,6 @@ fn GlassShelf(
 /// on every input; the list only ever fills that form in.
 #[component]
 pub fn Login() -> impl IntoView {
-    use crate::servers::DirectorySource;
     let app = expect_context::<AppState>();
     let navigate = use_navigate();
     // Reconnect-on-launch: the burrows you've signed into before (endpoint +
@@ -2162,7 +2551,7 @@ pub fn Login() -> impl IntoView {
     #[cfg(not(target_arch = "wasm32"))]
     let recent: Vec<crate::recent::RecentBurrow> = Vec::new();
     let last = recent.first().cloned();
-    let recent = store_value(recent);
+    let recent = create_rw_signal(recent);
     // Prefill the endpoint: the server browser's pick wins, else the last
     // burrow, else the local default. A burrow's WebSocket listener is 4654
     // by default (README, `ws_addr`). A dev build opens on its first seeded
@@ -2178,14 +2567,22 @@ pub fn Login() -> impl IntoView {
     // signal set in one component and read by another during the same
     // navigation races the new component's first read.
     let query = leptos_router::use_query_map();
+    let handle = create_rw_signal(last.as_ref().map(|b| b.handle.clone()).unwrap_or_default());
     create_render_effect(move |_| {
         if let Some(ep) = query.with(|q| q.get("server").cloned()) {
             if !ep.is_empty() {
+                // A burrow you have been to brings the handle you used there.
+                if let Some(h) = recent.with_untracked(|r| {
+                    r.iter()
+                        .find(|b| crate::connect::same_place(&b.endpoint, &ep))
+                        .map(|b| b.handle.clone())
+                }) {
+                    handle.set(h);
+                }
                 endpoint.set(ep);
             }
         }
     });
-    let handle = create_rw_signal(last.as_ref().map(|b| b.handle.clone()).unwrap_or_default());
     let password = create_rw_signal(String::new());
     let handle_missing = create_rw_signal(false);
     // Whether this is a seeded demo burrow is a fact about the address, so the
@@ -2258,50 +2655,24 @@ pub fn Login() -> impl IntoView {
     });
     let on_open = go;
 
-    // The browser. Ask the network on arrival: what is in memory may be the
-    // built-in sample, which this screen never shows as places. A render
-    // effect so a route re-entry doesn't fire it against a disposed view.
-    let listed = app.servers;
-    let source = app.directory_source;
-    let loading = app.directory_loading;
-    create_render_effect(move |seen: Option<bool>| {
-        if seen.is_none() {
-            app.load_directory();
-        }
-        true
-    });
-    let filter_text = create_rw_signal(String::new());
-    let yours = Signal::derive(move || {
-        crate::connect::filter(
-            recent.with_value(|r| listed.with(|l| crate::connect::yours(r, l))),
-            &filter_text.get(),
-        )
-    });
-    let discover = Signal::derive(move || {
-        crate::connect::filter(
-            recent.with_value(|r| {
-                listed.with(|l| source.with(|s| crate::connect::discover(l, s, r)))
-            }),
-            &filter_text.get(),
-        )
-    });
-    let demos =
-        Signal::derive(move || crate::connect::filter(crate::connect::demos(), &filter_text.get()));
-    let nothing_shown = move || {
-        yours.with(Vec::is_empty) && discover.with(Vec::is_empty) && demos.with(Vec::is_empty)
-    };
-    let unanswered = move || source.with(|s| *s == DirectorySource::Seeded);
-    let filtering = move || !filter_text.with(|q| q.trim().is_empty());
     // The button names where it is going when the address is a known place.
-    let go_label =
-        move || {
-            let mut known = recent.with_value(|r| listed.with(|l| crate::connect::yours(r, l)));
-            known.extend(recent.with_value(|r| {
-                listed.with(|l| source.with(|s| crate::connect::discover(l, s, r)))
-            }));
-            known.extend(crate::connect::demos());
-            endpoint.with(|e| crate::connect::connect_label(e, &known))
-        };
+    let go_label = move || {
+        let known = app.bookmarks.with(|b| {
+            recent.with(|r| {
+                app.servers.with(|l| {
+                    app.directory_source.with(|src| {
+                        let none = crate::connect::Probes::new();
+                        let mut rows = crate::connect::bookmarked(b, r, l, &none);
+                        rows.extend(crate::connect::yours(r, l, b, &none));
+                        rows.extend(crate::connect::discover(l, src, r, b));
+                        rows.extend(crate::connect::demos());
+                        rows
+                    })
+                })
+            })
+        });
+        endpoint.with(|e| crate::connect::connect_label(e, &known))
+    };
 
     view! {
         <main class="rh-connect" id=a11y::MAIN_ID tabindex="-1">
@@ -2413,98 +2784,7 @@ pub fn Login() -> impl IntoView {
                     </p>
                 </div>
             </section>
-            <section class="rh-connect-main" aria-label="Burrows">
-                <header class="rh-glass-head" data-tauri-drag-region="true">
-                    <h2>"Looking Glass"</h2>
-                    // A <label>, so a click on the lens lands in the field.
-                    <label class="rh-glass-search">
-                        <span inner_html=crate::icons::search_icon()></span>
-                        <input
-                            class="rh-input"
-                            type="search"
-                            aria-label="Filter burrows"
-                            placeholder="Filter"
-                            prop:value=filter_text
-                            on:input=move |ev| filter_text.set(event_target_value(&ev))
-                        />
-                    </label>
-                    <button
-                        type="button"
-                        class="rh-glass-refresh"
-                        class:busy=move || loading.get()
-                        aria-label="Refresh the list"
-                        title="Refresh the list"
-                        prop:disabled=move || loading.get()
-                        on:click=move |_| app.load_directory()
-                    >
-                        <span inner_html=crate::icons::refresh_icon()></span>
-                    </button>
-                </header>
-                <div class="rh-glass-cols" aria-hidden="true">
-                    <span></span>
-                    <span>"Burrow"</span>
-                    <span>"About"</span>
-                    <span class="num">"Online"</span>
-                    <span class="num uptime">"Uptime"</span>
-                </div>
-                <div
-                    class="rh-glass-scroll"
-                    tabindex="0"
-                    role="group"
-                    aria-label="Burrows to connect to. Arrow keys move, Return connects."
-                    on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-glass-row")
-                >
-                    <GlassShelf title="Your burrows" rows=yours endpoint handle on_open/>
-                    <GlassShelf title="Demo burrows" rows=demos endpoint handle on_open/>
-                    <GlassShelf title="Discover" rows=discover endpoint handle on_open/>
-                    // The listing is on its way and there is nothing to show
-                    // yet: row-shaped placeholders, not an empty pane.
-                    <Show when=move || loading.get() && unanswered() && !filtering() fallback=|| ()>
-                        <h3 class="rh-glass-group">"Discover"</h3>
-                        <Skeleton rows=5/>
-                    </Show>
-                    // Nobody answered. Say so, and say what still works.
-                    <Show when=move || !loading.get() && unanswered() && !filtering() fallback=|| ()>
-                        <EmptyState
-                            icon="/servers"
-                            title="No directory answered"
-                            sub="The looking glass is how public burrows get found. You can still connect to any burrow by its address."
-                            action=view! {
-                                <button
-                                    type="button"
-                                    class="rh-btn ghost small"
-                                    on:click=move |_| app.load_directory()
-                                >
-                                    "Try again"
-                                </button>
-                            }.into_view()
-                        />
-                    </Show>
-                    <Show when=move || filtering() && nothing_shown() fallback=|| ()>
-                        <p class="rh-empty">"No burrow matches that filter."</p>
-                    </Show>
-                    <Show
-                        when=move || {
-                            !loading.get() && !unanswered() && !filtering() && discover.with(Vec::is_empty)
-                        }
-                        fallback=|| ()
-                    >
-                        <p class="rh-empty">"No other burrows are listed right now."</p>
-                    </Show>
-                </div>
-                <footer class="rh-glass-status" role="status">
-                    <span>
-                        {move || listed.with(|l| source.with(|s| {
-                            crate::connect::status_line(loading.get(), s, l)
-                        }))}
-                    </span>
-                    <Show when=move || !unanswered() fallback=|| ()>
-                        <span class="rh-glass-via">
-                            "via "{move || source.with(|s| s.label().to_string())}
-                        </span>
-                    </Show>
-                </footer>
-            </section>
+            <BurrowBrowser endpoint handle recent on_open/>
         </main>
     }
 }
@@ -3728,121 +4008,32 @@ pub fn Directory() -> impl IntoView {
 /// standard Looking Glass, then a native status-port INDEX) on arrival.
 #[component]
 pub fn ServerBrowser() -> impl IntoView {
-    let app = expect_context::<AppState>();
-    let servers = app.servers;
     let navigate = use_navigate();
-    let query = create_rw_signal(String::new());
-    let rows = move || crate::servers::browse(&servers.get(), &query.get());
-    // Refresh from the network on arrival: the seeded list is a fallback, not
-    // the answer. A render effect so a route re-entry doesn't fire it against
-    // a disposed view.
-    create_render_effect(move |seen: Option<bool>| {
-        if seen.is_none() {
-            app.load_directory();
+    // The same browser the connect window has, standing alone: there is no
+    // form beside it, so a selected row carries its own Connect, and opening a
+    // burrow hands the pick to the connect window in the URL. (A signal set
+    // here and read there races the new component's first read; a query
+    // param is also shareable and reload-proof.)
+    let endpoint = create_rw_signal(String::new());
+    let handle = create_rw_signal(String::new());
+    #[cfg(target_arch = "wasm32")]
+    let recent = create_rw_signal(crate::recent::load());
+    #[cfg(not(target_arch = "wasm32"))]
+    let recent = create_rw_signal(Vec::<crate::recent::RecentBurrow>::new());
+    let on_open = Callback::new(move |()| {
+        let pick = endpoint.get_untracked();
+        if !pick.trim().is_empty() {
+            navigate(
+                &format!("/?server={}", crate::servers::encode_param(&pick)),
+                Default::default(),
+            );
         }
-        true
     });
-
     view! {
         <StatusBar/>
-        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
-            <section class="rh-panel rh-servers" aria-label="Server directory">
-                <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">"Looking Glass"</h1>
-                <div class="rh-glass-bar">
-                    <input
-                        class="rh-input"
-                        type="search"
-                        aria-label="Search servers"
-                        placeholder="Search servers\u{2026}"
-                        prop:value=move || query.get()
-                        on:input=move |ev| query.set(event_target_value(&ev))
-                    />
-                    <button
-                        class="rh-btn ghost"
-                        prop:disabled=move || app.directory_loading.get()
-                        on:click=move |_| app.load_directory()
-                    >
-                        {move || if app.directory_loading.get() { "Refreshing\u{2026}" } else { "Refresh" }}
-                    </button>
-                </div>
-                // Where this listing came from. A directory that doesn't say
-                // who told it is asking to be trusted for no reason.
-                <p class="rh-glass-source">
-                    "via "{move || app.directory_source.with(|s| s.label().to_string())}
-                </p>
-                <Show when=move || {
-                    servers.get().is_empty() && !app.directory_loading.get()
-                } fallback=|| ()>
-                    <p class="rh-empty">
-                        {move || match app.directory_source.get() {
-                            crate::servers::DirectorySource::Seeded => {
-                                "Couldn\u{2019}t reach a directory."
-                            }
-                            _ => "No burrows listed right now.",
-                        }}
-                    </p>
-                </Show>
-                <ul class="rh-server-list">
-                    <For
-                        each=rows
-                        key=|s| s.endpoint.clone()
-                        children=move |s| {
-                            let navigate = navigate.clone();
-                            let endpoint = s.endpoint.clone();
-                            let dot = if s.reachable { "rh-dot on" } else { "rh-dot off" };
-                            let presence = if s.reachable { "Online:" } else { "Offline:" };
-                            let uptime = s.uptime_pct.map(crate::servers::uptime_label);
-                            view! {
-                                <li class="rh-server-row">
-                                    <span class=dot aria-hidden="true"></span>
-                                    <span class="rh-visually-hidden">{presence}</span>
-                                    <div class="rh-server-main">
-                                        <div class="rh-server-head">
-                                            <span class="rh-server-name">{s.name.clone()}</span>
-                                            {s.users_online.map(|n| view! {
-                                                <span class="rh-server-users">{n}" online"</span>
-                                            })}
-                                            {uptime.map(|label| view! {
-                                                <span class="rh-server-uptime">{label}</span>
-                                            })}
-                                        </div>
-                                        <p class="rh-server-desc">{s.description.clone()}</p>
-                                        <p class="rh-server-listeners">
-                                            {(!s.listeners.is_empty()).then(|| {
-                                                let list = s.listeners.join(" \u{00b7} ");
-                                                view! { <span>{list}<span class="rh-dot-sep" aria-hidden="true">" \u{00b7} "</span></span> }
-                                            })}
-                                            <code class="rh-server-endpoint">{s.endpoint.clone()}</code>
-                                        </p>
-                                    </div>
-                                    <div class="rh-server-foot">
-                                        <button
-                                            class="rh-btn ghost small"
-                                            // The pick travels in the URL, not a
-                                            // signal: setting a signal and
-                                            // navigating in the same handler
-                                            // races the new component's first
-                                            // read, and a query param is also
-                                            // shareable and reload-proof.
-                                            on:click=move |_| {
-                                                navigate(
-                                                    &format!(
-                                                        "/?server={}",
-                                                        crate::servers::encode_param(&endpoint),
-                                                    ),
-                                                    Default::default(),
-                                                );
-                                            }
-                                        >
-                                            "Connect"
-                                        </button>
-                                    </div>
-                                </li>
-                            }
-                        }
-                    />
-                </ul>
-            </section>
+        <main class="rh-body rh-glass-page" id=a11y::MAIN_ID tabindex="-1">
+            <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Looking Glass"</h1>
+            <BurrowBrowser endpoint handle recent on_open standalone=true/>
         </main>
     }
 }

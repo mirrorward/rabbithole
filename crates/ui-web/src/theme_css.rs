@@ -509,10 +509,6 @@ body{overflow:hidden}\
 .rh-settings-range{display:flex;flex-direction:column;gap:.25rem;max-width:26rem;margin-bottom:var(--rh-space-2)}\
 .rh-settings-range-label{font-size:var(--rh-font-sm);color:var(--rh-muted)}\
 .rh-settings-range input[type=range]{width:100%;accent-color:var(--rh-accent)}\
-.rh-glass-bar{display:flex;gap:var(--rh-space-2);align-items:center}\
-.rh-glass-bar .rh-input{flex:1;min-width:0}\
-.rh-glass-source{margin:.3rem 0 var(--rh-space-3);font-size:var(--rh-font-xs);color:var(--rh-muted)}\
-.rh-server-listeners{margin:.15rem 0 0;font-size:var(--rh-font-xs);color:var(--rh-muted);font-family:var(--rh-font-mono)}\
 .rh-you-backup{display:flex;gap:var(--rh-space-2);flex-wrap:wrap;margin-bottom:var(--rh-space-2)}\
 .rh-restore{border:1px solid color-mix(in srgb,var(--rh-error) 35%,transparent);border-radius:var(--rh-radius);padding:var(--rh-space-3);display:flex;flex-direction:column;gap:var(--rh-space-2);max-width:42rem}\
 .rh-restore-warn{margin:0;color:var(--rh-error);font-size:var(--rh-font-sm);line-height:1.45}\
@@ -598,7 +594,7 @@ body{overflow:hidden}\
 /* AppKit reserves the hand cursor for hyperlinks; a hand over every control is\
    the classic wrapper tell. Content links keep it. Browser builds keep web\
    conventions untouched. */\
-.rh-app.native .rh-btn,.rh-app.native .rh-rail-tile,.rh-app.native .rh-format-btn,.rh-app.native .rh-glass-refresh,.rh-app.native .rh-presence,.rh-app.native .rh-crumb,.rh-app.native .rh-board-link,.rh-app.native .rh-thread-link,.rh-app.native .rh-file-link,.rh-app.native .rh-member-link,.rh-app.native .rh-station-link,.rh-app.native .rh-dm-peer,.rh-app.native .rh-subnav-link,.rh-app.native .rh-palette-item,.rh-app.native .rh-kbd-jump,.rh-app.native .rh-icon-btn{cursor:default}\
+.rh-app.native .rh-btn,.rh-app.native .rh-rail-tile,.rh-app.native .rh-format-btn,.rh-app.native .rh-glass-tool,.rh-app.native .rh-presence,.rh-app.native .rh-crumb,.rh-app.native .rh-board-link,.rh-app.native .rh-thread-link,.rh-app.native .rh-file-link,.rh-app.native .rh-member-link,.rh-app.native .rh-station-link,.rh-app.native .rh-dm-peer,.rh-app.native .rh-subnav-link,.rh-app.native .rh-palette-item,.rh-app.native .rh-kbd-jump,.rh-app.native .rh-icon-btn{cursor:default}\
 .rh-app.native .rh-rich a{cursor:pointer}\
 /* Dragging a nav link must not lift a translucent URL ghost out of the\
    sidebar. Selection rules already protect content; this stops element drag. */\
@@ -703,18 +699,6 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 .rh-palette-label{font-weight:600;color:var(--rh-text)}\
 .rh-palette-item.selected .rh-palette-label{color:var(--rh-accent)}\
 .rh-palette-hint{font-size:var(--rh-font-xs);color:var(--rh-muted);text-transform:uppercase;letter-spacing:.05em}\
-.rh-servers{flex:1;padding:var(--rh-space-5);overflow-y:auto}\
-.rh-server-list{list-style:none;margin:var(--rh-space-2) 0 0;padding:0;display:flex;flex-direction:column}\
-.rh-server-row{display:flex;align-items:center;gap:var(--rh-space-3);padding:.65rem .25rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
-.rh-server-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:.1rem}\
-.rh-server-head{display:flex;align-items:center;gap:var(--rh-space-2)}\
-.rh-server-name{font-family:var(--rh-font-display);font-weight:600;font-size:var(--rh-font-size);color:var(--rh-text)}\
-.rh-server-users{font-size:var(--rh-font-xs);color:var(--rh-muted);white-space:nowrap}\
-.rh-server-desc{margin:0;color:var(--rh-muted);font-size:var(--rh-font-sm);line-height:1.45}\
-.rh-server-foot{flex:none;display:flex;align-items:center}\
-.rh-server-uptime{font-size:var(--rh-font-xs);font-weight:600;color:var(--rh-accent);background:color-mix(in srgb,var(--rh-accent) 12%,transparent);padding:.15rem .5rem;border-radius:var(--rh-radius-full);white-space:nowrap}\
-.rh-server-endpoint{font-size:var(--rh-font-xs);color:var(--rh-muted)}\
-.rh-server-foot .rh-btn{margin-left:auto;padding:.35rem .8rem;font-size:var(--rh-font-sm)}\
 .rh-toasts{position:fixed;top:4.2rem;right:var(--rh-space-4);z-index:90;display:flex;flex-direction:column;gap:var(--rh-space-2);width:min(22rem,90vw)}\
 .rh-toast{display:flex;align-items:center;gap:var(--rh-space-2);background:var(--rh-surface);border:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);border-radius:var(--rh-radius);box-shadow:var(--rh-shadow-2);padding:.6rem .7rem;font-size:var(--rh-font-sm)}\
 .rh-toast-glyph{flex:none;font-size:var(--rh-font-lg);line-height:1;color:var(--rh-accent)}\
@@ -775,15 +759,16 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
    burrow, numbers in the mono face, and a status strip underneath. */\
 .rh-connect-main{display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;min-width:0;min-height:0}\
 .rh-glass-head{display:flex;align-items:center;gap:var(--rh-space-2);padding:var(--rh-space-4) var(--rh-space-5) var(--rh-space-3);-webkit-user-select:none;user-select:none}\
-.rh-glass-head h2{margin:0 auto 0 0;font-family:var(--rh-font-display);font-size:var(--rh-font-lg);font-weight:600;letter-spacing:-.015em;color:var(--rh-text)}\
+.rh-glass-head h2{margin:0 auto 0 0;white-space:nowrap;font-family:var(--rh-font-display);font-size:var(--rh-font-lg);font-weight:600;letter-spacing:-.015em;color:var(--rh-text)}\
 .rh-glass-search{position:relative;display:flex;align-items:center;width:min(14rem,45%)}\
 .rh-glass-search>span{position:absolute;left:.5rem;display:grid;color:var(--rh-muted)}\
 .rh-glass-search svg{width:.95rem;height:.95rem}\
 .rh-glass-search .rh-input{width:100%;padding:.3rem .6rem .3rem 1.8rem;font-size:var(--rh-font-sm);border-radius:var(--rh-radius-sm)}\
-.rh-glass-refresh{flex:none;display:grid;place-items:center;width:1.9rem;height:1.9rem;padding:0;border:1px solid transparent;border-radius:var(--rh-radius-sm);background:transparent;color:var(--rh-muted);cursor:pointer;transition:background-color .15s ease,color .15s ease}\
-.rh-glass-refresh:hover{background:color-mix(in srgb,var(--rh-text) 7%,transparent);color:var(--rh-text)}\
-.rh-glass-refresh:disabled{cursor:default}\
-.rh-glass-refresh>span{display:grid}\
+.rh-glass-tool{flex:none;display:grid;place-items:center;width:1.9rem;height:1.9rem;padding:0;border:1px solid transparent;border-radius:var(--rh-radius-sm);background:transparent;color:var(--rh-muted);cursor:pointer;transition:background-color .15s ease,color .15s ease}\
+.rh-glass-tool:hover{background:color-mix(in srgb,var(--rh-text) 7%,transparent);color:var(--rh-text)}\
+.rh-glass-tool:disabled{cursor:default}\
+.rh-glass-tool>span{display:grid}\
+.rh-glass-tool[aria-expanded=true]{background:color-mix(in srgb,var(--rh-brand) 16%,transparent);color:var(--rh-text)}\
 .rh-glass-refresh.busy svg{animation:rh-spin .9s linear infinite}\
 @keyframes rh-spin{to{transform:rotate(360deg)}}\
 .rh-glass-cols,.rh-glass-row{display:grid;grid-template-columns:1.6rem minmax(9rem,1.35fr) minmax(0,2fr) 4.25rem 3.5rem;column-gap:var(--rh-space-3);align-items:center}\
@@ -794,10 +779,13 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 .rh-glass-group{margin:var(--rh-space-4) .5rem .25rem;font-size:var(--rh-font-xs);font-weight:600;color:var(--rh-muted)}\
 .rh-glass-list{list-style:none;margin:0;padding:0}\
 .rh-glass-list li+li{border-top:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\
-.rh-glass-list li:has(.selected),.rh-glass-list li:has(.selected)+li{border-top-color:transparent}\
+.rh-glass-list li.selected,.rh-glass-list li.selected+li{border-top-color:transparent}\
+.rh-glass-item{border-radius:var(--rh-radius-sm)}\
+.rh-glass-item.selected{background:color-mix(in srgb,var(--rh-brand) 20%,transparent)}\
 .rh-glass-row{width:100%;min-height:2rem;padding:.25rem .5rem;border:0;border-radius:var(--rh-radius-sm);background:transparent;color:var(--rh-text);font:inherit;font-size:var(--rh-font-sm);line-height:1.35;text-align:left;cursor:default}\
 .rh-glass-row:hover{background:color-mix(in srgb,var(--rh-text) 5%,transparent)}\
-.rh-glass-row.selected{align-items:start;background:color-mix(in srgb,var(--rh-brand) 20%,transparent)}\
+.rh-glass-item.selected .rh-glass-row{align-items:start}\
+.rh-glass-item.selected .rh-glass-row:hover{background:transparent}\
 .rh-glass-row:focus-visible{outline:2px solid var(--rh-focus);outline-offset:-2px}\
 .rh-glass-mark{position:relative;display:grid;place-items:center;width:1.6rem;height:1.6rem}\
 .rh-glass-mark>span:first-child{display:grid}\
@@ -809,8 +797,18 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 .rh-glass-users,.rh-glass-uptime{font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);font-variant-numeric:tabular-nums slashed-zero;text-align:right;white-space:nowrap}\
 .rh-glass-uptime,.rh-glass-down{color:var(--rh-muted)}\
 .rh-glass-row.off .rh-glass-name{color:var(--rh-muted)}\
-.rh-glass-row.selected .rh-glass-desc{white-space:normal;overflow:visible;color:var(--rh-text)}\
-.rh-glass-more{grid-column:3/-1;display:flex;flex-wrap:wrap;gap:.1rem var(--rh-space-3);min-width:0;padding-bottom:.15rem;font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);color:var(--rh-muted)}\
+.rh-glass-item.selected .rh-glass-desc{white-space:normal;overflow:visible;color:var(--rh-text)}\
+.rh-glass-detail{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem var(--rh-space-4);padding:0 .5rem .5rem calc(2.1rem + var(--rh-space-3))}\
+.rh-glass-more{flex:1 1 14rem;display:flex;flex-wrap:wrap;gap:.1rem var(--rh-space-3);min-width:0;margin:0;font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);color:var(--rh-muted)}\
+.rh-glass-actions{display:flex;flex-wrap:wrap;gap:var(--rh-space-2)}\
+.rh-glass-actions .rh-btn.ghost{color:var(--rh-text);border-color:color-mix(in srgb,var(--rh-text) 22%,transparent)}\
+.rh-glass-actions .rh-btn.ghost:hover{background:color-mix(in srgb,var(--rh-text) 8%,transparent)}\
+.rh-glass-rename{flex:1 1 100%;display:flex;align-items:center;gap:var(--rh-space-2)}\
+.rh-glass-rename .rh-input{flex:1;min-width:0;padding:.3rem .55rem;font-size:var(--rh-font-sm)}\
+.rh-glass-add{display:grid;grid-template-columns:minmax(7rem,1fr) minmax(11rem,1.6fr) auto auto;align-items:center;gap:var(--rh-space-2);margin:var(--rh-space-2) 0 var(--rh-space-1);padding:var(--rh-space-3);border-radius:var(--rh-radius);background:color-mix(in srgb,var(--rh-surface-2) 70%,transparent);border:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
+.rh-glass-add .rh-input{min-width:0;padding:.35rem .6rem;font-size:var(--rh-font-sm)}\
+.rh-glass-add .rh-field-hint{grid-column:1/-1}\
+.rh-glass-page>.rh-connect-main{flex:1}\
 .rh-glass-more code{font:inherit;overflow-wrap:anywhere}\
 .rh-glass-scroll .rh-chat-empty{min-height:0;padding:var(--rh-space-8) var(--rh-space-4)}\
 .rh-glass-scroll .rh-chat-empty-mark{background:color-mix(in srgb,var(--rh-brand) 12%,transparent);color:var(--rh-brand)}\
@@ -822,9 +820,9 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
    drag strip still sits over that band, so nothing clickable goes in it. */\
 .rh-app.native:has(.rh-connect){padding-top:0}\
 .rh-app.native .rh-connect-side{padding-top:calc(1.75rem + var(--rh-space-5))}\
-.rh-app.native .rh-glass-head{padding-top:calc(1.75rem + var(--rh-space-1))}\
+.rh-app.native .rh-connect .rh-glass-head{padding-top:calc(1.75rem + var(--rh-space-1))}\
 html.rh-fullscreen .rh-app.native .rh-connect-side{padding-top:var(--rh-space-8)}\
-html.rh-fullscreen .rh-app.native .rh-glass-head{padding-top:var(--rh-space-4)}\
+html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--rh-space-4)}\
 .rh-login-notice{margin:0 0 .2rem;padding:.55rem .75rem;border-radius:var(--rh-radius);background:color-mix(in srgb,#e8890c 14%,transparent);color:var(--rh-text);font-size:var(--rh-font-sm);line-height:1.45}\
 .rh-load-failed{display:flex;align-items:center;gap:var(--rh-space-3);padding:var(--rh-space-3) .6rem;color:var(--rh-muted);font-size:var(--rh-font-sm)}\
 .rh-body{flex:1;display:flex;min-height:0}\
@@ -949,7 +947,7 @@ html.rh-fullscreen .rh-app.native .rh-glass-head{padding-top:var(--rh-space-4)}\
 .rh-station-track{font-size:var(--rh-font-sm);color:var(--rh-muted)}\
 .rh-slider{accent-color:var(--rh-accent);flex:1}\
 .rh-hint{color:var(--rh-muted);font-size:var(--rh-font-sm);margin:.3rem 0;line-height:1.5;max-width:70ch}\
-.rh-server-desc,.rh-settings-note{max-width:70ch}\
+.rh-settings-note{max-width:70ch}\
 .rh-radio-now{color:var(--rh-accent);text-decoration:none;font-size:var(--rh-font-sm);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:18rem;display:inline-flex;align-items:center;gap:.4rem}\
 .rh-radio-now::before{content:'';width:.5rem;height:.5rem;border-radius:50%;background:var(--rh-error);flex:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--rh-error) 25%,transparent)}\
 .rh-radio-now:hover{text-decoration:underline}\
@@ -1043,7 +1041,7 @@ html.rh-fullscreen .rh-app.native .rh-glass-head{padding-top:var(--rh-space-4)}\
 @media (max-width:1000px){.rh-glass-cols,.rh-glass-row{grid-template-columns:1.6rem minmax(8rem,1.2fr) minmax(0,1.6fr) 4.25rem}.rh-glass-uptime,.rh-glass-cols .uptime{display:none}}\
 /* A phone gets one scrolling page: a compact masthead and the form, then the\
    browser, its rows two lines tall so a name and its blurb both fit. */\
-@media (max-width:720px){.rh-connect{display:block;flex:none}.rh-connect-side{overflow:visible;gap:var(--rh-space-4);padding:var(--rh-space-5) var(--rh-space-4);border-right:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-connect-brand{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:var(--rh-space-3);align-items:center;text-align:left}.rh-connect-logo{grid-row:1/3;width:3.5rem;height:3.5rem}.rh-connect-brand h1{margin:0;align-self:end;font-size:1.35rem}.rh-connect-tagline{align-self:start}.rh-connect-version{display:none}.rh-connect-foot{padding-top:0}.rh-connect-main{display:block}.rh-glass-head{padding:var(--rh-space-4) var(--rh-space-4) var(--rh-space-2)}.rh-glass-cols{display:none}.rh-glass-scroll{overflow:visible;padding:0 var(--rh-space-2) var(--rh-space-3)}.rh-glass-row{grid-template-columns:1.6rem minmax(0,1fr) auto;grid-template-areas:\"mark name users\" \"mark desc desc\" \". more more\";row-gap:0;min-height:2.75rem;padding:.4rem .5rem}.rh-glass-mark{grid-area:mark}.rh-glass-name{grid-area:name}.rh-glass-desc{grid-area:desc}.rh-glass-users{grid-area:users}.rh-glass-more{grid-area:more}.rh-glass-status{padding:.5rem var(--rh-space-4) calc(.5rem + env(safe-area-inset-bottom))}}\
+@media (max-width:720px){.rh-connect{display:block;flex:none}.rh-connect-side{overflow:visible;gap:var(--rh-space-4);padding:var(--rh-space-5) var(--rh-space-4);border-right:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-connect-brand{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:var(--rh-space-3);align-items:center;text-align:left}.rh-connect-logo{grid-row:1/3;width:3.5rem;height:3.5rem}.rh-connect-brand h1{margin:0;align-self:end;font-size:1.35rem}.rh-connect-tagline{align-self:start}.rh-connect-version{display:none}.rh-connect-foot{padding-top:0}.rh-connect-main{display:block}.rh-glass-head{padding:var(--rh-space-4) var(--rh-space-4) var(--rh-space-2)}.rh-glass-search{flex:1;width:auto;min-width:0}.rh-glass-cols{display:none}.rh-glass-scroll{overflow:visible;padding:0 var(--rh-space-2) var(--rh-space-3)}.rh-glass-row{grid-template-columns:1.6rem minmax(0,1fr) auto;grid-template-areas:\"mark name users\" \"mark desc desc\";row-gap:0;min-height:2.75rem;padding:.4rem .5rem}.rh-glass-mark{grid-area:mark}.rh-glass-name{grid-area:name}.rh-glass-desc{grid-area:desc}.rh-glass-users{grid-area:users}.rh-glass-detail{padding-left:calc(2.1rem + var(--rh-space-3))}.rh-glass-add{grid-template-columns:1fr 1fr}.rh-glass-add .rh-input{grid-column:1/-1}.rh-glass-page{display:block;overflow-y:auto}.rh-glass-status{padding:.5rem var(--rh-space-4) calc(.5rem + env(safe-area-inset-bottom))}}\
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:.01ms!important;transition-delay:0s!important;animation-duration:.01ms!important;animation-delay:0s!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}\
 ";
 

@@ -218,6 +218,11 @@ pub fn link_icon() -> String {
     )
 }
 
+/// Plus: add one (a bookmark, by address).
+pub fn plus_icon() -> String {
+    format!("{OPEN}<path d=\"M12 5.5v13M5.5 12h13\"/></svg>")
+}
+
 /// Search: a lens, inside the connect window's filter field.
 pub fn search_icon() -> String {
     format!("{OPEN}<circle cx=\"10.5\" cy=\"10.5\" r=\"6\"/><path d=\"M15 15l4.5 4.5\"/></svg>")
@@ -459,6 +464,7 @@ mod furniture_icon_tests {
             ("close", close_icon()),
             ("key", key_icon()),
             ("send", send_icon()),
+            ("plus", plus_icon()),
             ("search", search_icon()),
             ("refresh", refresh_icon()),
         ] {

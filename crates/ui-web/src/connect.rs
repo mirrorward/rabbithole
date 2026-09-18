@@ -11,12 +11,22 @@
 //! connect to, a saved burrow is never listed twice, and the census counts
 //! only what a source actually reported.
 
+use std::collections::HashMap;
+
+use crate::bookmarks::Bookmark;
+use crate::probe::Probe;
 use crate::recent::RecentBurrow;
 use crate::servers::{DirectoryServer, DirectorySource};
+
+/// What the knocks found, keyed by [`probe_key`].
+pub type Probes = HashMap<String, Probe>;
 
 /// Which shelf a row sits on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Shelf {
+    /// A burrow you bookmarked, with the handle you last used there if you
+    /// have ever signed in.
+    Bookmark { handle: Option<String> },
     /// A burrow you have signed into before, with the handle you used there.
     Yours { handle: String },
     /// A burrow a directory or a Looking Glass lists.
@@ -61,12 +71,18 @@ impl Row {
 /// An endpoint without its scheme or trailing slash: what a person would call
 /// the address.
 pub fn host(endpoint: &str) -> String {
-    endpoint
-        .trim()
-        .trim_start_matches("wss://")
-        .trim_start_matches("ws://")
-        .trim_end_matches('/')
-        .to_string()
+    let endpoint = endpoint.trim();
+    // The scheme is case-insensitive (`WSS://` is `wss://`), and a place is
+    // the same place however its scheme was typed.
+    let lower = endpoint.to_ascii_lowercase();
+    let rest = if lower.starts_with("wss://") {
+        &endpoint[6..]
+    } else if lower.starts_with("ws://") {
+        &endpoint[5..]
+    } else {
+        endpoint
+    };
+    rest.trim_end_matches('/').to_string()
 }
 
 /// Do two endpoints name the same place? Scheme and case aside: a burrow
@@ -82,12 +98,66 @@ pub fn is_demo(endpoint: &str) -> bool {
     endpoint.trim().starts_with("demo://")
 }
 
-/// *Your burrows*: every burrow you have signed into, newest first, wearing
-/// the name and health a directory reports for it when one does. A burrow
-/// nobody lists still belongs here, under its address.
-pub fn yours(recent: &[RecentBurrow], listed: &[DirectoryServer]) -> Vec<Row> {
+/// The key a knock's result is filed under: the place, not its spelling.
+pub fn probe_key(endpoint: &str) -> String {
+    host(endpoint).to_ascii_lowercase()
+}
+
+/// Is it up? A directory that lists the burrow is asked first (it probes on a
+/// schedule and knows uptime besides); a burrow nobody lists is answered by
+/// our own knock; and with neither, the honest answer is "unknown".
+fn reachable(endpoint: &str, known: Option<&DirectoryServer>, probes: &Probes) -> Option<bool> {
+    known
+        .map(|s| s.reachable)
+        .or_else(|| probes.get(&probe_key(endpoint)).and_then(|p| p.reachable()))
+}
+
+/// *Bookmarks*: the burrows you chose to keep, in the order you kept them,
+/// under the names you gave them. A bookmark outlives its listing: that is
+/// the point of one. Health comes from the directory when it lists the place
+/// and from our own knock when it doesn't.
+pub fn bookmarked(
+    bookmarks: &[Bookmark],
+    recent: &[RecentBurrow],
+    listed: &[DirectoryServer],
+    probes: &Probes,
+) -> Vec<Row> {
+    bookmarks
+        .iter()
+        .map(|kept| {
+            let known = listed
+                .iter()
+                .find(|s| same_place(&s.endpoint, &kept.endpoint));
+            let handle = recent
+                .iter()
+                .find(|r| same_place(&r.endpoint, &kept.endpoint))
+                .map(|r| r.handle.clone());
+            Row {
+                shelf: Shelf::Bookmark { handle },
+                name: kept.name.clone(),
+                endpoint: kept.endpoint.clone(),
+                description: known.map(|s| s.description.clone()).unwrap_or_default(),
+                users: known.and_then(|s| s.users_online),
+                uptime: known.and_then(|s| s.uptime_pct),
+                reachable: reachable(&kept.endpoint, known, probes),
+                listeners: known.map(|s| s.listeners.clone()).unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+/// *Recent*: every burrow you have signed into and not bookmarked, newest
+/// first, wearing the name and health a directory reports for it when one
+/// does. A burrow nobody lists still belongs here, under its address.
+pub fn yours(
+    recent: &[RecentBurrow],
+    listed: &[DirectoryServer],
+    bookmarks: &[Bookmark],
+    probes: &Probes,
+) -> Vec<Row> {
     recent
         .iter()
+        .filter(|saved| !crate::bookmarks::is_bookmarked(bookmarks, &saved.endpoint))
         .map(|saved| {
             let known = listed
                 .iter()
@@ -103,11 +173,41 @@ pub fn yours(recent: &[RecentBurrow], listed: &[DirectoryServer]) -> Vec<Row> {
                 description: known.map(|s| s.description.clone()).unwrap_or_default(),
                 users: known.and_then(|s| s.users_online),
                 uptime: known.and_then(|s| s.uptime_pct),
-                reachable: known.map(|s| s.reachable),
+                reachable: reachable(&saved.endpoint, known, probes),
                 listeners: known.map(|s| s.listeners.clone()).unwrap_or_default(),
             }
         })
         .collect()
+}
+
+/// The places worth knocking on: your bookmarks and recent burrows that no
+/// directory vouches for. Listed burrows are left to the directory, so a
+/// refresh opens a handful of sockets, not one per row. Demo burrows have no
+/// door to knock on.
+pub fn to_knock(
+    bookmarks: &[Bookmark],
+    recent: &[RecentBurrow],
+    listed: &[DirectoryServer],
+    source: &DirectorySource,
+) -> Vec<String> {
+    let vouched = |endpoint: &str| {
+        *source != DirectorySource::Seeded
+            && listed.iter().any(|s| same_place(&s.endpoint, endpoint))
+    };
+    let mut out: Vec<String> = Vec::new();
+    for endpoint in bookmarks
+        .iter()
+        .map(|b| b.endpoint.as_str())
+        .chain(recent.iter().map(|r| r.endpoint.as_str()))
+    {
+        if !is_demo(endpoint)
+            && !vouched(endpoint)
+            && !out.iter().any(|seen| same_place(seen, endpoint))
+        {
+            out.push(endpoint.to_string());
+        }
+    }
+    out
 }
 
 /// *Discover*: what the live source lists, in the directory's own ranking
@@ -121,6 +221,7 @@ pub fn discover(
     listed: &[DirectoryServer],
     source: &DirectorySource,
     recent: &[RecentBurrow],
+    bookmarks: &[Bookmark],
 ) -> Vec<Row> {
     if *source == DirectorySource::Seeded {
         return Vec::new();
@@ -129,6 +230,7 @@ pub fn discover(
         .into_iter()
         .filter(|s| !is_demo(&s.endpoint))
         .filter(|s| !recent.iter().any(|r| same_place(&r.endpoint, &s.endpoint)))
+        .filter(|s| !crate::bookmarks::is_bookmarked(bookmarks, &s.endpoint))
         .map(|s| Row {
             shelf: Shelf::Listed,
             name: s.name,
@@ -176,6 +278,9 @@ pub fn filter(rows: Vec<Row>, query: &str) -> Vec<Row> {
         .filter(|r| {
             let handle = match &r.shelf {
                 Shelf::Yours { handle } => handle.as_str(),
+                Shelf::Bookmark {
+                    handle: Some(handle),
+                } => handle.as_str(),
                 _ => "",
             };
             [
@@ -262,6 +367,8 @@ mod tests {
                 saved("ws://localhost:4654", "test"),
             ],
             &glass,
+            &[],
+            &Probes::new(),
         );
         assert_eq!(rows[0].name, "The Warren", "scheme, case and slash aside");
         assert_eq!(rows[0].users, Some(12));
@@ -283,7 +390,7 @@ mod tests {
     fn the_built_in_sample_is_never_offered_as_a_place() {
         let sample = crate::servers::sample_directory();
         assert!(!sample.is_empty());
-        assert!(discover(&sample, &DirectorySource::Seeded, &[]).is_empty());
+        assert!(discover(&sample, &DirectorySource::Seeded, &[], &[]).is_empty());
     }
 
     #[test]
@@ -299,6 +406,7 @@ mod tests {
             &glass,
             &DirectorySource::Directory,
             &[saved("ws://mine.example", "me")],
+            &[],
         );
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["Busy", "Quiet", "Down"]);
@@ -309,8 +417,13 @@ mod tests {
     fn the_filter_reads_names_descriptions_addresses_and_handles() {
         let glass = [listed("The Warren", "wss://warren.example", None, true)];
         let all = || {
-            let mut rows = yours(&[saved("ws://localhost:4654", "Bramble")], &glass);
-            rows.extend(discover(&glass, &DirectorySource::Directory, &[]));
+            let mut rows = yours(
+                &[saved("ws://localhost:4654", "Bramble")],
+                &glass,
+                &[],
+                &Probes::new(),
+            );
+            rows.extend(discover(&glass, &DirectorySource::Directory, &[], &[]));
             rows
         };
         assert_eq!(filter(all(), "  ").len(), 2, "blank keeps everything");
@@ -368,7 +481,7 @@ mod tests {
     #[test]
     fn the_button_names_where_it_is_going() {
         let glass = [listed("The Warren", "wss://warren.example", None, true)];
-        let rows = discover(&glass, &DirectorySource::Directory, &[]);
+        let rows = discover(&glass, &DirectorySource::Directory, &[], &[]);
         assert_eq!(
             connect_label("wss://warren.example", &rows),
             "Connect to The Warren"
@@ -379,6 +492,97 @@ mod tests {
         );
         assert_eq!(connect_label("ws://localhost:4654", &rows), "Connect");
         assert_eq!(connect_label("", &rows), "Connect");
+    }
+
+    fn kept(endpoint: &str, name: &str) -> Bookmark {
+        Bookmark {
+            endpoint: endpoint.into(),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn a_bookmark_outlives_its_listing_and_keeps_your_name_for_it() {
+        let glass = [listed(
+            "The Warren (official)",
+            "wss://warren.example",
+            Some(12),
+            true,
+        )];
+        let shelf = [
+            kept("ws://warren.example/", "Warren"),
+            kept("ws://attic.lan:4654", "Attic"),
+        ];
+        let recent = [saved("wss://warren.example", "alice")];
+        let mut probes = Probes::new();
+        probes.insert(probe_key("WS://Attic.lan:4654/"), Probe::Down);
+        let rows = bookmarked(&shelf, &recent, &glass, &probes);
+        // Your name for it wins over the listing's; the listing supplies the
+        // rest, and the handle you used there comes along.
+        assert_eq!(rows[0].name, "Warren");
+        assert_eq!(rows[0].users, Some(12));
+        assert_eq!(rows[0].reachable, Some(true));
+        assert_eq!(
+            rows[0].shelf,
+            Shelf::Bookmark {
+                handle: Some("alice".into())
+            }
+        );
+        // Nobody lists the attic. It is still on the shelf, and its status is
+        // whatever our own knock found.
+        assert_eq!(rows[1].name, "Attic");
+        assert_eq!(rows[1].reachable, Some(false));
+        assert_eq!(rows[1].shelf, Shelf::Bookmark { handle: None });
+        // A knock still out is "unknown", not "down".
+        probes.insert(probe_key("ws://attic.lan:4654"), Probe::Checking);
+        assert_eq!(
+            bookmarked(&shelf, &recent, &glass, &probes)[1].reachable,
+            None
+        );
+    }
+
+    #[test]
+    fn a_place_sits_on_one_shelf_only() {
+        let glass = [
+            listed("Warren", "wss://warren.example", None, true),
+            listed("Other", "wss://other.example", None, true),
+        ];
+        let shelf = [kept("wss://warren.example", "Warren")];
+        let recent = [
+            saved("wss://warren.example", "alice"),
+            saved("ws://localhost:4654", "test"),
+        ];
+        let recents = yours(&recent, &glass, &shelf, &Probes::new());
+        assert_eq!(recents.len(), 1, "the bookmarked one left Recent");
+        assert_eq!(recents[0].name, "localhost:4654");
+        let found = discover(&glass, &DirectorySource::Directory, &recent, &shelf);
+        let names: Vec<&str> = found.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["Other"]);
+    }
+
+    #[test]
+    fn only_places_nobody_vouches_for_get_a_knock() {
+        let glass = [listed("Warren", "wss://warren.example", None, true)];
+        let shelf = [
+            kept("wss://warren.example", "Warren"),
+            kept("ws://attic.lan:4654", "Attic"),
+            kept("demo://the-warren", "Demo"),
+        ];
+        let recent = [
+            saved("ws://ATTIC.lan:4654/", "me"),
+            saved("ws://localhost:4654", "test"),
+        ];
+        let live = DirectorySource::Directory;
+        assert_eq!(
+            to_knock(&shelf, &recent, &glass, &live),
+            ["ws://attic.lan:4654", "ws://localhost:4654"],
+            "listed, demo and duplicate places are skipped"
+        );
+        // With no directory answering, nothing is vouched for.
+        assert_eq!(
+            to_knock(&shelf, &recent, &glass, &DirectorySource::Seeded).len(),
+            3
+        );
     }
 
     #[test]
