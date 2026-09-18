@@ -155,6 +155,51 @@ pub fn start_swarm_download(
     }
 }
 
+/// Hand bytes the webview already holds to the shell, which writes them into
+/// the downloads folder (a webview has no download manager to click into).
+/// `done` gets the path it landed at, or the shell's own words for why not.
+pub fn save_file(name: &str, bytes: &[u8], done: impl FnOnce(Result<String, String>) + 'static) {
+    let (Some(b), true) = (bridge(), native_available()) else {
+        done(Err("the desktop shell is not available".to_string()));
+        return;
+    };
+    let Some(invoke) = method(&b, "invoke") else {
+        done(Err("the desktop shell is not available".to_string()));
+        return;
+    };
+    let args = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&args, &JsValue::from_str("name"), &JsValue::from_str(name));
+    // Base64 rather than a JSON number array: a third the size on the bridge.
+    let _ = js_sys::Reflect::set(
+        &args,
+        &JsValue::from_str("dataBase64"),
+        &JsValue::from_str(&crate::wire::base64_encode(bytes)),
+    );
+    let Ok(ret) = invoke.call2(&b, &JsValue::from_str("save_file"), &args) else {
+        done(Err("the save could not be started".to_string()));
+        return;
+    };
+    let Ok(promise) = ret.dyn_into::<js_sys::Promise>() else {
+        done(Err("the save could not be started".to_string()));
+        return;
+    };
+    spawn_local(async move {
+        match JsFuture::from(promise).await {
+            Ok(path) => done(Ok(path
+                .as_string()
+                .unwrap_or_else(|| "your downloads folder".into()))),
+            Err(err) => done(Err(err
+                .as_string()
+                .or_else(|| {
+                    js_sys::Reflect::get(&err, &JsValue::from_str("message"))
+                        .ok()
+                        .and_then(|m| m.as_string())
+                })
+                .unwrap_or_else(|| "the file could not be written".to_string()))),
+        }
+    });
+}
+
 /// Install the `swarm://event` listener that folds native progress into the
 /// focused session's Transfers. The callback `Closure` is `forget()`-leaked so it
 /// lives for the app's lifetime (dropping it would silently kill progress).

@@ -422,6 +422,11 @@ impl MockClient {
             n.comment = comment.into();
             n.uploader = "rabbit".into();
             n.blob_id = Some([0u8; 32]);
+            // What the listing says a file weighs is what downloading it
+            // gives you: the seeded bytes are real (`crate::demo_files`).
+            if let Some(bytes) = crate::demo_files::bytes_for(name) {
+                n.size = bytes.len() as i64;
+            }
             n
         };
         vec![
@@ -465,6 +470,23 @@ impl MockClient {
         ]
     }
 
+    /// The bytes a demo download of `id` delivers, for the save step. `None`
+    /// for an unknown node, a folder, or the file that fails on purpose. An
+    /// uploaded file has no seeded content and saves as its recorded size in
+    /// zeros, which is what the mock stored of it.
+    pub fn download_bytes(&self, id: i64) -> Option<crate::wire::DownloadedFile> {
+        let n = self.file_nodes.iter().find(|n| n.id == id)?;
+        if n.name == FAILING_DEMO_FILE || n.kind != KIND_FILE {
+            return None;
+        }
+        Some(crate::wire::DownloadedFile {
+            name: n.name.clone(),
+            mime: n.mime.clone(),
+            bytes: crate::demo_files::bytes_for(&n.name)
+                .unwrap_or_else(|| vec![0u8; n.size.max(0) as usize]),
+        })
+    }
+
     /// The next free node id (max existing + 1).
     fn next_node_id(&self) -> i64 {
         self.file_nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1
@@ -505,7 +527,8 @@ impl MockClient {
                     retryable: true,
                 }],
                 Some(n) => {
-                    let bytes = vec![0u8; n.size.max(0) as usize];
+                    let bytes = crate::demo_files::bytes_for(&n.name)
+                        .unwrap_or_else(|| vec![0u8; n.size.max(0) as usize]);
                     file_events(&FileContent::new(n.clone(), bytes))
                 }
                 None => vec![FileEvent::Failed(format!("no node #{id}"))],
@@ -1196,7 +1219,17 @@ mod tests {
         match ev.as_slice() {
             [FileEvent::FileDownloaded { node, size }] => {
                 assert_eq!(node.id, 3);
-                assert_eq!(*size, 40_960);
+                // What arrives is what the listing advertised, and both are
+                // the real seeded archive, not a buffer of zeros.
+                let real = crate::demo_files::bytes_for("lister.lha").unwrap();
+                assert_eq!(*size, real.len());
+                assert_eq!(node.size as usize, real.len());
+                assert_eq!(c.download_bytes(3).unwrap().bytes, real);
+                assert!(
+                    c.download_bytes(7).is_none(),
+                    "the failing file gives nothing"
+                );
+                assert!(c.download_bytes(1).is_none(), "a folder is not a download");
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1238,12 +1271,13 @@ mod tests {
         else {
             panic!("expected a ticket");
         };
+        let whole = crate::demo_files::bytes_for("welcome.ans").unwrap().len() as u64;
         assert_eq!(*transfer_id, 4);
-        assert_eq!(*size, 2_048);
+        assert_eq!(*size, whole);
         let chunk = c.dispatch_file(FileCommand::RequestChunk {
             transfer_id: 4,
             offset: 0,
-            len: 2_048,
+            len: whole as u32,
         });
         assert!(matches!(
             chunk.as_slice(),

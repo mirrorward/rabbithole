@@ -337,6 +337,7 @@ pub fn run() {
             transfers::native_available,
             transfers::connect_native,
             transfers::swarm_start_download,
+            transfers::save_file,
         ])
         .setup(|app| {
             // Name the app after itself, not after its binary.

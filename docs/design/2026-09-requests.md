@@ -12,7 +12,7 @@
 | 2 | Header: burrow mark cut off; status dropdown not vertically centred; coloured icon per status; Leave does nothing and should be red | small | 0.207.0 |
 | 3 | Directory: bookmark burrows (kept even when they drop off the list), manage them, add custom ones, show their status | medium | 0.208.0 |
 | 4 | Clicking a username in the lobby opens their profile | small | 0.207.0 |
-| 5a | Demo downloads fail; they should be testable in full | small | planned |
+| 5a | Demo downloads fail; they should be testable in full | small | 0.209.0 |
 | 5b | Download asks where to save, unless a default folder is set; option for per-burrow subfolders | medium | planned |
 | 5c | Download offers swarm options: other burrows and people you have access to | medium/large | planned |
 | 6 | People with downloads can opt in to helping other people's swarm downloads | medium | planned |

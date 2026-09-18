@@ -1797,6 +1797,20 @@ impl AppState {
     pub fn download(&self, id: i64) {
         // In the native shell, a content-addressed file downloads via the
         // in-process swarm (many peers at once) instead of the WS inline path.
+        // A seeded demo burrow has no swarm to ask. In the desktop shell this
+        // used to go to the swarm anyway, asking for the all-zero root every
+        // seeded node carries, and fail: "downloads don't work in the demo".
+        if !self.focused().live.get_untracked() {
+            let file = self
+                .focused()
+                .client
+                .with_value(|client| client.download_bytes(id));
+            self.dispatch_file(FileCommand::Download { id });
+            if let Some(file) = file {
+                crate::save::save_bytes(&file.name, &file.mime, &file.bytes);
+            }
+            return;
+        }
         #[cfg(target_arch = "wasm32")]
         if crate::native::native_available() {
             let info = self.focused().files.with_untracked(|f| {
@@ -2236,6 +2250,7 @@ impl Default for AppState {
 pub fn App() -> impl IntoView {
     let app = AppState::new();
     provide_context(app);
+    set_current(app);
 
     // In the native shell, listen for swarm download progress and fold it into
     // the Transfers reducer. No-op on the web build.
@@ -2408,6 +2423,24 @@ pub fn App() -> impl IntoView {
             </div>
         </Router>
     }
+}
+
+thread_local! {
+    /// The running app, for the few callbacks that fire outside any component
+    /// (a shell command resolving, a socket frame arriving) and still need to
+    /// tell the person something. `AppState` is a bundle of signal handles owned
+    /// by the root scope, which lives as long as the page does.
+    static CURRENT: std::cell::Cell<Option<AppState>> = const { std::cell::Cell::new(None) };
+}
+
+/// Record the running app. Called once, by [`App`].
+pub fn set_current(app: AppState) {
+    CURRENT.with(|c| c.set(Some(app)));
+}
+
+/// The running app, if one is mounted.
+pub fn current() -> Option<AppState> {
+    CURRENT.with(|c| c.get())
 }
 
 /// What a confirmed question does. An intent the app carries out itself, not

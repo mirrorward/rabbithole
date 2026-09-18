@@ -137,6 +137,83 @@ pub async fn swarm_start_download(
     }
 }
 
+/// Write bytes the webview already holds (an inline download over its socket,
+/// or a seeded demo file) into the downloads folder, and say where they went.
+///
+/// A webview has no download manager: the `<a download>` click that saves a
+/// file in a browser tab goes nowhere here, which is how an in-app download
+/// came to "succeed" and leave nothing on disk. The name is reduced to a safe
+/// basename before it touches the filesystem, and an existing file is never
+/// overwritten: the newcomer gets a numbered name, the way Finder does it.
+#[tauri::command]
+pub async fn save_file(
+    app: AppHandle,
+    name: String,
+    data_base64: String,
+) -> Result<String, String> {
+    let bytes = decode_base64(&data_base64)?;
+    let dir = app.path().download_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("no downloads folder: {e}"))?;
+    let dest = unique_path(&dir, &sanitize_name(&name));
+    std::fs::write(&dest, &bytes).map_err(|e| format!("could not write {}: {e}", dest.display()))?;
+    eprintln!("[rh-save] wrote {} bytes to {}", bytes.len(), dest.display());
+    Ok(dest.display().to_string())
+}
+
+/// The first path for `name` in `dir` that nothing occupies yet: `name`, then
+/// `stem (2).ext`, `stem (3).ext`, and so on.
+fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let as_path = std::path::Path::new(name);
+    let stem = as_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| name.to_string());
+    let ext = as_path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    (2u32..)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .find(|candidate| !candidate.exists())
+        .expect("an unbounded counter finds a free name")
+}
+
+/// Decode standard base64 (with or without `=` padding). Hand-rolled so the
+/// shell takes no dependency for forty lines; whitespace is tolerated, anything
+/// else outside the alphabet is an error, never silently skipped.
+fn decode_base64(text: &str) -> Result<Vec<u8>, String> {
+    fn value(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a') as u32 + 26),
+            b'0'..=b'9' => Some((c - b'0') as u32 + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes() {
+        if c == b'=' || c.is_ascii_whitespace() {
+            continue;
+        }
+        let v = value(c).ok_or_else(|| "the file data was not valid base64".to_string())?;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
+}
+
 /// Reduce a server-supplied filename to a bare, safe basename so it can't escape
 /// the downloads directory. Strips path separators and rejects `..`, leading
 /// dots, and — for Windows — any name containing a `:` (drive-relative prefixes
@@ -170,6 +247,41 @@ fn parse_root(hex: &str) -> Result<[u8; 32], String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn base64_round_trips_and_refuses_garbage() {
+        assert_eq!(super::decode_base64("").unwrap(), b"");
+        assert_eq!(super::decode_base64("Zg==").unwrap(), b"f");
+        assert_eq!(super::decode_base64("Zm8=").unwrap(), b"fo");
+        assert_eq!(super::decode_base64("Zm9v").unwrap(), b"foo");
+        assert_eq!(super::decode_base64("Zm9vYmFy").unwrap(), b"foobar");
+        assert_eq!(super::decode_base64("Zm9v\nYmFy").unwrap(), b"foobar");
+        assert_eq!(super::decode_base64("/+8=").unwrap(), [0xff, 0xef]);
+        assert!(super::decode_base64("Zm9v!").is_err());
+    }
+
+    #[test]
+    fn a_saved_file_never_overwrites_the_one_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = super::unique_path(dir.path(), "readme.txt");
+        assert_eq!(first, dir.path().join("readme.txt"));
+        std::fs::write(&first, b"one").unwrap();
+        let second = super::unique_path(dir.path(), "readme.txt");
+        assert_eq!(second, dir.path().join("readme (2).txt"));
+        std::fs::write(&second, b"two").unwrap();
+        assert_eq!(
+            super::unique_path(dir.path(), "readme.txt"),
+            dir.path().join("readme (3).txt")
+        );
+        // No extension, and a name that would climb out of the folder.
+        std::fs::write(dir.path().join("LICENSE"), b"x").unwrap();
+        assert_eq!(
+            super::unique_path(dir.path(), "LICENSE"),
+            dir.path().join("LICENSE (2)")
+        );
+        assert_eq!(super::sanitize_name("../../etc/passwd"), "passwd");
+        assert_eq!(super::sanitize_name(".."), "download.bin");
+    }
+
     use super::*;
 
     #[test]
