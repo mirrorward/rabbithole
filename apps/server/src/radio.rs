@@ -36,9 +36,9 @@
 //! drop-behind fan-out here mirrors the audio `Station` semantics exactly: a
 //! listener that falls behind skips ahead and never blocks the source.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -141,6 +141,63 @@ pub struct Stations {
     programs: Mutex<HashMap<String, Program>>,
     /// Monotonic listener-id source for registry accounting.
     next_listener: AtomicU64,
+    /// What each station is playing and what it played before, so a client
+    /// that just arrived can be shown more than the present moment.
+    history: Mutex<HashMap<String, StationHistory>>,
+    /// Cover art per station: track title to the blob id of its image.
+    covers: Mutex<HashMap<String, HashMap<String, [u8; 32]>>>,
+    /// The port the stream listener actually bound (0 = not listening), which
+    /// is what gets advertised: the configured port may have been 0 ("any").
+    listen_port: AtomicU16,
+}
+
+/// How many tracks a station remembers having played.
+pub const RECENT_TRACKS: usize = 10;
+
+/// A track on the air, and when it started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Played {
+    pub title: String,
+    pub artist: String,
+    pub started_unix_ms: u64,
+}
+
+/// A station's current track and the ones before it, newest first.
+#[derive(Debug, Default)]
+struct StationHistory {
+    current: Option<Played>,
+    recent: VecDeque<Played>,
+}
+
+impl StationHistory {
+    /// A now-playing report arrived. Only a *change of track* moves history:
+    /// now-playing is republished whenever the listener count moves, and those
+    /// repeats must not fill the list with one song ten times.
+    fn note(&mut self, title: &str, artist: &str, now_ms: u64) {
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|c| c.title == title && c.artist == artist)
+        {
+            return;
+        }
+        self.retire();
+        if !title.trim().is_empty() {
+            self.current = Some(Played {
+                title: title.to_string(),
+                artist: artist.to_string(),
+                started_unix_ms: now_ms,
+            });
+        }
+    }
+
+    /// The current track is over: it becomes the newest recent one.
+    fn retire(&mut self) {
+        if let Some(done) = self.current.take() {
+            self.recent.push_front(done);
+            self.recent.truncate(RECENT_TRACKS);
+        }
+    }
 }
 
 /// A library-backed station: a playlist engine ([`StationController`]) plus its
@@ -179,7 +236,62 @@ impl Stations {
             mounts: Mutex::new(HashMap::new()),
             programs: Mutex::new(HashMap::new()),
             next_listener: AtomicU64::new(1),
+            history: Mutex::new(HashMap::new()),
+            covers: Mutex::new(HashMap::new()),
+            listen_port: AtomicU16::new(0),
         }
+    }
+
+    /// Record the port the stream listener bound, so it can be advertised.
+    pub fn set_listen_port(&self, port: u16) {
+        self.listen_port.store(port, Ordering::Relaxed);
+    }
+
+    /// The port audio is served on, or 0 when the listener is off.
+    pub fn listen_port(&self) -> u16 {
+        self.listen_port.load(Ordering::Relaxed)
+    }
+
+    /// A station reported what it is playing.
+    pub fn note_now_playing(&self, slug: &str, title: &str, artist: &str, now_ms: u64) {
+        self.history
+            .lock()
+            .entry(slug.to_string())
+            .or_default()
+            .note(title, artist, now_ms);
+    }
+
+    /// A station went off the air: its last track joins the recent list, which
+    /// is kept, so coming back on air does not start from an empty history.
+    pub fn note_off_air(&self, slug: &str) {
+        if let Some(h) = self.history.lock().get_mut(slug) {
+            h.retire();
+        }
+    }
+
+    /// What `slug` played before its current track, newest first.
+    pub fn recent(&self, slug: &str) -> Vec<Played> {
+        self.history
+            .lock()
+            .get(slug)
+            .map(|h| h.recent.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Install a station's cover art: track title to image blob.
+    pub fn set_covers(&self, slug: &str, covers: HashMap<String, [u8; 32]>) {
+        self.covers.lock().insert(slug.to_string(), covers);
+    }
+
+    /// The cover for the track `slug` is playing, when it has one.
+    pub fn cover_for(&self, slug: &str, title: &str) -> Option<[u8; 32]> {
+        self.covers.lock().get(slug)?.get(title).copied()
+    }
+
+    /// Whether audio can be had from `slug` right now: a source is connected
+    /// and its bytes are being fanned out.
+    pub fn is_streaming(&self, slug: &str) -> bool {
+        self.mounts.lock().contains_key(slug)
     }
 
     fn next_listener_id(&self) -> u64 {
@@ -548,6 +660,25 @@ where
     wr.write_all(source_ok(req.method).as_bytes()).await?;
     tracing::info!(mount = %slug, dj = %authed.persona.screen_name, "radio source live");
 
+    // Tell everyone watching that the station is on the air. This surface
+    // used to go live in silence: listeners could tune in, but no client was
+    // told there was anything to tune in to until the DJ's encoder happened to
+    // send a title through the *other* port.
+    if let Some(np) = now_playing.lock().clone() {
+        let listeners = shared.radio.registry.listener_count(&slug).unwrap_or(0);
+        publish_status(
+            shared,
+            RadioStatus {
+                station: slug.clone(),
+                title: np.title,
+                artist: np.artist,
+                dj: np.dj,
+                listeners,
+                live: true,
+            },
+        );
+    }
+
     // Fan the body out verbatim until the source disconnects.
     if !body.is_empty() {
         let _ = tx.send(Arc::from(body.into_boxed_slice()));
@@ -564,7 +695,18 @@ where
     // Source gone: drop the mount (closing every listener) and disable it.
     let _ = now_playing; // kept alive for the source's lifetime
     shared.radio.mounts.lock().remove(&slug);
-    let _ = shared.radio.registry.set_enabled(&slug, false);
+    // And say so: a rotation behind the mount takes the air back, otherwise
+    // the station is off it.
+    if shared.radio.now_playing(&slug).is_some() {
+        publish_now_playing(shared, &slug, false);
+    } else {
+        shared.radio.note_off_air(&slug);
+        shared.presence.clear_radio_now_playing(&slug);
+        shared.bus.publish(ServerEvent::RadioOff {
+            station: slug.clone(),
+        });
+        let _ = shared.radio.registry.set_enabled(&slug, false);
+    }
     tracing::info!(mount = %slug, "radio source ended");
     Ok(())
 }
@@ -700,6 +842,60 @@ fn track_from_node(node: &FileNodeRow) -> Option<Track> {
     ))
 }
 
+/// Is this a picture a player could show as a cover?
+fn is_image(name: &str, mime: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    mime.starts_with("image/")
+        || [".jpg", ".jpeg", ".png", ".webp", ".gif"]
+            .iter()
+            .any(|ext| lower.ends_with(ext))
+}
+
+/// The name without its extension, lowercased: `"Down the Hole.mp3"` and
+/// `"down the hole.JPG"` are the same stem.
+fn stem(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    match lower.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem.to_string(),
+        _ => lower,
+    }
+}
+
+/// Cover art for a file area's tracks, the way music folders have always done
+/// it: an image named like the track wins, else the folder's `cover`,
+/// `folder`, `front` or `album` image. Keyed by track title (the file name),
+/// which is what now-playing carries. Tracks with neither get no entry.
+pub fn covers_from_nodes(nodes: &[FileNodeRow]) -> HashMap<String, [u8; 32]> {
+    const FOLDER_ART: [&str; 4] = ["cover", "folder", "front", "album"];
+    let images: Vec<(&FileNodeRow, [u8; 32])> = nodes
+        .iter()
+        .filter(|n| n.kind == KIND_FILE && is_image(&n.name, &n.mime))
+        .filter_map(|n| n.blob_id.map(|b| (n, b)))
+        .collect();
+    let mut covers = HashMap::new();
+    for track in nodes {
+        if track.kind != KIND_FILE || track.blob_id.is_none() || !is_audio(&track.name, &track.mime)
+        {
+            continue;
+        }
+        let beside = |n: &&(&FileNodeRow, [u8; 32])| n.0.parent_id == track.parent_id;
+        let own = images
+            .iter()
+            .filter(beside)
+            .find(|(img, _)| stem(&img.name) == stem(&track.name));
+        let folder = FOLDER_ART.iter().find_map(|wanted| {
+            images
+                .iter()
+                .filter(beside)
+                .find(|(img, _)| stem(&img.name) == *wanted)
+        });
+        if let Some((_, blob)) = own.or(folder) {
+            covers.insert(track.name.clone(), *blob);
+        }
+    }
+    covers
+}
+
 /// Maps a file-area listing into a playlist track list, preserving order and
 /// dropping non-audio nodes. This is the file-listing → track-list seam.
 pub fn tracks_from_nodes(nodes: &[FileNodeRow]) -> Vec<Track> {
@@ -731,14 +927,70 @@ fn publish_now_playing(shared: &Arc<Shared>, slug: &str, live: bool) {
         return;
     };
     let listeners = shared.radio.registry.listener_count(slug).unwrap_or(0);
-    shared.presence.set_radio_now_playing(RadioStatus {
-        station: slug.to_string(),
-        title: np.title,
-        artist: np.artist,
-        dj: np.dj,
-        listeners,
-        live,
-    });
+    publish_status(
+        shared,
+        RadioStatus {
+            station: slug.to_string(),
+            title: np.title,
+            artist: np.artist,
+            dj: np.dj,
+            listeners,
+            live,
+        },
+    );
+}
+
+/// The one door a now-playing report leaves through: it is remembered (so the
+/// station has a history to show someone who just arrived) and then published
+/// to presence, which pushes it to everyone watching.
+fn publish_status(shared: &Arc<Shared>, status: RadioStatus) {
+    shared
+        .radio
+        .note_now_playing(&status.station, &status.title, &status.artist, unix_ms());
+    shared.presence.set_radio_now_playing(status);
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The listing a client asks for on arrival: every station on the air, what
+/// it is playing, what it played, its cover, and whether there is audio to be
+/// had. Built from presence (the same statuses that get pushed), so the
+/// listing and the pushes can never disagree about what is on.
+pub fn station_listing(shared: &Arc<Shared>) -> Vec<rabbithole_proto::radio::RadioStationInfo> {
+    use rabbithole_proto::radio::{RadioPlayed, RadioStationInfo};
+    shared
+        .presence
+        .radio_now_playing()
+        .into_iter()
+        .map(|status| {
+            let info = shared.radio.registry.get(&status.station);
+            let name = info
+                .as_ref()
+                .map(|i| i.display_name.clone())
+                .unwrap_or_else(|| status.station.clone());
+            let recent = shared
+                .radio
+                .recent(&status.station)
+                .into_iter()
+                .map(|p| RadioPlayed::new(p.title, p.artist, p.started_unix_ms))
+                .collect();
+            RadioStationInfo::new(status.station.clone(), name)
+                .described(info.map(|i| i.description).unwrap_or_default())
+                .on_air(
+                    status.listeners as u32,
+                    status.live,
+                    shared.radio.is_streaming(&status.station),
+                )
+                .with_cover(shared.radio.cover_for(&status.station, &status.title))
+                .with_recent(recent)
+                .playing(status.title, status.artist, status.dj)
+        })
+        .collect()
 }
 
 /// Bind + serve the DJ **source ingest** surface (SOURCE/PUT). Distinct from
@@ -862,14 +1114,17 @@ where
     // Republish presence directly from the mount's now-playing so pure-DJ
     // mounts (no library program) update too.
     let listeners = shared.radio.registry.listener_count(&slug).unwrap_or(0);
-    shared.presence.set_radio_now_playing(RadioStatus {
-        station: slug.clone(),
-        title: np.title,
-        artist: np.artist,
-        dj: np.dj,
-        listeners,
-        live: true,
-    });
+    publish_status(
+        shared,
+        RadioStatus {
+            station: slug.clone(),
+            title: np.title,
+            artist: np.artist,
+            dj: np.dj,
+            listeners,
+            live: true,
+        },
+    );
     tracing::info!(mount = %slug, song = %update.song, "radio metadata updated");
     wr.write_all(metadata_update_ok().as_bytes()).await?;
     Ok(())
@@ -1001,6 +1256,7 @@ where
     if had_program && shared.radio.now_playing(&slug).is_some() {
         publish_now_playing(shared, &slug, false);
     } else {
+        shared.radio.note_off_air(&slug);
         shared.presence.clear_radio_now_playing(&slug);
         // Off the air: a typed RADIO `RadioOff` push (projected in
         // `session::push_for_event`), like the now-playing `RadioNowPlaying`.
@@ -1071,6 +1327,91 @@ mod tests {
             rating_avg: 0.0,
             rating_count: 0,
         }
+    }
+
+    #[test]
+    fn history_moves_on_a_change_of_track_and_never_on_a_repeat() {
+        let radio = Stations::new();
+        radio.note_now_playing("live", "One", "A", 1_000);
+        // Now-playing is republished whenever the listener count moves. Those
+        // repeats are not plays.
+        radio.note_now_playing("live", "One", "A", 1_500);
+        radio.note_now_playing("live", "One", "A", 1_900);
+        assert!(
+            radio.recent("live").is_empty(),
+            "the current track is not history yet"
+        );
+        radio.note_now_playing("live", "Two", "B", 2_000);
+        assert_eq!(
+            radio.recent("live"),
+            [Played {
+                title: "One".into(),
+                artist: "A".into(),
+                started_unix_ms: 1_000
+            }]
+        );
+        // Newest first, and only the last ten.
+        for n in 3..=14u64 {
+            radio.note_now_playing("live", &format!("T{n}"), "", n * 1_000);
+        }
+        let recent = radio.recent("live");
+        assert_eq!(recent.len(), RECENT_TRACKS);
+        assert_eq!(recent[0].title, "T13", "T14 is still playing");
+        assert_eq!(recent[RECENT_TRACKS - 1].title, "T4");
+        // Going off the air retires the current track and keeps the list, so
+        // coming back on does not start from nothing.
+        radio.note_off_air("live");
+        assert_eq!(radio.recent("live")[0].title, "T14");
+        // Stations do not share a history.
+        assert!(radio.recent("ambient").is_empty());
+    }
+
+    #[test]
+    fn a_track_finds_its_cover_the_way_music_folders_do() {
+        let in_album = |id, name: &str, mime: &str, blob: u8| {
+            let mut n = file_node(id, name, mime, Some([blob; 32]));
+            n.parent_id = Some(10);
+            n
+        };
+        let nodes = vec![
+            in_album(1, "Down the Hole.mp3", "audio/mpeg", 1),
+            in_album(2, "down the hole.JPG", "image/jpeg", 2),
+            in_album(3, "Carrot Cake.mp3", "audio/mpeg", 3),
+            in_album(4, "Cover.png", "image/png", 4),
+            // A loose single in the area root: no image beside it.
+            file_node(5, "Loose.mp3", "audio/mpeg", Some([5; 32])),
+            // An image in another folder is nobody's cover here.
+            file_node(6, "folder.jpg", "image/jpeg", Some([6; 32])),
+            file_node(7, "Warren.ogg", "audio/ogg", Some([7; 32])),
+        ];
+        let covers = covers_from_nodes(&nodes);
+        assert_eq!(
+            covers.get("Down the Hole.mp3"),
+            Some(&[2; 32]),
+            "its own image wins"
+        );
+        assert_eq!(
+            covers.get("Carrot Cake.mp3"),
+            Some(&[4; 32]),
+            "else the folder's cover"
+        );
+        assert_eq!(
+            covers.get("Loose.mp3"),
+            Some(&[6; 32]),
+            "the root's folder.jpg"
+        );
+        assert_eq!(covers.get("Warren.ogg"), Some(&[6; 32]));
+        assert_eq!(
+            covers.len(),
+            4,
+            "images and folders get no entry of their own"
+        );
+
+        let radio = Stations::new();
+        radio.set_covers("ambient", covers);
+        assert_eq!(radio.cover_for("ambient", "Carrot Cake.mp3"), Some([4; 32]));
+        assert_eq!(radio.cover_for("ambient", "Nothing"), None);
+        assert_eq!(radio.cover_for("live", "Carrot Cake.mp3"), None);
     }
 
     #[test]

@@ -78,10 +78,191 @@ impl Message for RadioOff {
     const MESSAGE_TYPE: u16 = 2;
 }
 
+/// Request: what is on the air here, and where do I tune in? Client → server.
+///
+/// The pushes above are deltas for someone already watching. A client that
+/// just arrived needs the whole picture: every station, the address its audio
+/// is served from, and what it has been playing. Before this message the
+/// client had to *ask the person* for the stream address, which is a fact the
+/// server has and the person usually does not.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RadioStationsRequest;
+
+impl Message for RadioStationsRequest {
+    const FAMILY: Family = Family::RADIO;
+    const MESSAGE_TYPE: u16 = 3;
+}
+
+/// A track a station played, for its recently-played list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RadioPlayed {
+    pub title: String,
+    /// May be empty.
+    pub artist: String,
+    /// When it started, Unix milliseconds (0 when unknown).
+    pub started_unix_ms: u64,
+}
+
+impl RadioPlayed {
+    pub fn new(title: impl Into<String>, artist: impl Into<String>, started_unix_ms: u64) -> Self {
+        Self {
+            title: title.into(),
+            artist: artist.into(),
+            started_unix_ms,
+        }
+    }
+}
+
+/// One station, as the listing reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RadioStationInfo {
+    /// Mount slug, also the path the audio is served at (`/<station>`).
+    pub station: String,
+    /// The station's display name.
+    pub name: String,
+    pub description: String,
+    /// Current track title (empty when nothing is playing).
+    pub title: String,
+    pub artist: String,
+    /// The source name: a live DJ, or the automation label.
+    pub dj: String,
+    pub listeners: u32,
+    pub live: bool,
+    /// Whether audio can be had right now. A rotation with no encoder behind
+    /// it has now-playing but nothing to listen to, and the client should not
+    /// offer a Listen button that 404s.
+    pub streaming: bool,
+    /// Cover art for the current track, as a blob id the client fetches with
+    /// `BlobGet`. `None` when the station has none.
+    pub cover: Option<[u8; 32]>,
+    /// What played before the current track, newest first, at most ten.
+    pub recent: Vec<RadioPlayed>,
+}
+
+impl RadioStationInfo {
+    /// A station by slug and display name, silent and empty. The struct is
+    /// `#[non_exhaustive]`, so other crates build one through these.
+    pub fn new(station: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            station: station.into(),
+            name: name.into(),
+            description: String::new(),
+            title: String::new(),
+            artist: String::new(),
+            dj: String::new(),
+            listeners: 0,
+            live: false,
+            streaming: false,
+            cover: None,
+            recent: Vec::new(),
+        }
+    }
+
+    pub fn described(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    /// What is on now, and who is sourcing it.
+    pub fn playing(
+        mut self,
+        title: impl Into<String>,
+        artist: impl Into<String>,
+        dj: impl Into<String>,
+    ) -> Self {
+        self.title = title.into();
+        self.artist = artist.into();
+        self.dj = dj.into();
+        self
+    }
+
+    /// Who is listening, whether a DJ is live, and whether there is audio.
+    pub fn on_air(mut self, listeners: u32, live: bool, streaming: bool) -> Self {
+        self.listeners = listeners;
+        self.live = live;
+        self.streaming = streaming;
+        self
+    }
+
+    pub fn with_cover(mut self, cover: Option<[u8; 32]>) -> Self {
+        self.cover = cover;
+        self
+    }
+
+    pub fn with_recent(mut self, recent: Vec<RadioPlayed>) -> Self {
+        self.recent = recent;
+        self
+    }
+}
+
+/// Reply: the stations and where their audio lives. Server → client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RadioStations {
+    /// The public base URL audio is served under, when the operator set one
+    /// (`radio_public_base`, e.g. `https://radio.example.org`). Empty when not
+    /// set, in which case the client derives `http://<the host it dialled>:<port>`.
+    pub stream_base: String,
+    /// The port the burrow's own stream listener is bound to. 0 when the
+    /// listener is off, in which case nothing here can be tuned in to.
+    pub port: u16,
+    pub stations: Vec<RadioStationInfo>,
+}
+
+impl RadioStations {
+    pub fn new(stream_base: impl Into<String>, port: u16, stations: Vec<RadioStationInfo>) -> Self {
+        Self {
+            stream_base: stream_base.into(),
+            port,
+            stations,
+        }
+    }
+}
+
+impl Message for RadioStations {
+    const FAMILY: Family = Family::RADIO;
+    const MESSAGE_TYPE: u16 = 4;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Frame;
+
+    #[test]
+    fn the_station_listing_roundtrips_as_a_reply() {
+        let req = Frame::request(crate::RequestId(7), &RadioStationsRequest).unwrap();
+        assert_eq!(req.family, Family::RADIO);
+        assert_eq!(req.message_type, 3);
+        assert!(req.decode::<RadioStationsRequest>().unwrap().is_ok());
+
+        let msg = RadioStations::new(
+            "https://radio.example.org",
+            8000,
+            vec![RadioStationInfo {
+                station: "live".into(),
+                name: "Warren FM".into(),
+                description: "Pirate radio".into(),
+                title: "Down the Hole".into(),
+                artist: "The Lagomorphs".into(),
+                dj: "Robin".into(),
+                listeners: 7,
+                live: true,
+                streaming: true,
+                cover: Some([9u8; 32]),
+                recent: vec![RadioPlayed::new(
+                    "Carrot Cake",
+                    "The Lagomorphs",
+                    1_700_000_000_000,
+                )],
+            }],
+        );
+        let frame = Frame::reply_to(&req, &msg).unwrap();
+        assert_eq!(frame.message_type, 4);
+        assert_eq!(frame.decode::<RadioStations>().unwrap().unwrap(), msg);
+    }
 
     #[test]
     fn now_playing_roundtrips_as_a_push() {

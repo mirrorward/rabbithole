@@ -27,6 +27,10 @@ struct Cli {
     /// Overrides `http_web_root`; relative paths resolve under --data-dir.
     #[arg(long, value_name = "DIR")]
     web_root: Option<PathBuf>,
+    /// Serve the burrow's own radio: the Icecast-compatible stream listener,
+    /// without editing burrow.toml. Equivalent to `radio_enabled = true`.
+    #[arg(long)]
+    radio: bool,
     /// Host this burrow lists as its public address (implies announce).
     /// A `just up` stack sets `127.0.0.1` so the local glass can list it.
     #[arg(long, value_name = "HOST")]
@@ -90,6 +94,9 @@ async fn main() -> Result<()> {
     }
     if let Some(root) = cli.web_root {
         config.http_web_root = root;
+    }
+    if cli.radio {
+        config.radio_enabled = true;
     }
     if let Some(host) = cli.advertise_host {
         config.advertise_host = host;

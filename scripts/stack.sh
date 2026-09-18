@@ -74,7 +74,9 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 if [ "$run_burrow" = 1 ]; then
-  args=(--data-dir "$DATA_DIR")
+  # --radio: the burrow's own stream listener (:8000). Clients are told where
+  # it is; without it the Radio section has now-playing and nothing to hear.
+  args=(--data-dir "$DATA_DIR" --radio)
   if [ -d "$WEB_ROOT" ]; then
     args+=(--http --http-addr "$HTTP_ADDR" --web-root "$WEB_ROOT")
     echo "==> burrow    quic :4653 · ws :4654 · web http://$HTTP_ADDR"

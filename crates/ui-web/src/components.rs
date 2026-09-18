@@ -4494,8 +4494,8 @@ fn TransferQueue() -> impl IntoView {
 }
 
 /// The radio view: the station list (live/auto badges + listener counts) and
-/// the stream player. All state and logic live in the host-tested
-/// [`crate::radio`] (reducer, prefs, URL derivation); the wasm-only `<audio>`
+/// the player. All state and logic live in the host-tested [`crate::radio`]
+/// (reducer, prefs, stream-address derivation); the wasm-only `<audio>`
 /// element behind the controls is [`crate::player`], driven through the
 /// [`AppState`] preference setters.
 #[component]
@@ -4526,7 +4526,7 @@ pub fn Radio() -> impl IntoView {
                     <ul class="rh-tree">
                         <For
                             each=stations
-                            key=|s| format!("{}:{}:{}:{}", s.station, s.live, s.listeners, s.title)
+                            key=|s| format!("{}:{}:{}:{}:{}", s.station, s.live, s.listeners, s.title, s.name)
                             children=move |s| {
                                 let slug = s.station.clone();
                                 let selected = {
@@ -4557,7 +4557,7 @@ pub fn Radio() -> impl IntoView {
                                             on:click=move |_| app.select_station(&slug)
                                         >
                                             <span class="rh-station-head">
-                                                <span class="rh-station-name">{s.station.clone()}</span>
+                                                <span class="rh-station-name">{s.display_name().to_string()}</span>
                                                 <span class=badge>{badge_text}</span>
                                                 <span class="rh-file-meta">
                                                     {dj}" \u{b7} "{s.listeners}" listening"
@@ -4572,99 +4572,174 @@ pub fn Radio() -> impl IntoView {
                     </ul>
                 </Show>
             </section>
-            <section class="rh-panel" aria-label="Radio player">
+            <section class="rh-panel rh-player" aria-label="Radio player">
                 <RadioPlayerPanel/>
             </section>
         </main>
     }
 }
 
-/// The player controls: the Icecast delivery address, enable/mute toggles,
-/// and the volume slider. Controls are disabled (with a hint) until a valid
-/// delivery address is set.
+/// The player: what is on now (with its cover), the controls, and what played
+/// before. Where the audio comes from is the burrow's to say
+/// ([`crate::radio::RadioState::stream_url`]); this pane never asks the person
+/// for an address. When there is nothing to tune in to, it says which kind of
+/// nothing, because "Listen" greyed out with no reason is a dead end.
 #[component]
 fn RadioPlayerPanel() -> impl IntoView {
     let app = expect_context::<AppState>();
     let prefs = app.radio_prefs;
+    let radio = app.radio;
 
-    let base_ok = move || prefs.with(|p| crate::radio::base_is_valid(&p.base));
-    let has_station = move || prefs.with(|p| p.station.is_some());
-    let ready = move || base_ok() && has_station();
+    // The station on show: the one picked, else whatever is on the air, so
+    // the pane is never blank while something is playing.
+    let shown = move || {
+        radio.with(|r| {
+            prefs
+                .with(|p| p.station.clone())
+                .and_then(|slug| r.get(&slug).cloned())
+                .or_else(|| r.on_air().cloned())
+        })
+    };
+    let url = move || shown().and_then(|s| radio.with(|r| r.stream_url(&s.station)));
+    let ready = move || url().is_some();
     let enabled = move || prefs.with(|p| p.enabled);
     let muted = move || prefs.with(|p| p.muted);
     let volume_pct = move || (prefs.with(|p| p.volume) * 100.0).round() as i32;
-
-    let tuned = move || {
-        prefs.with(|p| {
-            p.station
-                .as_deref()
-                .and_then(|s| crate::radio::stream_url(&p.base, s))
+    let cover = move || {
+        shown()
+            .and_then(|s| s.cover)
+            .map(|id| crate::wire::id_to_hex(&id))
+            .and_then(|hex| app.radio_covers.with(|m| m.get(&hex).cloned()))
+    };
+    // Why there is nothing to listen to, when there isn't.
+    let reason = move || {
+        if ready() {
+            return None;
+        }
+        let station = shown()?;
+        Some(if !app.focused_tracked().live.get() {
+            "A seeded demo burrow has no audio to stream.".to_string()
+        } else if radio.with(|r| r.tuning().is_none()) {
+            "Asking the burrow where to tune in\u{2026}".to_string()
+        } else if radio.with(|r| r.radio_is_off()) {
+            "This burrow isn\u{2019}t streaming audio: its radio listener is off.".to_string()
+        } else {
+            format!(
+                "{} shows what it would play, but nothing is feeding it audio right now.",
+                station.display_name()
+            )
         })
     };
 
     view! {
-        <h2 class="rh-panel-title">"Player"</h2>
-        <label class="rh-hint" for="rh-radio-base">
-            "Your server's Icecast delivery address, e.g. http://host:8000"
-        </label>
-        <div class="rh-toolbar">
-            <input
-                id="rh-radio-base"
-                class="rh-input"
-                placeholder="http://host:8000"
-                prop:value=move || prefs.with(|p| p.base.clone())
-                on:change=move |ev| app.set_radio_base(&event_target_value(&ev))
-            />
-        </div>
-        <Show when=move || !base_ok() fallback=|| ()>
-            <p class="rh-hint">
-                "Set a valid http:// or https:// delivery address to enable the player."
-            </p>
-        </Show>
-        <Show when=move || base_ok() && !has_station() fallback=|| ()>
-            <p class="rh-hint">"Pick a station from the list to tune in."</p>
-        </Show>
-        <fieldset class="rh-fieldset rh-toolbar">
-            <legend class="rh-visually-hidden">"Playback controls"</legend>
-            <button
-                class="rh-btn small"
-                disabled=move || !ready()
-                on:click=move |_| app.set_radio_enabled(!prefs.get_untracked().enabled)
-            >
-                {move || if enabled() { "\u{25a0} Stop" } else { "\u{25b6} Listen" }}
-            </button>
-            <button
-                class="rh-btn small ghost"
-                disabled=move || !ready()
-                on:click=move |_| app.set_radio_muted(!prefs.get_untracked().muted)
-            >
-                {move || if muted() { "Unmute" } else { "Mute" }}
-            </button>
-            <input
-                class="rh-slider"
-                type="range"
-                min="0"
-                max="100"
-                aria-label="Volume"
-                disabled=move || !ready()
-                prop:value=move || volume_pct().to_string()
-                on:input=move |ev| {
-                    if let Ok(v) = event_target_value(&ev).parse::<f32>() {
-                        app.set_radio_volume(v / 100.0);
+        <h2 class="rh-panel-title">"Now playing"</h2>
+        <Show
+            when=move || shown().is_some()
+            fallback=|| view! {
+                <EmptyState
+                    icon="/radio"
+                    title="Nothing on"
+                    sub="When a station goes on the air, it plays here."
+                />
+            }
+        >
+            <div class="rh-player-now">
+                {move || match cover() {
+                    Some(src) => view! {
+                        <img class="rh-player-cover" src=src alt="" width="176" height="176"/>
                     }
-                }
-            />
-            <span class="rh-file-meta" aria-hidden="true">
-                {move || format!("{}%", volume_pct())}
-            </span>
-        </fieldset>
-        <Show when=move || tuned().is_some() fallback=|| ()>
-            <p class="rh-hint">
-                {move || {
-                    let url = tuned().unwrap_or_default();
-                    if enabled() { format!("Playing {url}") } else { format!("Ready: {url}") }
+                    .into_view(),
+                    None => {
+                        let style = shown()
+                            .map(|s| crate::radio::sleeve_style(&s.title, &s.artist))
+                            .unwrap_or_default();
+                        view! { <div class="rh-player-cover" style=style aria-hidden="true"></div> }
+                            .into_view()
+                    }
                 }}
-            </p>
+                <div class="rh-player-track" role="status">
+                    <p class="rh-player-title">{move || shown().map(|s| s.title)}</p>
+                    <p class="rh-player-artist">{move || shown().map(|s| s.artist)}</p>
+                    <p class="rh-player-station">
+                        {move || shown().map(|s| {
+                            let who = if s.live { format!("DJ {}", s.dj) } else { s.dj.clone() };
+                            format!(
+                                "{} \u{b7} {} \u{b7} {} listening",
+                                s.display_name(),
+                                who,
+                                s.listeners
+                            )
+                        })}
+                    </p>
+                </div>
+            </div>
+            <fieldset class="rh-fieldset rh-toolbar rh-player-controls">
+                <legend class="rh-visually-hidden">"Playback controls"</legend>
+                <button
+                    class="rh-btn"
+                    disabled=move || !ready()
+                    on:click=move |_| {
+                        // Nothing picked yet: Listen tunes in to what is on show.
+                        if prefs.with_untracked(|p| p.station.is_none()) {
+                            if let Some(s) = shown() {
+                                app.select_station(&s.station);
+                            }
+                        }
+                        app.set_radio_enabled(!prefs.get_untracked().enabled)
+                    }
+                >
+                    {move || if enabled() && ready() { "Stop" } else { "Listen" }}
+                </button>
+                <button
+                    class="rh-btn ghost"
+                    disabled=move || !ready()
+                    on:click=move |_| app.set_radio_muted(!prefs.get_untracked().muted)
+                >
+                    {move || if muted() { "Unmute" } else { "Mute" }}
+                </button>
+                <input
+                    class="rh-slider"
+                    type="range"
+                    min="0"
+                    max="100"
+                    aria-label="Volume"
+                    disabled=move || !ready()
+                    prop:value=move || volume_pct().to_string()
+                    on:input=move |ev| {
+                        if let Ok(v) = event_target_value(&ev).parse::<f32>() {
+                            app.set_radio_volume(v / 100.0);
+                        }
+                    }
+                />
+                <span class="rh-file-meta" aria-hidden="true">
+                    {move || format!("{}%", volume_pct())}
+                </span>
+            </fieldset>
+            {move || reason().map(|why| view! { <p class="rh-hint">{why}</p> })}
+            <h3 class="rh-player-heading">"Recently played"</h3>
+            <Show
+                when=move || shown().is_some_and(|s| !s.recent.is_empty())
+                fallback=|| view! { <p class="rh-hint">"Nothing yet. This is the first track since it came on."</p> }
+            >
+                <ol class="rh-player-recent">
+                    {move || shown().map(|s| {
+                        s.recent
+                            .into_iter()
+                            .map(|p| {
+                                let when = (p.started_unix_ms != 0)
+                                    .then(|| crate::clock::local_hhmm(p.started_unix_ms as i64));
+                                view! {
+                                    <li>
+                                        <span class="rh-player-recent-title">{p.title}</span>
+                                        <span class="rh-player-recent-artist">{p.artist}</span>
+                                        {when.map(|w| view! { <span class="rh-player-recent-when">{w}</span> })}
+                                    </li>
+                                }
+                            })
+                            .collect_view()
+                    })}
+                </ol>
+            </Show>
         </Show>
     }
 }

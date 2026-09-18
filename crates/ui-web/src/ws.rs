@@ -95,6 +95,8 @@ pub type ThreadSink = Rc<dyn Fn(Vec<crate::state::Thread>)>;
 pub type PostSink = Rc<dyn Fn(Vec<crate::state::Post>)>;
 /// A sink the transport pushes the DM conversation list into.
 pub type DmThreadSink = Rc<dyn Fn(Vec<crate::state::DmThread>)>;
+/// Receives a burrow's radio listing: where the audio is, and what is on.
+pub type RadioListingSink = Rc<dyn Fn(wire::RadioListing)>;
 /// A sink the transport pushes one conversation's message history into.
 pub type DmHistorySink = Rc<dyn Fn((String, Vec<crate::state::DmMessage>))>;
 /// A sink the transport pushes a live `(peer, message)` DM into.
@@ -136,6 +138,7 @@ struct Inner {
     thread_sink: Option<ThreadSink>,
     post_sink: Option<PostSink>,
     dm_thread_sink: Option<DmThreadSink>,
+    radio_listing_sink: Option<RadioListingSink>,
     dm_history_sink: Option<DmHistorySink>,
     /// Peers of in-flight DM-history requests, FIFO (a `DmHistory` reply is
     /// id-less; the ordered socket answers in request order).
@@ -238,6 +241,12 @@ impl Inner {
         }
     }
 
+    fn emit_radio_listing(&self, listing: wire::RadioListing) {
+        if let Some(sink) = &self.radio_listing_sink {
+            sink(listing);
+        }
+    }
+
     fn emit_dm_threads(&self, threads: Vec<crate::state::DmThread>) {
         if let Some(sink) = &self.dm_thread_sink {
             sink(threads);
@@ -301,6 +310,7 @@ impl WsClient {
                 thread_sink: None,
                 post_sink: None,
                 dm_thread_sink: None,
+                radio_listing_sink: None,
                 dm_history_sink: None,
                 pending_dm_history: RefCell::new(VecDeque::new()),
                 dm_received_sink: None,
@@ -468,6 +478,20 @@ impl WsClient {
         let id = b.next_request_id();
         if let Ok(bytes) = wire::post_reply(board, parent, body, id).and_then(|f| encode_frame(&f))
         {
+            Self::write(&mut b, &bytes);
+        }
+    }
+
+    /// Register the radio-listing sink. Most recent registration wins.
+    pub fn on_radio_listing(&mut self, sink: RadioListingSink) {
+        self.inner.borrow_mut().radio_listing_sink = Some(sink);
+    }
+
+    /// Ask what is on the air and where ([`on_radio_listing`](Self::on_radio_listing)).
+    pub fn request_radio_stations(&self) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(bytes) = wire::radio_stations_request(id).and_then(|f| encode_frame(&f)) {
             Self::write(&mut b, &bytes);
         }
     }
@@ -787,6 +811,9 @@ impl WsClient {
                         }
                         if let Some(threads) = wire::frame_to_dm_threads(&frame) {
                             b.emit_dm_threads(threads);
+                        }
+                        if let Some(listing) = wire::frame_to_radio_listing(&frame) {
+                            b.emit_radio_listing(listing);
                         }
                         if let Some(msgs) = wire::frame_to_dm_history(&frame) {
                             // Pair (FIFO) with the peer it was requested for so

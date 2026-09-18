@@ -180,6 +180,8 @@ pub struct AppState {
     /// The user's radio player preferences (enable/volume/mute/station plus
     /// the Icecast delivery address), persisted to `localStorage`.
     pub radio_prefs: RwSignal<RadioPrefs>,
+    /// Cover art fetched for the radio, as `data:` URLs keyed by blob hex.
+    pub radio_covers: RwSignal<std::collections::HashMap<String, String>>,
     /// The wasm-only `<audio>` element wrapper the preference setters keep in
     /// sync ([`crate::player`]). Absent on the host, where there is no DOM.
     #[cfg(target_arch = "wasm32")]
@@ -242,6 +244,7 @@ impl AppState {
             custom_pack: create_rw_signal(None),
             radio: create_rw_signal(RadioState::default()),
             radio_prefs: create_rw_signal(initial_radio_prefs()),
+            radio_covers: create_rw_signal(Default::default()),
             #[cfg(target_arch = "wasm32")]
             player: store_value(crate::player::RadioPlayer::new()),
         }
@@ -661,6 +664,9 @@ impl AppState {
                                     // …and the burrow's front page (its welcome
                                     // screen: featured item, who's on, ticker).
                                     c.request_front_page();
+                                    // …and what is on the air, and where: the
+                                    // stream address is the burrow's to say.
+                                    c.request_radio_stations();
                                     // This burrow inherits the user's current status.
                                     c.set_presence(presence.get_untracked(), None);
                                 });
@@ -877,13 +883,63 @@ impl AppState {
                 #[cfg(not(target_arch = "wasm32"))]
                 let _ = avatar_hex;
             }));
+            let radio_covers = self.radio_covers;
             ws.on_avatar(std::rc::Rc::new(move |(hex, data_url)| {
+                // A blob fetched for a station's cover goes to the radio; the
+                // same reply channel carries both, told apart by who asked.
+                let is_cover = radio.with_untracked(|r| {
+                    r.stations()
+                        .any(|s| s.cover.is_some_and(|c| crate::wire::id_to_hex(&c) == hex))
+                });
+                if is_cover {
+                    radio_covers.update(|m| {
+                        m.insert(hex.clone(), data_url.clone());
+                    });
+                }
                 // Only attach if the fetched blob still belongs to the selected
                 // profile — a late reply from a previous selection is dropped.
                 state.update(|s| s.set_avatar_src(&hex, data_url))
             }));
+            let listing_app = *self;
+            let listing_endpoint = endpoint.clone();
+            ws.on_radio_listing(std::rc::Rc::new(move |listing| {
+                let wanted: Vec<String> = listing
+                    .stations
+                    .iter()
+                    .filter_map(|s| s.cover.map(|c| crate::wire::id_to_hex(&c)))
+                    .filter(|hex| radio_covers.with_untracked(|m| !m.contains_key(hex)))
+                    .collect();
+                radio.update(|r| {
+                    r.apply_listing(
+                        crate::radio::Tuning {
+                            endpoint: listing_endpoint.clone(),
+                            stream_base: listing.stream_base,
+                            port: listing.port,
+                        },
+                        listing.stations,
+                    )
+                });
+                // Deferred: this sink runs inside the transport's own borrow,
+                // so fetching covers (and re-syncing the player, which may now
+                // have an address to play) waits a tick.
+                wasm_bindgen_futures::spawn_local(async move {
+                    for hex in wanted {
+                        ws_sv.update_value(|c| c.request_blob(&hex));
+                    }
+                    listing_app.radio_prefs_changed();
+                });
+            }));
             ws.on_notice(std::rc::Rc::new(move |route| match route {
-                crate::wire::NoticeRoute::Radio(u) => radio.update(|r| r.apply_update(u)),
+                crate::wire::NoticeRoute::Radio(u) => {
+                    let mut track_changed = false;
+                    radio.update(|r| track_changed = r.apply_update(u));
+                    // A new track has a new cover: ask for the picture again.
+                    if track_changed {
+                        wasm_bindgen_futures::spawn_local(async move {
+                            ws_sv.update_value(|c| c.request_radio_stations());
+                        });
+                    }
+                }
                 crate::wire::NoticeRoute::Chat { from, text } => {
                     state.update(|s| s.push_notice(&from, &text))
                 }
@@ -2101,7 +2157,9 @@ impl AppState {
     /// its notice sink.
     pub fn apply_notice(&self, route: NoticeRoute) {
         match route {
-            NoticeRoute::Radio(update) => self.radio.update(|r| r.apply_update(update)),
+            NoticeRoute::Radio(update) => self.radio.update(|r| {
+                r.apply_update(update);
+            }),
             NoticeRoute::Chat { from, text } => {
                 self.focused().state.update(|s| s.push_notice(&from, &text));
             }
@@ -2124,22 +2182,29 @@ impl AppState {
     /// real `ServerNotice` push routed through the host-tested wire mapping),
     /// so the Radio view and status segment render in dev.
     pub fn load_radio(&self) {
-        // In a live session the radio reducer is fed by real `[radio]` pushes
-        // through the notice sink; never mix seeded mock stations in.
+        // In a live session the burrow is asked: what is on, and where. Never
+        // mix seeded mock stations in.
         if self.skip_mock_load() {
+            #[cfg(target_arch = "wasm32")]
+            self.focused()
+                .ws
+                .update_value(|c| c.request_radio_stations());
             return;
         }
-        for route in self.focused().client.with_value(|c| c.radio_routes()) {
-            self.apply_notice(route);
+        // The demo: the seeded listing, decoded the way a live one is.
+        if let Some(listing) = self.focused().client.with_value(|c| c.radio_listing()) {
+            let endpoint = self.focused_endpoint();
+            self.radio.update(|r| {
+                r.apply_listing(
+                    crate::radio::Tuning {
+                        endpoint,
+                        stream_base: listing.stream_base,
+                        port: listing.port,
+                    },
+                    listing.stations,
+                )
+            });
         }
-    }
-
-    /// Set the Icecast delivery base address (e.g. `http://host:8000`),
-    /// persist it, and re-sync the player.
-    pub fn set_radio_base(&self, base: &str) {
-        self.radio_prefs
-            .update(|p| p.base = base.trim().to_string());
-        self.radio_prefs_changed();
     }
 
     /// Tune the player in or out, persist the choice, and re-sync.
@@ -2175,7 +2240,12 @@ impl AppState {
         {
             let prefs = self.radio_prefs.get_untracked();
             crate::radio::storage::save_prefs(&prefs);
-            self.player.update_value(|p| p.sync(&prefs));
+            // Where to tune in is the burrow's to say (`RadioState::stream_url`).
+            let url = prefs
+                .station
+                .as_deref()
+                .and_then(|station| self.radio.with_untracked(|r| r.stream_url(station)));
+            self.player.update_value(|p| p.sync(&prefs, url));
         }
     }
 }

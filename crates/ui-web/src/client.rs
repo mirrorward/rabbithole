@@ -801,6 +801,51 @@ impl MockClient {
         .collect()
     }
 
+    /// The demo burrow's radio listing, decoded through the host-tested
+    /// [`frame_to_radio_listing`](crate::wire::frame_to_radio_listing) like a
+    /// live one. A seeded burrow has no encoder, so nothing here streams and
+    /// the port is 0: the player shows everything except a working Listen.
+    pub fn radio_listing(&self) -> Option<crate::wire::RadioListing> {
+        use rabbithole_proto::radio::{RadioPlayed, RadioStationInfo, RadioStations};
+        const LAGOMORPHS: [&str; 10] = [
+            "Carrot Cake",
+            "Burrow Deep",
+            "Moonlit Meadow",
+            "Thump Twice",
+            "Clover Season",
+            "The Long Tunnel",
+            "Warren Rules",
+            "Whiskers in the Dark",
+            "Second Exit",
+            "Bramble Patch",
+        ];
+        let recent = LAGOMORPHS
+            .iter()
+            .map(|t| RadioPlayed::new(*t, "The Lagomorphs", 0))
+            .collect();
+        let listing = RadioStations::new(
+            "",
+            0,
+            vec![
+                RadioStationInfo::new("live", "Warren FM")
+                    .described("Pirate radio from under the hill")
+                    .playing("Down the Hole", "The Lagomorphs", "Robin")
+                    .on_air(7, true, false)
+                    .with_recent(recent),
+                RadioStationInfo::new("ambient", "Ambient Burrow")
+                    .described("Slow rotation for the small hours")
+                    .playing("Warren Dawn", "", "rotation")
+                    .on_air(3, false, false)
+                    .with_recent(vec![
+                        RadioPlayed::new("Dew on the Clover", "", 0),
+                        RadioPlayed::new("First Light", "", 0),
+                    ]),
+            ],
+        );
+        let frame = Frame::request(RequestId(0), &listing).ok()?;
+        crate::wire::frame_to_radio_listing(&frame)
+    }
+
     /// Route the seeded radio pushes exactly as the transport would: each is a
     /// real RADIO `RadioNowPlaying` frame decoded through the host-tested
     /// [`frame_to_notice_route`] — no parallel decode path.
@@ -1538,7 +1583,9 @@ mod tests {
         let mut radio = RadioState::default();
         for route in routes {
             match route {
-                NoticeRoute::Radio(update) => radio.apply_update(update),
+                NoticeRoute::Radio(update) => {
+                    radio.apply_update(update);
+                }
                 other => panic!("seeded notice routed to chat: {other:?}"),
             }
         }

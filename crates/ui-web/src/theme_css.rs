@@ -945,6 +945,24 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 .rh-station-head{display:flex;gap:var(--rh-space-2);align-items:center;width:100%}\
 .rh-station-name{font-weight:600;color:var(--rh-text)}\
 .rh-station-track{font-size:var(--rh-font-sm);color:var(--rh-muted)}\
+/* The radio player: what is on (with its sleeve), the controls, what came before. */\
+.rh-player{flex:1;min-width:0;overflow-y:auto}\
+.rh-player-now{display:flex;align-items:flex-end;gap:var(--rh-space-5);margin-bottom:var(--rh-space-5)}\
+.rh-player-cover{flex:none;display:block;width:11rem;height:11rem;border-radius:var(--rh-radius-lg);object-fit:cover;background-color:var(--rh-surface-2);box-shadow:var(--rh-shadow-2)}\
+.rh-player-track{min-width:0;display:flex;flex-direction:column;gap:.15rem;padding-bottom:.2rem}\
+.rh-player-title{margin:0;font-family:var(--rh-font-display);font-size:var(--rh-font-xl);font-weight:700;letter-spacing:-.02em;line-height:1.15;color:var(--rh-text);text-wrap:balance;overflow-wrap:anywhere}\
+.rh-player-artist{margin:0;font-size:var(--rh-font-lg);color:var(--rh-text)}\
+.rh-player-artist:empty{display:none}\
+.rh-player-station{margin:.35rem 0 0;font-size:var(--rh-font-sm);color:var(--rh-muted);font-variant-numeric:tabular-nums;text-wrap:pretty}\
+.rh-player-controls{align-items:center;margin-bottom:var(--rh-space-2)}\
+.rh-player-controls .rh-slider{flex:1;max-width:16rem}\
+.rh-player-heading{margin:var(--rh-space-6) 0 var(--rh-space-2);font-family:var(--rh-font-display);font-size:var(--rh-font-size);font-weight:600;color:var(--rh-text)}\
+.rh-player-recent{list-style:none;margin:0;padding:0;counter-reset:rh-played;max-width:40rem}\
+.rh-player-recent li{counter-increment:rh-played;display:grid;grid-template-columns:1.6rem minmax(0,1.4fr) minmax(0,1fr) auto;align-items:baseline;column-gap:var(--rh-space-3);min-height:2rem;padding:.3rem 0;border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent);font-size:var(--rh-font-sm)}\
+.rh-player-recent li::before{content:counter(rh-played);font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);color:var(--rh-muted);font-variant-numeric:tabular-nums;text-align:right}\
+.rh-player-recent-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--rh-text)}\
+.rh-player-recent-artist{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--rh-muted)}\
+.rh-player-recent-when{font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);color:var(--rh-muted);font-variant-numeric:tabular-nums}\
 .rh-slider{accent-color:var(--rh-accent);flex:1}\
 .rh-hint{color:var(--rh-muted);font-size:var(--rh-font-sm);margin:.3rem 0;line-height:1.5;max-width:70ch}\
 .rh-settings-note{max-width:70ch}\
@@ -1041,7 +1059,7 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 @media (max-width:1000px){.rh-glass-cols,.rh-glass-row{grid-template-columns:1.6rem minmax(8rem,1.2fr) minmax(0,1.6fr) 4.25rem}.rh-glass-uptime,.rh-glass-cols .uptime{display:none}}\
 /* A phone gets one scrolling page: a compact masthead and the form, then the\
    browser, its rows two lines tall so a name and its blurb both fit. */\
-@media (max-width:720px){.rh-connect{display:block;flex:none}.rh-connect-side{overflow:visible;gap:var(--rh-space-4);padding:var(--rh-space-5) var(--rh-space-4);border-right:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-connect-brand{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:var(--rh-space-3);align-items:center;text-align:left}.rh-connect-logo{grid-row:1/3;width:3.5rem;height:3.5rem}.rh-connect-brand h1{margin:0;align-self:end;font-size:1.35rem}.rh-connect-tagline{align-self:start}.rh-connect-version{display:none}.rh-connect-foot{padding-top:0}.rh-connect-main{display:block}.rh-glass-head{padding:var(--rh-space-4) var(--rh-space-4) var(--rh-space-2)}.rh-glass-search{flex:1;width:auto;min-width:0}.rh-glass-cols{display:none}.rh-glass-scroll{overflow:visible;padding:0 var(--rh-space-2) var(--rh-space-3)}.rh-glass-row{grid-template-columns:1.6rem minmax(0,1fr) auto;grid-template-areas:\"mark name users\" \"mark desc desc\";row-gap:0;min-height:2.75rem;padding:.4rem .5rem}.rh-glass-mark{grid-area:mark}.rh-glass-name{grid-area:name}.rh-glass-desc{grid-area:desc}.rh-glass-users{grid-area:users}.rh-glass-detail{padding-left:calc(2.1rem + var(--rh-space-3))}.rh-glass-add{grid-template-columns:1fr 1fr}.rh-glass-add .rh-input{grid-column:1/-1}.rh-glass-page{display:block;overflow-y:auto}.rh-glass-status{padding:.5rem var(--rh-space-4) calc(.5rem + env(safe-area-inset-bottom))}}\
+@media (max-width:720px){.rh-connect{display:block;flex:none}.rh-connect-side{overflow:visible;gap:var(--rh-space-4);padding:var(--rh-space-5) var(--rh-space-4);border-right:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-connect-brand{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:var(--rh-space-3);align-items:center;text-align:left}.rh-connect-logo{grid-row:1/3;width:3.5rem;height:3.5rem}.rh-connect-brand h1{margin:0;align-self:end;font-size:1.35rem}.rh-connect-tagline{align-self:start}.rh-connect-version{display:none}.rh-connect-foot{padding-top:0}.rh-connect-main{display:block}.rh-glass-head{padding:var(--rh-space-4) var(--rh-space-4) var(--rh-space-2)}.rh-glass-search{flex:1;width:auto;min-width:0}.rh-glass-cols{display:none}.rh-glass-scroll{overflow:visible;padding:0 var(--rh-space-2) var(--rh-space-3)}.rh-glass-row{grid-template-columns:1.6rem minmax(0,1fr) auto;grid-template-areas:\"mark name users\" \"mark desc desc\";row-gap:0;min-height:2.75rem;padding:.4rem .5rem}.rh-glass-mark{grid-area:mark}.rh-glass-name{grid-area:name}.rh-glass-desc{grid-area:desc}.rh-glass-users{grid-area:users}.rh-glass-detail{padding-left:calc(2.1rem + var(--rh-space-3))}.rh-glass-add{grid-template-columns:1fr 1fr}.rh-glass-add .rh-input{grid-column:1/-1}.rh-glass-page{display:block;overflow-y:auto}.rh-player-now{flex-direction:column;align-items:flex-start;gap:var(--rh-space-3)}.rh-player-cover{width:9rem;height:9rem}.rh-player-recent li{grid-template-columns:1.4rem minmax(0,1fr) auto}.rh-player-recent-artist{grid-column:2;grid-row:2}.rh-glass-status{padding:.5rem var(--rh-space-4) calc(.5rem + env(safe-area-inset-bottom))}}\
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:.01ms!important;transition-delay:0s!important;animation-duration:.01ms!important;animation-delay:0s!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}\
 ";
 

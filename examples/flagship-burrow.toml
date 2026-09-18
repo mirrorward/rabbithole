@@ -297,6 +297,12 @@ radio_enabled = true
 
 # Delivery listener (default 8000 — the Icecast convention). (restart)
 # radio_addr = "0.0.0.0:8000"
+# The public base URL the audio is reachable at, when it is not simply this
+# host on radio_addr's port: a TLS reverse proxy in front of the listener, say.
+# (A client served over https cannot play a plain-http stream.) Clients are
+# told this in the station listing; nobody is ever asked to type it. Empty =
+# clients use the host they dialled plus radio_addr's port.
+# radio_public_base = "https://radio.example.org"
 
 # DJ source ingest + the /admin/metadata + /admin.cgi `updinfo` endpoints. (restart)
 radio_source_enabled = true

@@ -127,13 +127,28 @@ async fn source_pushes_and_listener_receives_with_metadata_at_boundary() {
 
     // 4. The listener must receive metaint audio bytes, then a metadata block.
     //    Pull until we have the boundary block plus a little of the next run.
-    let want = DEFAULT_METAINT + 1 + 16 + 16;
-    while received.len() < want {
-        let more = read_at_least(&mut listener, 1).await;
-        if more.is_empty() {
+    //    How much that is depends on the block's own length byte, so read up
+    //    to the length byte first and then to one byte past the block. (This
+    //    used to read a fixed `metaint + 33` and then index byte `metaint +
+    //    33`: it passed only when a read happened to overshoot, and failed
+    //    whenever a chunk boundary landed exactly there.)
+    let mut want = DEFAULT_METAINT + 1;
+    loop {
+        while received.len() < want {
+            let more = read_at_least(&mut listener, 1).await;
+            if more.is_empty() {
+                break;
+            }
+            received.extend_from_slice(&more);
+        }
+        if received.len() < want {
+            break; // the stream ended early; the asserts below say so
+        }
+        let after_block = DEFAULT_METAINT + 1 + received[DEFAULT_METAINT] as usize * 16 + 1;
+        if want >= after_block {
             break;
         }
-        received.extend_from_slice(&more);
+        want = after_block;
     }
     assert!(
         received.len() > DEFAULT_METAINT,
@@ -167,6 +182,95 @@ async fn source_pushes_and_listener_receives_with_metadata_at_boundary() {
         "audio resumes after the metadata block"
     );
 
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_client_is_told_where_to_tune_in_without_being_asked() {
+    use rabbithole_core::Client;
+    use rabbithole_proto::radio::{RadioStations, RadioStationsRequest};
+
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("dj", "spin-spin-spin", Role::Admin)
+        .await
+        .unwrap();
+    let radio = burrow.radio_addr.expect("radio enabled");
+
+    // A guest: tuning in needs no account, and neither does finding out where.
+    let mut guest = Client::connect(
+        &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
+        None,
+        None,
+        "e2e",
+        "0",
+    )
+    .await
+    .unwrap();
+    guest.auth_guest(Some("listener".into())).await.unwrap();
+    guest.expect_welcome().await.unwrap();
+
+    // Nothing on the air yet. The port is already known, and it is the one
+    // that actually bound (the config said 0, "any").
+    let quiet: RadioStations = guest.request(&RadioStationsRequest).await.unwrap();
+    assert_eq!(quiet.port, radio.port());
+    assert_ne!(quiet.port, 0);
+    assert_eq!(quiet.stream_base, "");
+    assert!(quiet.stations.is_empty());
+
+    // A DJ goes live on /live.
+    let mut source = TcpStream::connect(radio).await.unwrap();
+    let head = format!(
+        "PUT /live HTTP/1.1\r\n\
+         Authorization: Basic {}\r\n\
+         ice-name: Warren FM\r\n\
+         content-type: audio/mpeg\r\n\r\n",
+        basic_auth("dj", "spin-spin-spin")
+    );
+    source.write_all(head.as_bytes()).await.unwrap();
+    source.flush().await.unwrap();
+    let ack = read_at_least(&mut source, 12).await;
+    assert!(String::from_utf8_lossy(&ack).contains("200 OK"));
+
+    let on: RadioStations = guest.request(&RadioStationsRequest).await.unwrap();
+    let live = on
+        .stations
+        .iter()
+        .find(|s| s.station == "live")
+        .expect("the mount is listed");
+    assert!(live.live);
+    assert!(
+        live.streaming,
+        "a source is connected: there is audio to be had"
+    );
+    assert_eq!(live.name, "Warren FM");
+    assert!(live.recent.is_empty(), "its first track is still playing");
+
+    // An operator behind a TLS proxy names the public address, live.
+    burrow
+        .shared
+        .config
+        .set_key("radio_public_base", "https://radio.example.org/")
+        .unwrap();
+    let named: RadioStations = guest.request(&RadioStationsRequest).await.unwrap();
+    assert_eq!(named.stream_base, "https://radio.example.org");
+
+    // The DJ leaves. The station comes off the listing, and says so.
+    drop(source);
+    let mut off = named;
+    for _ in 0..50 {
+        off = guest.request(&RadioStationsRequest).await.unwrap();
+        if off.stations.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert!(off.stations.is_empty(), "off the air: {:?}", off.stations);
     burrow.shutdown().await;
 }
 

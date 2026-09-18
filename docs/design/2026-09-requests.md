@@ -17,7 +17,7 @@
 | 5c | Download offers swarm options: other burrows and people you have access to | medium/large | planned |
 | 6 | People with downloads can opt in to helping other people's swarm downloads | medium | planned |
 | 7 | Server-to-server transfers: pick files or folders to send to another burrow you are on, optional swarm, permissions on both sides, clear errors, pieces from participants without exposing the destination | large, security-sensitive | design first |
-| 8 | Radio: the server advertises the stream URL (never ask the user); player shows the current song with cover and the last 10; the burrow uses its own streaming server | large | planned |
+| 8 | Radio: the server advertises the stream URL (never ask the user); player shows the current song with cover and the last 10; the burrow uses its own streaming server | large | 0.210.0 (a to c); library-rotation audio still open |
 
 ## Findings
 

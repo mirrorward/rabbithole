@@ -68,7 +68,7 @@ use crate::presence::{
     BlockAdd, BlockRemove, BuddyAdd, BuddyList, BuddyListRequest, BuddyRemove, PresenceSet,
     UserJoined, UserLeft, Who, WhoList,
 };
-use crate::radio::{RadioNowPlaying, RadioOff};
+use crate::radio::{RadioNowPlaying, RadioOff, RadioStations, RadioStationsRequest};
 use crate::session::{
     AgreementAccept, AuthGuest, AuthOk, AuthPassword, AuthResume, Ping, Pong, ServerNotice, Welcome,
 };
@@ -174,7 +174,7 @@ wire_registry! {
     // FEDERATION frame family but is not part of the client message registry.
 
     // ── Family 9: RADIO ──────────────────────────────────────────────────
-    RadioNowPlaying, RadioOff,
+    RadioNowPlaying, RadioOff, RadioStationsRequest, RadioStations,
 
     // ── Family 10: WISHING_WELL ──────────────────────────────────────────
     WishListRequest, WishList, WishCreate, WishVote, WishSetStatus, WishReply, WishUpdated,
@@ -187,7 +187,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 180;
+pub const EXPECTED: usize = 182;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

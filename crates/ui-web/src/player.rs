@@ -10,7 +10,7 @@
 
 use web_sys::HtmlAudioElement;
 
-use crate::radio::{stream_url, RadioPrefs};
+use crate::radio::RadioPrefs;
 
 /// A lazily created, detached `<audio>` element playing the radio stream.
 pub struct RadioPlayer {
@@ -83,14 +83,12 @@ impl RadioPlayer {
         }
     }
 
-    /// Reconcile the element with the user's preferences: derive the stream
-    /// URL (pure, host-tested [`stream_url`]), then play at the chosen
-    /// volume/mute when enabled — or pause otherwise.
-    pub fn sync(&mut self, prefs: &RadioPrefs) {
-        let url = prefs
-            .station
-            .as_deref()
-            .and_then(|station| stream_url(&prefs.base, station));
+    /// Reconcile the element with the user's preferences and the stream URL
+    /// the burrow's listing resolves to (pure, host-tested
+    /// [`RadioState::stream_url`](crate::radio::RadioState::stream_url)):
+    /// play at the chosen volume/mute when enabled and there is an address,
+    /// pause otherwise.
+    pub fn sync(&mut self, prefs: &RadioPrefs, url: Option<String>) {
         match url {
             Some(url) if prefs.enabled => {
                 self.set_src(&url);

@@ -94,7 +94,7 @@ use rabbithole_proto::filelib::{
 };
 use rabbithole_proto::hello::{CapabilitySet, Hello, HelloAck};
 use rabbithole_proto::presence::{PresenceSet, PresenceState, UserJoined, UserLeft, Who, WhoList};
-use rabbithole_proto::radio::{RadioNowPlaying, RadioOff};
+use rabbithole_proto::radio::{RadioNowPlaying, RadioOff, RadioStations, RadioStationsRequest};
 use rabbithole_proto::session::{AuthPassword, Ping, ServerNotice};
 use rabbithole_proto::transfer::{
     FileChunk, FileChunkRequest, TransferAbort, TransferOpen, TransferTicket,
@@ -587,6 +587,57 @@ pub fn blob_to_data_url(bytes: &[u8]) -> String {
     format!("data:{};base64,{}", image_mime(bytes), base64_encode(bytes))
 }
 
+/// Build a [`RadioStationsRequest`] frame: what is on the air, and where.
+pub fn radio_stations_request(id: RequestId) -> Result<Frame, ProtoError> {
+    Frame::request(id, &RadioStationsRequest)
+}
+
+/// A burrow's radio, as it reported it: where the audio is served and every
+/// station on the air.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RadioListing {
+    pub stream_base: String,
+    pub port: u16,
+    pub stations: Vec<crate::radio::StationStatus>,
+}
+
+/// Decode a [`RadioStations`] reply. `None` for any other frame or an error.
+pub fn frame_to_radio_listing(frame: &Frame) -> Option<RadioListing> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let m = frame.decode::<RadioStations>()?.ok()?;
+    Some(RadioListing {
+        stream_base: m.stream_base,
+        port: m.port,
+        stations: m
+            .stations
+            .into_iter()
+            .map(|s| crate::radio::StationStatus {
+                station: s.station,
+                title: s.title,
+                artist: s.artist,
+                dj: s.dj,
+                listeners: s.listeners,
+                live: s.live,
+                name: s.name,
+                description: s.description,
+                streaming: Some(s.streaming),
+                cover: s.cover,
+                recent: s
+                    .recent
+                    .into_iter()
+                    .map(|p| crate::radio::Played {
+                        title: p.title,
+                        artist: p.artist,
+                        started_unix_ms: p.started_unix_ms,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    })
+}
+
 /// Decode a presence push to a [`PresenceDelta`]. `None` for any other frame.
 pub fn frame_to_presence(frame: &Frame) -> Option<PresenceDelta> {
     if frame.error.is_some() {
@@ -746,6 +797,7 @@ pub fn frame_to_notice_route(frame: &Frame) -> Option<NoticeRoute> {
                 dj: np.dj,
                 listeners: np.listeners,
                 live: np.live,
+                ..Default::default()
             },
         )));
     }

@@ -12,7 +12,7 @@ browsers, telnet BBS clients, newsreaders, offline mail readers, and (yes) real
 classic Hotline clients. Servers federate over **Tunnels** and are discoverable
 through **Looking Glass** directories.
 
-**Status: 0.209.0 — waves 0–14 largely landed.** The native server and its
+**Status: 0.210.0 — waves 0–14 largely landed.** The native server and its
 surfaces are feature-complete for a public flagship; remaining work is 1.0
 hardening (E2EE wiring, cross-server flood-fill, GUI/mobile shells) and the
 post-1.0 Reticulum mesh. See [`TODO.md`](TODO.md) for the exact per-wave state.
@@ -33,7 +33,7 @@ recovery codes, multiple personas per account, and an ACL evaluator (roles +
 classes + capability bitmask, nearest-ancestor / deny-wins) governing every
 surface.
 
-| Subsystem | State at 0.209.0 |
+| Subsystem | State at 0.210.0 |
 |---|---|
 | **Accounts & identity** | Ed25519 identity keys, Argon2id passwords, hashed session tokens + resume, TOTP + recovery codes, key enrollment, registration gating (open/invite/closed) |
 | **Personas & presence** | Multiple personas per account, profiles/.plan/avatars+banners, buddy lists, presence states (away/idle/invisible), member directory + locate |
@@ -107,7 +107,7 @@ Native transports and rate limiting are the only things on out of the box;
 | NNTP peer feed (implicit TLS) | 1563 (`nntp_feed_tls_addr`) | `nntp_feed_tls_enabled` | off |
 | Hotline (+ HTXF on port+1) | 5500 / 5501 (`hotline_addr`) | `hotline_enabled` | off |
 | FidoNet / binkp mailer | 24554 (`ftn_addr`) | `ftn_enabled` | off |
-| Radio delivery (Icecast/ICY) | 8000 (`radio_addr`) | `radio_enabled` | off |
+| Radio delivery (Icecast/ICY) | 8000 (`radio_addr`) | `radio_enabled` or `burrow --radio` | off |
 | Radio DJ source + `updinfo` | 8001 (`radio_source_addr`) | `radio_source_enabled` | off |
 | RSS/Atom syndication | — (outbound fetcher) | `syndication_enabled` | off |
 | QWK/QWKE offline mail | — (telnet `[M]` + `ctl`) | `qwk_enabled` | off |

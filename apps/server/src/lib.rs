@@ -15,6 +15,7 @@ pub mod handlers10;
 pub mod handlers11;
 pub mod handlers12;
 pub mod handlers13;
+pub mod handlers14;
 pub mod handlers2;
 pub mod handlers3;
 pub mod handlers4;
@@ -445,6 +446,9 @@ impl Burrow {
         if let Some(addr) = radio {
             let (bound, handle) = radio::spawn_radio(shared.clone(), addr).await?;
             tracing::info!(radio = %bound, "radio (ICY) listening");
+            // What clients are told to tune in to: the port that actually
+            // bound, which is not the configured one when that was 0 ("any").
+            shared.radio.set_listen_port(bound.port());
             radio_addr = Some(bound);
             tasks.push(handle);
         }
@@ -704,6 +708,9 @@ async fn install_radio_library(
         };
         let tracks = radio::tracks_from_nodes(&nodes);
         let count = tracks.len();
+        shared
+            .radio
+            .set_covers(mount, radio::covers_from_nodes(&nodes));
         shared
             .radio
             .install_program(mount, &format!("{mount} (library)"), area, tracks);

@@ -192,6 +192,14 @@ pub struct ServerConfig {
     pub radio_enabled: bool,
     /// Radio listener address (default 0.0.0.0:8000 — the Icecast convention).
     pub radio_addr: SocketAddr,
+    /// The public base URL the radio's audio is reachable at, when that is not
+    /// simply "this host, `radio_addr`'s port" (e.g. `https://radio.example.org`
+    /// behind a TLS reverse proxy; a page served over https cannot play a
+    /// plain-http stream). Advertised to clients in the station listing, so no
+    /// person is ever asked to type a stream address. Empty (the default):
+    /// clients use the host they dialled plus the listener's port. Applies
+    /// live (read per listing).
+    pub radio_public_base: String,
     /// Accept inbound DJ source connections (SOURCE/PUT) on `radio_source_addr`.
     /// This is the *ingest* surface (a DJ pushing a live stream), distinct from
     /// the `radio_addr` *delivery* surface (players pulling). Off by default.
@@ -474,6 +482,7 @@ impl Default for ServerConfig {
             nntp_feed_peers: std::collections::HashMap::new(),
             radio_enabled: false,
             radio_addr: "0.0.0.0:8000".parse().expect("valid"),
+            radio_public_base: String::new(),
             radio_source_enabled: false,
             radio_source_addr: "0.0.0.0:8001".parse().expect("valid"),
             radio_source_user: "source".into(),
@@ -662,6 +671,7 @@ impl ServerConfig {
             "nntp_feed_tls_addr" => self.nntp_feed_tls_addr.to_string(),
             "radio_enabled" => self.radio_enabled.to_string(),
             "radio_addr" => self.radio_addr.to_string(),
+            "radio_public_base" => self.radio_public_base.clone(),
             "radio_source_enabled" => self.radio_source_enabled.to_string(),
             "radio_source_addr" => self.radio_source_addr.to_string(),
             "radio_source_user" => self.radio_source_user.clone(),
@@ -952,6 +962,10 @@ impl ServerConfig {
             "radio_addr" => {
                 self.radio_addr = parse_addr(key, value)?;
                 Ok(false)
+            }
+            "radio_public_base" => {
+                self.radio_public_base = value.trim().trim_end_matches('/').to_string();
+                Ok(true) // read per station listing
             }
             "radio_source_enabled" => {
                 self.radio_source_enabled = parse_bool(key, value)?;
@@ -1384,6 +1398,21 @@ mod tests {
         assert!(!loaded.nntp_auth_require_tls);
         assert_eq!(loaded.nntp_tls_addr.port(), 563);
         assert_eq!(loaded.nntp_feed_tls_addr.port(), 1563);
+    }
+
+    #[test]
+    fn radio_public_base_sets_live_and_drops_a_trailing_slash() {
+        let live = LiveConfig::new(ServerConfig::default());
+        assert_eq!(live.get_key("radio_public_base").unwrap(), "");
+        // `true`: it applies without a restart, because it is read per listing.
+        assert!(live
+            .set_key("radio_public_base", " https://radio.example.org/ ")
+            .unwrap());
+        assert_eq!(
+            live.get_key("radio_public_base").unwrap(),
+            "https://radio.example.org",
+            "clients join it to a mount with a slash of their own"
+        );
     }
 
     #[test]
