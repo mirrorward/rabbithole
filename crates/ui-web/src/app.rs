@@ -180,6 +180,9 @@ pub struct AppState {
     /// The user's radio player preferences (enable/volume/mute/station plus
     /// the Icecast delivery address), persisted to `localStorage`.
     pub radio_prefs: RwSignal<RadioPrefs>,
+    /// Where downloads go, in the desktop shell (which owns the preference).
+    /// `None` in a browser tab, where the browser decides.
+    pub download_prefs: RwSignal<Option<crate::save::DownloadPrefs>>,
     /// Cover art fetched for the radio, as `data:` URLs keyed by blob hex.
     pub radio_covers: RwSignal<std::collections::HashMap<String, String>>,
     /// The wasm-only `<audio>` element wrapper the preference setters keep in
@@ -245,6 +248,7 @@ impl AppState {
             radio: create_rw_signal(RadioState::default()),
             radio_prefs: create_rw_signal(initial_radio_prefs()),
             radio_covers: create_rw_signal(Default::default()),
+            download_prefs: create_rw_signal(None),
             #[cfg(target_arch = "wasm32")]
             player: store_value(crate::player::RadioPlayer::new()),
         }
@@ -1047,6 +1051,64 @@ impl AppState {
             self.pending_notice.set(Some(notice));
             self.drop_session(&id);
         }
+    }
+
+    /// What to call the focused burrow: its name, else its address. Used as a
+    /// folder name for "a folder per burrow" downloads; the shell makes it safe.
+    pub fn focused_burrow_label(&self) -> String {
+        self.focused()
+            .name
+            .get_untracked()
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| server_label(&self.focused_id.get_untracked()))
+    }
+
+    /// Ask the shell where downloads go (desktop only; a no-op in a tab).
+    pub fn load_download_prefs(&self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let prefs = self.download_prefs;
+            crate::native::download_prefs(move |answer| {
+                if let Ok(Some(p)) = answer {
+                    prefs.set(Some(p));
+                }
+            });
+        }
+    }
+
+    /// Fold a preference command's answer in, or say why it failed.
+    #[cfg(target_arch = "wasm32")]
+    fn download_prefs_answer(
+        &self,
+    ) -> impl FnOnce(Result<Option<crate::save::DownloadPrefs>, String>) + 'static {
+        let app = *self;
+        move |answer| match answer {
+            Ok(Some(p)) => app.download_prefs.set(Some(p)),
+            Ok(None) => {} // the panel was cancelled; nothing changed
+            Err(why) => {
+                app.notify(crate::toasts::ToastKind::Warn, why);
+            }
+        }
+    }
+
+    /// Choose the download folder in a native folder panel.
+    pub fn choose_download_folder(&self) {
+        #[cfg(target_arch = "wasm32")]
+        crate::native::choose_download_folder(self.download_prefs_answer());
+    }
+
+    /// Go back to asking where each download goes.
+    pub fn clear_download_folder(&self) {
+        #[cfg(target_arch = "wasm32")]
+        crate::native::clear_download_folder(self.download_prefs_answer());
+    }
+
+    /// Turn a folder per burrow on or off.
+    pub fn set_per_burrow_folders(&self, on: bool) {
+        #[cfg(target_arch = "wasm32")]
+        crate::native::set_per_burrow_folders(on, self.download_prefs_answer());
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = on;
     }
 
     /// Keep a burrow. `Err` says why not, in words for the person.
@@ -1907,6 +1969,7 @@ impl AppState {
                     size,
                     &name,
                     max_sources,
+                    &self.focused_burrow_label(),
                 );
                 return;
             }
@@ -2326,6 +2389,7 @@ pub fn App() -> impl IntoView {
     // the Transfers reducer. No-op on the web build.
     #[cfg(target_arch = "wasm32")]
     crate::native::install_swarm_listener(app);
+    app.load_download_prefs();
 
     // Load (or mint) the portable identity that names you across every burrow.
     // Keep the full signing identity (for friendship attestations) in a

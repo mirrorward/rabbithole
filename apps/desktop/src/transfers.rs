@@ -8,8 +8,16 @@
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 
+use std::path::PathBuf;
+
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex;
+
+use crate::downloads::{self, Destination, DownloadPrefs};
+#[cfg(test)]
+use crate::downloads::sanitize_name;
 
 use rabbithole_core::Client;
 
@@ -93,6 +101,10 @@ struct TransferEvent {
 /// Fetch content `root_hex` (`size` bytes; `0` = derive from the source list)
 /// from the swarm into the OS downloads directory as `name`, emitting
 /// `swarm://event` progress tagged with `transfer_id` as each unit lands.
+// Two of these are injected by Tauri; the other six are the command's wire
+// shape, which the webview calls by name. Bundling them into a struct would
+// change that call for no reader's benefit.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn swarm_start_download(
     app: AppHandle,
@@ -102,10 +114,14 @@ pub async fn swarm_start_download(
     size: u64,
     name: String,
     max_sources: u32,
+    burrow: Option<String>,
 ) -> Result<(), String> {
     let root = parse_root(&root_hex)?;
-    let dir = app.path().download_dir().map_err(|e| e.to_string())?;
-    let dest = dir.join(sanitize_name(&name));
+    // Where it goes is settled before a byte moves: asking after the fetch
+    // would download a file the person then declines to keep.
+    let Some(dest) = resolve_destination(&app, burrow.as_deref().unwrap_or_default(), &name, true).await? else {
+        return Err("Save cancelled.".to_string());
+    };
     eprintln!("[rh-swarm] swarm_start_download: transfer={transfer_id} root={root_hex} size={size} name={name:?}");
     let mut guard = state.client.lock().await;
     let client = guard.as_mut().ok_or("not connected to a burrow")?;
@@ -137,49 +153,166 @@ pub async fn swarm_start_download(
     }
 }
 
+/// The person's download preferences, as the Settings screen shows them.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadPrefsView {
+    /// The folder downloads go to without asking. `None`: ask each time.
+    folder: Option<String>,
+    per_burrow: bool,
+    /// The system downloads folder, which is where a save panel opens.
+    system_folder: String,
+}
+
+fn prefs_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join("downloads.json"))
+}
+
+fn view_of(app: &AppHandle, prefs: &DownloadPrefs) -> Result<DownloadPrefsView, String> {
+    Ok(DownloadPrefsView {
+        folder: prefs.folder.as_ref().map(|p| p.display().to_string()),
+        per_burrow: prefs.per_burrow,
+        system_folder: app
+            .path()
+            .download_dir()
+            .map_err(|e| e.to_string())?
+            .display()
+            .to_string(),
+    })
+}
+
+/// The current download preferences.
+#[tauri::command]
+pub fn download_prefs(app: AppHandle) -> Result<DownloadPrefsView, String> {
+    view_of(&app, &downloads::load(&prefs_path(&app)?))
+}
+
+/// Choose the download folder in a native folder panel. The webview asks for
+/// the panel; it never names the folder. `None` when the panel was cancelled.
+#[tauri::command]
+pub async fn choose_download_folder(app: AppHandle) -> Result<Option<DownloadPrefsView>, String> {
+    let path = prefs_path(&app)?;
+    let mut prefs = downloads::load(&path);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut panel = app.dialog().file().set_title("Save downloads to");
+    if let Some(start) = prefs.folder.clone().or_else(|| app.path().download_dir().ok()) {
+        panel = panel.set_directory(start);
+    }
+    panel.pick_folder(move |picked| {
+        let _ = tx.send(picked);
+    });
+    let Some(picked) = rx.await.map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    prefs.folder = Some(picked.into_path().map_err(|e| e.to_string())?);
+    downloads::store(&path, &prefs)?;
+    view_of(&app, &prefs).map(Some)
+}
+
+/// Go back to asking where each download goes.
+#[tauri::command]
+pub fn clear_download_folder(app: AppHandle) -> Result<DownloadPrefsView, String> {
+    let path = prefs_path(&app)?;
+    let mut prefs = downloads::load(&path);
+    prefs.folder = None;
+    downloads::store(&path, &prefs)?;
+    view_of(&app, &prefs)
+}
+
+/// Turn a folder per burrow on or off.
+#[tauri::command]
+pub fn set_per_burrow_folders(app: AppHandle, on: bool) -> Result<DownloadPrefsView, String> {
+    let path = prefs_path(&app)?;
+    let mut prefs = downloads::load(&path);
+    prefs.per_burrow = on;
+    downloads::store(&path, &prefs)?;
+    view_of(&app, &prefs)
+}
+
+/// Settle where one download goes: the set folder without asking, else a
+/// native save panel. `None` means the person cancelled the panel.
+///
+/// `resumable`: a swarm download resumes from a `.rhstate` beside its
+/// destination, so with a folder set it must land on the same path as last
+/// time rather than a fresh numbered one.
+async fn resolve_destination(
+    app: &AppHandle,
+    burrow: &str,
+    name: &str,
+    resumable: bool,
+) -> Result<Option<PathBuf>, String> {
+    let prefs = downloads::load(&prefs_path(app)?);
+    let system = app.path().download_dir().map_err(|e| e.to_string())?;
+    let dest = match downloads::plan(&prefs, &system, burrow, name) {
+        Destination::Write(path) => {
+            let path = if resumable {
+                // Same name as last time, so an interrupted fetch picks up.
+                path.parent()
+                    .map(|dir| dir.join(downloads::sanitize_name(name)))
+                    .unwrap_or(path)
+            } else {
+                path
+            };
+            Some(path)
+        }
+        Destination::Ask { dir, name } => {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            // Open on the burrow's folder when it exists, else its parent: a
+            // panel should not create folders just by being shown.
+            let start = if dir.is_dir() { dir.clone() } else { system.clone() };
+            app.dialog()
+                .file()
+                .set_title("Save download")
+                .set_directory(start)
+                .set_file_name(&name)
+                .save_file(move |picked| {
+                    let _ = tx.send(picked);
+                });
+            match rx.await.map_err(|e| e.to_string())? {
+                Some(picked) => Some(picked.into_path().map_err(|e| e.to_string())?),
+                None => None,
+            }
+        }
+    };
+    if let Some(path) = &dest {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+        }
+    }
+    Ok(dest)
+}
+
 /// Write bytes the webview already holds (an inline download over its socket,
-/// or a seeded demo file) into the downloads folder, and say where they went.
+/// or a seeded demo file) to disk, and say where they went. `None` when the
+/// person cancelled the save panel, which is not a failure.
 ///
 /// A webview has no download manager: the `<a download>` click that saves a
 /// file in a browser tab goes nowhere here, which is how an in-app download
-/// came to "succeed" and leave nothing on disk. The name is reduced to a safe
-/// basename before it touches the filesystem, and an existing file is never
-/// overwritten: the newcomer gets a numbered name, the way Finder does it.
+/// came to "succeed" and leave nothing on disk. Where it goes is
+/// [`resolve_destination`]'s call: the set folder, or a native save panel.
+/// The name is reduced to a safe basename first, and with a folder set an
+/// existing file is never overwritten (the newcomer gets a numbered name).
 #[tauri::command]
 pub async fn save_file(
     app: AppHandle,
     name: String,
     data_base64: String,
-) -> Result<String, String> {
+    burrow: Option<String>,
+) -> Result<Option<String>, String> {
     let bytes = decode_base64(&data_base64)?;
-    let dir = app.path().download_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("no downloads folder: {e}"))?;
-    let dest = unique_path(&dir, &sanitize_name(&name));
+    let Some(dest) =
+        resolve_destination(&app, burrow.as_deref().unwrap_or_default(), &name, false).await?
+    else {
+        return Ok(None);
+    };
     std::fs::write(&dest, &bytes).map_err(|e| format!("could not write {}: {e}", dest.display()))?;
     eprintln!("[rh-save] wrote {} bytes to {}", bytes.len(), dest.display());
-    Ok(dest.display().to_string())
-}
-
-/// The first path for `name` in `dir` that nothing occupies yet: `name`, then
-/// `stem (2).ext`, `stem (3).ext`, and so on.
-fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    let first = dir.join(name);
-    if !first.exists() {
-        return first;
-    }
-    let as_path = std::path::Path::new(name);
-    let stem = as_path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| name.to_string());
-    let ext = as_path
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
-    (2u32..)
-        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
-        .find(|candidate| !candidate.exists())
-        .expect("an unbounded counter finds a free name")
+    Ok(Some(dest.display().to_string()))
 }
 
 /// Decode standard base64 (with or without `=` padding). Hand-rolled so the
@@ -214,25 +347,6 @@ fn decode_base64(text: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Reduce a server-supplied filename to a bare, safe basename so it can't escape
-/// the downloads directory. Strips path separators and rejects `..`, leading
-/// dots, and — for Windows — any name containing a `:` (drive-relative prefixes
-/// like `C:evil.exe` PATH-resolve off the target dir, and `report.txt:stream`
-/// opens an NTFS alternate data stream), falling back to a fixed safe name.
-fn sanitize_name(name: &str) -> String {
-    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
-    let unsafe_name = base.is_empty()
-        || base == "."
-        || base == ".."
-        || base.starts_with('.')
-        || base.contains(':');
-    if unsafe_name {
-        "download.bin".to_string()
-    } else {
-        base.to_string()
-    }
-}
-
 /// Parse a 64-char lowercase-hex blake3 root into bytes.
 fn parse_root(hex: &str) -> Result<[u8; 32], String> {
     if hex.len() != 64 {
@@ -262,24 +376,24 @@ mod tests {
     #[test]
     fn a_saved_file_never_overwrites_the_one_before_it() {
         let dir = tempfile::tempdir().unwrap();
-        let first = super::unique_path(dir.path(), "readme.txt");
+        let first = crate::downloads::unique_path(dir.path(), "readme.txt");
         assert_eq!(first, dir.path().join("readme.txt"));
         std::fs::write(&first, b"one").unwrap();
-        let second = super::unique_path(dir.path(), "readme.txt");
+        let second = crate::downloads::unique_path(dir.path(), "readme.txt");
         assert_eq!(second, dir.path().join("readme (2).txt"));
         std::fs::write(&second, b"two").unwrap();
         assert_eq!(
-            super::unique_path(dir.path(), "readme.txt"),
+            crate::downloads::unique_path(dir.path(), "readme.txt"),
             dir.path().join("readme (3).txt")
         );
         // No extension, and a name that would climb out of the folder.
         std::fs::write(dir.path().join("LICENSE"), b"x").unwrap();
         assert_eq!(
-            super::unique_path(dir.path(), "LICENSE"),
+            crate::downloads::unique_path(dir.path(), "LICENSE"),
             dir.path().join("LICENSE (2)")
         );
-        assert_eq!(super::sanitize_name("../../etc/passwd"), "passwd");
-        assert_eq!(super::sanitize_name(".."), "download.bin");
+        assert_eq!(crate::downloads::sanitize_name("../../etc/passwd"), "passwd");
+        assert_eq!(crate::downloads::sanitize_name(".."), "download.bin");
     }
 
     use super::*;

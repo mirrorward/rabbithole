@@ -89,6 +89,7 @@ pub fn start_swarm_download(
     size: u64,
     name: &str,
     max_sources: u32,
+    burrow: &str,
 ) {
     let Some(b) = bridge() else { return };
     let Some(invoke) = method(&b, "invoke") else {
@@ -118,6 +119,11 @@ pub fn start_swarm_download(
         &args,
         &JsValue::from_str("maxSources"),
         &JsValue::from_f64(max_sources as f64),
+    );
+    let _ = js_sys::Reflect::set(
+        &args,
+        &JsValue::from_str("burrow"),
+        &JsValue::from_str(burrow),
     );
     if let Ok(ret) = invoke.call2(&b, &JsValue::from_str("swarm_start_download"), &args) {
         if let Ok(promise) = ret.dyn_into::<js_sys::Promise>() {
@@ -158,7 +164,12 @@ pub fn start_swarm_download(
 /// Hand bytes the webview already holds to the shell, which writes them into
 /// the downloads folder (a webview has no download manager to click into).
 /// `done` gets the path it landed at, or the shell's own words for why not.
-pub fn save_file(name: &str, bytes: &[u8], done: impl FnOnce(Result<String, String>) + 'static) {
+pub fn save_file(
+    name: &str,
+    bytes: &[u8],
+    burrow: &str,
+    done: impl FnOnce(Result<Option<String>, String>) + 'static,
+) {
     let (Some(b), true) = (bridge(), native_available()) else {
         done(Err("the desktop shell is not available".to_string()));
         return;
@@ -169,6 +180,13 @@ pub fn save_file(name: &str, bytes: &[u8], done: impl FnOnce(Result<String, Stri
     };
     let args = js_sys::Object::new();
     let _ = js_sys::Reflect::set(&args, &JsValue::from_str("name"), &JsValue::from_str(name));
+    // Which burrow it came from, for the "a folder per burrow" preference. A
+    // label only: the shell turns it into one safe folder name itself.
+    let _ = js_sys::Reflect::set(
+        &args,
+        &JsValue::from_str("burrow"),
+        &JsValue::from_str(burrow),
+    );
     // Base64 rather than a JSON number array: a third the size on the bridge.
     let _ = js_sys::Reflect::set(
         &args,
@@ -185,9 +203,8 @@ pub fn save_file(name: &str, bytes: &[u8], done: impl FnOnce(Result<String, Stri
     };
     spawn_local(async move {
         match JsFuture::from(promise).await {
-            Ok(path) => done(Ok(path
-                .as_string()
-                .unwrap_or_else(|| "your downloads folder".into()))),
+            // `null`: the person cancelled the save panel. Not a failure.
+            Ok(path) => done(Ok(path.as_string())),
             Err(err) => done(Err(err
                 .as_string()
                 .or_else(|| {
@@ -198,6 +215,77 @@ pub fn save_file(name: &str, bytes: &[u8], done: impl FnOnce(Result<String, Stri
                 .unwrap_or_else(|| "the file could not be written".to_string()))),
         }
     });
+}
+
+use crate::save::DownloadPrefs;
+
+fn prefs_from_js(v: &JsValue) -> Option<DownloadPrefs> {
+    if v.is_null() || v.is_undefined() {
+        return None;
+    }
+    let get = |k: &str| js_sys::Reflect::get(v, &JsValue::from_str(k)).ok();
+    Some(DownloadPrefs {
+        folder: get("folder").and_then(|f| f.as_string()),
+        per_burrow: get("perBurrow").and_then(|b| b.as_bool()).unwrap_or(false),
+        system_folder: get("systemFolder")
+            .and_then(|f| f.as_string())
+            .unwrap_or_default(),
+    })
+}
+
+/// Run one of the shell's download-preference commands and hand back the
+/// preferences it answers with (`None` from "choose" means the panel was
+/// cancelled and nothing changed).
+fn prefs_command(
+    command: &'static str,
+    args: js_sys::Object,
+    done: impl FnOnce(Result<Option<DownloadPrefs>, String>) + 'static,
+) {
+    let (Some(b), true) = (bridge(), native_available()) else {
+        return;
+    };
+    let Some(invoke) = method(&b, "invoke") else {
+        return;
+    };
+    let Ok(ret) = invoke.call2(&b, &JsValue::from_str(command), &args) else {
+        return;
+    };
+    let Ok(promise) = ret.dyn_into::<js_sys::Promise>() else {
+        return;
+    };
+    spawn_local(async move {
+        match JsFuture::from(promise).await {
+            Ok(v) => done(Ok(prefs_from_js(&v))),
+            Err(err) => done(Err(err
+                .as_string()
+                .unwrap_or_else(|| "the setting could not be changed".to_string()))),
+        }
+    });
+}
+
+/// Read the download preferences.
+pub fn download_prefs(done: impl FnOnce(Result<Option<DownloadPrefs>, String>) + 'static) {
+    prefs_command("download_prefs", js_sys::Object::new(), done);
+}
+
+/// Open the native folder panel to choose the download folder.
+pub fn choose_download_folder(done: impl FnOnce(Result<Option<DownloadPrefs>, String>) + 'static) {
+    prefs_command("choose_download_folder", js_sys::Object::new(), done);
+}
+
+/// Go back to asking where each download goes.
+pub fn clear_download_folder(done: impl FnOnce(Result<Option<DownloadPrefs>, String>) + 'static) {
+    prefs_command("clear_download_folder", js_sys::Object::new(), done);
+}
+
+/// Turn a folder per burrow on or off.
+pub fn set_per_burrow_folders(
+    on: bool,
+    done: impl FnOnce(Result<Option<DownloadPrefs>, String>) + 'static,
+) {
+    let args = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&args, &JsValue::from_str("on"), &JsValue::from_bool(on));
+    prefs_command("set_per_burrow_folders", args, done);
 }
 
 /// Install the `swarm://event` listener that folds native progress into the

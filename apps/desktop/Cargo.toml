@@ -1,7 +1,7 @@
 [package]
 name = "rabbithole-desktop"
 description = "RabbitHole — Tauri v2 desktop + mobile shell wrapping the ui-web Leptos SPA"
-version = "0.210.0"
+version = "0.211.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]
@@ -47,6 +47,9 @@ rabbithole-proto = { path = "../../crates/proto" }
 rabbithole-directory = { path = "../../crates/directory", features = ["native"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tauri-plugin-window-state = "2"
+# Native save and folder panels, so a download can ask where to go. Used from
+# Rust only: the webview is never granted the dialog API, and never names a path.
+tauri-plugin-dialog = "2"
 
 [dev-dependencies]
 rabbithole-identity = { path = "../../crates/identity" }

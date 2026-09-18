@@ -21,9 +21,10 @@
 //! console prove the round-trip end-to-end. The real swarm command/event surface
 //! (wrapping [`swarm::run_swarm_download`]) is the next slice.
 
+/// The Tauri command + event surface wrapping the swarm core.
+pub mod downloads;
 /// Source discovery + multi-source swarm download orchestration (Tauri-free).
 pub mod swarm;
-/// The Tauri command + event surface wrapping the swarm core.
 pub mod transfers;
 
 /// Injected before the SPA loads: expose a minimal native bridge over Tauri's
@@ -328,6 +329,8 @@ pub fn run() {
         // browser tab in a wrapper. The builder's sizes below become
         // first-launch defaults only.
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Native save and folder panels, called from Rust only.
+        .plugin(tauri_plugin_dialog::init())
         .manage(transfers::TransfersManager::default())
         .invoke_handler(tauri::generate_handler![
             ping,
@@ -338,6 +341,10 @@ pub fn run() {
             transfers::connect_native,
             transfers::swarm_start_download,
             transfers::save_file,
+            transfers::download_prefs,
+            transfers::choose_download_folder,
+            transfers::clear_download_folder,
+            transfers::set_per_burrow_folders,
         ])
         .setup(|app| {
             // Name the app after itself, not after its binary.

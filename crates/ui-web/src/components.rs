@@ -414,6 +414,9 @@ fn build_info() -> (String, String) {
 #[component]
 pub fn Settings() -> impl IntoView {
     let app = expect_context::<AppState>();
+    // The shell owns where downloads go, and it can change outside this
+    // screen (a folder deleted, another window): read it fresh on arrival.
+    app.load_download_prefs();
     let new_tracker = create_rw_signal(String::new());
 
     let add = move |_| {
@@ -582,6 +585,70 @@ pub fn Settings() -> impl IntoView {
                         }
                     />
                 </label>
+
+                // Where a download lands. The desktop shell owns this (a folder
+                // is only ever chosen in a native panel); in a browser tab the
+                // browser decides, so there is nothing here to set.
+                <Show
+                    when=move || app.download_prefs.with(Option::is_some)
+                    fallback=|| view! {
+                        <p class="rh-settings-note">
+                            "In a browser tab, your browser decides where downloads are saved. \
+                             The desktop app can ask each time, or use a folder you choose."
+                        </p>
+                    }
+                >
+                    <div class="rh-settings-folder">
+                        <p class="rh-settings-folder-line">
+                            {move || app.download_prefs.with(|p| {
+                                p.as_ref().map(|p| p.summary()).unwrap_or_default()
+                            })}
+                        </p>
+                        <div class="rh-settings-folder-actions">
+                            <button
+                                type="button"
+                                class="rh-btn ghost small"
+                                on:click=move |_| app.choose_download_folder()
+                            >
+                                {move || if app.download_prefs.with(|p| {
+                                    p.as_ref().is_some_and(|p| p.folder.is_some())
+                                }) {
+                                    "Change folder\u{2026}"
+                                } else {
+                                    "Choose a folder\u{2026}"
+                                }}
+                            </button>
+                            <Show
+                                when=move || app.download_prefs.with(|p| {
+                                    p.as_ref().is_some_and(|p| p.folder.is_some())
+                                })
+                                fallback=|| ()
+                            >
+                                <button
+                                    type="button"
+                                    class="rh-btn ghost small"
+                                    on:click=move |_| app.clear_download_folder()
+                                >
+                                    "Ask each time"
+                                </button>
+                            </Show>
+                        </div>
+                    </div>
+                    <label class="rh-settings-check">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || app.download_prefs.with(|p| {
+                                p.as_ref().is_some_and(|p| p.per_burrow)
+                            })
+                            on:change=move |ev| app.set_per_burrow_folders(event_target_checked(&ev))
+                        />
+                        <span>"Give each burrow a folder of its own"</span>
+                    </label>
+                    <p class="rh-settings-note">
+                        "A download never replaces a file that is already there: it gets a \
+                         numbered name instead."
+                    </p>
+                </Show>
 
                 <h3 class="rh-person-h2">"On launch"</h3>
                 <label class="rh-settings-check">
