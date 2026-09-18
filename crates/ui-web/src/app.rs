@@ -446,6 +446,19 @@ impl AppState {
         crate::theme_css::effective_mode(self.theme.get().mode, os_prefers_dark())
     }
 
+    /// Choose a theme pack outright (Settings) and persist it.
+    pub fn set_pack(&self, pack: rabbithole_core::theme::ThemePack) {
+        self.theme.update(|c| c.pack = pack);
+        self.persist_theme();
+    }
+
+    /// Choose light, dark or follow-the-system outright (Settings) and
+    /// persist it.
+    pub fn set_mode(&self, mode: crate::theme_css::ModeChoice) {
+        self.theme.update(|c| c.mode = mode);
+        self.persist_theme();
+    }
+
     /// Advance the mode choice (System → Light → Dark → …) and persist it.
     pub fn cycle_theme(&self) {
         self.theme.update(|c| c.mode = next_mode(c.mode));
@@ -875,7 +888,11 @@ impl AppState {
                         .update_value(|c| c.dispatch(rabbithole_core::api::Command::Disconnect));
                 }
             });
-            crate::recent::forget(&id.0);
+            // Leaving drops the session token, not the burrow: the handle
+            // stays in the recent list so rejoining is a password, not a
+            // form. Forgetting the whole entry meant every Leave cost the
+            // user their handle too.
+            crate::recent::remember_token(&id.0, "");
         }
         self.drop_session(&id);
     }
@@ -2240,6 +2257,29 @@ pub fn App() -> impl IntoView {
     }
 }
 
+/// Ask before leaving a burrow. Leave closes the socket and drops the
+/// session token; it was a small ghost button on every screen that did that
+/// on a single click. The message says what is kept, because that is the
+/// question a leaver has. Always true on the host (no window to ask).
+pub fn confirm_leave(name: &str) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .map(|w| {
+                w.confirm_with_message(&format!(
+                    "Leave {name}?\n\nYou can rejoin from the Looking Glass or your recent burrows; your handle is remembered."
+                ))
+                .unwrap_or(false)
+            })
+            .unwrap_or(true)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = name;
+        true
+    }
+}
+
 /// Are we running inside the desktop shell?
 fn is_native() -> bool {
     #[cfg(target_arch = "wasm32")]
@@ -2490,9 +2530,16 @@ fn WarrenSheet() -> impl IntoView {
                         <button
                             class="rh-btn ghost rh-sheet-leave"
                             on:click=move |_| {
-                                let id = app.focused_endpoint();
-                                app.disconnect(&ServerId(id));
-                                open.set(false);
+                                let name = app
+                                    .focused()
+                                    .name
+                                    .get_untracked()
+                                    .unwrap_or_else(|| "this burrow".into());
+                                if confirm_leave(&name) {
+                                    let id = app.focused_endpoint();
+                                    app.disconnect(&ServerId(id));
+                                    open.set(false);
+                                }
                             }
                         >
                             {move || format!(
@@ -2536,6 +2583,10 @@ fn BurrowRail() -> impl IntoView {
     let go_add = {
         let navigate = navigate.clone();
         move |_| navigate("/servers", Default::default())
+    };
+    let go_settings = {
+        let navigate = navigate.clone();
+        move |_| navigate("/settings", Default::default())
     };
 
     // Which rail destination is current. The warren tiles had no active state
@@ -2648,6 +2699,19 @@ fn BurrowRail() -> impl IntoView {
                 on:click=go_add
             >
                 <span class="rh-rail-glyph" inner_html=crate::icons::rail_icon("add")></span>
+            </button>
+            // Settings at the rail's foot, where a desktop app keeps its
+            // preferences. It had no entry point on a desktop at all: only
+            // typing into ⌘K reached it.
+            <button
+                class="rh-rail-tile rh-rail-unified rh-rail-settings"
+                class:active=move || at("/settings")
+                aria-current=move || at("/settings").then_some("page")
+                title="Settings"
+                aria-label="Settings"
+                on:click=go_settings
+            >
+                <span class="rh-rail-glyph" inner_html=crate::icons::settings_icon()></span>
             </button>
         </nav>
     }

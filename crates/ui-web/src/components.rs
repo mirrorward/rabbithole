@@ -35,74 +35,6 @@ fn endpoint_host(endpoint: &str) -> String {
         .to_string()
 }
 
-/// Appearance picker: a pack button cycling Clean → Retro → High Contrast and
-/// a mode button cycling System → Light → Dark. Together they cover the full
-/// pack × mode grid; the combined choice is persisted to `localStorage` and
-/// re-themes the whole app via the root CSS variables.
-#[component]
-pub fn ThemeToggle() -> impl IntoView {
-    let app = expect_context::<AppState>();
-    let pack = move || pack_label(app.theme.get().pack);
-    let mode = move || mode_name(app.theme.get().mode);
-    view! {
-        <span class="rh-theme-menu">
-            // Chimes: off until asked for, and silent whenever the window is
-            // focused (see crate::sound). A quiet toggle, not a settings page.
-            <button
-                class="rh-btn ghost rh-sound-toggle rh-icon-btn"
-                aria-pressed=move || app.sound_on.get().to_string()
-                aria-label=move || {
-                    if app.sound_on.get() { "Chimes on" } else { "Chimes off" }
-                }
-                title=move || {
-                    if app.sound_on.get() {
-                        "Chimes on \u{2014} click to silence"
-                    } else {
-                        "Chimes off \u{2014} click to hear new messages while away"
-                    }
-                }
-                on:click=move |_| {
-                    let on = !app.sound_on.get_untracked();
-                    app.sound_on.set(on);
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        crate::sound::set_enabled(on);
-                        // Play the DM voice once on enable, so the user hears
-                        // exactly what they just signed up for.
-                        if on {
-                            crate::sound::play(crate::sound::Chime::Dm);
-                        }
-                    }
-                }
-            >
-                <span inner_html=move || crate::icons::bell_icon(app.sound_on.get())></span>
-            </button>
-            // Icons, not words: three text buttons in a row read as a
-            // settings panel wedged into the title bar. The label each one
-            // used to show lives in its tooltip and accessible name, which is
-            // where it was actually useful.
-            <button
-                class="rh-btn ghost rh-icon-btn"
-                title=move || format!("Appearance: {} \u{2014} click to change", pack())
-                aria-label=move || format!("Appearance: {}", pack())
-                on:click=move |_| app.cycle_pack()
-            >
-                <span inner_html=crate::icons::pack_icon()></span>
-            </button>
-            <button
-                class="rh-btn ghost rh-icon-btn"
-                title=move || format!("{} \u{2014} click to change", mode())
-                aria-label=mode
-                on:click=move |_| app.cycle_theme()
-            >
-                <span inner_html=move || {
-                    crate::icons::mode_icon(app.theme.get().mode)
-                }></span>
-            </button>
-        </span>
-    }
-}
-
 /// The primary section links, as a **left sidebar**.
 ///
 /// This used to be a row of pills in the header, next to the burrow title, the
@@ -516,6 +448,50 @@ pub fn Settings() -> impl IntoView {
             <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Settings"</h1>
             <section class="rh-panel rh-settings">
                 <h2 class="rh-panel-title">"Settings"</h2>
+
+                <h3 class="rh-person-h2">"Appearance"</h3>
+                <div class="rh-seg" role="radiogroup" aria-label="Theme">
+                    {[
+                        rabbithole_core::theme::ThemePack::Clean,
+                        rabbithole_core::theme::ThemePack::Retro,
+                        rabbithole_core::theme::ThemePack::HighContrast,
+                    ]
+                    .into_iter()
+                    .map(|pack| view! {
+                        <button
+                            type="button"
+                            class="rh-seg-btn"
+                            class:on=move || app.theme.get().pack == pack
+                            role="radio"
+                            aria-checked=move || (app.theme.get().pack == pack).to_string()
+                            on:click=move |_| app.set_pack(pack)
+                        >
+                            {if pack == rabbithole_core::theme::ThemePack::HighContrast { "High contrast" } else { pack_label(pack) }}
+                        </button>
+                    })
+                    .collect_view()}
+                </div>
+                <div class="rh-seg" role="radiogroup" aria-label="Light or dark">
+                    {[
+                        crate::theme_css::ModeChoice::System,
+                        crate::theme_css::ModeChoice::Light,
+                        crate::theme_css::ModeChoice::Dark,
+                    ]
+                    .into_iter()
+                    .map(|mode| view! {
+                        <button
+                            type="button"
+                            class="rh-seg-btn"
+                            class:on=move || app.theme.get().mode == mode
+                            role="radio"
+                            aria-checked=move || (app.theme.get().mode == mode).to_string()
+                            on:click=move |_| app.set_mode(mode)
+                        >
+                            {if mode == crate::theme_css::ModeChoice::System { "Match system" } else { mode_name(mode) }}
+                        </button>
+                    })
+                    .collect_view()}
+                </div>
 
                 <h3 class="rh-person-h2">"Trackers"</h3>
                 <p class="rh-settings-note">
@@ -1590,7 +1566,15 @@ pub fn StatusBar() -> impl IntoView {
             name
         }
     };
-    let conn_label = move || state.with(|s| s.conn.label());
+    // The label says something only when there is something to say:
+    // "Connecting…", "Reconnecting…", "Offline". Healthy is the dot alone;
+    // spelling out "Online" next to a presence menu that also said "Online"
+    // was the same word meaning two things in one row.
+    let conn_label =
+        move || (!state.with(|s| s.conn.is_live())).then(|| state.with(|s| s.conn.label()));
+    let location = leptos_router::use_location();
+    let in_burrow =
+        move || crate::palette::scope_of(&location.pathname.get()) == crate::palette::Scope::Burrow;
     let dot_class = move || {
         if state.with(|s| s.conn.is_live()) {
             "rh-dot on"
@@ -1625,22 +1609,26 @@ pub fn StatusBar() -> impl IntoView {
                     <A href="/radio" class="rh-radio-now">{now_playing}</A>
                 </Show>
             </span>
-            // Leaving is only meaningful for a burrow you actually joined —
-            // the demo session is the app's floor.
-            <Show when=move || { app.can_leave() } fallback=|| ()>
+            // Leaving is only meaningful for a burrow you actually joined,
+            // and only while you're in it: on People or Transfers there is
+            // nothing on screen to leave. It asks first.
+            <Show when=move || { app.can_leave() && in_burrow() } fallback=|| ()>
                 <button
                     class="rh-btn ghost rh-leave"
-                    title="Disconnect from this burrow"
+                    title="Leave this burrow"
                     on:click=move |_| {
-                        let id = app.focused_endpoint();
-                        app.disconnect(&crate::app::ServerId(id));
+                        let name = state.with_untracked(|s| s.server_name.clone());
+                        let name = if name.is_empty() { "this burrow".to_string() } else { name };
+                        if crate::app::confirm_leave(&name) {
+                            let id = app.focused_endpoint();
+                            app.disconnect(&crate::app::ServerId(id));
+                        }
                     }
                 >
                     "Leave"
                 </button>
             </Show>
             <PresenceControl/>
-            <ThemeToggle/>
         </header>
         <Show when=move || banner().is_some() fallback=|| ()>
             {move || banner().map(|b| view! {
