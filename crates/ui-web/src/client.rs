@@ -580,10 +580,23 @@ impl MockClient {
     fn seeded_config() -> Vec<(String, String)> {
         let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
         vec![
-            pair("server.name", "Rabbit Lobby"),
-            pair("server.motd", "Welcome to the warren."),
-            pair("registration.mode", "invite"),
-            pair("chat.slowmode_secs", "0"),
+            // The operator keys, under the server's own names
+            // (`admin::OPERATOR_KEYS`), so the demo console and a live one
+            // show the same rows.
+            pair("name", "Rabbit Lobby"),
+            pair("motd", "Welcome to the warren."),
+            pair("agreement", ""),
+            pair("registration_mode", "invite"),
+            pair("guest_enabled", "true"),
+            pair("chat_max_len", "2000"),
+            pair("upload_quota_bytes", "1073741824"),
+            pair("max_concurrent_transfers", "4"),
+            pair("transfer_rate_bytes_per_sec", "0"),
+            pair("ws_public_url", ""),
+            pair("advertise_host", ""),
+            pair("announce_enabled", "true"),
+            pair("announce_description", "A seeded demo burrow."),
+            pair("announce_sysop", "rabbit"),
             // Gateway + syndication knobs for the Syndication & Gateways
             // panel, mirroring the server's key names and serializations.
             pair("nntp_enabled", "true"),
@@ -1307,18 +1320,28 @@ mod tests {
     }
 
     #[test]
+    fn every_operator_key_is_seeded_so_demo_and_live_consoles_agree() {
+        let mut c = MockClient::new();
+        for key in crate::admin::OPERATOR_KEYS {
+            let got = c.dispatch_admin(AdminCommand::GetConfig { key: (*key).into() });
+            assert!(
+                matches!(got.as_slice(), [AdminEvent::ConfigLoaded { .. }]),
+                "mock has no seed for operator key {key}"
+            );
+        }
+    }
+
+    #[test]
     fn admin_config_get_set_roundtrip() {
         let mut c = MockClient::new();
-        let got = c.dispatch_admin(AdminCommand::GetConfig {
-            key: "server.name".into(),
-        });
+        let got = c.dispatch_admin(AdminCommand::GetConfig { key: "name".into() });
         assert!(matches!(
             got.as_slice(),
             [AdminEvent::ConfigLoaded { value, .. }] if value == "Rabbit Lobby"
         ));
         // Setting a non-listener key applies live.
         let set = c.dispatch_admin(AdminCommand::SetConfig {
-            key: "server.name".into(),
+            key: "name".into(),
             value: "New Warren".into(),
         });
         assert!(matches!(
@@ -1337,9 +1360,7 @@ mod tests {
             }]
         ));
         // The updated value reads back.
-        let got = c.dispatch_admin(AdminCommand::GetConfig {
-            key: "server.name".into(),
-        });
+        let got = c.dispatch_admin(AdminCommand::GetConfig { key: "name".into() });
         assert!(matches!(
             got.as_slice(),
             [AdminEvent::ConfigLoaded { value, .. }] if value == "New Warren"

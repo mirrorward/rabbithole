@@ -1745,12 +1745,11 @@ impl AppState {
 
     /// Load the seeded config keys the console exposes.
     pub fn load_config(&self) {
-        for key in [
-            "server.name",
-            "server.motd",
-            "registration.mode",
-            "chat.slowmode_secs",
-        ] {
+        // The server's own key names (`Config::get_key`). These used to be the
+        // demo mock's dotted spellings (`server.name`, `chat.slowmode_secs`),
+        // which a real burrow answers NotFound — so a live operator console
+        // showed nothing but the gateway toggles.
+        for key in crate::admin::OPERATOR_KEYS {
             self.dispatch_admin(AdminCommand::GetConfig {
                 key: key.to_string(),
             });

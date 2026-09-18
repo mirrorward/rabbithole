@@ -827,6 +827,12 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 .rh-fieldset{border:0;padding:0;margin:0;min-width:0}\
 .rh-fieldset legend{float:left;padding:0}\
 .rh-config-key{font-weight:600;min-width:12rem;font-family:var(--rh-font-mono);font-size:var(--rh-font-xs)}\
+/* A config row is a three-column grid: key, value, Save. As a wrapping flex\
+   row, long keys pushed their input into the next line and short ones left\
+   the inputs ragged. */\
+.rh-config-row{display:grid;grid-template-columns:minmax(8rem,14rem) minmax(0,1fr) auto;align-items:center;gap:var(--rh-space-2)}\
+.rh-config-key{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+.rh-config-row .rh-input{min-width:0;width:100%}\
 .rh-account-role{font-size:var(--rh-font-xs);color:var(--rh-muted)}\
 .rh-editor{display:flex;flex-direction:column;gap:var(--rh-space-3)}\
 .rh-editor-row{display:flex;gap:var(--rh-space-2);align-items:center}\

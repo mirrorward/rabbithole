@@ -11,6 +11,27 @@
 //! the view stay in lockstep. The one view-local shape is [`ConfigEntry`]: a
 //! flat key/value pair accumulated from `ConfigGet` reads.
 
+/// The server config keys the console loads on entry — the ones an operator
+/// reaches for: what the place is called and says, who may join, the chat
+/// and transfer limits, and how it is advertised. Names are the server's own
+/// (`Config::get_key`/`set_key`); the demo mock seeds the same keys.
+pub const OPERATOR_KEYS: &[&str] = &[
+    "name",
+    "motd",
+    "agreement",
+    "registration_mode",
+    "guest_enabled",
+    "chat_max_len",
+    "upload_quota_bytes",
+    "max_concurrent_transfers",
+    "transfer_rate_bytes_per_sec",
+    "ws_public_url",
+    "advertise_host",
+    "announce_enabled",
+    "announce_description",
+    "announce_sysop",
+];
+
 use rabbithole_proto::admin::{AccountEntry, ClassEntry, InviteCode};
 
 use crate::wire::AdminEvent;
