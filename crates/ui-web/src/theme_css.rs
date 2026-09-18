@@ -279,6 +279,7 @@ pub mod storage {
 pub const STYLESHEET: &str = "\
 /* The display face, self-hosted (assets/space-grotesk-latin.woff2, OFL). Latin\
    only, 500..700 variable; the system sans stands in for everything else. */\
+/* impeccable-disable-next-line overused-font: Space Grotesk is pinned by docs/design/client-experience.md §8 */\
 @font-face{font-family:'Space Grotesk';font-style:normal;font-weight:500 700;font-display:swap;src:url(/space-grotesk-latin.woff2) format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}\
 *{box-sizing:border-box}\
 /* The browser's default `body{margin:8px}` was never reset, so the app -- which\
@@ -375,7 +376,7 @@ body{overflow:hidden}\
 .rh-chat-empty-sub{color:var(--rh-muted);margin:0;max-width:32ch}\
 .rh-person,.rh-xfer-item,.rh-who-row,.rh-tree-item{border-radius:0;transition:background-color .13s ease}\
 .rh-person:hover,.rh-xfer-item:hover,.rh-who-row:hover,.rh-tree-item:hover{background:color-mix(in srgb,var(--rh-text) 5%,transparent)}\
-.rh-empty{color:var(--rh-muted);font-style:italic;padding:var(--rh-space-4);text-align:center;animation:rh-fade-up .25s ease both}\
+.rh-empty{color:var(--rh-muted);padding:var(--rh-space-4);text-align:center;animation:rh-fade-up .25s ease both}\
 .rh-person-servers{margin-left:auto;font-size:var(--rh-font-sm);color:var(--rh-muted)}\
 .rh-xfers{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}\
 .rh-xfer-row{display:flex;align-items:center;gap:.7rem;padding:.5rem .3rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\
@@ -769,6 +770,10 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 .rh-panel{flex:1;padding:var(--rh-space-5);overflow-y:auto;min-width:0}\
 .rh-panel-title{display:flex;align-items:baseline;gap:.5rem;font-family:var(--rh-font-display);font-size:var(--rh-font-lg);font-weight:700;letter-spacing:-.02em;color:var(--rh-text);margin:0 0 var(--rh-space-3)}\
 .rh-panel-sub{font-size:var(--rh-font-sm);font-weight:500;letter-spacing:0;color:var(--rh-muted)}\
+/* A title that follows content gets more space above than below, so it reads\
+   as the head of what comes next rather than the tail of what came before. */\
+.rh-panel-title:not(:first-child){margin-top:var(--rh-space-6)}\
+.rh-config-list{max-height:min(60vh,34rem);overflow:auto;padding-right:.25rem}\
 .rh-tree{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:0}\
 /* Lists are rows with hairlines, not a stack of same-size cards: the same\
    vocabulary as the thread list and the file table, everywhere. */\
@@ -805,7 +810,7 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 .rh-post-when{margin-left:auto;font-size:var(--rh-font-xs);color:var(--rh-muted);font-variant-numeric:tabular-nums;white-space:nowrap}\
 .rh-post .rh-from{color:var(--rh-text);font-weight:600;margin:0}\
 .rh-post-body{margin:.4rem 0 0;line-height:1.6}\
-.rh-empty{color:var(--rh-muted);font-style:italic;padding:var(--rh-space-4);text-align:center}\
+.rh-empty{color:var(--rh-muted);padding:var(--rh-space-4);text-align:center}\
 .rh-dm-peer{width:100%;text-align:left;font:inherit;cursor:pointer;background:transparent;color:var(--rh-text);border:1px solid transparent;border-radius:var(--rh-radius);padding:.45rem .6rem;display:flex;align-items:center;gap:.6rem;transition:background-color .12s ease,color .12s ease}\
 /* Conversation rows carry a preview line, so the list is a little wider than\
    the lobby roster it shares a base style with. */\
@@ -860,7 +865,8 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 .rh-station-name{font-weight:600;color:var(--rh-text)}\
 .rh-station-track{font-size:var(--rh-font-sm);color:var(--rh-muted)}\
 .rh-slider{accent-color:var(--rh-accent);flex:1}\
-.rh-hint{color:var(--rh-muted);font-size:var(--rh-font-sm);margin:.3rem 0;line-height:1.5}\
+.rh-hint{color:var(--rh-muted);font-size:var(--rh-font-sm);margin:.3rem 0;line-height:1.5;max-width:70ch}\
+.rh-server-desc,.rh-settings-note{max-width:70ch}\
 .rh-radio-now{color:var(--rh-accent);text-decoration:none;font-size:var(--rh-font-sm);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:18rem;display:inline-flex;align-items:center;gap:.4rem}\
 .rh-radio-now::before{content:'';width:.5rem;height:.5rem;border-radius:50%;background:var(--rh-error);flex:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--rh-error) 25%,transparent)}\
 .rh-radio-now:hover{text-decoration:underline}\

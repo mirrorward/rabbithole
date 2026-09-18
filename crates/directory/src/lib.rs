@@ -1148,8 +1148,12 @@ mod tests {
             }
         });
         assert!(live, "a bound loopback port should probe live");
+        // Not asserted: that the port reads dead once the listener is
+        // dropped. Under a parallel workspace run another test process can
+        // take the same ephemeral port in that window, and the assertion
+        // failed exactly that way. `port_1_refuses` covers "closed means not
+        // live" without racing anyone.
         drop(listener);
-        assert!(!loopback_port_is_live(port));
     }
 
     #[test]

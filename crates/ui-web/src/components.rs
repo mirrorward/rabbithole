@@ -2632,6 +2632,12 @@ pub fn BoardView() -> impl IntoView {
     // loading skeleton forever.
     create_render_effect(move |_| {
         if let Some(slug) = params.with(|p| p.get("slug").cloned()) {
+            // Arriving here by link, before the board list has loaded, the
+            // title fell back to the slug ("general"). Ask for the list so
+            // the board can say its own name.
+            if state.with_untracked(|s| s.boards.is_empty()) {
+                app.load_boards();
+            }
             app.select_board(&slug);
         }
     });
@@ -3838,7 +3844,13 @@ pub fn Radio() -> impl IntoView {
                 <h2 class="rh-panel-title">"On the air"</h2>
                 <Show
                     when=move || radio.with(|r| !r.is_empty())
-                    fallback=|| view! { <p class="rh-empty">"(off the air)"</p> }
+                    fallback=|| view! {
+                        <EmptyState
+                            icon="/radio"
+                            title="Off the air"
+                            sub="Nobody is broadcasting right now."
+                        />
+                    }
                 >
                     <ul class="rh-tree">
                         <For
@@ -4052,7 +4064,11 @@ pub fn Admin() -> impl IntoView {
                 fallback=|| view! {
                     <div class="rh-body">
                         <section class="rh-panel">
-                            <p class="rh-empty">"You do not have admin access."</p>
+                            <EmptyState
+                                icon="/admin"
+                                title="Operators only"
+                                sub="This console needs an admin account on this burrow."
+                            />
                         </section>
                     </div>
                 }
@@ -4623,7 +4639,10 @@ fn AdminConfigPanel() -> impl IntoView {
     let admin = app.admin;
     view! {
         <h2 class="rh-panel-title">"Server config"</h2>
-        <ul class="rh-tree">
+        // Thirty keys stand taller than the accounts beside them; the list
+        // scrolls inside a bounded height so the console's first screen is
+        // both columns, not one column running past the fold.
+        <ul class="rh-tree rh-config-list">
             <For
                 each=move || admin.with(|a| a.config.clone())
                 key=|c| c.key.clone()

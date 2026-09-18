@@ -23,3 +23,5 @@ e2e-web/playwright-report/
 # Built SPA output from `trunk build` (serve via `burrow --web-root`)
 crates/ui-web/dist/
 .gstack/
+# Impeccable's live-server scratch (its critique snapshots are kept)
+.impeccable/live/
