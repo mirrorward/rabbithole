@@ -2734,7 +2734,7 @@ pub fn Dms() -> impl IntoView {
             <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">
                 "Direct messages"
             </h1>
-            <aside class="rh-who">
+            <aside class="rh-who rh-convos">
                 <h2>"Conversations"</h2>
                 <Show when=move || state.with(|s| s.loading.dms) fallback=|| ()>
                     <Skeleton rows=3/>
@@ -2772,6 +2772,19 @@ pub fn Dms() -> impl IntoView {
                                     "rh-dm-peer"
                                 }
                             };
+                            // The same warren mark the lobby and People use —
+                            // the row used to draw an anonymous gradient blob.
+                            let mark = crate::avatar::mark_svg(
+                                &crate::avatar::seed_for(None, &t.peer),
+                                26,
+                            );
+                            let (preview, when) = t
+                                .preview()
+                                .map(|(text, at)| (text.to_string(), at))
+                                .unwrap_or_default();
+                            let when = (when != 0).then(|| crate::clock::local_hhmm(when));
+                            let pip = crate::state::unread_badge(t.unread as usize);
+                            let unread = t.unread;
                             view! {
                                 <li>
                                     <button
@@ -2780,7 +2793,19 @@ pub fn Dms() -> impl IntoView {
                                         aria-current=move || current().then_some("true")
                                         on:click=move |_| app.select_dm(&id)
                                     >
-                                        {t.peer}
+                                        <span class="rh-mark rh-dm-mark" inner_html=mark></span>
+                                        <span class="rh-dm-main">
+                                            <span class="rh-dm-name">{t.peer}</span>
+                                            {(!preview.is_empty()).then(|| view! {
+                                                <span class="rh-dm-preview">{preview}</span>
+                                            })}
+                                        </span>
+                                        <span class="rh-dm-side">
+                                            {when.map(|w| view! { <span class="rh-dm-when">{w}</span> })}
+                                            {pip.map(|b| view! {
+                                                <span class="rh-pip" aria-label=format!("{unread} unread")>{b}</span>
+                                            })}
+                                        </span>
                                     </button>
                                 </li>
                             }
@@ -2837,6 +2862,10 @@ pub fn Dms() -> impl IntoView {
                                 key=|(k, _, _)| k.clone()
                                 children=move |(_, m, head)| view! {
                                     <li class=if head { "rh-line rh-line-head" } else { "rh-line rh-line-cont" }>
+                                        {head.then(|| {
+                                            let mark = crate::avatar::mark_svg(&m.from, 20);
+                                            view! { <span class="rh-mark rh-line-mark" inner_html=mark></span> }
+                                        })}
                                         {head.then(|| view! {
                                             <span class="rh-from">{m.from.clone()}</span>
                                         })}
@@ -2946,13 +2975,15 @@ pub fn Directory() -> impl IntoView {
                             let handle = m.handle.clone();
                             let presence_of = {
                                 let handle = m.handle.clone();
+                                // The live roster is the truth. The stored
+                                // member row's `online` is whatever the
+                                // directory reply said (never updated by
+                                // presence deltas), so reading it here left
+                                // every dot grey for people who were plainly
+                                // in the lobby.
                                 move || {
                                     state.with(|s| {
-                                        s.members
-                                            .iter()
-                                            .find(|x| x.handle == handle)
-                                            .map(|x| x.online)
-                                            .unwrap_or(m.online)
+                                        s.who.iter().any(|p| p.screen_name == handle)
                                     })
                                 }
                             };

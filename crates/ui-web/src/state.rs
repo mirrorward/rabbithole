@@ -122,6 +122,23 @@ pub struct DmThread {
     pub messages: Vec<DmMessage>,
     /// Unread messages in this conversation (from the wire).
     pub unread: u64,
+    /// The newest line, as the conversation list reported it — so a row can
+    /// show what was last said before its history has been fetched.
+    pub last_text: String,
+    /// When that newest line was sent, unix milliseconds (0 when unknown).
+    pub last_at_unix_ms: i64,
+}
+
+impl DmThread {
+    /// What a conversation row previews: the newest fetched message when the
+    /// history is loaded, else the summary the list came with. `None` for a
+    /// conversation nobody has said anything in yet.
+    pub fn preview(&self) -> Option<(&str, i64)> {
+        if let Some(m) = self.messages.last() {
+            return Some((m.text.as_str(), m.at_unix_ms));
+        }
+        (!self.last_text.is_empty()).then_some((self.last_text.as_str(), self.last_at_unix_ms))
+    }
 }
 
 /// A member's full profile card (from a live `ProfileGet`), richer than the
@@ -465,6 +482,8 @@ impl UiState {
                 peer: id.to_string(),
                 messages: Vec::new(),
                 unread: 0,
+                last_text: String::new(),
+                last_at_unix_ms: 0,
             });
         }
         // Opening a conversation is reading it.
@@ -508,6 +527,8 @@ impl UiState {
                 peer: peer.to_string(),
                 messages: vec![msg],
                 unread: if open { 0 } else { 1 },
+                last_text: String::new(),
+                last_at_unix_ms: 0,
             }),
         }
     }
@@ -1024,12 +1045,16 @@ mod tests {
                 peer: "alice".into(),
                 messages: vec![],
                 unread: 0,
+                last_text: String::new(),
+                last_at_unix_ms: 0,
             },
             DmThread {
                 id: "b".into(),
                 peer: "bob".into(),
                 messages: vec![],
                 unread: 0,
+                last_text: String::new(),
+                last_at_unix_ms: 0,
             },
         ]);
         s.select_dm("b");
@@ -1055,6 +1080,8 @@ mod tests {
             peer: "alice".into(),
             messages: vec![],
             unread: 0,
+            last_text: String::new(),
+            last_at_unix_ms: 0,
         }]);
         s.append_dm(
             "missing",
@@ -1137,6 +1164,41 @@ pub const ROLE_ADMIN: u8 = 3;
 /// server-configuration console.
 pub fn role_is_operator(role: u8) -> bool {
     role >= ROLE_ADMIN
+}
+
+#[cfg(test)]
+mod dm_preview_tests {
+    use super::{DmMessage, DmThread};
+
+    fn thread(last_text: &str, msgs: Vec<DmMessage>) -> DmThread {
+        DmThread {
+            id: "bob".into(),
+            peer: "bob".into(),
+            messages: msgs,
+            unread: 0,
+            last_text: last_text.into(),
+            last_at_unix_ms: 5,
+        }
+    }
+
+    #[test]
+    fn preview_prefers_fetched_history_then_the_list_summary() {
+        assert_eq!(thread("", vec![]).preview(), None, "nothing said yet");
+        assert_eq!(
+            thread("hi", vec![]).preview(),
+            Some(("hi", 5)),
+            "summary only"
+        );
+        let t = thread(
+            "stale",
+            vec![DmMessage {
+                from: "bob".into(),
+                text: "newest".into(),
+                at_unix_ms: 9,
+            }],
+        );
+        assert_eq!(t.preview(), Some(("newest", 9)), "history wins");
+    }
 }
 
 #[cfg(test)]

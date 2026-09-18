@@ -421,6 +421,10 @@ body{overflow:hidden}\
 .rh-status{flex:0 1 auto}\
 .rh-theme-menu,.rh-presence,.rh-kbd-jump,.rh-dot,.rh-conn{flex:none}\
 .rh-theme-menu{order:8;display:inline-flex;gap:.35rem;align-items:center}\
+/* Presence and Leave sit with the icon cluster on the right: with no `order`\
+   they rendered first, before the burrow's own name. */\
+.rh-header .rh-presence{order:7}\
+.rh-header .rh-leave{order:9;margin-left:.2rem}\
 .rh-nav{order:7;display:flex;gap:.15rem;align-items:center}\
 .rh-nav a,.rh-nav .rh-nav-item{color:var(--rh-muted);display:inline-flex;align-items:center;gap:.3rem;white-space:nowrap;text-decoration:none;font-size:var(--rh-font-sm);font-weight:500;padding:.35rem .7rem;border-radius:var(--rh-radius-full);transition:background-color .15s ease,color .15s ease;border-bottom:0}\
 .rh-nav a:hover,.rh-nav .rh-nav-item:hover{color:var(--rh-text);background:color-mix(in srgb,var(--rh-text) 7%,transparent)}\
@@ -754,8 +758,16 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 .rh-post .rh-from{color:var(--rh-accent);font-weight:600}\
 .rh-post-body{margin:.4rem 0 0;line-height:1.6}\
 .rh-empty{color:var(--rh-muted);font-style:italic;padding:var(--rh-space-4);text-align:center}\
-.rh-dm-peer{width:100%;text-align:left;font:inherit;cursor:pointer;background:transparent;color:var(--rh-text);border:1px solid transparent;border-radius:var(--rh-radius);padding:.45rem .6rem;display:flex;align-items:center;gap:.55rem;transition:background-color .12s ease,color .12s ease}\
-.rh-dm-peer::before{content:'';flex:none;width:1.7rem;height:1.7rem;border-radius:var(--rh-radius-full);background:linear-gradient(135deg,color-mix(in srgb,var(--rh-accent) 75%,var(--rh-surface)),color-mix(in srgb,var(--rh-accent) 25%,var(--rh-surface)))}\
+.rh-dm-peer{width:100%;text-align:left;font:inherit;cursor:pointer;background:transparent;color:var(--rh-text);border:1px solid transparent;border-radius:var(--rh-radius);padding:.45rem .6rem;display:flex;align-items:center;gap:.6rem;transition:background-color .12s ease,color .12s ease}\
+/* Conversation rows carry a preview line, so the list is a little wider than\
+   the lobby roster it shares a base style with. */\
+.rh-convos{width:18rem}\
+.rh-dm-mark{border-radius:7px}\
+.rh-dm-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:.05rem}\
+.rh-dm-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}\
+.rh-dm-preview{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--rh-font-xs);color:var(--rh-muted);font-weight:400}\
+.rh-dm-side{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:.2rem}\
+.rh-dm-when{font-size:var(--rh-font-xs);color:var(--rh-muted);font-variant-numeric:tabular-nums;font-weight:400}\
 .rh-dm-peer:hover{background:color-mix(in srgb,var(--rh-text) 6%,transparent)}\
 .rh-dm-peer.active{background:color-mix(in srgb,var(--rh-accent) 14%,transparent);color:var(--rh-accent);font-weight:600}\
 .rh-member-link{flex-direction:row;align-items:center;gap:var(--rh-space-3);padding:.6rem var(--rh-space-3)}\

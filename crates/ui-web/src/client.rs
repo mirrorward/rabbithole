@@ -385,6 +385,8 @@ impl MockClient {
                     },
                 ],
                 unread: 2,
+                last_text: String::new(),
+                last_at_unix_ms: 0,
             },
             DmThread {
                 id: "bob".to_string(),
@@ -395,6 +397,8 @@ impl MockClient {
                     at_unix_ms: now - 25 * 60_000,
                 }],
                 unread: 0,
+                last_text: String::new(),
+                last_at_unix_ms: 0,
             },
         ]
     }

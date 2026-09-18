@@ -397,6 +397,8 @@ pub fn frame_to_dm_threads(frame: &Frame) -> Option<Vec<crate::state::DmThread>>
                 peer: t.with,
                 messages: Vec::new(),
                 unread: t.unread,
+                last_text: t.last_text,
+                last_at_unix_ms: t.last_at_unix_ms,
             })
             .collect(),
     )
