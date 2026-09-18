@@ -1929,8 +1929,11 @@ impl AppState {
             }
             return;
         }
+        // A guest has no resume token, so the shell has no signed-in session of
+        // its own to this burrow. The webview's socket does: download over
+        // that, and the bytes are still saved through the shell.
         #[cfg(target_arch = "wasm32")]
-        if crate::native::native_available() {
+        if crate::native::native_available() && !self.focused().is_guest.get_untracked() {
             let info = self.focused().files.with_untracked(|f| {
                 f.nodes.iter().find(|n| n.id == id).and_then(|n| {
                     n.blob_id.map(|b| {
@@ -1970,6 +1973,9 @@ impl AppState {
                     &name,
                     max_sources,
                     &self.focused_burrow_label(),
+                    id,
+                    self.settings.get_untracked().download_from,
+                    &self.focused_endpoint(),
                 );
                 return;
             }

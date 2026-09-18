@@ -528,6 +528,9 @@ body{overflow:hidden}\
 .rh-tracker-tag{font-size:var(--rh-font-xs);color:var(--rh-muted);border:1px solid color-mix(in srgb,var(--rh-text) 14%,transparent);border-radius:var(--rh-radius-full);padding:0 .4rem}\
 .rh-tracker-remove{margin-left:auto}\
 .rh-tracker-add{display:flex;gap:var(--rh-space-2);margin-top:var(--rh-space-2);max-width:32rem}\
+.rh-download-from{display:flex;flex-direction:column;align-items:flex-start;gap:var(--rh-space-2);margin-top:var(--rh-space-4)}\
+.rh-download-from-label{font-size:var(--rh-font-sm);font-weight:600;color:var(--rh-text)}\
+.rh-download-from .rh-hint{margin:0}\
 .rh-settings-folder{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--rh-space-2) var(--rh-space-4);margin:var(--rh-space-3) 0 var(--rh-space-2);max-width:70ch}\
 .rh-settings-folder-line{margin:0;min-width:0;flex:1 1 16rem;overflow-wrap:anywhere}\
 .rh-settings-folder-actions{display:flex;gap:var(--rh-space-2);flex:none}\

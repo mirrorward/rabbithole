@@ -57,6 +57,68 @@ pub struct Settings {
     /// setting would silently wipe someone's tracker list.
     #[serde(default = "default_max_sources")]
     pub max_sources: u32,
+    /// Where a download comes from — see [`DownloadFrom`]. The last choice
+    /// made beside a Download button, remembered.
+    #[serde(default)]
+    pub download_from: DownloadFrom,
+}
+
+/// Where the person wants a download to come from.
+///
+/// *Peers* are other people on the same burrow who hold the file and offered
+/// to share it; pulling from several at once is what makes a swarm fast, and
+/// it spares the burrow's own link. A swarm is one burrow's: a ticket the
+/// burrow signs is only honoured by its own peers, so "people on my other
+/// burrows" are not sources for a file here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadFrom {
+    /// Peers when anyone has it, else the burrow. Cannot fail merely because
+    /// nobody happens to be sharing.
+    #[default]
+    Auto,
+    /// Peers only: never pull from the burrow itself.
+    Peers,
+    /// The burrow only: skip the swarm.
+    Origin,
+}
+
+impl DownloadFrom {
+    pub const ALL: [DownloadFrom; 3] = [
+        DownloadFrom::Auto,
+        DownloadFrom::Peers,
+        DownloadFrom::Origin,
+    ];
+
+    /// The word the desktop shell knows it by.
+    pub fn wire(self) -> &'static str {
+        match self {
+            DownloadFrom::Auto => "auto",
+            DownloadFrom::Peers => "peers",
+            DownloadFrom::Origin => "origin",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DownloadFrom::Auto => "Best available",
+            DownloadFrom::Peers => "Peers only",
+            DownloadFrom::Origin => "This burrow only",
+        }
+    }
+
+    /// What choosing it means, in a sentence.
+    pub fn explains(self) -> &'static str {
+        match self {
+            DownloadFrom::Auto => {
+                "From everyone sharing it here at once, or from the burrow itself when nobody is."
+            }
+            DownloadFrom::Peers => {
+                "Only from people sharing it here. If nobody is, the download waits for you to try again."
+            }
+            DownloadFrom::Origin => "Straight from the burrow, skipping the swarm.",
+        }
+    }
 }
 
 fn default_max_sources() -> u32 {
@@ -70,6 +132,7 @@ impl Default for Settings {
             reconnect_on_launch: true,
             notifications: true,
             max_sources: DEFAULT_MAX_SOURCES,
+            download_from: DownloadFrom::default(),
         }
     }
 }
@@ -140,6 +203,23 @@ pub mod storage {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn where_a_download_comes_from_survives_old_blobs_and_speaks_the_shells_words() {
+        // A blob written before the field existed still loads, to the default.
+        let old = r#"{"trackers":[],"reconnect_on_launch":true,"notifications":true}"#;
+        let parsed: super::Settings = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.download_from, super::DownloadFrom::Auto);
+        let json = serde_json::to_string(&super::DownloadFrom::Peers).unwrap();
+        assert_eq!(json, "\"peers\"");
+        for choice in super::DownloadFrom::ALL {
+            assert_eq!(
+                serde_json::to_string(&choice).unwrap(),
+                format!("\"{}\"", choice.wire())
+            );
+            assert!(choice.explains().ends_with('.'));
+        }
+    }
+
     use super::*;
 
     #[test]

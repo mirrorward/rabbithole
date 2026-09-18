@@ -21,16 +21,23 @@ use crate::downloads::sanitize_name;
 
 use rabbithole_core::Client;
 
-use crate::swarm::{run_swarm_download, SwarmEvent};
+use crate::swarm::{run_download, SourceMode, SwarmEvent, Wanted};
 
-/// App-managed state: the native RHP session.
+/// App-managed state: the native RHP sessions, one per burrow.
 #[derive(Default)]
 pub struct TransfersManager {
-    /// The connected client. `Client` is `!Sync`, so it lives behind an async
-    /// mutex; for now the swarm fetch runs while the lock is held, so downloads
-    /// serialize (concurrent downloads + mid-fetch abort are a later refinement,
-    /// unblocked by splitting the find/ticket phase from the lock-free fetch).
-    client: Mutex<Option<Client>>,
+    /// The authenticated native session for each burrow, keyed by the endpoint
+    /// the webview dialled. One per burrow, not one for the app: a file's node
+    /// id means something only on its own burrow, and a single shared session
+    /// (what this used to be) would ask whichever burrow connected last, which
+    /// with two burrows joined is a coin toss, and with the origin fallback
+    /// could fetch a *different file* that happens to share the id.
+    ///
+    /// `Client` is `!Sync`, so they live behind an async mutex; a fetch runs
+    /// while the lock is held, so downloads serialize (concurrent downloads +
+    /// mid-fetch abort are a later refinement, unblocked by splitting the
+    /// find/ticket phase from the lock-free fetch).
+    clients: Mutex<std::collections::HashMap<String, Client>>,
 }
 
 /// Authoritative "am I running inside the native shell?" signal. The wasm SPA
@@ -85,7 +92,15 @@ pub async fn connect_native(
         "[rh-swarm] native core connected to {endpoint} (authenticated: {authed}) — swarm downloads {}",
         if authed { "ready" } else { "unavailable (no resume token; guest?)" }
     );
-    *state.client.lock().await = Some(client);
+    // Only a session that can actually ask for things is kept. A guest has no
+    // resume token; the webview knows that too and downloads over its own
+    // socket instead.
+    let mut clients = state.clients.lock().await;
+    if authed {
+        clients.insert(endpoint, client);
+    } else {
+        clients.remove(&endpoint);
+    }
     Ok(())
 }
 
@@ -101,7 +116,7 @@ struct TransferEvent {
 /// Fetch content `root_hex` (`size` bytes; `0` = derive from the source list)
 /// from the swarm into the OS downloads directory as `name`, emitting
 /// `swarm://event` progress tagged with `transfer_id` as each unit lands.
-// Two of these are injected by Tauri; the other six are the command's wire
+// Two of these are injected by Tauri; the rest are the command's wire
 // shape, which the webview calls by name. Bundling them into a struct would
 // change that call for no reader's benefit.
 #[allow(clippy::too_many_arguments)]
@@ -109,12 +124,15 @@ struct TransferEvent {
 pub async fn swarm_start_download(
     app: AppHandle,
     state: State<'_, TransfersManager>,
+    endpoint: String,
     transfer_id: u64,
     root_hex: String,
     size: u64,
     name: String,
     max_sources: u32,
     burrow: Option<String>,
+    node_id: Option<i64>,
+    mode: Option<String>,
 ) -> Result<(), String> {
     let root = parse_root(&root_hex)?;
     // Where it goes is settled before a byte moves: asking after the fetch
@@ -123,14 +141,19 @@ pub async fn swarm_start_download(
         return Err("Save cancelled.".to_string());
     };
     eprintln!("[rh-swarm] swarm_start_download: transfer={transfer_id} root={root_hex} size={size} name={name:?}");
-    let mut guard = state.client.lock().await;
-    let client = guard.as_mut().ok_or("not connected to a burrow")?;
+    let mut guard = state.clients.lock().await;
+    let client = guard
+        .get_mut(&endpoint)
+        .ok_or("the app has no signed-in session to that burrow")?;
     // A failure is reported to the webview as an event, not just returned:
     // the UI's transfer row is driven by the event stream, and an error that
     // only comes back through the invoke promise leaves that row saying
     // nothing about what happened.
     let emit_app = app.clone();
-    let result = run_swarm_download(client, root, size, &dest, max_sources as usize, move |event| {
+    // Peers when anyone has it, else the burrow itself, unless told otherwise.
+    let mode = SourceMode::parse(mode.as_deref().unwrap_or("auto"));
+    let want = Wanted { root, size, node_id, max_sources: max_sources as usize, mode };
+    let result = run_download(client, &want, &dest, move |event| {
         let _ = emit_app.emit("swarm://event", TransferEvent { transfer_id, event });
     })
     .await;

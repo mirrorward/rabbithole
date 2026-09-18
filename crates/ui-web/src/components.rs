@@ -4497,6 +4497,47 @@ fn FileDetail() -> impl IntoView {
                                 <button class="rh-btn" on:click=move |_| app.download(id)>
                                     "Download"
                                 </button>
+                                // Where it comes from is a choice only the
+                                // desktop app has: a browser tab cannot reach
+                                // peers, so it has the burrow and nothing to pick.
+                                <Show
+                                    when=move || {
+                                        app.download_prefs.with(Option::is_some)
+                                            && app.focused_tracked().live.get()
+                                    }
+                                    fallback=|| ()
+                                >
+                                    <div class="rh-download-from">
+                                        <span class="rh-download-from-label" id="rh-download-from">
+                                            "Get it from"
+                                        </span>
+                                        <div class="rh-seg" role="radiogroup" aria-labelledby="rh-download-from">
+                                            {crate::settings::DownloadFrom::ALL
+                                                .into_iter()
+                                                .map(|choice| view! {
+                                                    <button
+                                                        type="button"
+                                                        class="rh-seg-btn"
+                                                        class:on=move || app.settings.get().download_from == choice
+                                                        role="radio"
+                                                        aria-checked=move || {
+                                                            (app.settings.get().download_from == choice).to_string()
+                                                        }
+                                                        on:click=move |_| {
+                                                            app.settings.update(|s| s.download_from = choice);
+                                                            app.save_settings();
+                                                        }
+                                                    >
+                                                        {choice.label()}
+                                                    </button>
+                                                })
+                                                .collect_view()}
+                                        </div>
+                                        <p class="rh-hint">
+                                            {move || app.settings.get().download_from.explains()}
+                                        </p>
+                                    </div>
+                                </Show>
                             </div>
                         }
                     })

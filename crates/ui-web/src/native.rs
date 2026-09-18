@@ -90,6 +90,9 @@ pub fn start_swarm_download(
     name: &str,
     max_sources: u32,
     burrow: &str,
+    node_id: i64,
+    from: crate::settings::DownloadFrom,
+    endpoint: &str,
 ) {
     let Some(b) = bridge() else { return };
     let Some(invoke) = method(&b, "invoke") else {
@@ -124,6 +127,25 @@ pub fn start_swarm_download(
         &args,
         &JsValue::from_str("burrow"),
         &JsValue::from_str(burrow),
+    );
+    // Which burrow: the shell keeps a native session per burrow, and a node id
+    // means something only on its own.
+    let _ = js_sys::Reflect::set(
+        &args,
+        &JsValue::from_str("endpoint"),
+        &JsValue::from_str(endpoint),
+    );
+    // The file's node, so the burrow itself can be asked when no peer has it,
+    // and where the person wants it from (peers, the burrow, or best available).
+    let _ = js_sys::Reflect::set(
+        &args,
+        &JsValue::from_str("nodeId"),
+        &JsValue::from_f64(node_id as f64),
+    );
+    let _ = js_sys::Reflect::set(
+        &args,
+        &JsValue::from_str("mode"),
+        &JsValue::from_str(from.wire()),
     );
     if let Ok(ret) = invoke.call2(&b, &JsValue::from_str("swarm_start_download"), &args) {
         if let Ok(promise) = ret.dyn_into::<js_sys::Promise>() {

@@ -55,8 +55,13 @@ impl std::fmt::Display for SwarmError {
         match self {
             SwarmError::Client(e) => write!(f, "server: {e}"),
             SwarmError::Fetch(e) => write!(f, "fetch: {e}"),
-            SwarmError::NoPeerSources { server_has } => {
-                write!(f, "no peer sources (server_has={server_has})")
+            // Said for a person: this is what the failed row shows.
+            SwarmError::NoPeerSources { server_has: true } => write!(
+                f,
+                "nobody is sharing this file right now, and this download was set to peers only"
+            ),
+            SwarmError::NoPeerSources { server_has: false } => {
+                write!(f, "nobody has this file right now, not even the burrow")
             }
         }
     }
@@ -68,6 +73,72 @@ impl From<ClientError> for SwarmError {
         SwarmError::Client(e)
     }
 }
+
+/// Where the person asked a download to come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceMode {
+    /// Peers when anyone has it, else the burrow itself. The default, and the
+    /// only choice under which a download cannot fail merely because nobody
+    /// happens to be seeding.
+    #[default]
+    Auto,
+    /// Peers only: never pull from the burrow (it may be metered, or slow).
+    PeersOnly,
+    /// The burrow only: skip discovery and fetch straight from the origin.
+    OriginOnly,
+}
+
+impl SourceMode {
+    /// The webview's word for it. Anything unrecognised is the default.
+    pub fn parse(word: &str) -> Self {
+        match word {
+            "peers" => SourceMode::PeersOnly,
+            "origin" => SourceMode::OriginOnly,
+            _ => SourceMode::Auto,
+        }
+    }
+}
+
+/// Which way a download goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    Swarm,
+    Origin,
+}
+
+/// Decide the route once discovery has answered. Pure, so the rule is tested
+/// rather than hoped for: a download fails for want of sources only when the
+/// person asked for peers and there are none, or when nobody at all has it.
+pub fn choose_route(
+    mode: SourceMode,
+    peers: usize,
+    server_has: bool,
+    origin_reachable: bool,
+) -> Result<Route, SwarmError> {
+    let origin_ok = server_has && origin_reachable;
+    match mode {
+        SourceMode::OriginOnly if origin_ok => Ok(Route::Origin),
+        SourceMode::OriginOnly => Err(SwarmError::NoPeerSources { server_has }),
+        SourceMode::PeersOnly if peers > 0 => Ok(Route::Swarm),
+        SourceMode::PeersOnly => Err(SwarmError::NoPeerSources { server_has }),
+        SourceMode::Auto if peers > 0 => Ok(Route::Swarm),
+        SourceMode::Auto if origin_ok => Ok(Route::Origin),
+        SourceMode::Auto => Err(SwarmError::NoPeerSources { server_has }),
+    }
+}
+
+/// How many whole swarm units `len` bytes of a `size`-byte file amount to,
+/// counting the short final unit once the file is complete.
+pub fn units_done(len: u64, size: u64) -> u64 {
+    if size > 0 && len >= size {
+        size.div_ceil(UNIT_SIZE)
+    } else {
+        len / UNIT_SIZE
+    }
+}
+
+/// What the Transfers row calls the burrow when it is the only source.
+pub const ORIGIN_SOURCE: &str = "the burrow";
 
 /// Turn a server's [`SourceList`] into the fetchable peers: only entries that
 /// registered BOTH a peer-wire endpoint and a cert fingerprint can be dialed;
@@ -164,10 +235,167 @@ pub async fn run_swarm_download(
     Ok(report)
 }
 
+/// One download, as asked for.
+#[derive(Debug, Clone, Copy)]
+pub struct Wanted {
+    /// The content's blake3 root (its blob id).
+    pub root: [u8; 32],
+    /// Its size when known; 0 to derive it from the source list.
+    pub size: u64,
+    /// The file's node on the origin, which is what the origin is asked for.
+    pub node_id: Option<i64>,
+    /// How many peers a swarm fetch may use at once.
+    pub max_sources: usize,
+    pub mode: SourceMode,
+}
+
+/// Download `root` the way the person asked: from peers, from the burrow, or
+/// (the default) from peers when there are any and the burrow when there are
+/// not. Before this, a download in the app failed outright whenever nobody
+/// happened to be seeding the file, which on most burrows is always.
+///
+/// `node_id` is the file's node on the origin; without it the origin cannot be
+/// asked, and the download is peers-only whatever was chosen.
+pub async fn run_download(
+    client: &mut Client,
+    want: &Wanted,
+    dest: &Path,
+    mut emit: impl FnMut(SwarmEvent),
+) -> Result<Route, SwarmError> {
+    let Wanted {
+        root,
+        size,
+        node_id,
+        max_sources,
+        mode,
+    } = *want;
+    let (peers, server_has) = if mode == SourceMode::OriginOnly {
+        (0, true) // the origin is asked directly; it answers for itself
+    } else {
+        let list = client.swarm_find(root).await?;
+        (sources_from_list(&list).len(), list.server_has)
+    };
+    match choose_route(mode, peers, server_has, node_id.is_some())? {
+        Route::Swarm => {
+            run_swarm_download(client, root, size, dest, max_sources, emit).await?;
+            Ok(Route::Swarm)
+        }
+        Route::Origin => {
+            let node_id = node_id.expect("choose_route requires a reachable origin");
+            run_origin_download(client, node_id, size, dest, &mut emit).await?;
+            // The origin verified the file against *its* ticket. Check it
+            // against what was asked for: a node id is only a number, and the
+            // content hash is the identity.
+            let got = Client::hash_file(dest).map(|(root, _)| root).ok();
+            if got != Some(root) {
+                let _ = std::fs::remove_file(dest);
+                return Err(SwarmError::Fetch(rabbithole_swarm::peer::PeerError::Verify(
+                    "the burrow sent a different file than the one asked for".to_string(),
+                )));
+            }
+            Ok(Route::Origin)
+        }
+    }
+}
+
+/// Fetch a file straight from the burrow (the ticketed, resumable, blake3-
+/// verified transfer every client uses), reporting progress in the same
+/// events a swarm fetch does so the Transfers row cannot tell the difference.
+async fn run_origin_download(
+    client: &mut Client,
+    node_id: i64,
+    size: u64,
+    dest: &Path,
+    emit: &mut impl FnMut(SwarmEvent),
+) -> Result<u64, SwarmError> {
+    // A swarm attempt leaves units at arbitrary offsets plus a `.rhstate`. The
+    // origin transfer resumes by *length*, which would mistake such a file
+    // for a contiguous partial and fail its final hash check. Start clean.
+    let state = rabbithole_swarm::scheduler::rhstate_path(dest);
+    if state.exists() {
+        let _ = std::fs::remove_file(&state);
+        let _ = std::fs::remove_file(dest);
+    }
+    let total_units = size.div_ceil(UNIT_SIZE).max(1);
+    emit(SwarmEvent::Opened {
+        total_units,
+        source_count: 1,
+    });
+    let mut reported = 0u64;
+    let mut report_up_to = |units: u64, emit: &mut dyn FnMut(SwarmEvent)| {
+        while reported < units.min(total_units) {
+            emit(SwarmEvent::Chunk {
+                endpoint: ORIGIN_SOURCE.to_string(),
+                offset: reported * UNIT_SIZE,
+                done_units: reported + 1,
+                total_units,
+            });
+            reported += 1;
+        }
+    };
+    let bytes = {
+        let transfer = client.transfer_download(node_id, dest);
+        tokio::pin!(transfer);
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(200));
+        loop {
+            tokio::select! {
+                done = &mut transfer => break done?,
+                _ = tick.tick() => {
+                    let len = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+                    // Hold the last unit back: it is only "done" once verified.
+                    report_up_to(units_done(len, 0).min(total_units.saturating_sub(1)), emit);
+                }
+            }
+        }
+    };
+    report_up_to(total_units, emit);
+    emit(SwarmEvent::Done {
+        bytes,
+        per_source: vec![(ORIGIN_SOURCE.to_string(), total_units)],
+    });
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rabbithole_proto::swarm::{SourceInfo, SourceList};
+
+    #[test]
+    fn a_download_fails_for_want_of_sources_only_when_it_must() {
+        use Route::*;
+        use SourceMode::*;
+        let route = |m, peers, has, reach| choose_route(m, peers, has, reach).ok();
+        // The default: peers when there are any, else the burrow.
+        assert_eq!(route(Auto, 3, true, true), Some(Swarm));
+        assert_eq!(route(Auto, 0, true, true), Some(Origin), "nobody seeding is not a failure");
+        assert_eq!(route(Auto, 0, false, true), None, "nobody has it at all");
+        assert_eq!(route(Auto, 0, true, false), None, "no node id: the origin cannot be asked");
+        // Peers only means it.
+        assert_eq!(route(PeersOnly, 2, true, true), Some(Swarm));
+        assert_eq!(route(PeersOnly, 0, true, true), None);
+        // The burrow only skips the peers even when there are some.
+        assert_eq!(route(OriginOnly, 5, true, true), Some(Origin));
+        assert_eq!(route(OriginOnly, 5, false, true), None);
+        // And the failure says something a person can act on.
+        let why = choose_route(PeersOnly, 0, true, true).unwrap_err().to_string();
+        assert!(why.contains("peers only"), "{why}");
+        assert_eq!(SourceMode::parse("peers"), PeersOnly);
+        assert_eq!(SourceMode::parse("origin"), OriginOnly);
+        assert_eq!(SourceMode::parse("auto"), Auto);
+        assert_eq!(SourceMode::parse("nonsense"), Auto);
+    }
+
+    #[test]
+    fn progress_counts_whole_units_and_the_short_last_one_only_when_complete() {
+        assert_eq!(units_done(0, 3 * UNIT_SIZE), 0);
+        assert_eq!(units_done(UNIT_SIZE - 1, 3 * UNIT_SIZE), 0);
+        assert_eq!(units_done(UNIT_SIZE, 3 * UNIT_SIZE), 1);
+        let size = 2 * UNIT_SIZE + 10;
+        assert_eq!(units_done(2 * UNIT_SIZE + 5, size), 2, "the tail is not done yet");
+        assert_eq!(units_done(size, size), 3, "complete: the short unit counts");
+        assert_eq!(units_done(700, 700), 1, "a small file is one unit");
+    }
 
     /// A peer-wire source: `SourceInfo::new` sets no contact; `with_endpoint`
     /// sets both endpoint + fingerprint together (the server only ever

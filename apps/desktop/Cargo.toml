@@ -1,7 +1,7 @@
 [package]
 name = "rabbithole-desktop"
 description = "RabbitHole — Tauri v2 desktop + mobile shell wrapping the ui-web Leptos SPA"
-version = "0.211.0"
+version = "0.212.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]
@@ -55,6 +55,10 @@ tauri-plugin-dialog = "2"
 rabbithole-identity = { path = "../../crates/identity" }
 tempfile = "3"
 blake3 = "1"
+# A real burrow for the origin-fallback test: the download path the app
+# takes when nobody is seeding has to be proven against the server it talks to.
+burrow = { path = "../server" }
+rabbithole-server-core = { path = "../../crates/server-core" }
 
 [profile.release]
 lto = true
