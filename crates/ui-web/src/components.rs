@@ -1883,6 +1883,8 @@ pub fn Login() -> impl IntoView {
 
     let connect = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        app.pending_notice.set(None);
+        app.pending_endpoint.set(None);
         if go_live.get() {
             // Live requires a handle to authenticate — without one the session
             // connects but never signs in (a silent dead session).
@@ -1940,6 +1942,12 @@ pub fn Login() -> impl IntoView {
             <form class="rh-login" on:submit=connect>
                 <h1 id=a11y::VIEW_TITLE_ID tabindex="-1">"RabbitHole"</h1>
                 <p class="rh-login-tagline">"Many burrows, one you."</p>
+                // Why you're here, when you didn't choose to be: an expired
+                // session or a refused sign-in names itself above the form
+                // instead of vanishing with a five-second toast.
+                {move || app.pending_notice.get().map(|n| view! {
+                    <p class="rh-login-notice" role="status">{n}</p>
+                })}
                 {(!recent.is_empty()).then(|| view! {
                     <div class="rh-recent" role="group" aria-label="Recent burrows">
                         <span class="rh-recent-label">"Recent"</span>
@@ -2036,7 +2044,7 @@ pub fn Login() -> impl IntoView {
                         class="rh-input"
                         type="password"
                         autocomplete="current-password"
-                        placeholder="password (leave empty to enter as a guest)"
+                        placeholder="password (empty for a guest visit)"
                         prop:value=password
                         on:input=move |ev| password.set(event_target_value(&ev))
                     />
@@ -2137,6 +2145,27 @@ fn EmptyState(
             <div class="rh-chat-empty-mark" aria-hidden="true" inner_html=crate::icons::section_icon(icon)></div>
             <p class="rh-chat-empty-title">{title}</p>
             <p class="rh-chat-empty-sub">{sub}</p>
+        </div>
+    }
+}
+
+/// A list that failed to arrive: says so, and offers to ask again. Shown in
+/// place of a skeleton that would otherwise shimmer forever, and instead of
+/// an empty state that would claim the burrow has nothing.
+#[component]
+fn LoadFailed(
+    /// What failed to load, in the product's words ("the boards").
+    what: &'static str,
+    /// Re-issue the request.
+    #[prop(into)]
+    on_retry: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <div class="rh-load-failed" role="alert">
+            <span>{format!("Couldn\u{2019}t load {what}.")}</span>
+            <button class="rh-btn ghost small" on:click=move |_| on_retry.call(())>
+                "Try again"
+            </button>
         </div>
     }
 }
@@ -2460,8 +2489,11 @@ pub fn Boards() -> impl IntoView {
                 <Show when=move || state.with(|s| s.loading.boards) fallback=|| ()>
                     <Skeleton rows=3/>
                 </Show>
+                <Show when=move || state.with(|s| s.load_failed && s.boards.is_empty()) fallback=|| ()>
+                    <LoadFailed what="the boards" on_retry=move |_| app.load_boards()/>
+                </Show>
                 <Show
-                    when=move || state.with(|s| !s.loading.boards && s.boards.is_empty())
+                    when=move || state.with(|s| !s.loading.boards && !s.load_failed && s.boards.is_empty())
                     fallback=|| ()
                 >
                     <EmptyState
@@ -2763,8 +2795,11 @@ pub fn Dms() -> impl IntoView {
                 <Show when=move || state.with(|s| s.loading.dms) fallback=|| ()>
                     <Skeleton rows=3/>
                 </Show>
+                <Show when=move || state.with(|s| s.load_failed && s.dm_threads.is_empty()) fallback=|| ()>
+                    <LoadFailed what="your conversations" on_retry=move |_| app.load_dms()/>
+                </Show>
                 <Show
-                    when=move || state.with(|s| !s.loading.dms && s.dm_threads.is_empty())
+                    when=move || state.with(|s| !s.loading.dms && !s.load_failed && s.dm_threads.is_empty())
                     fallback=|| ()
                 >
                     <p class="rh-empty">"No conversations yet \u{2014} message a handle below."</p>
@@ -2963,6 +2998,8 @@ pub fn Directory() -> impl IntoView {
                         if s.loading.members {
                             // Still on the wire — don't claim the burrow is empty.
                             view! { <Skeleton rows=4/> }.into_view()
+                        } else if s.load_failed && s.members.is_empty() {
+                            view! { <LoadFailed what="the members" on_retry=move |_| app.load_members()/> }.into_view()
                         } else if s.members.is_empty() {
                             view! {
                                 <EmptyState

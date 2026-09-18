@@ -146,6 +146,10 @@ pub struct AppState {
     /// An endpoint chosen in the server browser, handed to the login screen to
     /// prefill on its next mount (then cleared).
     pub pending_endpoint: RwSignal<Option<String>>,
+    /// Why the connect form is open, when it is open because something went
+    /// wrong ("Your session on Wonderland expired. Sign in again."). Shown
+    /// once by the form, then cleared.
+    pub pending_notice: RwSignal<Option<String>>,
     /// Transient toast notifications — humanized-event moments
     /// ([`crate::toasts`]).
     pub toasts: RwSignal<crate::toasts::ToastQueue>,
@@ -208,6 +212,7 @@ impl AppState {
             directory_source: create_rw_signal(crate::servers::DirectorySource::Seeded),
             directory_loading: create_rw_signal(false),
             pending_endpoint: create_rw_signal(None),
+            pending_notice: create_rw_signal(None),
             toasts: create_rw_signal(crate::toasts::ToastQueue::default()),
             theme: create_rw_signal(initial_theme_choice()),
             custom_pack: create_rw_signal(None),
@@ -550,6 +555,11 @@ impl AppState {
         // rather than leaving the burrow connected-but-unauthenticated forever.
         let authed = std::rc::Rc::new(std::cell::Cell::new(false));
         let resuming = matches!(auth, AuthMethod::Resume { .. });
+        // A refused sign-in signs the burrow out exactly once, even though
+        // the requests queued behind it fail too.
+        let signed_out = std::rc::Rc::new(std::cell::Cell::new(false));
+        let so_app = *self;
+        let so_name = self.focused().name;
         // Our own handle on this burrow (from AuthOk), so a chat line echoed back
         // to us never raises a notification about ourselves.
         let my_handle = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
@@ -663,16 +673,30 @@ impl AppState {
                             crate::sound::play(crate::sound::Chime::Chat);
                         }
                     }
-                    Event::CommandFailed { .. } if resuming && !authed.get() => {
-                        // An expired/invalid resume token: drop the dead token so
-                        // the next load falls back to a clean password sign-in,
-                        // and tell the user rather than leaving them stuck.
-                        crate::recent::remember_token(&ep, "");
-                        toasts.update(|q| {
-                            q.push(
-                                crate::toasts::ToastKind::Warn,
-                                "Your session expired \u{2014} please sign in again.",
-                            );
+                    Event::CommandFailed { detail } if !authed.get() && !signed_out.get() => {
+                        // A refused password or a dead resume token. The socket
+                        // is up but nothing works: the header kept saying
+                        // "Online", every panel shimmered, a toast per failed
+                        // retry stacked up, and the only way to a sign-in was
+                        // Leave. Sign the burrow out and open the connect form
+                        // with the reason. Deferred: this runs inside the
+                        // transport's own event dispatch.
+                        signed_out.set(true);
+                        let burrow = so_name
+                            .get_untracked()
+                            .filter(|n| !n.is_empty())
+                            .unwrap_or_else(|| server_label(&ServerId(ep.clone())));
+                        let notice = if resuming {
+                            crate::recent::remember_token(&ep, "");
+                            format!("Your session on {burrow} expired. Sign in again.")
+                        } else if detail.contains("Unauthenticated") {
+                            format!("{burrow} didn\u{2019}t accept that handle and password.")
+                        } else {
+                            format!("{burrow} didn\u{2019}t accept that sign-in ({detail}).")
+                        };
+                        let id = ServerId(ep.clone());
+                        wasm_bindgen_futures::spawn_local(async move {
+                            so_app.sign_out(&id, notice);
                         });
                     }
                     _ => {}
@@ -853,14 +877,18 @@ impl AppState {
             });
             crate::recent::forget(&id.0);
         }
-        // The demo session is the app's floor — leaving it would leave nothing
-        // to show, so it stays.
-        if id == ServerId::local() {
+        self.drop_session(&id);
+    }
+
+    /// Remove a session (and its rail tile); focus falls back to the first
+    /// remaining one. The placeholder is the app's floor and never goes.
+    fn drop_session(&self, id: &ServerId) {
+        if id.is_placeholder() {
             return;
         }
         self.sessions
-            .update(|list| list.retain(|(sid, _)| *sid != id));
-        if self.focused_id.get_untracked() == id {
+            .update(|list| list.retain(|(sid, _)| sid != id));
+        if self.focused_id.get_untracked() == *id {
             let next = self
                 .sessions
                 .with_untracked(|list| list.first().map(|(sid, _)| sid.clone()));
@@ -868,6 +896,30 @@ impl AppState {
                 self.set_focus(next);
             }
         }
+    }
+
+    /// Sign a burrow out after a refused sign-in or a dead resume token: the
+    /// socket closes for good (no reconnect loop retrying a token the server
+    /// already refused), the session and its tile go, the saved handle stays
+    /// so the connect form comes up prefilled, and the form carries `notice`
+    /// saying why. Focus falls back to the placeholder and the route guard
+    /// takes the user to the connect screen.
+    #[cfg(target_arch = "wasm32")]
+    pub fn sign_out(&self, id: &ServerId, notice: String) {
+        use crate::wire::EventClient;
+        self.sessions.with_untracked(|list| {
+            if let Some((_, session)) = list.iter().find(|(sid, _)| sid == id) {
+                session
+                    .ws
+                    .update_value(|c| c.dispatch(rabbithole_core::api::Command::Disconnect));
+            }
+        });
+        self.pending_endpoint.set(Some(id.0.clone()));
+        self.pending_notice.set(Some(notice));
+        // "Connected to Wonderland" beside "your session expired" is two
+        // stories; the form's notice is the one that is still true.
+        self.toasts.update(|q| q.clear());
+        self.drop_session(id);
     }
 
     /// Manually redial the live socket now (the reconnect banner's button).

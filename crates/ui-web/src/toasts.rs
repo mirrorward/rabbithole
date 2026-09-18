@@ -63,18 +63,28 @@ pub const MAX_TOASTS: usize = 4;
 impl ToastQueue {
     /// Push a toast, returning its id. Trims the oldest beyond [`MAX_TOASTS`].
     pub fn push(&mut self, kind: ToastKind, text: impl Into<String>) -> u64 {
+        let text = text.into();
+        // The same news twice is once. A reconnect loop that fails four
+        // times used to stack four identical "session expired" toasts.
+        if let Some(last) = self.items.last() {
+            if last.kind == kind && last.text == text {
+                return last.id;
+            }
+        }
         let id = self.next_id;
         self.next_id += 1;
-        self.items.push(Toast {
-            id,
-            kind,
-            text: text.into(),
-        });
+        self.items.push(Toast { id, kind, text });
         if self.items.len() > MAX_TOASTS {
             let overflow = self.items.len() - MAX_TOASTS;
             self.items.drain(0..overflow);
         }
         id
+    }
+
+    /// Drop every toast: what they announced no longer applies (a burrow
+    /// that was just signed out was "Connected" a second ago).
+    pub fn clear(&mut self) {
+        self.items.clear();
     }
 
     /// Remove a toast by id (a no-op if already gone).
@@ -91,6 +101,19 @@ impl ToastQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_identical_toast_collapses_into_the_last_one() {
+        let mut q = ToastQueue::default();
+        let a = q.push(ToastKind::Warn, "Your session expired.");
+        let b = q.push(ToastKind::Warn, "Your session expired.");
+        assert_eq!(a, b);
+        assert_eq!(q.items.len(), 1);
+        // Different text, or a different kind, is news.
+        q.push(ToastKind::Warn, "Connection lost.");
+        q.push(ToastKind::Info, "Connection lost.");
+        assert_eq!(q.items.len(), 3);
+    }
 
     #[test]
     fn push_returns_unique_ids_and_appends() {

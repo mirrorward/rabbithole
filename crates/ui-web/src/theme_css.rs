@@ -716,6 +716,8 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 .rh-login .rh-btn{justify-content:center;margin-top:var(--rh-space-2);padding:.6rem;font-size:var(--rh-font-size)}\
 .rh-live-toggle,.rh-login label.rh-live-toggle{display:flex;align-items:center;gap:.5rem;font-size:var(--rh-font-sm);font-weight:500;color:var(--rh-muted);cursor:pointer;text-transform:none;letter-spacing:normal;margin-bottom:0}\
 .rh-login-tagline{margin:-.5rem 0 .3rem;text-align:center;color:var(--rh-muted);font-size:var(--rh-font-sm)}\
+.rh-login-notice{margin:0 0 .2rem;padding:.55rem .75rem;border-radius:var(--rh-radius);background:color-mix(in srgb,#e8890c 14%,transparent);color:var(--rh-text);font-size:var(--rh-font-sm);line-height:1.45}\
+.rh-load-failed{display:flex;align-items:center;gap:var(--rh-space-3);padding:var(--rh-space-3) .6rem;color:var(--rh-muted);font-size:var(--rh-font-sm)}\
 .rh-field-hint{margin:-.35rem 0 0;font-size:var(--rh-font-xs);color:var(--rh-muted);line-height:1.4}\
 .rh-login .rh-recent-label,.rh-login .rh-demo-label{flex-basis:100%}\
 .rh-live-toggle input{accent-color:var(--rh-accent);cursor:pointer}\

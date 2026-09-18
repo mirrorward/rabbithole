@@ -615,7 +615,15 @@ pub fn command_to_frame(command: &Command, id: RequestId) -> Result<Option<Frame
     let frame = match command {
         Command::Connect { .. } | Command::Disconnect => return Ok(None),
         Command::SignIn { login, password } => {
-            Frame::request(id, &AuthPassword::new(login.clone(), password.clone()))?
+            // No password is a guest visit under that name (the server may
+            // adjust it). The form has said so; the wire now does it, rather
+            // than sending an empty password the server refuses.
+            if password.is_empty() {
+                let wanted = (!login.is_empty()).then(|| login.clone());
+                Frame::request(id, &rabbithole_proto::session::AuthGuest::new(wanted))?
+            } else {
+                Frame::request(id, &AuthPassword::new(login.clone(), password.clone()))?
+            }
         }
         Command::Resume { token } => Frame::request(
             id,
@@ -1341,6 +1349,25 @@ impl EventClient for crate::client::MockClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_password_signs_in_as_a_guest() {
+        let frame = command_to_frame(
+            &Command::SignIn {
+                login: "alice".into(),
+                password: String::new(),
+            },
+            RequestId(7),
+        )
+        .unwrap()
+        .expect("a sign-in is a frame");
+        let guest = frame
+            .decode::<rabbithole_proto::session::AuthGuest>()
+            .expect("an AuthGuest frame")
+            .unwrap();
+        assert_eq!(guest.desired_name.as_deref(), Some("alice"));
+        assert!(frame.decode::<AuthPassword>().is_none());
+    }
     use rabbithole_proto::frame::{Family, FrameKind};
     use rabbithole_proto::presence::{UserSummary, WhoList};
     use rabbithole_proto::{encode_frame, ErrorCode};

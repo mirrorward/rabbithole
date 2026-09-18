@@ -334,6 +334,9 @@ pub struct UiState {
     /// Which list requests are in flight — so a view shows a skeleton instead of
     /// falsely claiming "nothing here" while data is still on the wire.
     pub loading: Loading,
+    /// A list request failed while its skeleton was up. Panels offer a
+    /// retry instead of shimmering forever or claiming the burrow is empty.
+    pub load_failed: bool,
 }
 
 /// In-flight list requests. A view distinguishes three states with this:
@@ -373,6 +376,12 @@ impl UiState {
             }
             Event::CommandFailed { detail } => {
                 self.status = format!("Error: {detail}");
+                // A failed command never delivers the list it was asked
+                // for; a skeleton left waiting would shimmer forever.
+                if self.loading != Loading::default() {
+                    self.loading = Loading::default();
+                    self.load_failed = true;
+                }
             }
             Event::ChatMessage {
                 from,
@@ -427,6 +436,7 @@ impl UiState {
 
     /// Replace the board tree (from a client snapshot).
     pub fn set_boards(&mut self, boards: Vec<Board>) {
+        self.load_failed = false;
         self.boards = boards;
         self.loading.boards = false;
     }
@@ -472,6 +482,7 @@ impl UiState {
 
     /// Replace the DM conversation list (from a client snapshot).
     pub fn set_dm_threads(&mut self, threads: Vec<DmThread>) {
+        self.load_failed = false;
         self.dm_threads = threads;
         self.loading.dms = false;
     }
@@ -544,6 +555,7 @@ impl UiState {
 
     /// Replace the member directory (from a client snapshot).
     pub fn set_members(&mut self, members: Vec<Member>) {
+        self.load_failed = false;
         self.members = members;
         self.loading.members = false;
     }
@@ -813,6 +825,25 @@ mod tests {
             detail: "nope".into(),
         });
         assert!(s.status.contains("nope"));
+    }
+
+    #[test]
+    fn a_failure_mid_load_ends_the_skeleton_and_offers_a_retry() {
+        let mut s = UiState::default();
+        s.loading.boards = true;
+        s.apply(&Event::CommandFailed {
+            detail: "Unauthenticated".into(),
+        });
+        assert!(!s.loading.boards, "the skeleton must come down");
+        assert!(s.load_failed, "and the panel must know why");
+        // The list arriving after a retry clears the failure.
+        s.set_boards(vec![]);
+        assert!(!s.load_failed);
+        // A failure with nothing loading is not a load failure.
+        s.apply(&Event::CommandFailed {
+            detail: "slow down".into(),
+        });
+        assert!(!s.load_failed);
     }
 
     #[test]
