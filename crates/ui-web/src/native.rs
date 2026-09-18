@@ -252,6 +252,11 @@ fn prefs_from_js(v: &JsValue) -> Option<DownloadPrefs> {
         system_folder: get("systemFolder")
             .and_then(|f| f.as_string())
             .unwrap_or_default(),
+        seed: get("seed").and_then(|b| b.as_bool()).unwrap_or(false),
+        seeding_files: get("seedingFiles")
+            .and_then(|n| n.as_f64())
+            .map_or(0, |n| n as u32),
+        seeding_note: get("seedingNote").and_then(|s| s.as_string()),
     })
 }
 
@@ -308,6 +313,13 @@ pub fn set_per_burrow_folders(
     let args = js_sys::Object::new();
     let _ = js_sys::Reflect::set(&args, &JsValue::from_str("on"), &JsValue::from_bool(on));
     prefs_command("set_per_burrow_folders", args, done);
+}
+
+/// Turn sharing downloads with a burrow's swarm on or off.
+pub fn set_seeding(on: bool, done: impl FnOnce(Result<Option<DownloadPrefs>, String>) + 'static) {
+    let args = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&args, &JsValue::from_str("on"), &JsValue::from_bool(on));
+    prefs_command("set_seeding", args, done);
 }
 
 /// Install the `swarm://event` listener that folds native progress into the

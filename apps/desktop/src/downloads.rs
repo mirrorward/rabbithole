@@ -26,6 +26,10 @@ pub struct DownloadPrefs {
     /// Put each burrow's files in a folder of its own.
     #[serde(default)]
     pub per_burrow: bool,
+    /// Offer what you download from a burrow to other people on that burrow
+    /// (see [`crate::seeding`]). Off unless the person turns it on.
+    #[serde(default)]
+    pub seed: bool,
 }
 
 /// What to do with one download.
@@ -167,6 +171,7 @@ mod tests {
         let prefs = DownloadPrefs {
             folder: None,
             per_burrow: true,
+            ..Default::default()
         };
         assert_eq!(
             plan(&prefs, sys, "The Warren", "readme.txt"),
@@ -183,6 +188,7 @@ mod tests {
         let prefs = DownloadPrefs {
             folder: Some(root.path().to_path_buf()),
             per_burrow: true,
+            ..Default::default()
         };
         let sys = Path::new("/nowhere");
         let first = plan(&prefs, sys, "The Warren", "lister.lha");
@@ -200,6 +206,7 @@ mod tests {
         let flat = DownloadPrefs {
             folder: Some(root.path().to_path_buf()),
             per_burrow: false,
+            ..Default::default()
         };
         assert_eq!(
             plan(&flat, sys, "The Warren", "a.txt"),
@@ -225,6 +232,7 @@ mod tests {
         let prefs = DownloadPrefs {
             folder: Some(root.to_path_buf()),
             per_burrow: true,
+            ..Default::default()
         };
         let Destination::Write(p) = plan(&prefs, root, "../..", "../../x.txt") else {
             panic!()
@@ -241,9 +249,14 @@ mod tests {
         let prefs = DownloadPrefs {
             folder: Some(PathBuf::from("/Volumes/Big/Warren")),
             per_burrow: true,
+            ..Default::default()
         };
         store(&path, &prefs).unwrap();
         assert_eq!(load(&path), prefs);
+        // A file written before seeding existed loads with it off: opting in
+        // is something a person does, never something an upgrade does.
+        std::fs::write(&path, r#"{"folder":null,"per_burrow":true}"#).unwrap();
+        assert!(!load(&path).seed);
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(load(&path), DownloadPrefs::default(), "garbage means ask");
     }

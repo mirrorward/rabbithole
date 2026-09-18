@@ -15,8 +15,8 @@
 | 5a | Demo downloads fail; they should be testable in full | small | 0.209.0 |
 | 5b | Download asks where to save, unless a default folder is set; option for per-burrow subfolders | medium | 0.211.0 (desktop; a browser tab cannot choose) |
 | 5c | Download offers swarm options: other burrows and people you have access to | medium/large | 0.212.0 within one burrow (Best available / Peers only / This burrow only, with origin fallback); sources on other burrows need per-source tickets and wait for the server-to-server design |
-| 6 | People with downloads can opt in to helping other people's swarm downloads | medium | planned |
-| 7 | Server-to-server transfers: pick files or folders to send to another burrow you are on, optional swarm, permissions on both sides, clear errors, pieces from participants without exposing the destination | large, security-sensitive | design first |
+| 6 | People with downloads can opt in to helping other people's swarm downloads | medium | 0.213.0 (desktop, opt-in, in memory while the app is open) |
+| 7 | Server-to-server transfers: pick files or folders to send to another burrow you are on, optional swarm, permissions on both sides, clear errors, pieces from participants without exposing the destination | large, security-sensitive | designed, awaiting review: [`server-to-server-transfers.md`](server-to-server-transfers.md) |
 | 8 | Radio: the server advertises the stream URL (never ask the user); player shows the current song with cover and the last 10; the burrow uses its own streaming server | large | 0.210.0 (a to c); library-rotation audio still open |
 
 ## Findings

@@ -648,6 +648,27 @@ pub fn Settings() -> impl IntoView {
                         "A download never replaces a file that is already there: it gets a \
                          numbered name instead."
                     </p>
+                    <label class="rh-settings-check">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || app.download_prefs.with(|p| {
+                                p.as_ref().is_some_and(|p| p.seed)
+                            })
+                            on:change=move |ev| app.set_seeding(event_target_checked(&ev))
+                        />
+                        <span>"Help other people\u{2019}s downloads"</span>
+                    </label>
+                    <p class="rh-settings-note" role="status">
+                        {move || app.download_prefs.with(|p| {
+                            p.as_ref().map(|p| p.seeding_line()).unwrap_or_default()
+                        })}
+                    </p>
+                    <p class="rh-settings-note">
+                        "When this is on, a file you download from a burrow is offered to other \
+                         people on that same burrow, from this Mac, while the app is open. The \
+                         burrow decides who may fetch it, and only files it already lists are \
+                         shared. Turning it off stops it at once."
+                    </p>
                 </Show>
 
                 <h3 class="rh-person-h2">"On launch"</h3>

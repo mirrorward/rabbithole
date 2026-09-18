@@ -21,9 +21,29 @@ pub struct DownloadPrefs {
     pub per_burrow: bool,
     /// The system downloads folder, where a save panel opens.
     pub system_folder: String,
+    /// Whether downloads are offered to other people on the same burrow.
+    pub seed: bool,
+    /// How many files are on offer right now, across every burrow.
+    pub seeding_files: u32,
+    /// Why sharing last did not work, when it did not.
+    pub seeding_note: Option<String>,
 }
 
 impl DownloadPrefs {
+    /// What the Settings screen says about sharing, under its switch.
+    pub fn seeding_line(&self) -> String {
+        match (self.seed, self.seeding_files, &self.seeding_note) {
+            (false, _, _) => "Off. Nothing on this machine is offered to anyone.".to_string(),
+            (true, _, Some(why)) => format!("On, but sharing isn\u{2019}t working: {why}"),
+            (true, 0, None) => {
+                "On. The next file you download will be offered to that burrow\u{2019}s swarm."
+                    .to_string()
+            }
+            (true, 1, None) => "On. Sharing 1 file while the app is open.".to_string(),
+            (true, n, None) => format!("On. Sharing {n} files while the app is open."),
+        }
+    }
+
     /// What the Settings screen says downloads do, in a sentence.
     pub fn summary(&self) -> String {
         match (&self.folder, self.per_burrow) {
@@ -130,5 +150,26 @@ mod tests {
             p.summary(),
             "Downloads go to /Volumes/Big/Warren without asking."
         );
+    }
+
+    #[test]
+    fn the_sharing_line_says_off_plainly_and_a_failure_in_the_burrows_words() {
+        let mut p = DownloadPrefs::default();
+        assert!(p.seeding_line().starts_with("Off."));
+        p.seed = true;
+        assert!(p.seeding_line().contains("next file you download"));
+        p.seeding_files = 1;
+        assert_eq!(
+            p.seeding_line(),
+            "On. Sharing 1 file while the app is open."
+        );
+        p.seeding_files = 4;
+        assert_eq!(
+            p.seeding_line(),
+            "On. Sharing 4 files while the app is open."
+        );
+        p.seeding_note = Some("the burrow would not list it: Forbidden".into());
+        assert!(p.seeding_line().contains("isn\u{2019}t working"));
+        assert!(p.seeding_line().contains("Forbidden"));
     }
 }

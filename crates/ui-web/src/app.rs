@@ -1111,6 +1111,14 @@ impl AppState {
         let _ = on;
     }
 
+    /// Turn sharing downloads with a burrow's swarm on or off (desktop only).
+    pub fn set_seeding(&self, on: bool) {
+        #[cfg(target_arch = "wasm32")]
+        crate::native::set_seeding(on, self.download_prefs_answer());
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = on;
+    }
+
     /// Keep a burrow. `Err` says why not, in words for the person.
     pub fn add_bookmark(
         &self,

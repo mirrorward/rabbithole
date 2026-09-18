@@ -23,6 +23,7 @@
 
 /// The Tauri command + event surface wrapping the swarm core.
 pub mod downloads;
+pub mod seeding;
 /// Source discovery + multi-source swarm download orchestration (Tauri-free).
 pub mod swarm;
 pub mod transfers;
@@ -345,8 +346,12 @@ pub fn run() {
             transfers::choose_download_folder,
             transfers::clear_download_folder,
             transfers::set_per_burrow_folders,
+            transfers::set_seeding,
         ])
         .setup(|app| {
+            // Keep swarm adverts alive while anything is on offer (a no-op
+            // until the person opts in to sharing their downloads).
+            tauri::async_runtime::spawn(transfers::reannounce_loop(app.handle().clone()));
             // Name the app after itself, not after its binary.
             #[cfg(target_os = "macos")]
             {

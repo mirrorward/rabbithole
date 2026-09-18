@@ -38,6 +38,13 @@ pub struct TransfersManager {
     /// mid-fetch abort are a later refinement, unblocked by splitting the
     /// find/ticket phase from the lock-free fetch).
     clients: Mutex<std::collections::HashMap<String, Client>>,
+    /// What this machine offers to each burrow's swarm, when the person has
+    /// opted in. Per burrow, like the sessions. Lock order is always
+    /// `clients` then `seeders`.
+    seeders: Mutex<std::collections::HashMap<String, crate::seeding::Seeder>>,
+    /// The last reason sharing did not work, for the Settings screen. Sharing
+    /// never fails a download, so this is the only place it is said.
+    seeding_note: std::sync::Mutex<Option<String>>,
 }
 
 /// Authoritative "am I running inside the native shell?" signal. The wasm SPA
@@ -97,7 +104,14 @@ pub async fn connect_native(
     // socket instead.
     let mut clients = state.clients.lock().await;
     if authed {
-        clients.insert(endpoint, client);
+        clients.insert(endpoint.clone(), client);
+        // Adverts die with a session. A new one announces what is on offer.
+        let mut seeders = state.seeders.lock().await;
+        if let (Some(client), Some(seeder)) = (clients.get_mut(&endpoint), seeders.get_mut(&endpoint)) {
+            if let Err(why) = seeder.announce(client).await {
+                *state.seeding_note.lock().expect("not poisoned") = Some(why.to_string());
+            }
+        }
     } else {
         clients.remove(&endpoint);
     }
@@ -158,7 +172,21 @@ pub async fn swarm_start_download(
     })
     .await;
     match result {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // Opted in: what was just downloaded from this burrow is offered
+            // to this burrow's swarm. A courtesy on top of the download, so a
+            // failure to share is noted for Settings and never fails it.
+            if downloads::load(&prefs_path(&app)?).seed {
+                let mut seeders = state.seeders.lock().await;
+                let shared = seeders
+                    .entry(endpoint.clone())
+                    .or_default()
+                    .share(client, root, size, &name, &dest)
+                    .await;
+                *state.seeding_note.lock().expect("not poisoned") = shared.err().map(|e| e.to_string());
+            }
+            Ok(())
+        }
         Err(e) => {
             let reason = e.to_string();
             let _ = app.emit(
@@ -183,6 +211,12 @@ pub struct DownloadPrefsView {
     /// The folder downloads go to without asking. `None`: ask each time.
     folder: Option<String>,
     per_burrow: bool,
+    /// Whether downloads are offered to other people on the same burrow.
+    seed: bool,
+    /// How many files are on offer right now, across every burrow.
+    seeding_files: usize,
+    /// Why sharing last did not work, when it did not.
+    seeding_note: Option<String>,
     /// The system downloads folder, which is where a save panel opens.
     system_folder: String,
 }
@@ -196,9 +230,21 @@ fn prefs_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn view_of(app: &AppHandle, prefs: &DownloadPrefs) -> Result<DownloadPrefsView, String> {
+    let state = app.state::<TransfersManager>();
+    // `try_lock`: this is a status line, and a download in progress holds the
+    // lock for its duration. Better a count of zero than a frozen Settings.
+    let seeding_files = state
+        .seeders
+        .try_lock()
+        .map(|s| s.values().map(crate::seeding::Seeder::files).sum())
+        .unwrap_or(0);
+    let seeding_note = state.seeding_note.lock().expect("not poisoned").clone();
     Ok(DownloadPrefsView {
         folder: prefs.folder.as_ref().map(|p| p.display().to_string()),
         per_burrow: prefs.per_burrow,
+        seed: prefs.seed,
+        seeding_files,
+        seeding_note,
         system_folder: app
             .path()
             .download_dir()
@@ -254,6 +300,51 @@ pub fn set_per_burrow_folders(app: AppHandle, on: bool) -> Result<DownloadPrefsV
     prefs.per_burrow = on;
     downloads::store(&path, &prefs)?;
     view_of(&app, &prefs)
+}
+
+/// Turn sharing downloads on or off. Off means off now: every advert is
+/// withdrawn and every peer endpoint closed, not merely "no new ones".
+#[tauri::command]
+pub async fn set_seeding(app: AppHandle, state: State<'_, TransfersManager>, on: bool) -> Result<DownloadPrefsView, String> {
+    let path = prefs_path(&app)?;
+    let mut prefs = downloads::load(&path);
+    prefs.seed = on;
+    downloads::store(&path, &prefs)?;
+    if !on {
+        let mut clients = state.clients.lock().await;
+        let mut seeders = state.seeders.lock().await;
+        for (endpoint, seeder) in seeders.iter_mut() {
+            seeder.stop(clients.get_mut(endpoint)).await;
+        }
+        seeders.clear();
+        *state.seeding_note.lock().expect("not poisoned") = None;
+    }
+    view_of(&app, &prefs)
+}
+
+/// Keep adverts alive: a burrow forgets an advert that is not renewed. Runs
+/// for the life of the app and does nothing while nothing is on offer. A
+/// long download holds the session lock, so an advert can lapse during one
+/// and come back at the next pass: soft state, by design.
+pub async fn reannounce_loop(app: AppHandle) {
+    loop {
+        let wait = {
+            let state = app.state::<TransfersManager>();
+            let mut clients = state.clients.lock().await;
+            let mut seeders = state.seeders.lock().await;
+            let mut next = 60;
+            for (endpoint, seeder) in seeders.iter_mut().filter(|(_, s)| s.files() > 0) {
+                if let Some(client) = clients.get_mut(endpoint) {
+                    if let Err(why) = seeder.announce(client).await {
+                        *state.seeding_note.lock().expect("not poisoned") = Some(why.to_string());
+                    }
+                }
+                next = next.min(seeder.reannounce_after());
+            }
+            next
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+    }
 }
 
 /// Settle where one download goes: the set folder without asking, else a
