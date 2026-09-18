@@ -122,16 +122,29 @@ pub fn ThemeToggle() -> impl IntoView {
 pub fn Nav() -> impl IntoView {
     use crate::palette::{sections_for, Scope};
     let app = expect_context::<AppState>();
-    let is_admin = app.focused().is_admin;
-    let state = app.focused().state;
+    // The sidebar is mounted once by the shell and outlives every burrow, so
+    // it must read the focused session *reactively* (`focused_tracked`), not
+    // capture one session's signals at mount. Captured, it stayed bound to
+    // whichever burrow was focused when the app started: after leaving that
+    // burrow and joining another, the pips and the Admin entry were still
+    // that first session's — an admin who reconnected lost the console.
+    let is_admin = move || app.focused_tracked().is_admin.get();
     // Only ever rendered inside a burrow (the shell hides the sidebar
     // entirely on warren routes — People, Transfers, You and Servers are each
     // one screen and get the full width). So this lists the burrow's sections,
     // headed by the burrow's name.
     // Unread pips: the counts the wire has always carried, summed per section.
     // A pip says "something happened here" without shouting a number in a nav.
-    let dm_unread = move || state.with(|s| s.dm_threads.iter().map(|t| t.unread).sum::<u64>());
-    let board_unread = move || state.with(|s| s.boards.iter().map(|b| b.unread).sum::<u64>());
+    let dm_unread = move || {
+        app.focused_tracked()
+            .state
+            .with(|s| s.dm_threads.iter().map(|t| t.unread).sum::<u64>())
+    };
+    let board_unread = move || {
+        app.focused_tracked()
+            .state
+            .with(|s| s.boards.iter().map(|b| b.unread).sum::<u64>())
+    };
     let unread_for = move |route: &'static str| match route {
         "/boards" => Some(Signal::derive(board_unread)),
         "/dms" => Some(Signal::derive(dm_unread)),
@@ -158,7 +171,7 @@ pub fn Nav() -> impl IntoView {
                 }
             />
             // The operator console, for operators.
-            <Show when=move || is_admin.get() fallback=|| ()>
+            <Show when=is_admin fallback=|| ()>
                 <div class="rh-subnav-rule" aria-hidden="true"></div>
                 <NavLink path="/admin" label="Admin" unread=None/>
             </Show>
@@ -1828,7 +1841,10 @@ pub fn Login() -> impl IntoView {
         app.pending_endpoint
             .get_untracked()
             .or_else(|| last.as_ref().map(|b| b.endpoint.clone()))
-            .unwrap_or_else(|| "ws://localhost:9000".to_string()),
+            // A burrow's WebSocket listener is 4654 by default (README,
+            // `ws_addr`); this used to say 9000, the seeded demo's pretend
+            // port, so a first live connect to a local burrow failed.
+            .unwrap_or_else(|| "ws://localhost:4654".to_string()),
     );
     // The Looking Glass hands its pick over in the URL (`/?server=…`): a
     // signal set in one component and read by another during the same
@@ -1844,8 +1860,9 @@ pub fn Login() -> impl IntoView {
     let handle = create_rw_signal(last.as_ref().map(|b| b.handle.clone()).unwrap_or_default());
     let password = create_rw_signal(String::new());
     // Opt in to a real RHP-over-WebSocket session instead of the seeded demo.
-    // Default to live when we have a burrow to reconnect to.
-    let go_live = create_rw_signal(last.is_some());
+    // Default to live when we have a burrow to reconnect to — and always in
+    // a build without the demo, where live is the only kind of connection.
+    let go_live = create_rw_signal(last.is_some() || !cfg!(feature = "demo"));
 
     let connect = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
@@ -1897,7 +1914,7 @@ pub fn Login() -> impl IntoView {
         #[cfg(not(feature = "demo"))]
         app.notify(
             crate::toasts::ToastKind::Warn,
-            "Tick \u{201c}live connection\u{201d} and enter a burrow address.".to_string(),
+            "Enter your handle and a burrow address to connect.".to_string(),
         );
     };
 
@@ -1905,6 +1922,7 @@ pub fn Login() -> impl IntoView {
         <main id=a11y::MAIN_ID tabindex="-1">
             <form class="rh-login" on:submit=connect>
                 <h1 id=a11y::VIEW_TITLE_ID tabindex="-1">"RabbitHole"</h1>
+                <p class="rh-login-tagline">"Many burrows, one you."</p>
                 {(!recent.is_empty()).then(|| view! {
                     <div class="rh-recent" role="group" aria-label="Recent burrows">
                         <span class="rh-recent-label">"Recent"</span>
@@ -1952,36 +1970,56 @@ pub fn Login() -> impl IntoView {
                     #[cfg(not(feature = "demo"))]
                     ().into_view()
                 }
-                <label for=a11y::LOGIN_SERVER_ID>"Server"</label>
+                <label for=a11y::LOGIN_SERVER_ID>"Burrow"</label>
                 <input
                     id=a11y::LOGIN_SERVER_ID
                     class="rh-input"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="ws://localhost:4654"
                     prop:value=endpoint
                     on:input=move |ev| endpoint.set(event_target_value(&ev))
                 />
+                <p class="rh-field-hint">
+                    "ws:// reaches a burrow on this machine; anything further away needs wss://."
+                </p>
                 <label for=a11y::LOGIN_HANDLE_ID>"Handle"</label>
                 <input
                     id=a11y::LOGIN_HANDLE_ID
                     class="rh-input"
+                    autocomplete="username"
+                    spellcheck="false"
                     placeholder="your handle"
                     prop:value=handle
                     on:input=move |ev| handle.set(event_target_value(&ev))
                 />
-                <label class="rh-live-toggle">
-                    <input
-                        type="checkbox"
-                        prop:checked=go_live
-                        on:change=move |ev| go_live.set(event_target_checked(&ev))
-                    />
-                    "Live connection (connect to a real server)"
-                </label>
+                // The demo toggle only exists where a demo does. A shipped
+                // build has one kind of connection, so it asks no question.
+                {
+                    #[cfg(feature = "demo")]
+                    {
+                        view! {
+                            <label class="rh-live-toggle">
+                                <input
+                                    type="checkbox"
+                                    prop:checked=go_live
+                                    on:change=move |ev| go_live.set(event_target_checked(&ev))
+                                />
+                                "Real burrow \u{2014} untick to enter the seeded demo instead"
+                            </label>
+                        }.into_view()
+                    }
+                    #[cfg(not(feature = "demo"))]
+                    ().into_view()
+                }
                 <Show when=move || go_live.get() fallback=|| ()>
                     <label for="rh-login-password">"Password"</label>
                     <input
                         id="rh-login-password"
                         class="rh-input"
                         type="password"
-                        placeholder="password"
+                        autocomplete="current-password"
+                        placeholder="password (leave empty to enter as a guest)"
                         prop:value=password
                         on:input=move |ev| password.set(event_target_value(&ev))
                     />

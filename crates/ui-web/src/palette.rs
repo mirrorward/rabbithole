@@ -136,6 +136,14 @@ pub fn is_chromeless(path: &str) -> bool {
     matches!(path.trim_end_matches('/'), "" | "/about")
 }
 
+/// Does this route only make sense inside a burrow? True for every
+/// burrow-scoped section (the lobby, boards, files…); false for the connect
+/// screen, About, and the warren layer, which stand on their own with no
+/// burrow joined.
+pub fn needs_a_burrow(path: &str) -> bool {
+    !is_chromeless(path) && scope_of(path) == Scope::Burrow
+}
+
 /// The scope a route belongs to. Anything not explicitly warren-level is a
 /// burrow route, so a new burrow section gets the burrow sidebar by default
 /// rather than silently getting the wrong one.
@@ -143,8 +151,12 @@ pub fn scope_of(path: &str) -> Scope {
     let path = path.trim_end_matches('/');
     // Sub-paths belong to their parent: /people/<seed> is a person page, still
     // a warren view, and must not sprout a burrow sidebar.
+    // Settings is yours, not a burrow's: it lists no burrow sections and, like
+    // the rest of the warren layer, needs no burrow joined. It used to fall
+    // through to Burrow, so the settings page wore a burrow sidebar.
     if WARREN_SECTIONS
         .iter()
+        .chain(std::iter::once(&SETTINGS_SECTION))
         .any(|s| path == s.route || path.starts_with(&format!("{}/", s.route)))
     {
         Scope::Warren
@@ -234,6 +246,35 @@ pub fn palette_matches(query: &str) -> Vec<Section> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn burrow_routes_need_a_burrow_and_warren_routes_do_not() {
+        for p in [
+            "/lobby",
+            "/boards",
+            "/boards/general",
+            "/dms",
+            "/files",
+            "/radio",
+            "/art",
+            "/admin",
+        ] {
+            assert!(needs_a_burrow(p), "{p} is a place");
+        }
+        for p in [
+            "/",
+            "",
+            "/about",
+            "/people",
+            "/people/abc",
+            "/transfers",
+            "/you",
+            "/servers",
+            "/settings",
+        ] {
+            assert!(!needs_a_burrow(p), "{p} stands on its own");
+        }
+    }
 
     #[test]
     fn digit_shortcuts_follow_the_burrow_sidebar() {

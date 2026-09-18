@@ -39,6 +39,14 @@ impl ServerId {
     pub fn local() -> Self {
         ServerId("local".to_string())
     }
+
+    /// Is this the app's **placeholder** session — the one that exists before
+    /// you join anywhere, so there is always something to focus? It is not a
+    /// place: it never appears in the rail, and a burrow route can't be shown
+    /// against it ([`crate::palette::needs_a_burrow`]).
+    pub fn is_placeholder(&self) -> bool {
+        self.0 == "local"
+    }
 }
 
 /// One server session's per-connection reactive state. `Copy` (a bundle of
@@ -253,6 +261,10 @@ impl AppState {
         let focused = self.focused_id.get();
         self.sessions.with(|list| {
             list.iter()
+                // The placeholder is not a burrow. It used to render as a
+                // "Demo — Offline" tile beside every live burrow, in shipped
+                // builds too, where there is no demo to open.
+                .filter(|(id, _)| !id.is_placeholder())
                 .map(|(id, session)| {
                     // Prefer the burrow's handshake name, then a published theme
                     // name, then the endpoint host.
@@ -279,6 +291,13 @@ impl AppState {
                 })
                 .collect()
         })
+    }
+
+    /// Is any real burrow joined (live, or a seeded demo)? Reactive. False
+    /// while only the placeholder exists.
+    pub fn has_burrows(&self) -> bool {
+        self.sessions
+            .with(|list| list.iter().any(|(id, _)| !id.is_placeholder()))
     }
 
     /// Total unread lobby lines across every burrow you aren't currently viewing
@@ -2107,6 +2126,7 @@ pub fn App() -> impl IntoView {
                     "Skip to main content"
                 </a>
                 <RouteFocus/>
+                <PlaceGuard/>
                 <CommandPalette/>
                 <Toasts/>
                 <div class="rh-shell">
@@ -2344,6 +2364,34 @@ fn BurrowRail() -> impl IntoView {
             </button>
         </nav>
     }
+}
+
+/// Burrow routes need a burrow. While the focused session is the app's
+/// placeholder — nothing joined yet, or the last burrow just left — a
+/// burrow-scoped URL (`/lobby`, `/boards`, `/files`…) would render the
+/// placeholder's seeded mock as if it were somewhere you'd arrived, in
+/// shipped builds too. Those go to the connect screen instead. Warren routes
+/// (People, Transfers, You, Servers, Settings, About) stand on their own.
+///
+/// Renders nothing; it owns one effect and must live inside `<Router>`.
+#[component]
+fn PlaceGuard() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let location = use_location();
+    let navigate = use_navigate();
+    create_effect(move |_| {
+        let path = location.pathname.get();
+        let placeholder = app.focused_id.get().is_placeholder();
+        if placeholder && crate::palette::needs_a_burrow(&path) {
+            navigate(
+                "/",
+                NavigateOptions {
+                    replace: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
 }
 
 /// Focus management for client-side navigation: after every route change
