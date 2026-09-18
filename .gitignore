@@ -25,3 +25,7 @@ crates/ui-web/dist/
 .gstack/
 # Impeccable's live-server scratch (its critique snapshots are kept)
 .impeccable/live/
+
+# A burrow's runtime data dir (the default --data-dir): its database, blobs,
+# ctl socket and, above all, its identity keys. Never commit one.
+/burrow-data/
