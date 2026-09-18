@@ -1550,12 +1550,21 @@ impl AppState {
                     loading.set(false);
                     return;
                 }
+                // Nobody answered. A listing already on screen stays there,
+                // under the name of whoever gave it: relabelling real rows as
+                // the built-in sample (what this used to do on a failed
+                // refresh) is wrong twice over, and the connect window, which
+                // never shows the sample, would drop a good list for nothing.
+                let held_live =
+                    source.with_untracked(|s| *s != crate::servers::DirectorySource::Seeded);
                 app.notify(
                     crate::toasts::ToastKind::Warn,
-                    "Couldn\u{2019}t reach a directory \u{2014} showing the built-in list."
-                        .to_string(),
+                    if held_live {
+                        "Couldn\u{2019}t refresh the list. Showing the last one.".to_string()
+                    } else {
+                        "Couldn\u{2019}t reach a directory.".to_string()
+                    },
                 );
-                source.set(crate::servers::DirectorySource::Seeded);
                 loading.set(false);
             });
         }

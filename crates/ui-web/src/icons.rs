@@ -213,6 +213,17 @@ pub fn link_icon() -> String {
     )
 }
 
+/// Search: a lens, inside the connect window's filter field.
+pub fn search_icon() -> String {
+    format!("{OPEN}<circle cx=\"10.5\" cy=\"10.5\" r=\"6\"/><path d=\"M15 15l4.5 4.5\"/></svg>")
+}
+
+/// Refresh: one arrow most of the way round a circle. Turns while a listing
+/// is on its way.
+pub fn refresh_icon() -> String {
+    format!("{OPEN}<path d=\"M19 12a7 7 0 1 1-2.05-4.95\"/><path d=\"M19.5 4.5v4h-4\"/></svg>")
+}
+
 /// Dismiss: a plain cross, for toasts and sheets.
 pub fn close_icon() -> String {
     format!("{OPEN}<path d=\"M6.5 6.5l11 11m0-11l-11 11\"/></svg>")
@@ -442,6 +453,8 @@ mod furniture_icon_tests {
             ("close", close_icon()),
             ("key", key_icon()),
             ("send", send_icon()),
+            ("search", search_icon()),
+            ("refresh", refresh_icon()),
         ] {
             assert!(svg.starts_with("<svg"), "{name} is not an svg");
             assert!(svg.ends_with("</svg>"), "{name} is unterminated");

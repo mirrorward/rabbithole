@@ -321,10 +321,6 @@ body{overflow:hidden}\
 .rh-people{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}\
 .rh-person{display:flex;align-items:center;gap:.6rem;padding:.5rem .3rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\
 .rh-person-name{font-weight:600}\
-.rh-recent{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin:.2rem 0 .4rem}\
-.rh-recent-label{font-size:var(--rh-font-sm);font-weight:600;color:var(--rh-muted)}\
-.rh-recent-chip{border:1px solid color-mix(in srgb,var(--rh-accent) 30%,transparent);background:color-mix(in srgb,var(--rh-accent) 8%,transparent);color:var(--rh-text);border-radius:999px;padding:.15rem .6rem;font-size:var(--rh-font-sm);cursor:pointer;font-family:inherit}\
-.rh-recent-chip:hover{background:color-mix(in srgb,var(--rh-accent) 16%,transparent)}\
 .rh-welcome{margin:.75rem;padding:.85rem 1rem;border:1px solid color-mix(in srgb,var(--rh-accent) 35%,transparent);border-radius:var(--rh-radius,8px);background:color-mix(in srgb,var(--rh-accent) 7%,var(--rh-bg));box-shadow:0 1px 3px rgba(0,0,0,.06)}\
 .rh-welcome-head{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem}\
 .rh-welcome-title{font-weight:700;letter-spacing:.01em}\
@@ -526,8 +522,6 @@ body{overflow:hidden}\
 .rh-tracker-remove{margin-left:auto}\
 .rh-tracker-add{display:flex;gap:var(--rh-space-2);margin-top:var(--rh-space-2);max-width:32rem}\
 .rh-settings-check{display:flex;align-items:center;gap:var(--rh-space-2);padding:.25rem 0;font-size:var(--rh-font-sm)}\
-.rh-demo-picker{display:flex;align-items:center;gap:var(--rh-space-2);flex-wrap:wrap;margin-bottom:var(--rh-space-2)}\
-.rh-demo-label{font-size:var(--rh-font-sm);font-weight:600;color:var(--rh-muted)}\
 /* The person page: one human, everything you know about them. */\
 .rh-person-link{display:flex;align-items:center;gap:var(--rh-space-2);width:100%;padding:.35rem .4rem;border-radius:var(--rh-radius);color:inherit;text-decoration:none;border-bottom:0}\
 .rh-person-link:hover{background:color-mix(in srgb,var(--rh-text) 5%,transparent)}\
@@ -593,7 +587,7 @@ body{overflow:hidden}\
 /* AppKit reserves the hand cursor for hyperlinks; a hand over every control is\
    the classic wrapper tell. Content links keep it. Browser builds keep web\
    conventions untouched. */\
-.rh-app.native .rh-btn,.rh-app.native .rh-rail-tile,.rh-app.native .rh-format-btn,.rh-app.native .rh-recent-chip,.rh-app.native .rh-presence,.rh-app.native .rh-crumb,.rh-app.native .rh-board-link,.rh-app.native .rh-thread-link,.rh-app.native .rh-file-link,.rh-app.native .rh-member-link,.rh-app.native .rh-station-link,.rh-app.native .rh-dm-peer,.rh-app.native .rh-subnav-link,.rh-app.native .rh-palette-item,.rh-app.native .rh-kbd-jump,.rh-app.native .rh-icon-btn{cursor:default}\
+.rh-app.native .rh-btn,.rh-app.native .rh-rail-tile,.rh-app.native .rh-format-btn,.rh-app.native .rh-glass-refresh,.rh-app.native .rh-presence,.rh-app.native .rh-crumb,.rh-app.native .rh-board-link,.rh-app.native .rh-thread-link,.rh-app.native .rh-file-link,.rh-app.native .rh-member-link,.rh-app.native .rh-station-link,.rh-app.native .rh-dm-peer,.rh-app.native .rh-subnav-link,.rh-app.native .rh-palette-item,.rh-app.native .rh-kbd-jump,.rh-app.native .rh-icon-btn{cursor:default}\
 .rh-app.native .rh-rich a{cursor:pointer}\
 /* Dragging a nav link must not lift a translucent URL ghost out of the\
    sidebar. Selection rules already protect content; this stops element drag. */\
@@ -737,18 +731,91 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 /* A connect dialog, not a marketing hero: the blurred accent glow and heavy\
    drop shadow are the SaaS-login look. A quiet panel on the window ground is\
    what Transmit or Screens put in front of you. */\
-.rh-login{position:relative;max-width:23rem;margin:5rem auto;display:flex;flex-direction:column;gap:var(--rh-space-3);background:var(--rh-surface);padding:var(--rh-space-8);border-radius:var(--rh-radius-lg);border:1px solid color-mix(in srgb,var(--rh-text) 10%,transparent);box-shadow:var(--rh-shadow-1)}\
-.rh-login h1{margin:0 0 var(--rh-space-2);text-align:center;font-family:var(--rh-font-display);font-size:var(--rh-font-2xl);letter-spacing:-.02em;display:flex;flex-direction:column;align-items:center;gap:.7rem;color:var(--rh-text)}\
-.rh-login h1::before{content:'';width:3.25rem;height:3.25rem;border-radius:var(--rh-radius-full);background:radial-gradient(circle at 50% 52%,var(--rh-surface) 0 15%,var(--rh-accent) 15% 27%,var(--rh-surface) 27% 41%,color-mix(in srgb,var(--rh-accent) 62%,var(--rh-surface)) 41% 58%,var(--rh-surface) 58% 73%,color-mix(in srgb,var(--rh-accent) 34%,var(--rh-surface)) 73% 100%);box-shadow:0 0 0 1px color-mix(in srgb,var(--rh-accent) 35%,transparent),0 8px 24px -6px color-mix(in srgb,var(--rh-accent) 70%,transparent)}\
-.rh-login label{font-size:var(--rh-font-sm);font-weight:600;color:var(--rh-text);margin-bottom:-.35rem}\
-.rh-login .rh-btn{justify-content:center;margin-top:var(--rh-space-2);padding:.6rem;font-size:var(--rh-font-size)}\
-.rh-live-toggle,.rh-login label.rh-live-toggle{display:flex;align-items:center;gap:.5rem;font-size:var(--rh-font-sm);font-weight:500;color:var(--rh-muted);cursor:pointer;text-transform:none;letter-spacing:normal;margin-bottom:0}\
-.rh-login-tagline{margin:-.5rem 0 .3rem;text-align:center;color:var(--rh-muted);font-size:var(--rh-font-sm)}\
+/* The connect window. A Mac app's welcome window, not a web sign-in card: who\
+   this is and the way in on the left, the places you could go on the right.\
+   It is the warren layer, so its one colour is the ember, not a burrow's accent. */\
+.rh-connect{flex:1;min-height:0;display:grid;grid-template-columns:minmax(17.5rem,21rem) minmax(0,1fr)}\
+.rh-connect-side{display:flex;flex-direction:column;gap:var(--rh-space-5);min-height:0;overflow-y:auto;padding:var(--rh-space-8) var(--rh-space-6) var(--rh-space-4);background:var(--rh-surface-2);border-right:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
+.rh-connect-brand{display:flex;flex-direction:column;align-items:center;text-align:center}\
+.rh-connect-logo{display:block;width:7rem;height:7rem;filter:drop-shadow(0 .5rem .9rem color-mix(in srgb,#000 26%,transparent))}\
+.rh-connect-brand h1{margin:var(--rh-space-2) 0 0;font-family:var(--rh-font-display);font-size:1.75rem;font-weight:700;letter-spacing:-.025em;line-height:1.1;color:var(--rh-text)}\
+.rh-connect-tagline{margin:.2rem 0 0;color:var(--rh-muted);font-size:var(--rh-font-sm)}\
+.rh-login{display:flex;flex-direction:column;gap:.35rem}\
+.rh-login label{margin-top:var(--rh-space-2);font-size:var(--rh-font-sm);font-weight:600;color:var(--rh-text)}\
+.rh-login label:first-child{margin-top:0}\
+.rh-login .rh-input{width:100%}\
+.rh-login-address{font-family:var(--rh-font-mono);font-size:var(--rh-font-sm);font-variant-numeric:slashed-zero}\
+.rh-connect .rh-input{caret-color:var(--rh-brand)}\
+.rh-connect .rh-input:focus{border-color:var(--rh-brand);box-shadow:0 0 0 3px color-mix(in srgb,var(--rh-brand) 24%,transparent)}\
+.rh-connect .rh-input[aria-invalid=true]{border-color:var(--rh-error)}\
+.rh-connect ::selection{background:color-mix(in srgb,var(--rh-brand) 32%,transparent)}\
+.rh-field-hint{margin:0;font-size:var(--rh-font-xs);color:var(--rh-muted);line-height:1.4}\
+.rh-field-hint.error{color:var(--rh-error)}\
+.rh-btn.rh-connect-go{justify-content:center;width:100%;min-width:0;margin-top:var(--rh-space-4);padding:.6rem .9rem;background:var(--rh-brand);color:var(--rh-on-brand)}\
+.rh-btn.rh-connect-go:hover{background:color-mix(in srgb,var(--rh-brand) 90%,var(--rh-text))}\
+.rh-connect-go span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+.rh-connect-foot{margin-top:auto;padding-top:var(--rh-space-4);display:flex;flex-direction:column;align-items:center;gap:var(--rh-space-2)}\
+.rh-connect-back{display:inline-flex;align-items:center;gap:.2rem;max-width:100%;padding:.25rem .6rem .25rem .3rem;border-radius:var(--rh-radius-sm);color:var(--rh-text);font-size:var(--rh-font-sm);text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\
+.rh-connect-back:hover{background:color-mix(in srgb,var(--rh-text) 7%,transparent)}\
+.rh-connect-back>span{display:grid;flex:none;color:var(--rh-muted)}\
+.rh-connect-back svg{width:.95rem;height:.95rem}\
+.rh-connect-version{margin:0;text-align:center;font-size:var(--rh-font-xs);color:var(--rh-muted);font-variant-numeric:tabular-nums}\
+/* The burrow browser: Hotline's tracker window. One dense list, a face per\
+   burrow, numbers in the mono face, and a status strip underneath. */\
+.rh-connect-main{display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;min-width:0;min-height:0}\
+.rh-glass-head{display:flex;align-items:center;gap:var(--rh-space-2);padding:var(--rh-space-4) var(--rh-space-5) var(--rh-space-3);-webkit-user-select:none;user-select:none}\
+.rh-glass-head h2{margin:0 auto 0 0;font-family:var(--rh-font-display);font-size:var(--rh-font-lg);font-weight:600;letter-spacing:-.015em;color:var(--rh-text)}\
+.rh-glass-search{position:relative;display:flex;align-items:center;width:min(14rem,45%)}\
+.rh-glass-search>span{position:absolute;left:.5rem;display:grid;color:var(--rh-muted)}\
+.rh-glass-search svg{width:.95rem;height:.95rem}\
+.rh-glass-search .rh-input{width:100%;padding:.3rem .6rem .3rem 1.8rem;font-size:var(--rh-font-sm);border-radius:var(--rh-radius-sm)}\
+.rh-glass-refresh{flex:none;display:grid;place-items:center;width:1.9rem;height:1.9rem;padding:0;border:1px solid transparent;border-radius:var(--rh-radius-sm);background:transparent;color:var(--rh-muted);cursor:pointer;transition:background-color .15s ease,color .15s ease}\
+.rh-glass-refresh:hover{background:color-mix(in srgb,var(--rh-text) 7%,transparent);color:var(--rh-text)}\
+.rh-glass-refresh:disabled{cursor:default}\
+.rh-glass-refresh>span{display:grid}\
+.rh-glass-refresh.busy svg{animation:rh-spin .9s linear infinite}\
+@keyframes rh-spin{to{transform:rotate(360deg)}}\
+.rh-glass-cols,.rh-glass-row{display:grid;grid-template-columns:1.6rem minmax(9rem,1.35fr) minmax(0,2fr) 4.25rem 3.5rem;column-gap:var(--rh-space-3);align-items:center}\
+.rh-glass-cols{padding:0 calc(var(--rh-space-5) + .5rem) .35rem;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent);font-size:var(--rh-font-xs);font-weight:600;color:var(--rh-muted);-webkit-user-select:none;user-select:none}\
+.rh-glass-cols .num{text-align:right}\
+.rh-glass-scroll{min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:var(--rh-space-1) var(--rh-space-5) var(--rh-space-4)}\
+.rh-glass-scroll:focus-visible{outline-offset:-2px}\
+.rh-glass-group{margin:var(--rh-space-4) .5rem .25rem;font-size:var(--rh-font-xs);font-weight:600;color:var(--rh-muted)}\
+.rh-glass-list{list-style:none;margin:0;padding:0}\
+.rh-glass-list li+li{border-top:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent)}\
+.rh-glass-list li:has(.selected),.rh-glass-list li:has(.selected)+li{border-top-color:transparent}\
+.rh-glass-row{width:100%;min-height:2rem;padding:.25rem .5rem;border:0;border-radius:var(--rh-radius-sm);background:transparent;color:var(--rh-text);font:inherit;font-size:var(--rh-font-sm);line-height:1.35;text-align:left;cursor:default}\
+.rh-glass-row:hover{background:color-mix(in srgb,var(--rh-text) 5%,transparent)}\
+.rh-glass-row.selected{align-items:start;background:color-mix(in srgb,var(--rh-brand) 20%,transparent)}\
+.rh-glass-row:focus-visible{outline:2px solid var(--rh-focus);outline-offset:-2px}\
+.rh-glass-mark{position:relative;display:grid;place-items:center;width:1.6rem;height:1.6rem}\
+.rh-glass-mark>span:first-child{display:grid}\
+.rh-glass-mark svg{display:block;border-radius:.3rem}\
+.rh-glass-mark .rh-dot{position:absolute;right:-.2rem;bottom:-.15rem;box-shadow:0 0 0 2px var(--rh-bg)}\
+.rh-glass-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--rh-font-display);font-weight:600;letter-spacing:-.01em}\
+.rh-glass-desc{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--rh-muted)}\
+.rh-glass-as{margin-right:.6rem;color:var(--rh-text)}\
+.rh-glass-users,.rh-glass-uptime{font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);font-variant-numeric:tabular-nums slashed-zero;text-align:right;white-space:nowrap}\
+.rh-glass-uptime,.rh-glass-down{color:var(--rh-muted)}\
+.rh-glass-row.off .rh-glass-name{color:var(--rh-muted)}\
+.rh-glass-row.selected .rh-glass-desc{white-space:normal;overflow:visible;color:var(--rh-text)}\
+.rh-glass-more{grid-column:3/-1;display:flex;flex-wrap:wrap;gap:.1rem var(--rh-space-3);min-width:0;padding-bottom:.15rem;font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);color:var(--rh-muted)}\
+.rh-glass-more code{font:inherit;overflow-wrap:anywhere}\
+.rh-glass-scroll .rh-chat-empty{min-height:0;padding:var(--rh-space-8) var(--rh-space-4)}\
+.rh-glass-scroll .rh-chat-empty-mark{background:color-mix(in srgb,var(--rh-brand) 12%,transparent);color:var(--rh-brand)}\
+.rh-glass-scroll .rh-skeleton{padding:var(--rh-space-2) .5rem}\
+.rh-glass-status{display:flex;align-items:center;justify-content:space-between;gap:var(--rh-space-3);padding:.4rem calc(var(--rh-space-5) + .5rem);border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent);background:color-mix(in srgb,var(--rh-surface-2) 55%,transparent);font-size:var(--rh-font-xs);color:var(--rh-muted);font-variant-numeric:tabular-nums;-webkit-user-select:none;user-select:none}\
+.rh-glass-via{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+/* In the desktop shell this window owns the title bar: both panes run to the\
+   top edge, under the traffic lights, the way a Mac sidebar does. The fixed\
+   drag strip still sits over that band, so nothing clickable goes in it. */\
+.rh-app.native:has(.rh-connect){padding-top:0}\
+.rh-app.native .rh-connect-side{padding-top:calc(1.75rem + var(--rh-space-5))}\
+.rh-app.native .rh-glass-head{padding-top:calc(1.75rem + var(--rh-space-1))}\
+html.rh-fullscreen .rh-app.native .rh-connect-side{padding-top:var(--rh-space-8)}\
+html.rh-fullscreen .rh-app.native .rh-glass-head{padding-top:var(--rh-space-4)}\
 .rh-login-notice{margin:0 0 .2rem;padding:.55rem .75rem;border-radius:var(--rh-radius);background:color-mix(in srgb,#e8890c 14%,transparent);color:var(--rh-text);font-size:var(--rh-font-sm);line-height:1.45}\
 .rh-load-failed{display:flex;align-items:center;gap:var(--rh-space-3);padding:var(--rh-space-3) .6rem;color:var(--rh-muted);font-size:var(--rh-font-sm)}\
-.rh-field-hint{margin:-.35rem 0 0;font-size:var(--rh-font-xs);color:var(--rh-muted);line-height:1.4}\
-.rh-login .rh-recent-label,.rh-login .rh-demo-label{flex-basis:100%}\
-.rh-live-toggle input{accent-color:var(--rh-accent);cursor:pointer}\
 .rh-body{flex:1;display:flex;min-height:0}\
 .rh-chat{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}\
 .rh-jump-new{position:absolute;left:50%;bottom:4.6rem;transform:translateX(-50%);z-index:15;font:inherit;font-size:var(--rh-font-sm);font-weight:600;color:var(--rh-bg);background:var(--rh-accent);border:0;border-radius:var(--rh-radius-full);padding:.35rem .95rem;cursor:pointer;box-shadow:var(--rh-shadow-2);white-space:nowrap;animation:rh-pop .2s cubic-bezier(.22,1,.36,1) both;transition:box-shadow .15s ease,background-color .15s ease}\
@@ -790,7 +857,7 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 /* Pressed states. A native row visibly darkens the instant the mouse goes\
    down; a row that shows nothing between hover and navigation reads as a\
    hyperlink. Instant, untransitioned -- also right under reduced motion. */\
-.rh-board-link:active,.rh-thread-link:active,.rh-member-link:active,.rh-file-link:active,.rh-station-link:active,.rh-subnav-link:active,.rh-dm-peer:active,.rh-crumb:active,.rh-format-btn:active,.rh-recent-chip:active,.rh-palette-item:active,.rh-back:active{background:color-mix(in srgb,var(--rh-text) 10%,transparent)}\
+.rh-board-link:active,.rh-thread-link:active,.rh-member-link:active,.rh-file-link:active,.rh-station-link:active,.rh-subnav-link:active,.rh-dm-peer:active,.rh-crumb:active,.rh-format-btn:active,.rh-glass-row:active,.rh-palette-item:active,.rh-back:active{background:color-mix(in srgb,var(--rh-text) 10%,transparent)}\
 .rh-thread-link.active,.rh-file-link.active,.rh-station-link.active{border-color:var(--rh-accent);box-shadow:0 0 0 1px var(--rh-accent),var(--rh-shadow-2)}\
 .rh-board-name,.rh-thread-title{font-weight:600;color:var(--rh-text);font-size:var(--rh-font-size)}\
 .rh-board-desc,.rh-thread-author,.rh-member-handle{font-size:var(--rh-font-xs);color:var(--rh-muted)}\
@@ -927,7 +994,7 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 @media (hover:none){.rh-line-cont .rh-line-time{opacity:1}}\
 @media (max-width:860px){.rh-status,.rh-kbd-jump,.rh-header .rh-kbd-jump{display:none}}\
 @media (max-width:720px){.rh-header{display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:\"dot title presence\" \"live live live\" \"nav nav nav\";align-items:center;padding:var(--rh-space-2) var(--rh-space-3);min-height:2.9rem;gap:var(--rh-space-2)}.rh-header .rh-leave{display:none}.rh-rail{display:none}.rh-sidenav-slot{display:none}.rh-header .rh-title{grid-area:title;font-size:var(--rh-font-size);min-width:0;overflow:hidden}.rh-dot{grid-area:dot}.rh-presence{grid-area:presence;justify-self:end;padding:.25rem 1.2rem .25rem .4rem;font-size:var(--rh-font-xs)}.rh-live-slot{grid-area:live;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}\
-.rh-live-slot .rh-radio-now{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.rh-nav{grid-area:nav;min-width:0;overflow-x:auto;padding-bottom:.15rem}.rh-tabbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;padding:.3rem var(--rh-space-2) calc(.3rem + env(safe-area-inset-bottom));border-top:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);background:color-mix(in srgb,var(--rh-surface) 92%,transparent);backdrop-filter:saturate(1.4) blur(14px);-webkit-backdrop-filter:saturate(1.4) blur(14px);-webkit-user-select:none;user-select:none}.rh-tabbar.rh-hidden{display:none}.rh-tab{flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.15rem;min-height:2.9rem;padding:.25rem .1rem;border:0;background:transparent;color:var(--rh-muted);font-family:inherit;font-size:.7rem;font-weight:500;border-radius:var(--rh-radius);cursor:pointer}.rh-tab.active{color:var(--rh-brand)}.rh-tab-burrow.active{color:var(--rh-accent)}.rh-tab:active{background:color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-tab-icon{position:relative;display:grid;place-items:center;width:1.6rem;height:1.6rem}.rh-tab-icon svg{width:22px;height:22px}.rh-tab-tile{width:1.5rem;height:1.5rem;border-radius:.45rem;display:grid;place-items:center;font-weight:700;font-size:.8rem;background:color-mix(in srgb,var(--rh-text) 8%,transparent);color:var(--rh-muted)}.rh-tab.active .rh-tab-tile{background:color-mix(in srgb,var(--rh-accent) 18%,transparent);color:var(--rh-accent)}.rh-tab-label{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rh-tab .rh-rail-badge{top:-.35rem;right:-.5rem;box-shadow:0 0 0 2px var(--rh-surface)}.rh-section-strip{display:flex;gap:.35rem;overflow-x:auto;scrollbar-width:none;padding:.45rem var(--rh-space-3);border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent);background:var(--rh-surface);-webkit-user-select:none;user-select:none}.rh-section-strip::-webkit-scrollbar{display:none}.rh-section-strip .rh-subnav-link{flex:none;flex-direction:row;align-items:center;gap:.35rem;padding:.3rem .75rem;min-height:2rem;border-radius:var(--rh-radius-full);font-size:var(--rh-font-sm);color:var(--rh-muted);background:color-mix(in srgb,var(--rh-text) 5%,transparent)}.rh-section-strip .rh-subnav-link[aria-current=page]{background:color-mix(in srgb,var(--rh-accent) 14%,transparent);color:var(--rh-accent)}.rh-section-strip .rh-subnav-icon{width:16px;height:16px}.rh-section-strip .rh-subnav-icon svg{width:16px;height:16px}.rh-section-strip .rh-pip{position:static;margin-left:.1rem}.rh-shell-main{padding-bottom:3.6rem}.rh-status,.rh-kbd-jump,.rh-spacer{display:none}.rh-header .rh-kbd-jump{display:none}.rh-conn{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}.rh-toasts{top:auto;bottom:calc(3.9rem + env(safe-area-inset-bottom));left:var(--rh-space-3);right:var(--rh-space-3);width:auto}.rh-body{flex-direction:column}.rh-who,.rh-threads,.rh-members,.rh-files,.rh-stations{max-width:none;width:auto;border-right:0;border-left:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-who{max-height:35vh}.rh-chat{min-height:0}.rh-filetable-head,.rh-filetable .rh-file-link{grid-template-columns:minmax(0,1fr) 5rem}.rh-fcol-kind,.rh-fcol-who,.rh-fcol-when{display:none}.rh-scroll{padding:var(--rh-space-3)}.rh-present{order:-1;display:flex;align-items:center;gap:var(--rh-space-2);padding:.4rem var(--rh-space-3);max-height:none}.rh-present h2{margin:0;flex:none}.rh-present ul{flex-direction:row;flex:1;min-width:0;overflow-x:auto;gap:.4rem;padding-bottom:.15rem}.rh-present li{flex:none;white-space:nowrap}.rh-present:has(> ul:empty){display:none}.rh-server-row{flex-wrap:wrap;row-gap:.5rem}.rh-server-main{flex:1 1 0;min-width:60%}.rh-server-foot{flex-basis:100%}.rh-server-foot .rh-btn{width:100%;justify-content:center}.rh-server-listeners{white-space:normal}.rh-reader{min-height:14rem}.rh-login{margin:var(--rh-space-6) var(--rh-space-4)}}\
+.rh-live-slot .rh-radio-now{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.rh-nav{grid-area:nav;min-width:0;overflow-x:auto;padding-bottom:.15rem}.rh-tabbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;padding:.3rem var(--rh-space-2) calc(.3rem + env(safe-area-inset-bottom));border-top:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);background:color-mix(in srgb,var(--rh-surface) 92%,transparent);backdrop-filter:saturate(1.4) blur(14px);-webkit-backdrop-filter:saturate(1.4) blur(14px);-webkit-user-select:none;user-select:none}.rh-tabbar.rh-hidden{display:none}.rh-tab{flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.15rem;min-height:2.9rem;padding:.25rem .1rem;border:0;background:transparent;color:var(--rh-muted);font-family:inherit;font-size:.7rem;font-weight:500;border-radius:var(--rh-radius);cursor:pointer}.rh-tab.active{color:var(--rh-brand)}.rh-tab-burrow.active{color:var(--rh-accent)}.rh-tab:active{background:color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-tab-icon{position:relative;display:grid;place-items:center;width:1.6rem;height:1.6rem}.rh-tab-icon svg{width:22px;height:22px}.rh-tab-tile{width:1.5rem;height:1.5rem;border-radius:.45rem;display:grid;place-items:center;font-weight:700;font-size:.8rem;background:color-mix(in srgb,var(--rh-text) 8%,transparent);color:var(--rh-muted)}.rh-tab.active .rh-tab-tile{background:color-mix(in srgb,var(--rh-accent) 18%,transparent);color:var(--rh-accent)}.rh-tab-label{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rh-tab .rh-rail-badge{top:-.35rem;right:-.5rem;box-shadow:0 0 0 2px var(--rh-surface)}.rh-section-strip{display:flex;gap:.35rem;overflow-x:auto;scrollbar-width:none;padding:.45rem var(--rh-space-3);border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent);background:var(--rh-surface);-webkit-user-select:none;user-select:none}.rh-section-strip::-webkit-scrollbar{display:none}.rh-section-strip .rh-subnav-link{flex:none;flex-direction:row;align-items:center;gap:.35rem;padding:.3rem .75rem;min-height:2rem;border-radius:var(--rh-radius-full);font-size:var(--rh-font-sm);color:var(--rh-muted);background:color-mix(in srgb,var(--rh-text) 5%,transparent)}.rh-section-strip .rh-subnav-link[aria-current=page]{background:color-mix(in srgb,var(--rh-accent) 14%,transparent);color:var(--rh-accent)}.rh-section-strip .rh-subnav-icon{width:16px;height:16px}.rh-section-strip .rh-subnav-icon svg{width:16px;height:16px}.rh-section-strip .rh-pip{position:static;margin-left:.1rem}.rh-shell-main{padding-bottom:3.6rem}.rh-status,.rh-kbd-jump,.rh-spacer{display:none}.rh-header .rh-kbd-jump{display:none}.rh-conn{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}.rh-toasts{top:auto;bottom:calc(3.9rem + env(safe-area-inset-bottom));left:var(--rh-space-3);right:var(--rh-space-3);width:auto}.rh-body{flex-direction:column}.rh-who,.rh-threads,.rh-members,.rh-files,.rh-stations{max-width:none;width:auto;border-right:0;border-left:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-who{max-height:35vh}.rh-chat{min-height:0}.rh-filetable-head,.rh-filetable .rh-file-link{grid-template-columns:minmax(0,1fr) 5rem}.rh-fcol-kind,.rh-fcol-who,.rh-fcol-when{display:none}.rh-scroll{padding:var(--rh-space-3)}.rh-present{order:-1;display:flex;align-items:center;gap:var(--rh-space-2);padding:.4rem var(--rh-space-3);max-height:none}.rh-present h2{margin:0;flex:none}.rh-present ul{flex-direction:row;flex:1;min-width:0;overflow-x:auto;gap:.4rem;padding-bottom:.15rem}.rh-present li{flex:none;white-space:nowrap}.rh-present:has(> ul:empty){display:none}.rh-server-row{flex-wrap:wrap;row-gap:.5rem}.rh-server-main{flex:1 1 0;min-width:60%}.rh-server-foot{flex-basis:100%}.rh-server-foot .rh-btn{width:100%;justify-content:center}.rh-server-listeners{white-space:normal}.rh-reader{min-height:14rem}}\
 @keyframes rh-shimmer{0%{background-position:-180% 0}100%{background-position:180% 0}}\
 .rh-skeleton{display:flex;flex-direction:column;gap:.55rem;padding:var(--rh-space-4)}\
 .rh-skeleton-row{height:.85rem;border-radius:var(--rh-radius-full,999px);background:linear-gradient(90deg,color-mix(in srgb,var(--rh-text) 7%,transparent) 25%,color-mix(in srgb,var(--rh-text) 13%,transparent) 50%,color-mix(in srgb,var(--rh-text) 7%,transparent) 75%);background-size:180% 100%;animation:rh-shimmer 1.35s ease-in-out infinite}\
@@ -951,6 +1018,11 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
    page reload. */\
 .rh-btn:active{transform:scale(.97)}\
 .rh-rail-server.active{animation:rh-pop .22s cubic-bezier(.22,1,.36,1) both}\
+@media (hover:none){.rh-glass-row{min-height:2.75rem}}\
+@media (max-width:1000px){.rh-glass-cols,.rh-glass-row{grid-template-columns:1.6rem minmax(8rem,1.2fr) minmax(0,1.6fr) 4.25rem}.rh-glass-uptime,.rh-glass-cols .uptime{display:none}}\
+/* A phone gets one scrolling page: a compact masthead and the form, then the\
+   browser, its rows two lines tall so a name and its blurb both fit. */\
+@media (max-width:720px){.rh-connect{display:block;flex:none}.rh-connect-side{overflow:visible;gap:var(--rh-space-4);padding:var(--rh-space-5) var(--rh-space-4);border-right:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-connect-brand{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:var(--rh-space-3);align-items:center;text-align:left}.rh-connect-logo{grid-row:1/3;width:3.5rem;height:3.5rem}.rh-connect-brand h1{margin:0;align-self:end;font-size:1.35rem}.rh-connect-tagline{align-self:start}.rh-connect-version{display:none}.rh-connect-foot{padding-top:0}.rh-connect-main{display:block}.rh-glass-head{padding:var(--rh-space-4) var(--rh-space-4) var(--rh-space-2)}.rh-glass-cols{display:none}.rh-glass-scroll{overflow:visible;padding:0 var(--rh-space-2) var(--rh-space-3)}.rh-glass-row{grid-template-columns:1.6rem minmax(0,1fr) auto;grid-template-areas:\"mark name users\" \"mark desc desc\" \". more more\";row-gap:0;min-height:2.75rem;padding:.4rem .5rem}.rh-glass-mark{grid-area:mark}.rh-glass-name{grid-area:name}.rh-glass-desc{grid-area:desc}.rh-glass-users{grid-area:users}.rh-glass-more{grid-area:more}.rh-glass-status{padding:.5rem var(--rh-space-4) calc(.5rem + env(safe-area-inset-bottom))}}\
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:.01ms!important;transition-delay:0s!important;animation-duration:.01ms!important;animation-delay:0s!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}\
 ";
 
@@ -1310,7 +1382,10 @@ mod tests {
         // does feels like a web page. But `user-select:none` on anything a user
         // might want to *copy* — a message, a filename, a fingerprint — is a
         // real harm, so it's allowed only on navigation furniture.
-        const CHROME: [&str; 7] = [
+        const CHROME: [&str; 10] = [
+            ".rh-glass-head",
+            ".rh-glass-cols",
+            ".rh-glass-status",
             ".rh-subnav",
             ".rh-rail",
             ".rh-header",

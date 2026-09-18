@@ -26,15 +26,6 @@ use crate::theme_css::{mode_name, pack_label};
 use crate::theme_editor::{contrast_warnings, EditorAction, EditorState};
 use crate::wire::AdminCommand;
 
-/// Strip a `ws://`/`wss://` endpoint down to a readable `host:port` for chips.
-fn endpoint_host(endpoint: &str) -> String {
-    endpoint
-        .trim_start_matches("wss://")
-        .trim_start_matches("ws://")
-        .trim_end_matches('/')
-        .to_string()
-}
-
 /// The primary section links, as a **left sidebar**.
 ///
 /// This used to be a row of pills in the header, next to the burrow title, the
@@ -1864,28 +1855,178 @@ pub fn Toasts() -> impl IntoView {
     }
 }
 
-/// Connect screen: server URL + handle + connect button. A real `<form>`
-/// (Enter submits from either field) with `<label for=…>` on both inputs.
+/// One line of the connect window's burrow browser.
+///
+/// A Mac list row, not a web card: one click (or arrowing onto it) selects,
+/// which puts the burrow's address in the form; a double-click or Return
+/// connects. The selected row opens up to show the whole description and the
+/// address, so the list stays dense and nothing is hidden for good.
+#[component]
+fn GlassRow(
+    row: crate::connect::Row,
+    /// The connect form's address. A row is selected when it is this place.
+    endpoint: RwSignal<String>,
+    /// The connect form's handle; a saved burrow brings its own.
+    handle: RwSignal<String>,
+    /// Connect to the selected burrow now.
+    #[prop(into)]
+    on_open: Callback<()>,
+) -> impl IntoView {
+    use crate::connect::Shelf;
+    let place = store_value(row.endpoint.clone());
+    let saved_handle = store_value(match &row.shelf {
+        Shelf::Yours { handle } => Some(handle.clone()),
+        _ => None,
+    });
+    let selected =
+        move || place.with_value(|p| endpoint.with(|e| crate::connect::same_place(e, p)));
+    let pick = move || {
+        if !selected() {
+            endpoint.set(place.get_value());
+        }
+        if let Some(h) = saved_handle.get_value() {
+            if handle.with_untracked(|now| *now != h) {
+                handle.set(h);
+            }
+        }
+    };
+    // Each burrow gets a face, the way a Hotline tracker row had its icon:
+    // the same pixel mark people wear, grown from the burrow's address.
+    let mark = crate::avatar::mark_svg(
+        &crate::avatar::seed_for(None, &crate::connect::host(&row.endpoint)),
+        22,
+    );
+    let down = row.reachable == Some(false);
+    let pip = row
+        .reachable
+        .map(|up| if up { "rh-dot on" } else { "rh-dot off" });
+    let presence = row
+        .reachable
+        .map(|up| if up { "Online." } else { "Offline." });
+    // A burrow nobody can reach has no one online *now*, whatever it last said.
+    let users = if down { None } else { row.users };
+    let uptime = row.uptime.map(|p| format!("{}%", p.min(100)));
+    let as_handle = saved_handle.get_value();
+    let description = row.description.clone();
+    let address = row.endpoint.clone();
+    let listeners = row.listeners.join(" \u{00b7} ");
+    let demo = row.shelf == Shelf::Demo;
+    view! {
+        <li>
+            <button
+                type="button"
+                class="rh-glass-row"
+                class:selected=selected
+                class:off=down
+                tabindex="-1"
+                aria-pressed=move || if selected() { "true" } else { "false" }
+                on:click=move |_| pick()
+                on:focus=move |_| pick()
+                on:dblclick=move |_| {
+                    pick();
+                    on_open.call(());
+                }
+                on:keydown=move |ev| {
+                    if ev.key() == "Enter" {
+                        ev.prevent_default();
+                        pick();
+                        on_open.call(());
+                    }
+                }
+            >
+                <span class="rh-glass-mark">
+                    <span inner_html=mark></span>
+                    {pip.map(|class| view! { <span class=class aria-hidden="true"></span> })}
+                </span>
+                <span class="rh-glass-name">{row.name.clone()}</span>
+                <span class="rh-glass-desc">
+                    {presence.map(|p| view! { <span class="rh-visually-hidden">{p}" "</span> })}
+                    {as_handle.map(|h| view! { <span class="rh-glass-as">"as "{h}</span> })}
+                    {description}
+                </span>
+                <span class="rh-glass-users">
+                    {if down {
+                        view! { <span class="rh-glass-down">"offline"</span> }.into_view()
+                    } else {
+                        users
+                            .map(|n| view! {
+                                {n}<span class="rh-visually-hidden">" online"</span>
+                            })
+                            .into_view()
+                    }}
+                </span>
+                <span class="rh-glass-uptime">
+                    {uptime.map(|u| view! {
+                        {u}<span class="rh-visually-hidden">" uptime"</span>
+                    })}
+                </span>
+                <Show when=selected fallback=|| ()>
+                    <span class="rh-glass-more">
+                        <code>{address.clone()}</code>
+                        {(!listeners.is_empty()).then(|| view! { <span>{listeners.clone()}</span> })}
+                        {demo.then(|| view! { <span>"seeded demo"</span> })}
+                    </span>
+                </Show>
+            </button>
+        </li>
+    }
+}
+
+/// One shelf of the browser: a title and its rows, or nothing when it is empty.
+#[component]
+fn GlassShelf(
+    title: &'static str,
+    #[prop(into)] rows: Signal<Vec<crate::connect::Row>>,
+    endpoint: RwSignal<String>,
+    handle: RwSignal<String>,
+    #[prop(into)] on_open: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <Show when=move || rows.with(|r| !r.is_empty()) fallback=|| ()>
+            <h3 class="rh-glass-group">{title}</h3>
+            <ul class="rh-glass-list" aria-label=title>
+                <For
+                    each=move || rows.get()
+                    key=|r| r.key()
+                    children=move |row| view! { <GlassRow row endpoint handle on_open/> }
+                />
+            </ul>
+        </Show>
+    }
+}
+
+/// The connect window.
+///
+/// Laid out like a Mac app's welcome window rather than a web sign-in card:
+/// who this is and the way in on the left, the places you could go on the
+/// right. The right side is Hotline's tracker window, reinterpreted (design
+/// spec §3): *Your burrows* over *Discover*, one dense list with a face per
+/// burrow, a filter, and a status strip that says where the listing came from.
+///
+/// Still a real `<form>` (Return submits from any field) with `<label for=…>`
+/// on every input; the list only ever fills that form in.
 #[component]
 pub fn Login() -> impl IntoView {
+    use crate::servers::DirectorySource;
     let app = expect_context::<AppState>();
     let navigate = use_navigate();
     // Reconnect-on-launch: the burrows you've signed into before (endpoint +
-    // handle only). The most recent seeds the form; all appear as quick chips.
+    // handle only). The most recent seeds the form; all of them are a shelf.
     #[cfg(target_arch = "wasm32")]
     let recent = crate::recent::load();
     #[cfg(not(target_arch = "wasm32"))]
     let recent: Vec<crate::recent::RecentBurrow> = Vec::new();
     let last = recent.first().cloned();
-    // Prefill the endpoint: the server browser's pick wins, else the last burrow,
-    // else the local default.
+    let recent = store_value(recent);
+    // Prefill the endpoint: the server browser's pick wins, else the last
+    // burrow, else the local default. A burrow's WebSocket listener is 4654
+    // by default (README, `ws_addr`). A dev build opens on its first seeded
+    // burrow instead, so the demo is one Return away.
     let endpoint = create_rw_signal(
         app.pending_endpoint
             .get_untracked()
             .or_else(|| last.as_ref().map(|b| b.endpoint.clone()))
-            // A burrow's WebSocket listener is 4654 by default (README,
-            // `ws_addr`); this used to say 9000, the seeded demo's pretend
-            // port, so a first live connect to a local burrow failed.
+            .or_else(|| crate::connect::demos().first().map(|d| d.endpoint.clone()))
             .unwrap_or_else(|| "ws://localhost:4654".to_string()),
     );
     // The Looking Glass hands its pick over in the URL (`/?server=…`): a
@@ -1901,47 +2042,56 @@ pub fn Login() -> impl IntoView {
     });
     let handle = create_rw_signal(last.as_ref().map(|b| b.handle.clone()).unwrap_or_default());
     let password = create_rw_signal(String::new());
-    // Opt in to a real RHP-over-WebSocket session instead of the seeded demo.
-    // Default to live when we have a burrow to reconnect to — and always in
-    // a build without the demo, where live is the only kind of connection.
-    let go_live = create_rw_signal(last.is_some() || !cfg!(feature = "demo"));
+    let handle_missing = create_rw_signal(false);
+    // Whether this is a seeded demo burrow is a fact about the address, so the
+    // form asks no "real or demo?" question: a demo row fills in a `demo://`
+    // address and everything else is a live connection.
+    let is_demo = move || endpoint.with(|e| crate::connect::is_demo(e));
 
-    let connect = move |ev: leptos::ev::SubmitEvent| {
-        ev.prevent_default();
+    // A `Callback` that OWNS the navigate function, not a closure over a
+    // stored one. Connecting focuses the new burrow, which remounts the routed
+    // tree and disposes this component mid-call: anything of ours held in a
+    // `StoredValue` is gone by the time the next line runs (it panicked with
+    // "could not get stored value" exactly there), while a value the running
+    // closure owns outlives the scope that made it.
+    let go = Callback::new(move |()| {
         app.pending_notice.set(None);
         app.pending_endpoint.set(None);
-        if go_live.get() {
-            // Live requires a handle to authenticate — without one the session
-            // connects but never signs in (a silent dead session).
-            let who = handle.get();
-            if who.trim().is_empty() {
-                return;
-            }
+        let place = endpoint.get_untracked();
+        if place.trim().is_empty() {
+            crate::a11y::focus_id(a11y::LOGIN_SERVER_ID);
+            return;
+        }
+        // A handle is what signs you in. Without one the session used to
+        // connect and then sit there unauthenticated, and the button simply
+        // did nothing: say what is missing, and go to it.
+        let who = handle.get_untracked();
+        if who.trim().is_empty() {
+            handle_missing.set(true);
+            crate::a11y::focus_id(a11y::LOGIN_HANDLE_ID);
+            return;
+        }
+        if !crate::connect::is_demo(&place) {
             // Live: open a real socket + authenticate; state fills from
             // transport events (the handshake sets the header to Online, and
             // the lobby fills with live chat once signed in).
-            app.connect_live(endpoint.get(), who, password.get());
+            app.connect_live(place, who, password.get_untracked());
             navigate("/lobby", Default::default());
             return;
         }
         // The demo path, dev builds only. Without the `demo` feature there is
-        // no seeded burrow to join, and the form requires a live connection —
-        // a shipped build must never present fabricated data as a place.
+        // no seeded burrow to join: a shipped build must never present
+        // fabricated data as a place.
         #[cfg(feature = "demo")]
         {
-            let who = handle.get();
-            if who.trim().is_empty() {
-                return;
-            }
-            let name = who.clone();
             let demo = crate::client::DEMO_BURROWS
                 .iter()
-                .find(|d| d.endpoint == endpoint.get())
+                .find(|d| d.endpoint == place)
                 .unwrap_or(&crate::client::DEMO_BURROWS[0]);
             app.join_demo(demo, &who);
             app.notify(
                 crate::toasts::ToastKind::Success,
-                format!("Signed in as {name}"),
+                format!("Signed in as {who}"),
             );
             let waiting = app.focused().state.with(|s| s.dm_threads.len());
             if waiting > 0 {
@@ -1958,124 +2108,258 @@ pub fn Login() -> impl IntoView {
         #[cfg(not(feature = "demo"))]
         app.notify(
             crate::toasts::ToastKind::Warn,
-            "Enter your handle and a burrow address to connect.".to_string(),
+            "That is a demo address, and this build has no demo burrows.".to_string(),
         );
+    });
+    let on_open = go;
+
+    // The browser. Ask the network on arrival: what is in memory may be the
+    // built-in sample, which this screen never shows as places. A render
+    // effect so a route re-entry doesn't fire it against a disposed view.
+    let listed = app.servers;
+    let source = app.directory_source;
+    let loading = app.directory_loading;
+    create_render_effect(move |seen: Option<bool>| {
+        if seen.is_none() {
+            app.load_directory();
+        }
+        true
+    });
+    let filter_text = create_rw_signal(String::new());
+    let yours = Signal::derive(move || {
+        crate::connect::filter(
+            recent.with_value(|r| listed.with(|l| crate::connect::yours(r, l))),
+            &filter_text.get(),
+        )
+    });
+    let discover = Signal::derive(move || {
+        crate::connect::filter(
+            recent.with_value(|r| {
+                listed.with(|l| source.with(|s| crate::connect::discover(l, s, r)))
+            }),
+            &filter_text.get(),
+        )
+    });
+    let demos =
+        Signal::derive(move || crate::connect::filter(crate::connect::demos(), &filter_text.get()));
+    let nothing_shown = move || {
+        yours.with(Vec::is_empty) && discover.with(Vec::is_empty) && demos.with(Vec::is_empty)
     };
+    let unanswered = move || source.with(|s| *s == DirectorySource::Seeded);
+    let filtering = move || !filter_text.with(|q| q.trim().is_empty());
+    // The button names where it is going when the address is a known place.
+    let go_label =
+        move || {
+            let mut known = recent.with_value(|r| listed.with(|l| crate::connect::yours(r, l)));
+            known.extend(recent.with_value(|r| {
+                listed.with(|l| source.with(|s| crate::connect::discover(l, s, r)))
+            }));
+            known.extend(crate::connect::demos());
+            endpoint.with(|e| crate::connect::connect_label(e, &known))
+        };
 
     view! {
-        <main id=a11y::MAIN_ID tabindex="-1">
-            <form class="rh-login" on:submit=connect>
-                <h1 id=a11y::VIEW_TITLE_ID tabindex="-1">"RabbitHole"</h1>
-                <p class="rh-login-tagline">"Many burrows, one you."</p>
+        <main class="rh-connect" id=a11y::MAIN_ID tabindex="-1">
+            <section class="rh-connect-side" aria-label="Sign in">
+                <div class="rh-connect-brand">
+                    <img
+                        class="rh-connect-logo"
+                        src="/logo.png"
+                        alt=""
+                        width="112"
+                        height="112"
+                        draggable="false"
+                    />
+                    <h1 id=a11y::VIEW_TITLE_ID tabindex="-1">"RabbitHole"</h1>
+                    <p class="rh-connect-tagline">"Many burrows, one you."</p>
+                </div>
                 // Why you're here, when you didn't choose to be: an expired
                 // session or a refused sign-in names itself above the form
                 // instead of vanishing with a five-second toast.
                 {move || app.pending_notice.get().map(|n| view! {
                     <p class="rh-login-notice" role="status">{n}</p>
                 })}
-                {(!recent.is_empty()).then(|| view! {
-                    <div class="rh-recent" role="group" aria-label="Recent burrows">
-                        <span class="rh-recent-label">"Recent"</span>
-                        {recent.into_iter().map(|b| {
-                            let (ep, h) = (b.endpoint.clone(), b.handle.clone());
-                            let label = format!("{} @ {}", b.handle, endpoint_host(&b.endpoint));
-                            view! {
+                <form
+                    class="rh-login"
+                    on:submit=move |ev: leptos::ev::SubmitEvent| {
+                        ev.prevent_default();
+                        go.call(());
+                    }
+                >
+                    <label for=a11y::LOGIN_SERVER_ID>"Burrow"</label>
+                    <input
+                        id=a11y::LOGIN_SERVER_ID
+                        class="rh-input rh-login-address"
+                        autocomplete="off"
+                        autocapitalize="off"
+                        spellcheck="false"
+                        placeholder="ws://localhost:4654"
+                        prop:value=endpoint
+                        on:input=move |ev| endpoint.set(event_target_value(&ev))
+                    />
+                    <p class="rh-field-hint">
+                        "ws:// reaches a burrow on this machine; anything further away needs wss://."
+                    </p>
+                    <label for=a11y::LOGIN_HANDLE_ID>"Handle"</label>
+                    <input
+                        id=a11y::LOGIN_HANDLE_ID
+                        class="rh-input"
+                        autocomplete="username"
+                        autocapitalize="off"
+                        spellcheck="false"
+                        placeholder="your handle"
+                        aria-invalid=move || {
+                            if handle_missing.get() && handle.with(|h| h.trim().is_empty()) {
+                                "true"
+                            } else {
+                                "false"
+                            }
+                        }
+                        prop:value=handle
+                        on:input=move |ev| {
+                            handle_missing.set(false);
+                            handle.set(event_target_value(&ev));
+                        }
+                    />
+                    <Show
+                        when=move || handle_missing.get() && handle.with(|h| h.trim().is_empty())
+                        fallback=|| ()
+                    >
+                        <p class="rh-field-hint error" role="alert">
+                            "Pick a handle first. It is the name people there will see."
+                        </p>
+                    </Show>
+                    // A seeded demo burrow has no accounts to sign in to.
+                    <Show when=move || !is_demo() fallback=|| ()>
+                        <label for="rh-login-password">"Password"</label>
+                        <input
+                            id="rh-login-password"
+                            class="rh-input"
+                            type="password"
+                            autocomplete="current-password"
+                            placeholder="password"
+                            prop:value=password
+                            on:input=move |ev| password.set(event_target_value(&ev))
+                        />
+                        <p class="rh-field-hint">"Leave it empty to visit as a guest."</p>
+                    </Show>
+                    <button class="rh-btn rh-connect-go" type="submit">
+                        <span>{go_label}</span>
+                    </button>
+                </form>
+                // Here to add a burrow, not because there is nowhere to be:
+                // the rail is hidden on this window, so say the way back.
+                <div class="rh-connect-foot">
+                    <Show when=move || app.has_burrows() fallback=|| ()>
+                        <A class="rh-connect-back" href="/lobby">
+                            <span inner_html=crate::icons::chevron_left_icon()></span>
+                            "Back to "
+                            {move || {
+                                app.focused_tracked()
+                                    .name
+                                    .get()
+                                    .filter(|n| !n.is_empty())
+                                    .unwrap_or_else(|| "your burrow".into())
+                            }}
+                        </A>
+                    </Show>
+                    <p class="rh-connect-version">
+                        {concat!("Version ", env!("CARGO_PKG_VERSION"))}
+                    </p>
+                </div>
+            </section>
+            <section class="rh-connect-main" aria-label="Burrows">
+                <header class="rh-glass-head" data-tauri-drag-region="true">
+                    <h2>"Looking Glass"</h2>
+                    // A <label>, so a click on the lens lands in the field.
+                    <label class="rh-glass-search">
+                        <span inner_html=crate::icons::search_icon()></span>
+                        <input
+                            class="rh-input"
+                            type="search"
+                            aria-label="Filter burrows"
+                            placeholder="Filter"
+                            prop:value=filter_text
+                            on:input=move |ev| filter_text.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <button
+                        type="button"
+                        class="rh-glass-refresh"
+                        class:busy=move || loading.get()
+                        aria-label="Refresh the list"
+                        title="Refresh the list"
+                        prop:disabled=move || loading.get()
+                        on:click=move |_| app.load_directory()
+                    >
+                        <span inner_html=crate::icons::refresh_icon()></span>
+                    </button>
+                </header>
+                <div class="rh-glass-cols" aria-hidden="true">
+                    <span></span>
+                    <span>"Burrow"</span>
+                    <span>"About"</span>
+                    <span class="num">"Online"</span>
+                    <span class="num uptime">"Uptime"</span>
+                </div>
+                <div
+                    class="rh-glass-scroll"
+                    tabindex="0"
+                    role="group"
+                    aria-label="Burrows to connect to. Arrow keys move, Return connects."
+                    on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-glass-row")
+                >
+                    <GlassShelf title="Your burrows" rows=yours endpoint handle on_open/>
+                    <GlassShelf title="Demo burrows" rows=demos endpoint handle on_open/>
+                    <GlassShelf title="Discover" rows=discover endpoint handle on_open/>
+                    // The listing is on its way and there is nothing to show
+                    // yet: row-shaped placeholders, not an empty pane.
+                    <Show when=move || loading.get() && unanswered() && !filtering() fallback=|| ()>
+                        <h3 class="rh-glass-group">"Discover"</h3>
+                        <Skeleton rows=5/>
+                    </Show>
+                    // Nobody answered. Say so, and say what still works.
+                    <Show when=move || !loading.get() && unanswered() && !filtering() fallback=|| ()>
+                        <EmptyState
+                            icon="/servers"
+                            title="No directory answered"
+                            sub="The looking glass is how public burrows get found. You can still connect to any burrow by its address."
+                            action=view! {
                                 <button
                                     type="button"
-                                    class="rh-recent-chip"
-                                    on:click=move |_| {
-                                        endpoint.set(ep.clone());
-                                        handle.set(h.clone());
-                                        go_live.set(true);
-                                    }
-                                >{label}</button>
-                            }
-                        }).collect_view()}
-                    </div>
-                })}
-                // Dev builds get the seeded warren: two burrows, so switching
-                // places is testable without running two servers.
-                {
-                    #[cfg(feature = "demo")]
-                    {
-                        view! {
-                            <div class="rh-demo-picker">
-                                <span class="rh-demo-label">"Demo burrows"</span>
-                                {crate::client::DEMO_BURROWS.iter().map(|d| {
-                                    let ep = d.endpoint.to_string();
-                                    view! {
-                                        <button
-                                            type="button"
-                                            class="rh-recent-chip"
-                                            on:click=move |_| {
-                                                endpoint.set(ep.clone());
-                                                go_live.set(false);
-                                            }
-                                        >{d.name}</button>
-                                    }
-                                }).collect_view()}
-                            </div>
-                        }.into_view()
-                    }
-                    #[cfg(not(feature = "demo"))]
-                    ().into_view()
-                }
-                <label for=a11y::LOGIN_SERVER_ID>"Burrow"</label>
-                <input
-                    id=a11y::LOGIN_SERVER_ID
-                    class="rh-input"
-                    autocomplete="off"
-                    spellcheck="false"
-                    placeholder="ws://localhost:4654"
-                    prop:value=endpoint
-                    on:input=move |ev| endpoint.set(event_target_value(&ev))
-                />
-                <p class="rh-field-hint">
-                    "ws:// reaches a burrow on this machine; anything further away needs wss://."
-                </p>
-                <label for=a11y::LOGIN_HANDLE_ID>"Handle"</label>
-                <input
-                    id=a11y::LOGIN_HANDLE_ID
-                    class="rh-input"
-                    autocomplete="username"
-                    spellcheck="false"
-                    placeholder="your handle"
-                    prop:value=handle
-                    on:input=move |ev| handle.set(event_target_value(&ev))
-                />
-                // The demo toggle only exists where a demo does. A shipped
-                // build has one kind of connection, so it asks no question.
-                {
-                    #[cfg(feature = "demo")]
-                    {
-                        view! {
-                            <label class="rh-live-toggle">
-                                <input
-                                    type="checkbox"
-                                    prop:checked=go_live
-                                    on:change=move |ev| go_live.set(event_target_checked(&ev))
-                                />
-                                "Real burrow \u{2014} untick to enter the seeded demo instead"
-                            </label>
-                        }.into_view()
-                    }
-                    #[cfg(not(feature = "demo"))]
-                    ().into_view()
-                }
-                <Show when=move || go_live.get() fallback=|| ()>
-                    <label for="rh-login-password">"Password"</label>
-                    <input
-                        id="rh-login-password"
-                        class="rh-input"
-                        type="password"
-                        autocomplete="current-password"
-                        placeholder="password (empty for a guest visit)"
-                        prop:value=password
-                        on:input=move |ev| password.set(event_target_value(&ev))
-                    />
-                </Show>
-                <button class="rh-btn" type="submit">"Connect"</button>
-            </form>
+                                    class="rh-btn ghost small"
+                                    on:click=move |_| app.load_directory()
+                                >
+                                    "Try again"
+                                </button>
+                            }.into_view()
+                        />
+                    </Show>
+                    <Show when=move || filtering() && nothing_shown() fallback=|| ()>
+                        <p class="rh-empty">"No burrow matches that filter."</p>
+                    </Show>
+                    <Show
+                        when=move || {
+                            !loading.get() && !unanswered() && !filtering() && discover.with(Vec::is_empty)
+                        }
+                        fallback=|| ()
+                    >
+                        <p class="rh-empty">"No other burrows are listed right now."</p>
+                    </Show>
+                </div>
+                <footer class="rh-glass-status" role="status">
+                    <span>
+                        {move || listed.with(|l| source.with(|s| {
+                            crate::connect::status_line(loading.get(), s, l)
+                        }))}
+                    </span>
+                    <Show when=move || !unanswered() fallback=|| ()>
+                        <span class="rh-glass-via">
+                            "via "{move || source.with(|s| s.label().to_string())}
+                        </span>
+                    </Show>
+                </footer>
+            </section>
         </main>
     }
 }

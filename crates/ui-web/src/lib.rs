@@ -88,6 +88,7 @@ pub mod clock;
 pub mod components;
 pub mod compose;
 pub mod conn;
+pub mod connect;
 pub mod files;
 pub mod friend;
 pub mod icons;

@@ -82,6 +82,10 @@ fn colour_vars(p: &Palette, bg_image: &str, layers: Layers) -> VarMap {
     // surface into the first.
     m.insert("--rh-brand".into(), hex(layers.brand.unwrap_or(p.accent)));
     m.insert(
+        "--rh-on-brand".into(),
+        hex(layers.on_brand.unwrap_or(p.background)),
+    );
+    m.insert(
         "--rh-surface-2".into(),
         hex(layers.surface2.unwrap_or(p.surface)),
     );
@@ -101,6 +105,12 @@ fn colour_vars(p: &Palette, bg_image: &str, layers: Layers) -> VarMap {
 struct Layers {
     brand: Option<Rgb>,
     surface2: Option<Rgb>,
+    /// Text and icons drawn ON the brand colour (the connect window's primary
+    /// button). Ember is a mid-tone: the page background that `.rh-btn` puts
+    /// on the accent reads at 3.3:1 on the light ember, so Clean names a dark
+    /// warm ink instead. Packs with no brand of their own fall back to the
+    /// background, the same pairing their accent buttons already use.
+    on_brand: Option<Rgb>,
 }
 
 /// The mode-independent tokens a pack contributes: the type scale, the
@@ -186,6 +196,8 @@ const DISPLAY: &str = "'Space Grotesk',system-ui,-apple-system,'Segoe UI',Roboto
 /// Clean's ember, per mode (design spec §8).
 const CLEAN_BRAND_LIGHT: Rgb = Rgb(0xe8, 0x6a, 0x1f);
 const CLEAN_BRAND_DARK: Rgb = Rgb(0xff, 0x8a, 0x3d);
+/// Ink on ember, both modes: 5.9:1 on the light ember, 8.6:1 on the dark.
+const CLEAN_ON_BRAND: Rgb = Rgb(0x1d, 0x12, 0x04);
 /// Clean's second surface: a cooler step for the rail and sidebar, so the
 /// warren layer reads as a different material from the burrow's pane.
 const CLEAN_SURFACE2_LIGHT: Rgb = Rgb(0xee, 0xf1, 0xf6);
@@ -231,6 +243,7 @@ impl PackTokens {
                     Layers {
                         brand: Some(CLEAN_BRAND_LIGHT),
                         surface2: Some(CLEAN_SURFACE2_LIGHT),
+                        on_brand: Some(CLEAN_ON_BRAND),
                     },
                 ),
                 dark: colour_vars(
@@ -239,6 +252,7 @@ impl PackTokens {
                     Layers {
                         brand: Some(CLEAN_BRAND_DARK),
                         surface2: Some(CLEAN_SURFACE2_DARK),
+                        on_brand: Some(CLEAN_ON_BRAND),
                     },
                 ),
             },
@@ -480,6 +494,29 @@ mod tests {
                         "{pack:?}/{mode:?}: focus outline on {against} is {ratio:.2}:1 (< 3:1)"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn ink_on_the_brand_is_readable_in_every_pack_and_mode() {
+        // The connect window's primary button is ember with `--rh-on-brand`
+        // text. AA for normal-size text, in all six pack x mode combos: the
+        // pairing `.rh-btn` uses on the accent (page background as ink) only
+        // reaches 3.3:1 on Clean's light ember, which is why this token exists.
+        for pack in PACKS {
+            let tokens = PackTokens::builtin(pack);
+            for (mode, map) in [(Mode::Light, &tokens.light), (Mode::Dark, &tokens.dark)] {
+                let get = |var: &str| {
+                    crate::theme_editor::parse_hex(&map[var])
+                        .unwrap_or_else(|| panic!("{pack:?}/{mode:?} {var} is hex"))
+                };
+                let ratio =
+                    crate::theme_editor::contrast_ratio(get("--rh-on-brand"), get("--rh-brand"));
+                assert!(
+                    ratio >= 4.5,
+                    "{pack:?}/{mode:?}: ink on brand is {ratio:.2}:1 (< 4.5:1)"
+                );
             }
         }
     }

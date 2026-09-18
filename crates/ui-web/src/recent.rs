@@ -20,11 +20,37 @@ pub struct RecentBurrow {
 /// Most we keep — enough to cover a person's warren, few enough to stay tidy.
 const MAX_RECENT: usize = 8;
 
+/// The handle a person typed, without the ` (guest)` a burrow appends to a
+/// guest's screen name.
+///
+/// What gets remembered is the screen name the burrow sent back, and for a
+/// guest that is `"test (guest)"`. Prefilling the connect form with it sent it
+/// back as the login, so the next visit was `"test (guest) (guest)"`, and the
+/// one after that grew another. The suffix is the burrow's annotation, not
+/// part of anyone's name: strip every copy.
+pub fn bare_handle(handle: &str) -> &str {
+    let mut bare = handle.trim();
+    while let Some(rest) = bare.strip_suffix("(guest)") {
+        bare = rest.trim_end();
+    }
+    bare
+}
+
+/// Clean a stored list on the way in: entries saved before [`bare_handle`]
+/// existed still carry their suffixes.
+pub fn without_guest_suffixes(mut list: Vec<RecentBurrow>) -> Vec<RecentBurrow> {
+    for b in &mut list {
+        b.handle = bare_handle(&b.handle).to_string();
+    }
+    list
+}
+
 /// Fold a fresh sign-in into the recent list: dedup by endpoint (a re-login
 /// updates the handle + jumps to front), most-recent first, capped. If the new
 /// entry carries no token but a prior entry for the same endpoint had one, the
 /// token is preserved (a reconnect shouldn't drop a still-valid session). Pure.
 pub fn add_recent(mut list: Vec<RecentBurrow>, mut entry: RecentBurrow) -> Vec<RecentBurrow> {
+    entry.handle = bare_handle(&entry.handle).to_string();
     if entry.token.is_none() {
         if let Some(prior) = list.iter().find(|b| b.endpoint == entry.endpoint) {
             entry.token = prior.token.clone();
@@ -89,6 +115,7 @@ mod persist {
         storage()
             .and_then(|s| s.get_item(super::persist::KEY).ok().flatten())
             .and_then(|json| serde_json::from_str(&json).ok())
+            .map(super::without_guest_suffixes)
             .unwrap_or_default()
     }
 
@@ -135,6 +162,35 @@ pub use persist::{forget, load, remember, remember_token};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_guest_suffix_is_never_remembered_as_part_of_the_name() {
+        assert_eq!(super::bare_handle("test (guest)"), "test");
+        assert_eq!(super::bare_handle("test (guest) (guest)"), "test");
+        assert_eq!(
+            super::bare_handle("  White Rabbit (guest) "),
+            "White Rabbit"
+        );
+        assert_eq!(super::bare_handle("alice"), "alice");
+        assert_eq!(super::bare_handle("guestbook"), "guestbook");
+        // Saving strips it...
+        let list = super::add_recent(
+            Vec::new(),
+            super::RecentBurrow {
+                endpoint: "ws://localhost:4654".into(),
+                handle: "test (guest)".into(),
+                token: None,
+            },
+        );
+        assert_eq!(list[0].handle, "test");
+        // ...and so does reading a list saved before this rule existed.
+        let old = vec![super::RecentBurrow {
+            endpoint: "ws://localhost:4654".into(),
+            handle: "test (guest) (guest)".into(),
+            token: None,
+        }];
+        assert_eq!(super::without_guest_suffixes(old)[0].handle, "test");
+    }
+
     use super::*;
 
     fn b(endpoint: &str, handle: &str) -> RecentBurrow {
