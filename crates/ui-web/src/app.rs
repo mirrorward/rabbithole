@@ -62,6 +62,10 @@ pub struct Session {
     pub files: RwSignal<FilesState>,
     /// Whether this session holds an admin capability on its server.
     pub is_admin: RwSignal<bool>,
+    /// Whether this session is a guest: a handle with no account behind it.
+    /// The server refuses a guest everything that is between accounts, so
+    /// the DM view offers sign-in instead of asking and failing.
+    pub is_guest: RwSignal<bool>,
     /// Whether this session is **live** (a real RHP-over-WebSocket transport)
     /// rather than the seeded [`MockClient`] demo.
     pub live: RwSignal<bool>,
@@ -182,6 +186,7 @@ impl AppState {
             state: create_rw_signal(UiState::default()),
             files: create_rw_signal(FilesState::default()),
             is_admin: create_rw_signal(false),
+            is_guest: create_rw_signal(false),
             live: create_rw_signal(false),
             server_theme: create_rw_signal(None),
             name: create_rw_signal(None),
@@ -411,6 +416,7 @@ impl AppState {
                 state: create_rw_signal(UiState::default()),
                 files: create_rw_signal(FilesState::default()),
                 is_admin: create_rw_signal(false),
+                is_guest: create_rw_signal(false),
                 live: create_rw_signal(false),
                 server_theme: create_rw_signal(None),
                 name: create_rw_signal(None),
@@ -558,6 +564,7 @@ impl AppState {
         let files = self.focused().files;
         let session_name = self.focused().name;
         let is_admin = self.focused().is_admin;
+        let is_guest = self.focused().is_guest;
         let presence = self.presence;
         let ws_sv = self.focused().ws;
         // Endpoint captured for both the "connected" toast/label and, on a
@@ -654,6 +661,11 @@ impl AppState {
                         // live admin never saw an Admin entry at all (only the
                         // demo's seeded "rabbit" handle did).
                         is_admin.set(crate::state::role_is_operator(*role));
+                        // And whether there is an account behind the handle
+                        // at all: the DM view used to ask a guest's
+                        // conversation list, get Forbidden, and offer a
+                        // "Try again" that could never work.
+                        is_guest.set(crate::state::role_is_guest(*role));
                         // Persist the session so a reload auto-reconnects: the
                         // handle (from the persona) + the resume token (empty for
                         // guests → cleared). Never the password.
@@ -939,6 +951,29 @@ impl AppState {
         self.drop_session(id);
     }
 
+    /// A guest who wants to be someone: bring this burrow's connect form back,
+    /// prefilled with the guest handle, with a line saying why it is there.
+    /// The guest session goes (there is nothing in it to keep); a member
+    /// session replaces it once the form is submitted.
+    pub fn sign_in_as_member(&self) {
+        let id = self.focused_id.get_untracked();
+        let burrow = self
+            .focused()
+            .name
+            .get_untracked()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| server_label(&id));
+        let notice = format!("Direct messages on {burrow} need an account. Sign in with yours.");
+        #[cfg(target_arch = "wasm32")]
+        self.sign_out(&id, notice);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.pending_endpoint.set(Some(id.0.clone()));
+            self.pending_notice.set(Some(notice));
+            self.drop_session(&id);
+        }
+    }
+
     /// Manually redial the live socket now (the reconnect banner's button).
     pub fn reconnect(&self) {
         #[cfg(target_arch = "wasm32")]
@@ -1001,6 +1036,7 @@ impl AppState {
                 state: create_rw_signal(UiState::default()),
                 files: create_rw_signal(FilesState::default()),
                 is_admin: create_rw_signal(false),
+                is_guest: create_rw_signal(false),
                 live: create_rw_signal(false),
                 server_theme: create_rw_signal(None),
                 name: create_rw_signal(Some(demo.name.to_string())),
@@ -1225,6 +1261,11 @@ impl AppState {
     /// Load the DM conversation snapshots into state. Live: request the
     /// conversation list over the socket (the reply folds through the sink).
     pub fn load_dms(&self) {
+        // A guest has no conversations to list and the server says so with
+        // Forbidden; the DM view shows the sign-in gate instead of asking.
+        if self.focused().is_guest.get_untracked() {
+            return;
+        }
         #[cfg(target_arch = "wasm32")]
         if self.focused().live.get_untracked() {
             self.focused().state.update(|s| s.loading.dms = true);

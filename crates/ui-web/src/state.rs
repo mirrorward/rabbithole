@@ -1201,6 +1201,13 @@ pub fn role_is_operator(role: u8) -> bool {
     role >= ROLE_ADMIN
 }
 
+/// Is this role ordinal a guest? A guest reads along (lobby, boards, files)
+/// but has no account behind the handle, so the server refuses everything
+/// that is between accounts: direct messages first of all.
+pub fn role_is_guest(role: u8) -> bool {
+    role == 0
+}
+
 #[cfg(test)]
 mod dm_preview_tests {
     use super::{DmMessage, DmThread};
@@ -1243,6 +1250,9 @@ mod role_tests {
     #[test]
     fn only_admin_and_above_are_operators() {
         assert!(!role_is_operator(0), "guest");
+        assert!(super::role_is_guest(0));
+        assert!(!super::role_is_guest(1), "a user has an account");
+        assert!(!super::role_is_guest(3), "so does an admin");
         assert!(!role_is_operator(1), "user");
         assert!(!role_is_operator(2), "moderator");
         assert!(role_is_operator(3), "admin");

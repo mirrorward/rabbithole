@@ -374,6 +374,8 @@ body{overflow:hidden}\
 .rh-chat-empty-mark svg{width:24px;height:24px}\
 .rh-chat-empty-title{font-weight:700;margin:.3rem 0 0}\
 .rh-chat-empty-sub{color:var(--rh-muted);margin:0;max-width:32ch}\
+.rh-chat-empty-action{margin-top:var(--rh-space-3)}\
+.rh-dm-gate{flex:1;display:flex;flex-direction:column;justify-content:center;min-width:0}\
 .rh-person,.rh-xfer-item,.rh-who-row,.rh-tree-item{border-radius:0;transition:background-color .13s ease}\
 .rh-person:hover,.rh-xfer-item:hover,.rh-who-row:hover,.rh-tree-item:hover{background:color-mix(in srgb,var(--rh-text) 5%,transparent)}\
 .rh-empty{color:var(--rh-muted);padding:var(--rh-space-4);text-align:center;animation:rh-fade-up .25s ease both}\

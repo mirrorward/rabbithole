@@ -2164,12 +2164,16 @@ fn EmptyState(
     /// A sentence of guidance under the headline.
     #[prop(into)]
     sub: String,
+    /// The one thing to do about it, when there is one (a button).
+    #[prop(optional)]
+    action: Option<View>,
 ) -> impl IntoView {
     view! {
         <div class="rh-chat-empty">
             <div class="rh-chat-empty-mark" aria-hidden="true" inner_html=crate::icons::section_icon(icon)></div>
             <p class="rh-chat-empty-title">{title}</p>
             <p class="rh-chat-empty-sub">{sub}</p>
+            {action.map(|a| view! { <div class="rh-chat-empty-action">{a}</div> })}
         </div>
     }
 }
@@ -2851,7 +2855,11 @@ pub fn Dms() -> impl IntoView {
     let app = expect_context::<AppState>();
     let state = app.focused().state;
     let draft = create_rw_signal(String::new());
-    app.load_dms();
+    // A guest gets the gate below, not a request the server will refuse.
+    let is_guest = app.focused().is_guest;
+    if !is_guest.get_untracked() {
+        app.load_dms();
+    }
 
     // Follow the newest message unless the reader has scrolled up to history.
     let log = crate::scroll::ChatScroll::install(move || {
@@ -2896,6 +2904,14 @@ pub fn Dms() -> impl IntoView {
             <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">
                 "Direct messages"
             </h1>
+            // Direct messages travel between accounts, and a guest has none
+            // behind the handle. The server refuses the list with Forbidden;
+            // this used to surface as "Couldn't load your conversations. Try
+            // again", a retry that could never succeed. Now the section says
+            // what it needs and offers the way there.
+            <Show
+                when=move || is_guest.get()
+                fallback=move || view! {
             <aside class="rh-who rh-convos">
                 <h2>"Conversations"</h2>
                 <Show when=move || state.with(|s| s.loading.dms) fallback=|| ()>
@@ -3066,6 +3082,21 @@ pub fn Dms() -> impl IntoView {
                     />
                 </Show>
             </section>
+                }
+            >
+                <section class="rh-dm-gate" aria-label="Sign in to message">
+                    <EmptyState
+                        icon="/dms"
+                        title="Messages need an account"
+                        sub="You\u{2019}re here as a guest. Sign in with an account to send and receive direct messages."
+                        action=view! {
+                            <button class="rh-btn" on:click=move |_| app.sign_in_as_member()>
+                                "Sign in"
+                            </button>
+                        }.into_view()
+                    />
+                </section>
+            </Show>
         </main>
     }
 }
