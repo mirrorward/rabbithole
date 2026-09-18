@@ -157,18 +157,6 @@ pub fn Nav() -> impl IntoView {
     };
     view! {
         <nav class="rh-subnav" aria-label="Primary">
-            // Phone only (the stylesheet hides it wider): opens the warren
-            // sheet, which is the burrow rail's job where no rail fits.
-            <button
-                type="button"
-                class="rh-subnav-link rh-subnav-warren"
-                aria-haspopup="dialog"
-                aria-expanded=move || app.switcher_open.get().to_string()
-                on:click=move |_| app.switcher_open.update(|o| *o = !*o)
-            >
-                <span class="rh-subnav-icon" inner_html=crate::icons::rail_icon("home")></span>
-                <span class="rh-subnav-label">"Warren"</span>
-            </button>
             <span class="rh-subnav-scope">
                 // focused_tracked(), not focused(): the latter reads the id
                 // untracked, so this label was computed once at mount and
@@ -195,6 +183,54 @@ pub fn Nav() -> impl IntoView {
                 <NavLink path="/admin" label="Admin" unread=None/>
             </Show>
         </nav>
+    }
+}
+
+/// The unread count a section's pip shows, if the section has one: boards
+/// and DMs carry counts on the wire; the rest don't.
+fn section_unread(app: AppState, route: &'static str) -> Option<Signal<u64>> {
+    match route {
+        "/boards" => Some(Signal::derive(move || {
+            app.focused_tracked()
+                .state
+                .with(|s| s.boards.iter().map(|b| b.unread).sum::<u64>())
+        })),
+        "/dms" => Some(Signal::derive(move || {
+            app.focused_tracked()
+                .state
+                .with(|s| s.dm_threads.iter().map(|t| t.unread).sum::<u64>())
+        })),
+        _ => None,
+    }
+}
+
+/// The burrow's sections as a scrolling strip of chips under the header.
+/// Phones only (the stylesheet hides it wider, where the sidebar lists the
+/// same sections): a burrow has eight sections and a phone's bottom bar has
+/// room for five, so the bar holds the warren and the strip holds the place.
+/// Rendered in burrow scope only; the warren's screens have no sections.
+#[component]
+fn SectionStrip() -> impl IntoView {
+    use crate::palette::{scope_of, sections_for, Scope};
+    let app = expect_context::<AppState>();
+    let location = leptos_router::use_location();
+    let in_burrow = move || scope_of(&location.pathname.get()) == Scope::Burrow;
+    let is_admin = move || app.focused_tracked().is_admin.get();
+    view! {
+        <Show when=in_burrow fallback=|| ()>
+            <nav class="rh-section-strip" aria-label="Sections">
+                <For
+                    each=|| sections_for(Scope::Burrow).to_vec()
+                    key=|s| s.route
+                    children=move |s| view! {
+                        <NavLink path=s.route label=s.label unread=section_unread(app, s.route)/>
+                    }
+                />
+                <Show when=is_admin fallback=|| ()>
+                    <NavLink path="/admin" label="Admin" unread=None/>
+                </Show>
+            </nav>
+        </Show>
     }
 }
 
@@ -1622,6 +1658,7 @@ pub fn StatusBar() -> impl IntoView {
                 </div>
             })}
         </Show>
+        <SectionStrip/>
     }
 }
 
@@ -2596,7 +2633,7 @@ pub fn BoardView() -> impl IntoView {
                     when=move || state.with(|s| !s.loading.threads && s.threads.is_empty())
                     fallback=|| ()
                 >
-                    <p class="rh-empty">"No threads yet \u{2014} start the first one below."</p>
+                    <p class="rh-empty">"No threads yet \u{2014} start the first one."</p>
                 </Show>
                 // The thread list is a navigation index beside the reader, not
                 // the main content — so it stays a narrow column with a dense
@@ -2686,7 +2723,7 @@ pub fn BoardView() -> impl IntoView {
                         <EmptyState
                             icon="/boards"
                             title="Nothing open"
-                            sub="Pick a thread on the left to read it."
+                            sub="Pick a thread to read it."
                         />
                     }
                 >
@@ -2802,7 +2839,7 @@ pub fn Dms() -> impl IntoView {
                     when=move || state.with(|s| !s.loading.dms && !s.load_failed && s.dm_threads.is_empty())
                     fallback=|| ()
                 >
-                    <p class="rh-empty">"No conversations yet \u{2014} message a handle below."</p>
+                    <p class="rh-empty">"No conversations yet \u{2014} message a handle to start one."</p>
                 </Show>
                 <form class="rh-dm-start" on:submit=start>
                     <input
@@ -2879,7 +2916,7 @@ pub fn Dms() -> impl IntoView {
                         <EmptyState
                             icon="/dms"
                             title="No conversation open"
-                            sub="Choose someone on the left, or start a new one below."
+                            sub="Pick a conversation, or message a handle to start one."
                         />
                     }
                 >

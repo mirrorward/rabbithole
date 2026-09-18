@@ -2190,6 +2190,7 @@ pub fn App() -> impl IntoView {
                 <div class="rh-shell">
                     <BurrowRail/>
                     <SideNav/>
+                    <PhoneTabBar/>
                     <div class="rh-shell-main">
                         <WelcomeSheet/>
                         // Remount the place when the focused burrow changes,
@@ -2278,6 +2279,96 @@ fn SideNav() -> impl IntoView {
         <div class="rh-sidenav-slot" class:rh-hidden=chromeless class:warren-scope=warren>
             <Nav/>
         </div>
+    }
+}
+
+/// The phone's bottom tab bar: what the burrow rail is on a desktop, in the
+/// five slots a thumb can reach. Warren (opens the sheet: switch or add a
+/// burrow, Settings, Leave), the burrow you're in (its tile; the Looking
+/// Glass when you're in none), People, Transfers, You. The burrow's own
+/// sections live in a strip under the header, not here: eight of them at a
+/// legible size never fit a 390px bar, and they used to render at 9.92px.
+/// Hidden wider than a phone by the stylesheet, and on the connect screen.
+#[component]
+fn PhoneTabBar() -> impl IntoView {
+    use crate::palette::{is_chromeless, scope_of, Scope};
+    let app = expect_context::<AppState>();
+    let location = leptos_router::use_location();
+    let navigate = leptos_router::use_navigate();
+    let go = Callback::new(move |route: &'static str| navigate(route, Default::default()));
+    let hidden = move || is_chromeless(&location.pathname.get());
+    let at = move |route: &'static str| location.pathname.get().trim_end_matches('/') == route;
+    let in_burrow = move || scope_of(&location.pathname.get()) == Scope::Burrow;
+    // The burrow tab shows where you are: the focused burrow's tile and
+    // name, or the way to one when nothing is joined.
+    let burrow_name = move || {
+        app.has_burrows().then(|| {
+            app.focused_tracked()
+                .name
+                .get()
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "Burrow".into())
+        })
+    };
+    // Lines that landed in burrows you're not looking at: the Warren tab is
+    // where you'd go to switch, so it wears the count.
+    let elsewhere = move || app.total_unread();
+    view! {
+        <nav class="rh-tabbar" class:rh-hidden=hidden aria-label="Warren">
+            <button
+                type="button"
+                class="rh-tab"
+                aria-haspopup="dialog"
+                aria-expanded=move || app.switcher_open.get().to_string()
+                on:click=move |_| app.switcher_open.update(|o| *o = !*o)
+            >
+                <span class="rh-tab-icon">
+                    <span inner_html=crate::icons::rail_icon("home")></span>
+                    {move || crate::state::unread_badge(elsewhere()).map(|b| view! {
+                        <span class="rh-rail-badge" aria-label=format!("{} unread elsewhere", elsewhere())>{b}</span>
+                    })}
+                </span>
+                <span class="rh-tab-label">"Warren"</span>
+            </button>
+            <button
+                type="button"
+                class="rh-tab"
+                class:active=in_burrow
+                aria-current=move || in_burrow().then_some("page")
+                on:click=move |_| {
+                    if app.has_burrows() { go.call("/lobby") } else { go.call("/servers") }
+                }
+            >
+                {move || match burrow_name() {
+                    Some(name) => {
+                        let glyph = name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                        view! {
+                            <span class="rh-tab-icon"><span class="rh-tab-tile">{glyph}</span></span>
+                            <span class="rh-tab-label">{name}</span>
+                        }.into_view()
+                    }
+                    None => view! {
+                        <span class="rh-tab-icon"><span inner_html=crate::icons::rail_icon("add")></span></span>
+                        <span class="rh-tab-label">"Burrows"</span>
+                    }.into_view(),
+                }}
+            </button>
+            {[("/people", "People", "people"), ("/transfers", "Transfers", "transfers"), ("/you", "You", "you")]
+                .into_iter()
+                .map(|(route, label, icon)| view! {
+                    <button
+                        type="button"
+                        class="rh-tab"
+                        class:active=move || at(route)
+                        aria-current=move || at(route).then_some("page")
+                        on:click=move |_| go.call(route)
+                    >
+                        <span class="rh-tab-icon"><span inner_html=crate::icons::rail_icon(icon)></span></span>
+                        <span class="rh-tab-label">{label}</span>
+                    </button>
+                })
+                .collect_view()}
+        </nav>
     }
 }
 
