@@ -68,7 +68,7 @@
 | # | Slice | Status |
 |---|---|---|
 | 1 | Described settings, saved to disk; the console's shell: sections, switches, dropdowns, Reset, one save bar, descriptions | 0.216.0 |
-| 2 | Surfaces start and stop live, and say whether they are listening | |
+| 2 | Surfaces start and stop live, and say whether they are listening | 0.217.0 (`apps/server/src/surfaces.rs`; federation, port mapping and doors still wait for a restart) |
 | 3 | People: create, role, class, disable, password and 2FA reset, delete; classes with named capabilities; invites | |
 | 4 | Boards: create, edit, delete, reorder; moderators can remove posts | |
 | 5 | File areas and files: create, edit, delete areas; delete, describe, move files; quarantine and deny-hashes | |

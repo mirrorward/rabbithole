@@ -35,6 +35,7 @@ pub mod qwk;
 pub mod radio;
 pub mod session;
 pub mod stats;
+pub mod surfaces;
 pub mod syndication;
 pub mod telnet;
 pub mod well_known;
@@ -112,6 +113,9 @@ pub struct Shared {
     /// Live syndication/legacy-gateway activity counters (Wave 10),
     /// surfaced over the admin family and `ctl gateway-stats`.
     pub stats: stats::GatewayStats,
+    /// The optional network surfaces, started and stopped while the burrow
+    /// runs ([`surfaces::reconcile`]).
+    pub surfaces: surfaces::Surfaces,
     next_session: AtomicU64,
 }
 
@@ -260,28 +264,8 @@ impl Burrow {
         // persistent identity (and pinned fingerprint) QUIC presents.
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(identity.tls.server_config()?);
 
-        // Legacy listener toggles (captured before `config` moves into the
-        // live handle).
-        let telnet = config.telnet_enabled.then_some(config.telnet_addr);
-        let finger = config.finger_enabled.then_some(config.finger_addr);
-        let http = config.http_enabled.then_some(config.http_addr);
-        // Empty web root = no static serving (the /files handoff still works);
-        // a relative one resolves under data_dir like the other dir knobs.
-        let http_web_root = (!config.http_web_root.as_os_str().is_empty())
-            .then(|| resolve_dir(&data_dir, &config.http_web_root));
-        let nntp = config.nntp_enabled.then_some(config.nntp_addr);
-        let nntp_tls = config.nntp_tls_enabled.then_some(config.nntp_tls_addr);
-        let nntp_feed = config.nntp_feed_enabled.then_some(config.nntp_feed_addr);
-        let nntp_feed_tls = config
-            .nntp_feed_tls_enabled
-            .then_some(config.nntp_feed_tls_addr);
-        let radio = config.radio_enabled.then_some(config.radio_addr);
-        let radio_source = config
-            .radio_source_enabled
-            .then_some(config.radio_source_addr);
+        // Captured before `config` moves into the live handle.
         let radio_library_areas = config.radio_library_areas.clone();
-        let hotline = config.hotline_enabled.then_some(config.hotline_addr);
-        let ftn = config.ftn_enabled.then_some(config.ftn_addr);
         let federation = config.federation_enabled.then_some(config.federation_addr);
         let federation_peers = config.federation_peers.clone();
         // Best-effort port mapping: only when enabled *and* a gateway IP that
@@ -297,11 +281,6 @@ impl Burrow {
             })
             .flatten();
         let portmap_lifetime = config.portmap_lifetime_secs;
-        // Feed ingest is worth spawning only when enabled *and* mapped.
-        let syndication_on = config.syndication_enabled && !config.syndication_feeds.is_empty();
-        // FTN spool dirs resolve under data_dir when relative.
-        let ftn_inbound = resolve_dir(&data_dir, &config.ftn_inbound_dir);
-        let ftn_outbound = resolve_dir(&data_dir, &config.ftn_outbound_dir);
         // Door host: validates the `[[doors]]` list when doors are enabled.
         let door_host = doors::DoorService::from_config(&config, &data_dir)?;
 
@@ -347,6 +326,7 @@ impl Burrow {
             moderation,
             zpartials: zmodem::Partials::new(),
             stats: stats::GatewayStats::new(),
+            surfaces: surfaces::Surfaces::new(tls_acceptor.clone(), data_dir.clone()),
             next_session: AtomicU64::new(1),
         });
 
@@ -388,118 +368,31 @@ impl Burrow {
             }),
         ];
 
-        // Opt-in legacy surfaces (Wave 6).
-        let mut telnet_addr = None;
-        if let Some(addr) = telnet {
-            let (bound, handle) = legacy::spawn_telnet(shared.clone(), addr).await?;
-            tracing::info!(telnet = %bound, "telnet BBS listening");
-            telnet_addr = Some(bound);
-            tasks.push(handle);
-        }
-        let mut finger_addr = None;
-        if let Some(addr) = finger {
-            let (bound, handle) = legacy::spawn_finger(shared.clone(), addr).await?;
-            tracing::info!(finger = %bound, "finger listening");
-            finger_addr = Some(bound);
-            tasks.push(handle);
-        }
-        let mut http_addr = None;
-        if let Some(addr) = http {
-            let (bound, handle) = http::spawn_http(shared.clone(), addr, http_web_root).await?;
-            tracing::info!(http = %bound, "embedded HTTP (web shell + /files handoff) listening");
-            http_addr = Some(bound);
-            tasks.push(handle);
-        }
-        let mut nntp_addr = None;
-        if let Some(addr) = nntp {
-            let (bound, handle) =
-                nntp::spawn_nntp(shared.clone(), addr, tls_acceptor.clone()).await?;
-            tracing::info!(nntp = %bound, "NNTP gateway listening");
-            nntp_addr = Some(bound);
-            tasks.push(handle);
-        }
-        let mut nntp_tls_addr = None;
-        if let Some(addr) = nntp_tls {
-            let (bound, handle) =
-                nntp::spawn_nntps(shared.clone(), addr, tls_acceptor.clone()).await?;
-            tracing::info!(nntps = %bound, "NNTPS (implicit TLS) gateway listening");
-            nntp_tls_addr = Some(bound);
-            tasks.push(handle);
-        }
-        let mut nntp_feed_addr = None;
-        if let Some(addr) = nntp_feed {
-            let (bound, handle) =
-                nntp_feed::spawn_nntp_feed(shared.clone(), addr, tls_acceptor.clone()).await?;
-            tracing::info!(nntp_feed = %bound, "NNTP peer-feed (transit) listening");
-            nntp_feed_addr = Some(bound);
-            tasks.push(handle);
-        }
-        let mut nntp_feed_tls_addr = None;
-        if let Some(addr) = nntp_feed_tls {
-            let (bound, handle) =
-                nntp_feed::spawn_nntp_feed_tls(shared.clone(), addr, tls_acceptor.clone()).await?;
-            tracing::info!(nntp_feed_tls = %bound, "NNTP peer-feed (implicit TLS) listening");
-            nntp_feed_tls_addr = Some(bound);
-            tasks.push(handle);
-        }
-        let mut radio_addr = None;
-        if let Some(addr) = radio {
-            let (bound, handle) = radio::spawn_radio(shared.clone(), addr).await?;
-            tracing::info!(radio = %bound, "radio (ICY) listening");
-            // What clients are told to tune in to: the port that actually
-            // bound, which is not the configured one when that was 0 ("any").
-            shared.radio.set_listen_port(bound.port());
-            radio_addr = Some(bound);
-            tasks.push(handle);
-        }
         // Library playlist sources: pull each configured file area's audio into
-        // a station's rotation. Off by default (empty map).
+        // a station's rotation. Off by default (empty map). Before the
+        // surfaces start, because the radio surface gives every rotation that
+        // has tracks a pump.
         install_radio_library(&shared, &radio_library_areas).await;
         if !shared.radio.program_slugs().is_empty() {
             tasks.push(radio::spawn_playlist_driver(shared.clone()));
         }
-        // With the stream listener on, a library station is not just a list
-        // of titles: each one gets a pump that plays its rotation out loud.
-        // (Without the listener there is nowhere to tune in, and the timer
-        // driver above keeps now-playing moving on its own.)
-        if shared.radio.listen_port() != 0 {
-            for slug in shared.radio.program_slugs() {
-                if shared.radio.track_count(&slug) > 0 {
-                    tracing::info!(mount = %slug, "radio library station streaming");
-                    tasks.push(radio::spawn_program_pump(shared.clone(), slug));
-                }
-            }
-        }
-        let mut radio_source_addr = None;
-        if let Some(addr) = radio_source {
-            let (bound, handle) = radio::spawn_radio_source(shared.clone(), addr).await?;
-            tracing::info!(radio_source = %bound, "radio DJ source ingest listening");
-            radio_source_addr = Some(bound);
-            tasks.push(handle);
-        }
-        let mut hotline_addr = None;
-        if let Some(addr) = hotline {
-            let (bound, handle) = hotline::spawn_hotline(shared.clone(), addr).await?;
-            tracing::info!(hotline = %bound, "Hotline listening");
-            hotline_addr = Some(bound);
-            tasks.push(handle);
-        }
-        let mut ftn_addr = None;
-        if let Some(addr) = ftn {
-            let (bound, handle) =
-                ftn::spawn_ftn(shared.clone(), addr, ftn_inbound, ftn_outbound).await?;
-            tracing::info!(ftn = %bound, "FidoNet (binkp) gateway listening");
-            ftn_addr = Some(bound);
-            tasks.push(handle);
-        }
-        // RSS/Atom feed ingest (Wave 10): background poller, no listener.
-        if syndication_on {
-            tasks.push(syndication::spawn_syndication(
-                shared.clone(),
-                data_dir.join("syndication"),
-            ));
-            tracing::info!("syndication feed ingest running");
-        }
+        // Every optional surface (telnet, finger, HTTP, NNTP and its TLS and
+        // feed variants, radio and its source ingest, Hotline, FidoNet, the
+        // feed poller): started here to match the config, and again whenever
+        // the config changes. One that cannot start is reported, not fatal.
+        surfaces::reconcile(&shared).await;
+        let bound = |s| shared.surfaces.bound(s);
+        let telnet_addr = bound(surfaces::Surface::Telnet);
+        let finger_addr = bound(surfaces::Surface::Finger);
+        let http_addr = bound(surfaces::Surface::Http);
+        let nntp_addr = bound(surfaces::Surface::Nntp);
+        let nntp_tls_addr = bound(surfaces::Surface::NntpTls);
+        let nntp_feed_addr = bound(surfaces::Surface::NntpFeed);
+        let nntp_feed_tls_addr = bound(surfaces::Surface::NntpFeedTls);
+        let radio_addr = bound(surfaces::Surface::Radio);
+        let radio_source_addr = bound(surfaces::Surface::RadioSource);
+        let hotline_addr = bound(surfaces::Surface::Hotline);
+        let ftn_addr = bound(surfaces::Surface::Ftn);
         // Looking Glass announce: tell the trackers this burrow exists so it
         // can be found by people who don't already know its address. The task
         // re-reads config every round, so it is spawned unconditionally and
@@ -572,6 +465,7 @@ impl Burrow {
         self.shared.bus.publish(ServerEvent::Shutdown);
         // Give sessions a beat to observe it before the process moves on.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        self.shared.surfaces.stop_all(&self.shared).await;
         for t in &self.tasks {
             t.abort();
         }

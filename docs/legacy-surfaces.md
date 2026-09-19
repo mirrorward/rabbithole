@@ -5,8 +5,13 @@ Every non-native listener a burrow can run. **All are off by default**
 the only things on out of the box. Config keys are exact
 (`crates/server-core/src/config.rs`); most are settable via
 `ctl config set`, keys marked *TOML-only* are edited in `burrow.toml`.
-Listener addresses require a restart; `*_min_role` gates apply live
-(re-checked per login/connection).
+Every surface here starts, stops and rebinds while the burrow runs: flip its
+`*_enabled` key or change its address (from the admin console or
+`ctl config-set`) and the change is in effect before it is acknowledged.
+Sessions already connected finish on their own. `burrow ctl surfaces` (and the
+console, beside each switch) says what is actually listening, and why not when
+it is not: a port that is taken is reported, never fatal, and is retried on
+the next change. `*_min_role` gates are re-checked per login/connection.
 
 Rate-limit classes are the Wave-13 token buckets (`ratelimit_*` knobs,
 master switch `ratelimit_enabled`, on by default): **conn** = new

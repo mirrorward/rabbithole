@@ -440,6 +440,88 @@ impl Message for ConfigDescription {
     const MESSAGE_TYPE: u16 = 16;
 }
 
+/// Ask what the burrow's optional surfaces are actually doing.
+/// → [`SurfaceStatus`]. Requires `CONFIG_ADMIN`.
+///
+/// A config key says what was asked for (`nntp_enabled = true`). This says
+/// what happened: listening, and where; or not, and why. The two differ
+/// exactly when an operator most needs to know (a port already taken).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceStatusRequest;
+
+impl Message for SurfaceStatusRequest {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 17;
+}
+
+/// What a surface is doing ([`SurfaceInfo::state`]).
+pub mod surface_state {
+    /// Not asked for, or stopped.
+    pub const OFF: u8 = 0;
+    /// Accepting connections on [`super::SurfaceInfo::addr`].
+    pub const LISTENING: u8 = 1;
+    /// Running, with no address of its own (the feed poller).
+    pub const RUNNING: u8 = 2;
+    /// Asked for and not running. [`super::SurfaceInfo::detail`] says why.
+    pub const FAILED: u8 = 3;
+    /// Switched on with nothing to do. `detail` says what is missing.
+    pub const IDLE: u8 = 4;
+}
+
+/// One surface of a [`SurfaceStatus`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceInfo {
+    /// The config key that switches this surface on (`nntp_enabled`): what a
+    /// console ties the report to.
+    pub key: String,
+    /// One of [`surface_state`].
+    pub state: u8,
+    /// The bound address when listening (`0.0.0.0:1119`); empty otherwise.
+    pub addr: String,
+    /// Why it failed or what it is waiting for; empty otherwise.
+    pub detail: String,
+}
+
+impl SurfaceInfo {
+    pub fn new(key: impl Into<String>, state: u8) -> Self {
+        Self {
+            key: key.into(),
+            state,
+            addr: String::new(),
+            detail: String::new(),
+        }
+    }
+
+    pub fn addr(mut self, addr: impl Into<String>) -> Self {
+        self.addr = addr.into();
+        self
+    }
+
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = detail.into();
+        self
+    }
+}
+
+/// Reply to [`SurfaceStatusRequest`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceStatus {
+    pub surfaces: Vec<SurfaceInfo>,
+}
+
+impl SurfaceStatus {
+    pub fn new(surfaces: Vec<SurfaceInfo>) -> Self {
+        Self { surfaces }
+    }
+}
+
+impl Message for SurfaceStatus {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 18;
+}
+
 // ---------------------------------------------------------------------------
 // Moderation suite (Wave 13): types 30..40 of the ADMIN family.
 // ---------------------------------------------------------------------------

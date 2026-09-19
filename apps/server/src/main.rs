@@ -50,7 +50,7 @@ enum Cmd {
     Run,
     /// Talk to a running burrow through its local ctl socket.
     Ctl {
-        /// e.g.: status | config-get | config-set | account-create | who |
+        /// e.g.: status | surfaces | config-get | config-set | account-create | who |
         /// theme-status | theme-clear
         cmd: String,
         /// Positional args: config-get KEY, config-set KEY VALUE,
@@ -192,6 +192,7 @@ async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<
         ("theme-status", _) => json!({"cmd": "theme-status"}),
         ("theme-clear", _) => json!({"cmd": "theme-clear"}),
         ("gateway-stats", _) => json!({"cmd": "gateway-stats"}),
+        ("surfaces", _) => json!({"cmd": "surfaces"}),
         ("peer-list", _) => json!({"cmd": "peer-list"}),
         ("peer-approve", [key]) => json!({"cmd": "peer-approve", "key": key}),
         ("peer-approve", [key, origin]) => {
@@ -211,7 +212,7 @@ async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<
         // Always refused by the server with the offline procedure.
         ("restore", [dir]) => json!({"cmd": "restore", "path": dir}),
         _ => anyhow::bail!(
-            "usage: burrow ctl <status|who|config-get KEY|config-set KEY VALUE|account-create LOGIN PASSWORD [ROLE]|theme-status|theme-clear|gateway-stats|peer-list|peer-approve KEY [ORIGIN]|peer-revoke KEY|origin-list|origin-pin ORIGIN KEY|fed-catalogs|fed-search TERMS…|backup DEST-DIR|backup-verify SNAPSHOT-DIR>"
+            "usage: burrow ctl <status|who|config-get KEY|config-set KEY VALUE|account-create LOGIN PASSWORD [ROLE]|theme-status|theme-clear|gateway-stats|surfaces|peer-list|peer-approve KEY [ORIGIN]|peer-revoke KEY|origin-list|origin-pin ORIGIN KEY|fed-catalogs|fed-search TERMS…|backup DEST-DIR|backup-verify SNAPSHOT-DIR>"
         ),
     };
 

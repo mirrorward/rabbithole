@@ -2148,6 +2148,15 @@ impl AppState {
             crate::admin_settings::DESCRIBE,
             AdminCommand::DescribeConfig,
         );
+        self.load_surfaces();
+    }
+
+    /// Ask what the burrow's optional surfaces are actually doing.
+    pub fn load_surfaces(&self) {
+        self.dispatch_settings(
+            crate::admin_settings::SURFACES,
+            AdminCommand::GetSurfaceStatus,
+        );
     }
 
     /// Drive one config command and fold its reply, paired with the key it
@@ -2180,6 +2189,9 @@ impl AppState {
             for event in events {
                 match event {
                     AdminEvent::ConfigDescribed(entries) => s.described(entries),
+                    AdminEvent::SurfacesReported(surfaces) => s.surfaces_reported(surfaces),
+                    // An older burrow has no such report. Nothing is shown.
+                    AdminEvent::Failed(_) if key == crate::admin_settings::SURFACES => {}
                     AdminEvent::ConfigLoaded { key, value } => s.bare_value(key, value),
                     AdminEvent::ConfigApplied { applied_live } => s.saved(key, *applied_live),
                     AdminEvent::Failed(_) if key == crate::admin_settings::DESCRIBE => {
@@ -2224,6 +2236,8 @@ impl AppState {
                         crate::admin_settings::DESCRIBE,
                         AdminCommand::DescribeConfig,
                     );
+                    // A saved switch may have started or stopped something.
+                    app.load_surfaces();
                     // The feed pane reads a few of these keys on its own.
                     app.load_syndication();
                 }
@@ -2296,55 +2310,13 @@ impl AppState {
         });
     }
 
-    /// Drive one `SetConfig` for the panel, fold the paired reply, then
-    /// re-read the key so the panel shows the authoritative stored value.
-    fn dispatch_syn_set(&self, key: &str, command: AdminCommand) {
-        #[cfg(target_arch = "wasm32")]
-        if self.focused().live.get_untracked() {
-            self.focused()
-                .ws
-                .update_value(|c| c.dispatch_admin(&command));
-            self.dispatch_syn_get(key);
-            return;
-        }
-        let syndication = self.syndication;
-        self.focused().client.update_value(|client| {
-            let events = client.dispatch_admin(command);
-            syndication.update(|s| s.apply_set_reply(key, &events));
-        });
-        self.dispatch_syn_get(key);
-    }
-
-    /// Load every key the Syndication & Gateways panel shows (gateway
-    /// toggles, listener addresses, the syndication knobs, the TOML-only
-    /// `syndication_feeds` attempt, and the live gateway-stats snapshot).
+    /// Load what the feeds pane reads: the syndication knobs, the TOML-only
+    /// `syndication_feeds` attempt, and the live gateway-stats snapshot.
     pub fn load_syndication(&self) {
         for key in crate::syndication_admin::LOAD_KEYS {
             self.dispatch_syn_get(key);
         }
         self.dispatch_admin(AdminCommand::GetGatewayStats);
-    }
-
-    /// Flip a gateway/syndication boolean key, if it is loaded and parsable.
-    pub fn syn_toggle(&self, key: &str) {
-        let Some(command) = self.syndication.with_untracked(|s| s.toggle_command(key)) else {
-            return;
-        };
-        self.dispatch_syn_set(key, command);
-    }
-
-    /// Update the poll-interval draft (inline validation happens in the
-    /// reducer).
-    pub fn syn_set_poll_draft(&self, draft: &str) {
-        self.syndication.update(|s| s.set_poll_draft(draft));
-    }
-
-    /// Save the poll-interval draft, if valid and changed.
-    pub fn syn_save_poll(&self) {
-        let Some(command) = self.syndication.with_untracked(|s| s.poll_save_command()) else {
-            return;
-        };
-        self.dispatch_syn_set(crate::syndication_admin::KEY_POLL_SECS, command);
     }
 
     /// Fold one routed notice: `[radio]` bridge updates feed the radio

@@ -57,7 +57,11 @@ The **only** environment variables that exist (see
 
 All other settings (registration mode, quotas, telnet/finger, theme, etc.) are
 edited via the TOML file or at runtime with `burrow ctl config-set KEY VALUE`.
-Listener/data-dir changes require a restart; text/identity fields apply live.
+Almost everything applies live, the optional surfaces included (telnet, finger,
+HTTP, NNTP, radio, Hotline, FidoNet, the feed poller): they start, stop and
+rebind as their keys change. What waits for a restart is what every client
+arrives on (`quic_addr`, `ws_addr`), plus federation, port mapping, doors and
+the data directory.
 
 ### Public WebSocket access
 

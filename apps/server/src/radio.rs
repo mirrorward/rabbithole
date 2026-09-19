@@ -500,6 +500,16 @@ impl Stations {
         Some((tx, now_playing))
     }
 
+    /// The stream listener went away: take every rotation off the air. A
+    /// mount a DJ holds is theirs and stays; it ends when their source does.
+    /// Dropping the entry closes each listener's stream cleanly.
+    pub fn retire_program_mounts(&self) {
+        self.mounts.lock().retain(|_, m| !m.program_owned);
+        for p in self.programs.lock().values_mut() {
+            p.pumped = false;
+        }
+    }
+
     /// Whether the pump holding `tx` still has the air: its mount is there,
     /// is the rotation's, and is this very channel.
     fn owns_air(&self, slug: &str, tx: &Fanout) -> bool {

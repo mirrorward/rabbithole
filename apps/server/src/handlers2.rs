@@ -471,6 +471,14 @@ pub async fn handle(
         return Ok(true);
     }
 
+    if let Some(Ok(_)) = frame.decode::<padm::SurfaceStatusRequest>() {
+        if !ctx.allows(shared, "admin", Caps::CONFIG_ADMIN) {
+            fail!(ErrorCode::Forbidden);
+        }
+        reply!(&surface_status(shared));
+        return Ok(true);
+    }
+
     if let Some(Ok(req)) = frame.decode::<padm::ConfigSet>() {
         if !ctx.allows(shared, "admin", Caps::CONFIG_ADMIN) {
             fail!(ErrorCode::Forbidden);
@@ -494,6 +502,10 @@ pub async fn handle(
                     "config-set",
                     format!("{}={}", req.key, shown),
                 );
+                // Before the reply, so "applied" means it: by the time the
+                // console hears back, a surface this key belongs to is up, or
+                // the reason it is not is on record.
+                crate::surfaces::reconcile(shared).await;
                 reply!(&padm::ConfigApplied::new(applied_live));
             }
             // A value the key refuses is the asker's mistake. A config file
@@ -548,4 +560,26 @@ fn describe_config(shared: &Arc<Shared>) -> padm::ConfigDescription {
         })
         .collect();
     padm::ConfigDescription::new(entries)
+}
+
+/// What each optional surface is doing ([`padm::SurfaceStatus`]).
+fn surface_status(shared: &Arc<Shared>) -> padm::SurfaceStatus {
+    use crate::surfaces::SurfaceState;
+    use padm::surface_state as st;
+    let surfaces = shared
+        .surfaces
+        .report()
+        .into_iter()
+        .map(|(surface, state)| {
+            let info = |code| padm::SurfaceInfo::new(surface.key(), code);
+            match state {
+                SurfaceState::Off => info(st::OFF),
+                SurfaceState::Listening(addr) => info(st::LISTENING).addr(addr.to_string()),
+                SurfaceState::Running => info(st::RUNNING),
+                SurfaceState::Failed(why) => info(st::FAILED).detail(why),
+                SurfaceState::Idle(why) => info(st::IDLE).detail(why),
+            }
+        })
+        .collect();
+    padm::SurfaceStatus::new(surfaces)
 }

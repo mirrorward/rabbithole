@@ -17,12 +17,17 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use rabbithole_proto::admin::{config_flag, config_kind, ConfigKeyInfo};
+use rabbithole_proto::admin::{
+    config_flag, config_kind, surface_state, ConfigKeyInfo, SurfaceInfo,
+};
 
 /// The pending-request marker for [`crate::wire::AdminCommand::DescribeConfig`]:
 /// the transport pairs every admin reply with the key it was about, and this
 /// stands in for "the description". Not a legal key (`*` is in none).
 pub const DESCRIBE: &str = "*describe";
+
+/// The same, for [`crate::wire::AdminCommand::GetSurfaceStatus`].
+pub const SURFACES: &str = "*surfaces";
 
 /// The shape of a setting, which decides its control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +121,53 @@ pub enum Outcome {
     Refused(String),
 }
 
+/// How a surface's report should read beside its switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// It is doing what was asked.
+    Good,
+    /// It is not, and the line says why.
+    Bad,
+    /// On, with nothing to do.
+    Waiting,
+}
+
+/// What a surface is actually doing, in a sentence. `None` when it is simply
+/// off: a switch that is off needs no second opinion.
+///
+/// The setting says what was asked for; this says what happened. They differ
+/// exactly when it matters (the port was taken), which is why the console
+/// shows the fact and not an echo of the switch.
+pub fn surface_line(info: &SurfaceInfo) -> Option<(Tone, String)> {
+    match info.state {
+        surface_state::LISTENING => Some((Tone::Good, format!("Listening on {}.", info.addr))),
+        surface_state::RUNNING => Some((Tone::Good, "Running.".to_string())),
+        surface_state::FAILED => {
+            let why = if info.detail.to_ascii_lowercase().contains("in use") {
+                "something else is already using that address".to_string()
+            } else if info
+                .detail
+                .to_ascii_lowercase()
+                .contains("permission denied")
+            {
+                "the burrow is not allowed to use that port (ports under 1024 need privileges)"
+                    .to_string()
+            } else {
+                info.detail.trim_end_matches('.').to_string()
+            };
+            Some((Tone::Bad, format!("Not running: {why}.")))
+        }
+        surface_state::IDLE => Some((
+            Tone::Waiting,
+            format!(
+                "On, with nothing to do: {}.",
+                info.detail.trim_end_matches('.')
+            ),
+        )),
+        _ => None,
+    }
+}
+
 /// How the console came by its settings.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Load {
@@ -141,6 +193,8 @@ pub struct SettingsState {
     drafts: BTreeMap<String, String>,
     outcomes: HashMap<String, Outcome>,
     in_flight: BTreeSet<String>,
+    /// What each surface is doing, by the key of its switch.
+    surfaces: HashMap<String, SurfaceInfo>,
 }
 
 impl SettingsState {
@@ -157,6 +211,20 @@ impl SettingsState {
         self.settings = entries.iter().map(Setting::from_wire).collect();
         self.load = Load::Described;
         self.drop_settled_drafts();
+    }
+
+    /// The burrow reported what its surfaces are doing.
+    pub fn surfaces_reported(&mut self, surfaces: &[SurfaceInfo]) {
+        self.surfaces = surfaces
+            .iter()
+            .map(|s| (s.key.clone(), s.clone()))
+            .collect();
+    }
+
+    /// What the surface behind the switch `key` is doing, if it is a surface
+    /// and has something to say.
+    pub fn surface(&self, key: &str) -> Option<(Tone, String)> {
+        self.surfaces.get(key).and_then(surface_line)
     }
 
     /// An older burrow refused to describe itself.
@@ -701,6 +769,49 @@ mod tests {
         let mut d = burrow();
         d.bare_value("name", "stale");
         assert_eq!(d.shown("name"), "Kevin\u{2019}s Burrow");
+    }
+
+    #[test]
+    fn a_switch_is_told_what_actually_happened() {
+        let mut s = burrow();
+        assert!(s.surface("nntp_enabled").is_none(), "nothing reported yet");
+        s.surfaces_reported(&[
+            SurfaceInfo::new("nntp_enabled", surface_state::LISTENING).addr("0.0.0.0:1119"),
+            SurfaceInfo::new("telnet_enabled", surface_state::FAILED)
+                .detail("Address already in use (os error 48)"),
+            SurfaceInfo::new("finger_enabled", surface_state::FAILED)
+                .detail("Permission denied (os error 13)"),
+            SurfaceInfo::new("hotline_enabled", surface_state::FAILED).detail("no route."),
+            SurfaceInfo::new("syndication_enabled", surface_state::IDLE)
+                .detail("no feeds are mapped in burrow.toml"),
+            SurfaceInfo::new("ftn_enabled", surface_state::OFF),
+        ]);
+        assert_eq!(
+            s.surface("nntp_enabled"),
+            Some((Tone::Good, "Listening on 0.0.0.0:1119.".into()))
+        );
+        assert_eq!(
+            s.surface("telnet_enabled"),
+            Some((
+                Tone::Bad,
+                "Not running: something else is already using that address.".into()
+            ))
+        );
+        assert!(s
+            .surface("finger_enabled")
+            .unwrap()
+            .1
+            .contains("under 1024"));
+        assert_eq!(
+            s.surface("hotline_enabled").unwrap().1,
+            "Not running: no route."
+        );
+        assert_eq!(s.surface("syndication_enabled").unwrap().0, Tone::Waiting);
+        assert!(
+            s.surface("ftn_enabled").is_none(),
+            "off needs no second opinion"
+        );
+        assert!(s.surface("guest_enabled").is_none(), "not a surface");
     }
 
     #[test]

@@ -610,6 +610,7 @@ impl WsClient {
             // Not a key: a marker, so a refusal of the describe request (an
             // older burrow) reaches the settings model as exactly that.
             AdminCommand::DescribeConfig => Some(crate::admin_settings::DESCRIBE.to_string()),
+            AdminCommand::GetSurfaceStatus => Some(crate::admin_settings::SURFACES.to_string()),
             _ => None,
         };
         match wire::admin_command_to_frame(command, id) {

@@ -70,6 +70,15 @@ use crate::Shared;
 /// without impersonating a real account.
 const FTN_GATEWAY_ACCOUNT: i64 = 0;
 
+/// Aborts the task it holds when dropped.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Bind + serve the FTN binkp surface. Returns the bound address (useful when
 /// the config asked for port 0) and the accept-loop task handle. Mirrors the
 /// `spawn_nntp` / `spawn_hotline` helpers.
@@ -87,9 +96,13 @@ pub async fn spawn_ftn(
     let local = listener.local_addr()?;
 
     // Outbound echomail scanner: local board posts -> staged BSO packets.
-    tokio::spawn(outbound_scanner(gateway.clone()));
+    // It lives and dies with the listener: the accept task owns it, so
+    // stopping the surface (the task is aborted, its future dropped) stops
+    // the scanner too. It used to be spawned loose and outlived everything.
+    let scanner = AbortOnDrop(tokio::spawn(outbound_scanner(gateway.clone())));
 
     let handle = tokio::spawn(async move {
+        let _scanner = scanner;
         loop {
             let Ok((sock, peer)) = listener.accept().await else {
                 break;

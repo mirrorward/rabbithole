@@ -16,7 +16,7 @@ use leptos_router::{use_navigate, use_params_map, A};
 
 use crate::a11y;
 use crate::admin_catalog::{self as catalog, Area, Group, Item, Pane, Section, Unit, SECTIONS};
-use crate::admin_settings::{humanize_bytes, humanize_secs, Kind, Load, Outcome};
+use crate::admin_settings::{humanize_bytes, humanize_secs, Kind, Load, Outcome, Tone};
 use crate::app::AppState;
 use crate::components::{
     AdminAccountsPanel, AdminClassesPanel, AdminModerationPanel, EmptyState, StatusBar,
@@ -392,6 +392,7 @@ fn SettingRow(item: Item) -> impl IntoView {
     let invalid = create_memo(move |_| settings.with(|s| s.invalid(key)));
     let outcome = create_memo(move |_| settings.with(|s| s.outcome(key).cloned()));
     let is_set = create_memo(move |_| settings.with(|s| s.get(key).is_some_and(|x| x.is_set)));
+    let surface = create_memo(move |_| settings.with(|s| s.surface(key)));
     let stage = move |value: String| settings.update(|s| s.stage(key, &value));
 
     let default_said = match (&meta.default, meta.secret, meta.kind) {
@@ -547,6 +548,17 @@ fn SettingRow(item: Item) -> impl IntoView {
                         </button>
                     </Show>
                 </p>
+                {move || surface.get().map(|(tone, text)| view! {
+                    <p
+                        class="rh-adm-surface"
+                        class:bad=tone == Tone::Bad
+                        class:waiting=tone == Tone::Waiting
+                        role="status"
+                    >
+                        <span class="rh-adm-surface-dot" aria-hidden="true"></span>
+                        {text}
+                    </p>
+                })}
                 {move || state_line().map(|(tone, text)| view! {
                     <p class="rh-adm-state" class:bad=tone == "bad" role="status">{text}</p>
                 })}

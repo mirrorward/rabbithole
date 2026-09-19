@@ -613,8 +613,20 @@ impl ServerConfig {
             key: "config".into(),
             detail: e.to_string(),
         })?;
+        let defaults = toml_edit::ser::to_document(&ServerConfig::default()).ok();
         for key in keys {
+            let at_default = defaults
+                .as_ref()
+                .and_then(|d| d.get(key))
+                .zip(fresh.get(key))
+                .is_some_and(|(d, held)| d.to_string().trim() == held.to_string().trim());
             match fresh.get(key) {
+                // Back at the default: take the line out instead of pinning
+                // the default in place. "Reset" means "whatever the burrow
+                // ships with", including what a later version ships with.
+                Some(_) if at_default => {
+                    doc.remove(key);
+                }
                 Some(item) => doc[key] = item.clone(),
                 // Not a serialized field (or skipped when empty): drop a stale one.
                 None => {
@@ -773,6 +785,13 @@ impl ServerConfig {
 
     /// Runtime set by key. Returns whether the change applies live
     /// (`true`) or needs a restart (`false`).
+    ///
+    /// The optional surfaces (telnet, finger, HTTP, NNTP and its variants,
+    /// radio and its source ingest, Hotline, FidoNet, the feed poller) are
+    /// live: the burrow's surface supervisor starts, stops or rebinds one as
+    /// soon as a key of theirs changes. What still waits for a restart is what
+    /// every client arrives on (`quic_addr`, `ws_addr`), plus federation,
+    /// port mapping, doors and the data directory.
     pub fn set_key(&mut self, key: &str, value: &str) -> Result<bool, ConfigError> {
         match key {
             "name" => {
@@ -920,11 +939,11 @@ impl ServerConfig {
             }
             "telnet_enabled" => {
                 self.telnet_enabled = parse_bool(key, value)?;
-                Ok(false) // listener binds at startup
+                Ok(true)
             }
             "telnet_addr" => {
                 self.telnet_addr = parse_addr(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             // Surface minimums apply live: each login/query re-reads config.
             "telnet_min_role" => {
@@ -933,11 +952,11 @@ impl ServerConfig {
             }
             "finger_enabled" => {
                 self.finger_enabled = parse_bool(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "finger_addr" => {
                 self.finger_addr = parse_addr(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "finger_min_role" => {
                 self.finger_min_role = parse_min_role(key, value)?;
@@ -949,23 +968,23 @@ impl ServerConfig {
             }
             "http_enabled" => {
                 self.http_enabled = parse_bool(key, value)?;
-                Ok(false) // listener binds at startup
+                Ok(true)
             }
             "http_addr" => {
                 self.http_addr = parse_addr(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "http_web_root" => {
                 self.http_web_root = PathBuf::from(value);
-                Ok(false)
+                Ok(true)
             }
             "nntp_enabled" => {
                 self.nntp_enabled = parse_bool(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "nntp_addr" => {
                 self.nntp_addr = parse_addr(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "nntp_min_role" => {
                 self.nntp_min_role = parse_min_role(key, value)?;
@@ -973,11 +992,11 @@ impl ServerConfig {
             }
             "nntp_tls_enabled" => {
                 self.nntp_tls_enabled = parse_bool(key, value)?;
-                Ok(false) // listener binds at startup
+                Ok(true)
             }
             "nntp_tls_addr" => {
                 self.nntp_tls_addr = parse_addr(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             // Checked per AUTHINFO command, so it applies live.
             "nntp_auth_require_tls" => {
@@ -986,27 +1005,27 @@ impl ServerConfig {
             }
             "nntp_feed_enabled" => {
                 self.nntp_feed_enabled = parse_bool(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "nntp_feed_addr" => {
                 self.nntp_feed_addr = parse_addr(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "nntp_feed_tls_enabled" => {
                 self.nntp_feed_tls_enabled = parse_bool(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "nntp_feed_tls_addr" => {
                 self.nntp_feed_tls_addr = parse_addr(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "radio_enabled" => {
                 self.radio_enabled = parse_bool(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "radio_addr" => {
                 self.radio_addr = parse_addr(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "radio_public_base" => {
                 self.radio_public_base = value.trim().trim_end_matches('/').to_string();
@@ -1014,19 +1033,19 @@ impl ServerConfig {
             }
             "radio_source_enabled" => {
                 self.radio_source_enabled = parse_bool(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "radio_source_addr" => {
                 self.radio_source_addr = parse_addr(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "radio_source_user" => {
                 self.radio_source_user = value.to_string();
-                Ok(false)
+                Ok(true)
             }
             "radio_source_password" => {
                 self.radio_source_password = value.to_string();
-                Ok(false)
+                Ok(true)
             }
             "doors_enabled" => {
                 self.doors_enabled = parse_bool(key, value)?;
@@ -1052,11 +1071,11 @@ impl ServerConfig {
             }
             "hotline_enabled" => {
                 self.hotline_enabled = parse_bool(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "hotline_addr" => {
                 self.hotline_addr = parse_addr(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "hotline_min_role" => {
                 self.hotline_min_role = parse_min_role(key, value)?;
@@ -1064,35 +1083,35 @@ impl ServerConfig {
             }
             "ftn_enabled" => {
                 self.ftn_enabled = parse_bool(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "ftn_addr" => {
                 self.ftn_addr = parse_addr(key, value)?;
-                Ok(false)
+                Ok(true)
             }
             "ftn_node" => {
                 self.ftn_node = value.to_string();
-                Ok(false)
+                Ok(true)
             }
             "ftn_uplink" => {
                 self.ftn_uplink = value.to_string();
-                Ok(false)
+                Ok(true)
             }
             "ftn_uplink_host" => {
                 self.ftn_uplink_host = value.to_string();
-                Ok(false)
+                Ok(true)
             }
             "ftn_password" => {
                 self.ftn_password = value.to_string();
-                Ok(false)
+                Ok(true)
             }
             "ftn_inbound_dir" => {
                 self.ftn_inbound_dir = PathBuf::from(value);
-                Ok(false)
+                Ok(true)
             }
             "ftn_outbound_dir" => {
                 self.ftn_outbound_dir = PathBuf::from(value);
-                Ok(false)
+                Ok(true)
             }
             // QWK applies live: both surfaces re-read config per command and
             // resolve the spool dir at build time.
@@ -1106,14 +1125,14 @@ impl ServerConfig {
             }
             "syndication_enabled" => {
                 self.syndication_enabled = parse_bool(key, value)?;
-                Ok(false) // the poll task starts at boot
+                Ok(true)
             }
             "syndication_poll_secs" => {
                 self.syndication_poll_secs = value.parse().map_err(|_| ConfigError::BadValue {
                     key: key.into(),
                     detail: value.into(),
                 })?;
-                Ok(false)
+                Ok(true)
             }
             "federation_enabled" => {
                 self.federation_enabled = parse_bool(key, value)?;
@@ -1818,16 +1837,25 @@ mod tests {
 
         let live = LiveConfig::new(ServerConfig::load(Some(&path)).unwrap());
         assert!(live.set_key("name", "Kevin\u{2019}s Burrow").unwrap());
-        assert!(!live.set_key("nntp_enabled", "true").unwrap());
+        assert!(live.set_key("nntp_enabled", "true").unwrap());
+        assert!(!live.set_key("federation_enabled", "true").unwrap());
 
         // The restart: a fresh load sees both changes.
         let again = ServerConfig::load(Some(&path)).unwrap();
         assert_eq!(again.name, "Kevin\u{2019}s Burrow");
         assert!(again.nntp_enabled);
+        assert!(again.federation_enabled);
         assert_eq!(
             again.keywords.get("tea").map(String::as_str),
             Some("room:tea")
         );
+
+        // Putting a setting back to its default takes its line out again.
+        live.set_key("motd", "Tea at four").unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("motd"));
+        live.set_key("motd", "").unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("motd"));
+        assert_eq!(ServerConfig::load(Some(&path)).unwrap().motd, "");
 
         // And the operator's file is still theirs.
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1964,11 +1992,12 @@ mod tests {
         assert_eq!(live.get_key("nntp_auth_require_tls").unwrap(), "true");
         assert_eq!(live.get_key("nntp_feed_tls_enabled").unwrap(), "false");
         assert_eq!(live.get_key("nntp_feed_tls_addr").unwrap(), "0.0.0.0:1563");
-        // Listener knobs need a restart; the AUTHINFO gate applies live.
-        assert!(!live.set_key("nntp_tls_enabled", "on").unwrap());
-        assert!(!live.set_key("nntp_tls_addr", "127.0.0.1:5630").unwrap());
+        // All live: the surface supervisor rebinds a listener when its keys
+        // change, and the AUTHINFO gate is read per command.
+        assert!(live.set_key("nntp_tls_enabled", "on").unwrap());
+        assert!(live.set_key("nntp_tls_addr", "127.0.0.1:5630").unwrap());
         assert!(live.set_key("nntp_auth_require_tls", "off").unwrap());
-        assert!(!live.set_key("nntp_feed_tls_enabled", "on").unwrap());
+        assert!(live.set_key("nntp_feed_tls_enabled", "on").unwrap());
         assert_eq!(live.get_key("nntp_auth_require_tls").unwrap(), "false");
         assert!(matches!(
             live.set_key("nntp_tls_addr", "not-an-addr"),

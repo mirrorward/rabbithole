@@ -39,52 +39,52 @@ pub const DEMO_SCHEMA: &[(&str, &str, u8, u8)] = &[
     ("swarm_advert_ttl_secs", "3600", 2, 1),
     ("swarm_adverts_max", "4096", 2, 1),
     ("swarm_cache_max_bytes", "0", 2, 1),
-    ("telnet_enabled", "false", 1, 0),
-    ("telnet_addr", "0.0.0.0:2323", 0, 0),
+    ("telnet_enabled", "false", 1, 1),
+    ("telnet_addr", "0.0.0.0:2323", 0, 1),
     ("telnet_min_role", "guest", 3, 1),
-    ("finger_enabled", "false", 1, 0),
-    ("finger_addr", "0.0.0.0:7979", 0, 0),
+    ("finger_enabled", "false", 1, 1),
+    ("finger_addr", "0.0.0.0:7979", 0, 1),
     ("finger_min_role", "guest", 3, 1),
     ("files_http_base", "", 0, 1),
-    ("http_enabled", "false", 1, 0),
-    ("http_addr", "0.0.0.0:8080", 0, 0),
-    ("http_web_root", "", 0, 0),
-    ("nntp_enabled", "false", 1, 0),
-    ("nntp_addr", "0.0.0.0:1119", 0, 0),
+    ("http_enabled", "false", 1, 1),
+    ("http_addr", "0.0.0.0:8080", 0, 1),
+    ("http_web_root", "", 0, 1),
+    ("nntp_enabled", "false", 1, 1),
+    ("nntp_addr", "0.0.0.0:1119", 0, 1),
     ("nntp_min_role", "guest", 3, 1),
-    ("nntp_tls_enabled", "false", 1, 0),
-    ("nntp_tls_addr", "0.0.0.0:563", 0, 0),
+    ("nntp_tls_enabled", "false", 1, 1),
+    ("nntp_tls_addr", "0.0.0.0:563", 0, 1),
     ("nntp_auth_require_tls", "true", 1, 1),
-    ("nntp_feed_enabled", "false", 1, 0),
-    ("nntp_feed_addr", "0.0.0.0:1120", 0, 0),
-    ("nntp_feed_tls_enabled", "false", 1, 0),
-    ("nntp_feed_tls_addr", "0.0.0.0:1563", 0, 0),
-    ("radio_enabled", "false", 1, 0),
-    ("radio_addr", "0.0.0.0:8000", 0, 0),
+    ("nntp_feed_enabled", "false", 1, 1),
+    ("nntp_feed_addr", "0.0.0.0:1120", 0, 1),
+    ("nntp_feed_tls_enabled", "false", 1, 1),
+    ("nntp_feed_tls_addr", "0.0.0.0:1563", 0, 1),
+    ("radio_enabled", "false", 1, 1),
+    ("radio_addr", "0.0.0.0:8000", 0, 1),
     ("radio_public_base", "", 0, 1),
-    ("radio_source_enabled", "false", 1, 0),
-    ("radio_source_addr", "0.0.0.0:8001", 0, 0),
-    ("radio_source_user", "source", 0, 0),
-    ("radio_source_password", "", 0, 2),
+    ("radio_source_enabled", "false", 1, 1),
+    ("radio_source_addr", "0.0.0.0:8001", 0, 1),
+    ("radio_source_user", "source", 0, 1),
+    ("radio_source_password", "", 0, 3),
     ("doors_enabled", "false", 1, 0),
     ("doors_dir", "doors", 0, 0),
     ("doors_max_nodes", "4", 2, 0),
     ("doors_session_max_secs", "3600", 2, 0),
-    ("hotline_enabled", "false", 1, 0),
-    ("hotline_addr", "0.0.0.0:5500", 0, 0),
+    ("hotline_enabled", "false", 1, 1),
+    ("hotline_addr", "0.0.0.0:5500", 0, 1),
     ("hotline_min_role", "guest", 3, 1),
-    ("ftn_enabled", "false", 1, 0),
-    ("ftn_addr", "0.0.0.0:24554", 0, 0),
-    ("ftn_node", "", 0, 0),
-    ("ftn_uplink", "", 0, 0),
-    ("ftn_uplink_host", "", 0, 0),
-    ("ftn_password", "", 0, 2),
-    ("ftn_inbound_dir", "ftn/inbound", 0, 0),
-    ("ftn_outbound_dir", "ftn/outbound", 0, 0),
+    ("ftn_enabled", "false", 1, 1),
+    ("ftn_addr", "0.0.0.0:24554", 0, 1),
+    ("ftn_node", "", 0, 1),
+    ("ftn_uplink", "", 0, 1),
+    ("ftn_uplink_host", "", 0, 1),
+    ("ftn_password", "", 0, 3),
+    ("ftn_inbound_dir", "ftn/inbound", 0, 1),
+    ("ftn_outbound_dir", "ftn/outbound", 0, 1),
     ("qwk_enabled", "false", 1, 1),
     ("qwk_spool_dir", "qwk", 0, 1),
-    ("syndication_enabled", "false", 1, 0),
-    ("syndication_poll_secs", "1800", 2, 0),
+    ("syndication_enabled", "false", 1, 1),
+    ("syndication_poll_secs", "1800", 2, 1),
     ("federation_enabled", "false", 1, 0),
     ("federation_origin", "", 0, 8),
     ("federation_addr", "0.0.0.0:4655", 0, 0),
@@ -144,6 +144,45 @@ pub fn describe(held: &[(String, String)]) -> Vec<ConfigKeyInfo> {
                 info = info.choices(demo_choices(key).iter().copied());
             }
             info
+        })
+        .collect()
+}
+
+/// What the demo burrow's surfaces are "doing": each one that is switched on
+/// is listening on its configured address, as a healthy burrow's would be.
+pub fn surfaces(held: &[(String, String)]) -> Vec<rabbithole_proto::admin::SurfaceInfo> {
+    use rabbithole_proto::admin::{surface_state, SurfaceInfo};
+    let value = |key: &str| -> String {
+        held.iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+            .or_else(|| {
+                DEMO_SCHEMA
+                    .iter()
+                    .find(|(k, ..)| *k == key)
+                    .map(|(_, d, ..)| (*d).to_string())
+            })
+            .unwrap_or_default()
+    };
+    DEMO_SCHEMA
+        .iter()
+        .map(|(key, ..)| *key)
+        .filter(|key| key.ends_with("_enabled"))
+        .filter_map(|key| {
+            let stem = key.trim_end_matches("_enabled");
+            let addr = value(&format!("{stem}_addr"));
+            let on = value(key) == "true";
+            match (stem, addr.is_empty()) {
+                ("syndication", _) => Some(if on {
+                    SurfaceInfo::new(key, surface_state::RUNNING)
+                } else {
+                    SurfaceInfo::new(key, surface_state::OFF)
+                }),
+                // Only surfaces with an address of their own are supervised.
+                (_, true) | ("federation", _) => None,
+                _ if on => Some(SurfaceInfo::new(key, surface_state::LISTENING).addr(addr)),
+                _ => Some(SurfaceInfo::new(key, surface_state::OFF)),
+            }
         })
         .collect()
 }

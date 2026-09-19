@@ -77,7 +77,8 @@ use rabbithole_proto::admin::{
     AccountEntry, AccountList, AccountListRequest, AccountSet, Broadcast, ClassEntry, ClassList,
     ClassListRequest, ClassSet, ConfigApplied, ConfigDescribeRequest, ConfigDescription, ConfigGet,
     ConfigKeyInfo, ConfigSet, ConfigValue, GatewayStatsReply, GatewayStatsRequest, InviteCode,
-    InviteCreate, Kick, ThemeBundleInfo, ThemeBundleSet,
+    InviteCreate, Kick, SurfaceInfo, SurfaceStatus, SurfaceStatusRequest, ThemeBundleInfo,
+    ThemeBundleSet,
 };
 use rabbithole_proto::board::{
     BoardList, BoardListRequest, PostCreate, ThreadList, ThreadListRequest, ThreadPosts,
@@ -1254,6 +1255,8 @@ pub enum AdminCommand {
     /// Ask the burrow to describe every setting: value, default, shape,
     /// choices, live or restart. → [`ConfigDescription`].
     DescribeConfig,
+    /// What each optional surface is actually doing. → [`SurfaceStatus`].
+    GetSurfaceStatus,
     /// Live syndication + gateway counters. → [`GatewayStatsReply`].
     GetGatewayStats,
     /// Publish a postcard [`rabbithole_proto::welcome::ThemeBundle`].
@@ -1289,6 +1292,8 @@ pub enum AdminEvent {
     },
     /// The burrow described its settings.
     ConfigDescribed(Vec<ConfigKeyInfo>),
+    /// The burrow reported what its surfaces are doing.
+    SurfacesReported(Vec<SurfaceInfo>),
     /// A config change was applied (or saved pending restart).
     ConfigApplied {
         /// False = saved but needs a restart to take effect.
@@ -1343,6 +1348,7 @@ pub fn admin_command_to_frame(
             Frame::request(id, &ConfigSet::new(key.clone(), value.clone()))?
         }
         AdminCommand::DescribeConfig => Frame::request(id, &ConfigDescribeRequest)?,
+        AdminCommand::GetSurfaceStatus => Frame::request(id, &SurfaceStatusRequest)?,
         AdminCommand::GetGatewayStats => Frame::request(id, &GatewayStatsRequest)?,
         AdminCommand::SetThemeBundle { bundle } => {
             Frame::request(id, &ThemeBundleSet::new(bundle.clone(), Vec::new()))?
@@ -1381,6 +1387,9 @@ pub fn frame_to_admin_events(frame: &Frame) -> Vec<AdminEvent> {
     }
     if let Some(Ok(m)) = frame.decode::<ConfigDescription>() {
         return vec![AdminEvent::ConfigDescribed(m.entries)];
+    }
+    if let Some(Ok(m)) = frame.decode::<SurfaceStatus>() {
+        return vec![AdminEvent::SurfacesReported(m.surfaces)];
     }
     if let Some(Ok(m)) = frame.decode::<ConfigApplied>() {
         return vec![AdminEvent::ConfigApplied {

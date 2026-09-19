@@ -1,40 +1,25 @@
-//! Pure, DOM-free state for the admin **Syndication & Gateways** panel.
+//! Pure, DOM-free state for the feeds half of the admin console's
+//! **Federation & feeds** section.
 //!
 //! Like [`crate::admin`] and [`crate::theme_editor`], this module holds no
-//! Leptos or `web_sys` types: the whole panel model — key loading, the poll
-//! interval editor with validation, the gateway matrix derivation, and the
-//! defensive `syndication_feeds` parser — is unit-tested on the host with
-//! `cargo test`. The panel component in [`crate::components`] owns a reactive
-//! `RwSignal<SynAdminState>` and folds replies into it.
+//! Leptos or `web_sys` types: the feed table's model and the defensive
+//! `syndication_feeds` parser are unit-tested on the host with `cargo test`.
 //!
-//! ## What travels over the wire (and what honestly cannot)
+//! It used to be a second settings editor as well: a gateway matrix with its
+//! own toggles, a poll-interval box with its own Save, and a table of which
+//! keys "need a restart" that mirrored the server by hand. All of that is the
+//! settings model's now ([`crate::admin_settings`]), where the burrow itself
+//! says what is live, and what is left here only reads.
 //!
-//! Everything here rides the **existing** ADMIN-family config vocabulary
-//! ([`AdminCommand::GetConfig`] / [`AdminCommand::SetConfig`] and their
-//! [`AdminEvent`] replies) — no new wire messages are invented. The server's
-//! `ctl config` surface exposes scalar keys only:
+//! ## What the wire cannot say
 //!
-//! - `syndication_enabled`, `syndication_poll_secs`, the `nntp_*`, `ftn_*`
-//!   and `qwk_*` knobs: gettable and settable.
-//! - `syndication_feeds` (the feed URL → board-slug map) is **TOML-only** —
-//!   the server's config get/set has no arm for it, so a `ConfigGet` answers
-//!   `NotFound`. The panel still *asks* (a future server slice may expose a
-//!   read-only serialization) and folds the outcome totally: a value parses
-//!   into read-only [`FeedRow`]s via [`parse_feeds_value`]; a failure lands as
-//!   [`FeedsStatus::Unavailable`] and the UI shows the honest
-//!   "edit `burrow.toml` + restart" hint. In both cases feeds are never
-//!   editable from this panel.
-//!
-//! ## Live vs. restart-required
-//!
-//! The wire only reveals whether a key applied live *after* a set (the
-//! [`AdminEvent::ConfigApplied`] reply's `applied_live` flag — exactly how
-//! [`crate::admin`] surfaces it today). For badges shown *before* any set,
-//! [`expected_applies_live`] mirrors the documented server semantics
-//! (listener toggles/addresses bind at startup; QWK re-reads config per
-//! command). The authoritative per-key answer from a real `ConfigApplied`
-//! reply is recorded in [`SynAdminState::learned_live`] and always wins over
-//! the expectation.
+//! `syndication_feeds` (the feed URL → board-slug map) is **TOML-only**: the
+//! server's config get/set has no arm for it, so a `ConfigGet` answers
+//! `NotFound`. The pane still *asks* (a future server slice may expose a
+//! read-only serialization) and folds the outcome totally: a value parses
+//! into read-only [`FeedRow`]s via [`parse_feeds_value`]; a failure lands as
+//! [`FeedsStatus::Unavailable`] and the UI shows the honest "edit
+//! `burrow.toml`" hint. Either way feeds are never editable here.
 //!
 //! ## Feed monitor
 //!
@@ -43,8 +28,6 @@
 //! and folds last-poll / status / seen / posted / dupes per feed plus the
 //! per-gateway activity rows. Configured state (enabled + poll interval)
 //! remains the fallback when a snapshot has not arrived.
-
-use std::collections::BTreeMap;
 
 use rabbithole_proto::admin::{FeedStat, GatewayStat, GatewayStatsReply};
 
@@ -75,43 +58,7 @@ pub const POLL_CEILING_SECS: i64 = 86_400;
 
 /// Every config key the panel loads on entry, `syndication_feeds` included
 /// (see the module docs for why asking is still the right move).
-pub const LOAD_KEYS: &[&str] = &[
-    KEY_ENABLED,
-    KEY_POLL_SECS,
-    KEY_FEEDS,
-    "nntp_enabled",
-    "nntp_addr",
-    "nntp_tls_enabled",
-    "nntp_tls_addr",
-    "nntp_feed_enabled",
-    "nntp_feed_addr",
-    "nntp_feed_tls_enabled",
-    "nntp_feed_tls_addr",
-    "ftn_enabled",
-    "ftn_addr",
-    "qwk_enabled",
-];
-
-/// The gateway families the matrix summarises: display label, the boolean
-/// enabled key, and the listener address key (`None` for non-listener
-/// surfaces like QWK and the syndication poller).
-const FAMILIES: &[(&str, &str, Option<&str>)] = &[
-    ("NNTP reader", "nntp_enabled", Some("nntp_addr")),
-    ("NNTP reader TLS", "nntp_tls_enabled", Some("nntp_tls_addr")),
-    (
-        "NNTP peer feed",
-        "nntp_feed_enabled",
-        Some("nntp_feed_addr"),
-    ),
-    (
-        "NNTP peer feed TLS",
-        "nntp_feed_tls_enabled",
-        Some("nntp_feed_tls_addr"),
-    ),
-    ("FTN binkp", "ftn_enabled", Some("ftn_addr")),
-    ("QWK offline mail", "qwk_enabled", None),
-    ("Syndication", KEY_ENABLED, None),
-];
+pub const LOAD_KEYS: &[&str] = &[KEY_ENABLED, KEY_POLL_SECS, KEY_FEEDS];
 
 /// One configured feed: URL → destination board slug. Read-only in the panel
 /// (the map itself is TOML-only server-side).
@@ -136,23 +83,6 @@ pub enum FeedsStatus {
     Listed(Vec<FeedRow>),
 }
 
-/// One row of the gateway matrix.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GatewayRow {
-    /// Display label for the network family.
-    pub family: &'static str,
-    /// The boolean config key the toggle drives.
-    pub toggle_key: &'static str,
-    /// Loaded enabled state (`None` until the key loads / if unparsable).
-    pub enabled: Option<bool>,
-    /// Listener port parsed from the family's `*_addr` value, if any.
-    pub port: Option<u16>,
-    /// Whether a set of `toggle_key` applies live (`false` = restart
-    /// required). Learned from `ConfigApplied` replies when available, else
-    /// the documented expectation.
-    pub applies_live: bool,
-}
-
 /// The Syndication & Gateways panel model. `Default` is the empty, unloaded
 /// state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -161,13 +91,6 @@ pub struct SynAdminState {
     pub config: Vec<ConfigEntry>,
     /// What we know about the feed map.
     pub feeds: FeedsStatus,
-    /// The poll-interval editor's draft text.
-    pub poll_draft: String,
-    /// Inline validation (or server rejection) error for the poll editor.
-    pub poll_error: Option<String>,
-    /// Authoritative live-vs-restart answers learned from `ConfigApplied`
-    /// replies, keyed by config key. Wins over [`expected_applies_live`].
-    pub learned_live: BTreeMap<String, bool>,
     /// One-line status for the panel.
     pub status: String,
     /// Latest live gateway/feed snapshot, if one has arrived.
@@ -201,11 +124,6 @@ impl SynAdminState {
                     if k == KEY_FEEDS {
                         self.feeds = FeedsStatus::Listed(parse_feeds_value(value));
                     }
-                    if k == KEY_POLL_SECS {
-                        // Sync the editor to the authoritative value.
-                        self.poll_draft = value.clone();
-                        self.poll_error = None;
-                    }
                 }
                 AdminEvent::Failed(detail) => {
                     if key == KEY_FEEDS {
@@ -234,43 +152,15 @@ impl SynAdminState {
             self.apply_get_reply("", events);
             return;
         }
-        if let Some(k) = key {
-            if events
-                .iter()
-                .any(|e| matches!(e, AdminEvent::ConfigApplied { .. }))
-            {
-                self.apply_set_reply(k, events);
-            } else {
-                self.apply_get_reply(k, events);
-            }
-        } else {
-            self.apply_get_reply("", events);
+        // A `ConfigApplied` is the settings model's business
+        // ([`crate::admin_settings`]); this pane only reads.
+        if events
+            .iter()
+            .any(|e| matches!(e, AdminEvent::ConfigApplied { .. }))
+        {
+            return;
         }
-    }
-
-    /// Fold the reply events of a `SetConfig` for `key`: record the
-    /// authoritative live-vs-restart answer and surface a status line. A
-    /// failure on [`KEY_POLL_SECS`] also lands inline on the poll editor.
-    pub fn apply_set_reply(&mut self, key: &str, events: &[AdminEvent]) {
-        for event in events {
-            match event {
-                AdminEvent::ConfigApplied { applied_live } => {
-                    self.learned_live.insert(key.to_string(), *applied_live);
-                    self.status = if *applied_live {
-                        format!("Saved {key}; applied live.")
-                    } else {
-                        format!("Saved {key}; a restart is required to apply it.")
-                    };
-                }
-                AdminEvent::Failed(detail) => {
-                    self.status = format!("Error saving {key}: {detail}");
-                    if key == KEY_POLL_SECS {
-                        self.poll_error = Some(detail.clone());
-                    }
-                }
-                _ => {}
-            }
-        }
+        self.apply_get_reply(key.unwrap_or(""), events);
     }
 
     /// Insert or replace a config pair keyed by `key`.
@@ -301,72 +191,6 @@ impl SynAdminState {
     /// The loaded `syndication_poll_secs`, if readable.
     pub fn poll_secs(&self) -> Option<i64> {
         self.value(KEY_POLL_SECS).and_then(|v| v.parse().ok())
-    }
-
-    /// Replace the poll editor draft and re-validate it inline.
-    pub fn set_poll_draft(&mut self, draft: &str) {
-        self.poll_draft = draft.to_string();
-        self.poll_error = validate_poll_secs(draft).err();
-    }
-
-    /// Whether the poll draft differs from the loaded value.
-    pub fn poll_dirty(&self) -> bool {
-        match self.value(KEY_POLL_SECS) {
-            Some(loaded) => loaded != self.poll_draft.trim(),
-            None => !self.poll_draft.trim().is_empty(),
-        }
-    }
-
-    /// The `SetConfig` that saves the poll draft — `Some` only when the draft
-    /// is valid *and* differs from the loaded value.
-    pub fn poll_save_command(&self) -> Option<AdminCommand> {
-        let secs = validate_poll_secs(&self.poll_draft).ok()?;
-        if !self.poll_dirty() {
-            return None;
-        }
-        Some(AdminCommand::SetConfig {
-            key: KEY_POLL_SECS.to_string(),
-            value: secs.to_string(),
-        })
-    }
-
-    /// The `SetConfig` that flips a boolean key — `Some` only when the key
-    /// has loaded and parses as a bool (no blind toggles).
-    pub fn toggle_command(&self, key: &str) -> Option<AdminCommand> {
-        let current = self.value(key).and_then(parse_bool_value)?;
-        Some(AdminCommand::SetConfig {
-            key: key.to_string(),
-            value: (!current).to_string(),
-        })
-    }
-
-    /// Whether a set of `key` applies live: the answer learned from a real
-    /// `ConfigApplied` reply when one exists, else the documented expectation
-    /// ([`expected_applies_live`]), else `false` (assume restart — the honest
-    /// default for an unknown key).
-    pub fn applies_live(&self, key: &str) -> bool {
-        self.learned_live
-            .get(key)
-            .copied()
-            .or_else(|| expected_applies_live(key))
-            .unwrap_or(false)
-    }
-
-    /// Derive the gateway matrix from the loaded config pairs: one row per
-    /// family in [`FAMILIES`], populated with whatever has loaded so far.
-    pub fn gateway_matrix(&self) -> Vec<GatewayRow> {
-        FAMILIES
-            .iter()
-            .map(|(family, toggle_key, addr_key)| GatewayRow {
-                family,
-                toggle_key,
-                enabled: self.value(toggle_key).and_then(parse_bool_value),
-                port: addr_key
-                    .and_then(|k| self.value(k))
-                    .and_then(parse_addr_port),
-                applies_live: self.applies_live(toggle_key),
-            })
-            .collect()
     }
 
     /// The feed rows for the monitor, when listed.
@@ -439,52 +263,6 @@ pub fn feed_stat_line(stat: &FeedStat) -> String {
     )
 }
 
-/// Validate a poll-interval draft: a positive integer number of seconds
-/// within `POLL_MIN_SECS..=POLL_MAX_SECS`. Returns the parsed value or a
-/// human-readable error.
-pub fn validate_poll_secs(draft: &str) -> Result<i64, String> {
-    let t = draft.trim();
-    if t.is_empty() {
-        return Err("Enter a poll interval in seconds.".to_string());
-    }
-    let secs: i64 = t
-        .parse()
-        .map_err(|_| format!("{t:?} is not a whole number of seconds."))?;
-    if secs < POLL_MIN_SECS {
-        return Err(format!("Interval must be at least {POLL_MIN_SECS} s."));
-    }
-    if secs > POLL_MAX_SECS {
-        return Err(format!(
-            "Interval must be at most {POLL_MAX_SECS} s (one week)."
-        ));
-    }
-    Ok(secs)
-}
-
-/// The documented live-vs-restart expectation for the keys this panel
-/// touches, mirroring the server's config semantics: listener toggles and
-/// addresses bind at startup (restart); QWK re-reads config per command
-/// (live); the syndication poll task starts at boot (restart). `None` for
-/// keys outside the panel's vocabulary.
-pub fn expected_applies_live(key: &str) -> Option<bool> {
-    match key {
-        "qwk_enabled" | "qwk_spool_dir" | "nntp_min_role" | "nntp_auth_require_tls" => Some(true),
-        "nntp_enabled"
-        | "nntp_addr"
-        | "nntp_tls_enabled"
-        | "nntp_tls_addr"
-        | "nntp_feed_enabled"
-        | "nntp_feed_addr"
-        | "nntp_feed_tls_enabled"
-        | "nntp_feed_tls_addr"
-        | "ftn_enabled"
-        | "ftn_addr"
-        | KEY_ENABLED
-        | KEY_POLL_SECS => Some(false),
-        _ => None,
-    }
-}
-
 /// Parse a server bool serialization, accepting the same spellings the
 /// server's own parser does. `None` for anything else.
 pub fn parse_bool_value(v: &str) -> Option<bool> {
@@ -493,13 +271,6 @@ pub fn parse_bool_value(v: &str) -> Option<bool> {
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
-}
-
-/// Parse the port out of a `SocketAddr` display string (`0.0.0.0:1119`,
-/// `[::]:563`). `None` when it doesn't look like one.
-pub fn parse_addr_port(addr: &str) -> Option<u16> {
-    let (_, port) = addr.trim().rsplit_once(':')?;
-    port.parse().ok()
 }
 
 /// Parse a `syndication_feeds` serialization into feed rows — **total** and
@@ -631,14 +402,12 @@ mod tests {
     }
 
     #[test]
-    fn get_replies_upsert_and_sync_the_poll_draft() {
+    fn get_replies_upsert_by_key() {
         let mut s = SynAdminState::default();
         s.apply_get_reply(KEY_ENABLED, &loaded(KEY_ENABLED, "false"));
         assert_eq!(s.enabled(), Some(false));
         s.apply_get_reply(KEY_POLL_SECS, &loaded(KEY_POLL_SECS, "1800"));
         assert_eq!(s.poll_secs(), Some(1800));
-        assert_eq!(s.poll_draft, "1800");
-        assert!(s.poll_error.is_none());
         // A re-read updates in place (no duplicate entries).
         s.apply_get_reply(KEY_ENABLED, &loaded(KEY_ENABLED, "true"));
         assert_eq!(s.enabled(), Some(true));
@@ -686,157 +455,6 @@ mod tests {
         s.apply_get_reply("nntp_enabled", &[AdminEvent::Failed("Forbidden".into())]);
         assert!(s.status.contains("nntp_enabled"));
         assert!(s.status.contains("Forbidden"));
-    }
-
-    #[test]
-    fn poll_draft_validation_vectors() {
-        assert_eq!(validate_poll_secs("1800"), Ok(1800));
-        assert_eq!(validate_poll_secs(" 900 "), Ok(900));
-        assert_eq!(validate_poll_secs("1"), Ok(POLL_MIN_SECS));
-        assert_eq!(validate_poll_secs("604800"), Ok(POLL_MAX_SECS));
-        assert!(validate_poll_secs("0").is_err());
-        assert!(validate_poll_secs("-5").is_err());
-        assert!(validate_poll_secs("604801").is_err());
-        assert!(validate_poll_secs("abc").is_err());
-        assert!(validate_poll_secs("18.5").is_err());
-        assert!(validate_poll_secs("").is_err());
-    }
-
-    #[test]
-    fn poll_editor_flow_load_edit_validate_save() {
-        let mut s = SynAdminState::default();
-        s.apply_get_reply(KEY_POLL_SECS, &loaded(KEY_POLL_SECS, "1800"));
-        // Unedited: nothing to save.
-        assert!(!s.poll_dirty());
-        assert_eq!(s.poll_save_command(), None);
-        // An invalid edit parks an inline error and never yields a command.
-        s.set_poll_draft("0");
-        assert!(s.poll_error.is_some());
-        assert_eq!(s.poll_save_command(), None);
-        // A valid edit clears it and yields the SetConfig.
-        s.set_poll_draft("900");
-        assert!(s.poll_error.is_none());
-        assert_eq!(
-            s.poll_save_command(),
-            Some(AdminCommand::SetConfig {
-                key: KEY_POLL_SECS.into(),
-                value: "900".into(),
-            })
-        );
-        // The set reply is honest about the restart, and a follow-up re-read
-        // (the app reloads the key after a save) re-syncs the draft.
-        s.apply_set_reply(
-            KEY_POLL_SECS,
-            &[AdminEvent::ConfigApplied {
-                applied_live: false,
-            }],
-        );
-        assert!(s.status.contains("restart"));
-        s.apply_get_reply(KEY_POLL_SECS, &loaded(KEY_POLL_SECS, "900"));
-        assert!(!s.poll_dirty());
-    }
-
-    #[test]
-    fn set_failure_on_poll_key_lands_inline() {
-        let mut s = SynAdminState::default();
-        s.apply_set_reply(
-            KEY_POLL_SECS,
-            &[AdminEvent::Failed("server error: BadValue".into())],
-        );
-        assert!(s.poll_error.as_deref().unwrap_or("").contains("BadValue"));
-        assert!(s.status.contains(KEY_POLL_SECS));
-    }
-
-    #[test]
-    fn toggle_command_flips_only_loaded_parsable_bools() {
-        let mut s = SynAdminState::default();
-        // Not loaded yet: no blind toggles.
-        assert_eq!(s.toggle_command(KEY_ENABLED), None);
-        s.apply_get_reply(KEY_ENABLED, &loaded(KEY_ENABLED, "false"));
-        assert_eq!(
-            s.toggle_command(KEY_ENABLED),
-            Some(AdminCommand::SetConfig {
-                key: KEY_ENABLED.into(),
-                value: "true".into(),
-            })
-        );
-        // An unparsable value refuses to toggle.
-        s.apply_get_reply("ftn_enabled", &loaded("ftn_enabled", "maybe"));
-        assert_eq!(s.toggle_command("ftn_enabled"), None);
-    }
-
-    #[test]
-    fn learned_applied_live_wins_over_expectation() {
-        let mut s = SynAdminState::default();
-        // Expectation: QWK applies live, syndication needs a restart.
-        assert!(s.applies_live("qwk_enabled"));
-        assert!(!s.applies_live(KEY_ENABLED));
-        // Unknown keys default to the honest "assume restart".
-        assert!(!s.applies_live("mystery_key"));
-        // A real ConfigApplied reply overrides the expectation.
-        s.apply_set_reply(
-            "qwk_enabled",
-            &[AdminEvent::ConfigApplied {
-                applied_live: false,
-            }],
-        );
-        assert!(!s.applies_live("qwk_enabled"));
-        assert!(s.status.contains("restart"));
-        s.apply_set_reply(
-            KEY_ENABLED,
-            &[AdminEvent::ConfigApplied { applied_live: true }],
-        );
-        assert!(s.applies_live(KEY_ENABLED));
-        assert!(s.status.contains("applied live"));
-    }
-
-    #[test]
-    fn expected_applies_live_mirrors_server_semantics() {
-        assert_eq!(expected_applies_live("qwk_enabled"), Some(true));
-        assert_eq!(expected_applies_live("nntp_auth_require_tls"), Some(true));
-        assert_eq!(expected_applies_live("nntp_enabled"), Some(false));
-        assert_eq!(expected_applies_live("nntp_tls_enabled"), Some(false));
-        assert_eq!(expected_applies_live("ftn_enabled"), Some(false));
-        assert_eq!(expected_applies_live(KEY_ENABLED), Some(false));
-        assert_eq!(expected_applies_live(KEY_POLL_SECS), Some(false));
-        assert_eq!(expected_applies_live("server.name"), None);
-    }
-
-    #[test]
-    fn gateway_matrix_derives_from_loaded_pairs() {
-        let s = loaded_state();
-        let matrix = s.gateway_matrix();
-        assert_eq!(matrix.len(), 7);
-        let row = |family: &str| {
-            matrix
-                .iter()
-                .find(|r| r.family == family)
-                .unwrap_or_else(|| panic!("no {family} row"))
-        };
-        let reader = row("NNTP reader");
-        assert_eq!(reader.enabled, Some(true));
-        assert_eq!(reader.port, Some(1119));
-        assert!(!reader.applies_live, "listener toggles need a restart");
-        assert_eq!(row("NNTP reader TLS").port, Some(563));
-        assert_eq!(row("NNTP peer feed").enabled, Some(false));
-        assert_eq!(row("NNTP peer feed TLS").port, Some(1563));
-        assert_eq!(row("FTN binkp").port, Some(24554));
-        let qwk = row("QWK offline mail");
-        assert_eq!(qwk.enabled, Some(true));
-        assert_eq!(qwk.port, None, "QWK is not a listener");
-        assert!(qwk.applies_live);
-        let syn = row("Syndication");
-        assert_eq!(syn.enabled, Some(true));
-        assert_eq!(syn.port, None);
-        assert!(!syn.applies_live);
-    }
-
-    #[test]
-    fn gateway_matrix_before_any_load_is_all_unknowns() {
-        let matrix = SynAdminState::default().gateway_matrix();
-        assert_eq!(matrix.len(), 7);
-        assert!(matrix.iter().all(|r| r.enabled.is_none()));
-        assert!(matrix.iter().all(|r| r.port.is_none()));
     }
 
     #[test]
@@ -893,16 +511,6 @@ mod tests {
         for v in ["", "maybe", "2"] {
             assert_eq!(parse_bool_value(v), None, "{v:?}");
         }
-    }
-
-    #[test]
-    fn addr_ports_parse_from_socketaddr_displays() {
-        assert_eq!(parse_addr_port("0.0.0.0:1119"), Some(1119));
-        assert_eq!(parse_addr_port("[::]:563"), Some(563));
-        assert_eq!(parse_addr_port("127.0.0.1:0"), Some(0));
-        assert_eq!(parse_addr_port("not-an-addr"), None);
-        assert_eq!(parse_addr_port("host:99999"), None);
-        assert_eq!(parse_addr_port(""), None);
     }
 
     #[test]

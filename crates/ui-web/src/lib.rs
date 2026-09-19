@@ -150,10 +150,7 @@ pub use server_theme::ServerOverlay;
 pub use state::{
     Board, ChatLine, DmMessage, DmThread, Member, MemberProfile, Post, Presence, Thread, UiState,
 };
-pub use syndication_admin::{
-    expected_applies_live, parse_feeds_value, validate_poll_secs, FeedRow, FeedsStatus, GatewayRow,
-    SynAdminState,
-};
+pub use syndication_admin::{parse_feeds_value, FeedRow, FeedsStatus, SynAdminState};
 pub use theme_editor::{contrast_warnings, ContrastWarning, EditorAction, EditorState};
 pub use wire::{
     admin_command_to_frame, blob_get_request, blob_to_data_url, board_list_request,

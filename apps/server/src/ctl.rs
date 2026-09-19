@@ -20,14 +20,14 @@ use crate::Shared;
 
 /// Handle one parsed ctl request. Exposed for tests and for the `ctl`
 /// subcommand's error messages.
-pub async fn handle(shared: &Shared, req: &Value) -> Value {
+pub async fn handle(shared: &Arc<Shared>, req: &Value) -> Value {
     match dispatch(shared, req).await {
         Ok(data) => json!({"ok": true, "data": data}),
         Err(e) => json!({"ok": false, "error": e}),
     }
 }
 
-async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
+async fn dispatch(shared: &Arc<Shared>, req: &Value) -> Result<Value, String> {
     let cmd = req
         .get("cmd")
         .and_then(Value::as_str)
@@ -114,6 +114,9 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
                 value.as_str()
             };
             audit("config-set", format!("{key}={shown}"));
+            // Start, stop or rebind whatever surface this key belongs to,
+            // before answering: "applied" should mean it.
+            crate::surfaces::reconcile(shared).await;
             Ok(json!({"applied_live": live}))
         }
         "account-create" => {
@@ -134,6 +137,17 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
                 .map_err(|e| e.to_string())?;
             audit("account-create", format!("{login} role={role:?}"));
             Ok(json!({"id": account.id, "login": account.login}))
+        }
+        "surfaces" => {
+            let report: Vec<Value> = shared
+                .surfaces
+                .report()
+                .into_iter()
+                .map(|(surface, state)| {
+                    json!({"surface": surface.key(), "state": format!("{state:?}")})
+                })
+                .collect();
+            Ok(json!({"surfaces": report}))
         }
         "board-create" => {
             let slug = str_arg("slug")?;

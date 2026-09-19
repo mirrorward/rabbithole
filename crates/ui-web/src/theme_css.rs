@@ -1012,6 +1012,12 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 .rh-adm-edited{font-weight:600;color:color-mix(in srgb,var(--rh-brand) 62%,var(--rh-text))}\
 .rh-adm-reset{appearance:none;border:0;background:none;padding:0;font:inherit;color:var(--rh-accent);cursor:pointer;text-decoration:underline;text-underline-offset:.18em;border-radius:2px}\
 .rh-adm-reset:hover{color:color-mix(in srgb,var(--rh-accent) 78%,var(--rh-text))}\
+.rh-adm-surface{margin:.4rem 0 0;display:flex;align-items:baseline;gap:.45rem;font-size:var(--rh-font-xs);font-weight:600;color:color-mix(in srgb,#3fbf7f 62%,var(--rh-text))}\
+.rh-adm-surface-dot{flex:none;align-self:center;width:.45rem;height:.45rem;border-radius:50%;background:#3fbf7f}\
+.rh-adm-surface.bad{color:var(--rh-error)}\
+.rh-adm-surface.bad .rh-adm-surface-dot{background:var(--rh-error)}\
+.rh-adm-surface.waiting{color:var(--rh-muted)}\
+.rh-adm-surface.waiting .rh-adm-surface-dot{background:var(--rh-muted)}\
 .rh-adm-state{margin:.35rem 0 0;font-size:var(--rh-font-xs);font-weight:600;color:color-mix(in srgb,#3fbf7f 62%,var(--rh-text))}\
 .rh-adm-state.bad{color:var(--rh-error)}\
 .rh-adm-control{display:flex;align-items:center;justify-content:flex-end;min-height:2.1rem}\

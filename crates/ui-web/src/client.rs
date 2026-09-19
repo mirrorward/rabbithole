@@ -771,13 +771,18 @@ impl MockClient {
                 // and syndication keys the admin panel drives; for keys
                 // outside that vocabulary keep the original mock rule
                 // (listener addresses need a restart; the rest is live).
-                let live = crate::demo_config::applies_live(&key)
-                    .or_else(|| crate::syndication_admin::expected_applies_live(&key))
-                    .unwrap_or_else(|| !key.starts_with("listen."));
+                // What a real burrow says about the key (the snapshot); a key
+                // no burrow has is assumed live.
+                let live = crate::demo_config::applies_live(&key).unwrap_or(true);
                 admin_events(&ConfigApplied::new(live))
             }
             AdminCommand::DescribeConfig => {
                 vec![AdminEvent::ConfigDescribed(crate::demo_config::describe(
+                    &self.admin_config,
+                ))]
+            }
+            AdminCommand::GetSurfaceStatus => {
+                vec![AdminEvent::SurfacesReported(crate::demo_config::surfaces(
                     &self.admin_config,
                 ))]
             }
@@ -1437,10 +1442,10 @@ mod tests {
             set.as_slice(),
             [AdminEvent::ConfigApplied { applied_live: true }]
         ));
-        // A listener key needs a restart.
+        // The address every browser arrives on waits for a restart.
         let listen = c.dispatch_admin(AdminCommand::SetConfig {
-            key: "listen.ws".into(),
-            value: "0.0.0.0:9000".into(),
+            key: "ws_addr".into(),
+            value: "127.0.0.1:9000".into(),
         });
         assert!(matches!(
             listen.as_slice(),
@@ -1488,54 +1493,46 @@ mod tests {
         for row in &rows {
             assert!(boards.iter().any(|b| b.slug == row.board), "{row:?}");
         }
-        // The matrix is fully populated from the seeded pairs.
-        let matrix = s.gateway_matrix();
-        assert_eq!(matrix.len(), 7);
-        assert!(matrix.iter().all(|r| r.enabled.is_some()));
     }
 
     #[test]
-    fn admin_set_config_mirrors_gateway_restart_semantics() {
+    fn the_demo_burrow_answers_a_saved_setting_as_a_real_one_would() {
         let mut c = MockClient::new();
-        // Syndication's poll task starts at boot: restart required.
-        let ev = c.dispatch_admin(AdminCommand::SetConfig {
-            key: "syndication_enabled".into(),
-            value: "false".into(),
-        });
+        let mut set = |key: &str, value: &str| {
+            c.dispatch_admin(AdminCommand::SetConfig {
+                key: key.into(),
+                value: value.into(),
+            })
+        };
+        // A gateway starts and stops while the burrow runs: live.
         assert!(matches!(
-            ev.as_slice(),
-            [AdminEvent::ConfigApplied {
-                applied_live: false
-            }]
-        ));
-        // QWK re-reads config per command: applies live.
-        let ev = c.dispatch_admin(AdminCommand::SetConfig {
-            key: "qwk_enabled".into(),
-            value: "false".into(),
-        });
-        assert!(matches!(
-            ev.as_slice(),
+            set("nntp_enabled", "false").as_slice(),
             [AdminEvent::ConfigApplied { applied_live: true }]
         ));
-        // NNTP listeners bind at startup: restart required.
-        let ev = c.dispatch_admin(AdminCommand::SetConfig {
-            key: "nntp_enabled".into(),
-            value: "false".into(),
-        });
+        // What every client arrives on still waits for a restart.
         assert!(matches!(
-            ev.as_slice(),
+            set("quic_addr", "0.0.0.0:4700").as_slice(),
             [AdminEvent::ConfigApplied {
                 applied_live: false
             }]
         ));
-        // The toggled value reads back.
-        let got = c.dispatch_admin(AdminCommand::GetConfig {
-            key: "nntp_enabled".into(),
-        });
-        assert!(matches!(
-            got.as_slice(),
-            [AdminEvent::ConfigLoaded { value, .. }] if value == "false"
-        ));
+        // And it describes itself, surfaces included.
+        let described = c.dispatch_admin(AdminCommand::DescribeConfig);
+        let [AdminEvent::ConfigDescribed(entries)] = described.as_slice() else {
+            panic!("no description: {described:?}");
+        };
+        let nntp = entries.iter().find(|e| e.key == "nntp_enabled").unwrap();
+        assert_eq!(nntp.value, "false", "the change just made is held");
+        let reported = c.dispatch_admin(AdminCommand::GetSurfaceStatus);
+        let [AdminEvent::SurfacesReported(surfaces)] = reported.as_slice() else {
+            panic!("no report: {reported:?}");
+        };
+        let nntp = surfaces.iter().find(|s| s.key == "nntp_enabled").unwrap();
+        assert_eq!(nntp.state, rabbithole_proto::admin::surface_state::OFF);
+        assert!(
+            surfaces.iter().all(|s| s.key != "guest_enabled"),
+            "not a surface"
+        );
     }
 
     #[test]
