@@ -943,20 +943,23 @@ pub const SECTIONS: &[Section] = &[
             Group {
                 title: "Sending files between burrows",
                 blurb: "Someone on this burrow and another can send files and folders from one \
-                        to the other. The receiving burrow fetches them itself, over its \
-                        federation session with the sender, so both must be approved peers.",
+                        to the other. The receiving burrow fetches them itself: from an \
+                        approved peer over their federation session, and from any other burrow \
+                        only when both operators allow it below.",
                 items: &[
                     item(
                         "s2s_grants_enabled",
                         "Let people send from here",
-                        "People may send what they can download here to a peer burrow. The \
-                         permission names that burrow alone and lapses after an hour.",
+                        "People may send what they can download here to another burrow: a \
+                         peer, or any burrow if allowed below. The permission names that burrow \
+                         alone and lapses after an hour.",
                     ),
                     item(
                         "s2s_pull_enabled",
-                        "Take files sent from peers",
-                        "People may bring files from a peer burrow into this one. They are \
-                         filed under the person who asked, and count against their space.",
+                        "Take files sent from other burrows",
+                        "People may bring files from another burrow into this one: a peer, or \
+                         any burrow if allowed below. They are filed under the person who \
+                         asked, and count against their space.",
                     ),
                     item(
                         "s2s_max_concurrent",
