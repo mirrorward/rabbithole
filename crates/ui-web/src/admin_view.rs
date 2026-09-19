@@ -19,8 +19,7 @@ use crate::admin_catalog::{self as catalog, Area, Group, Item, Pane, Section, Un
 use crate::admin_settings::{humanize_bytes, humanize_secs, Kind, Load, Outcome, Tone};
 use crate::app::AppState;
 use crate::components::{
-    AdminAccountsPanel, AdminClassesPanel, AdminModerationPanel, EmptyState, StatusBar,
-    SyndicationPanel, ThemeEditorPanel,
+    AdminModerationPanel, EmptyState, StatusBar, SyndicationPanel, ThemeEditorPanel,
 };
 
 /// The console. Gated behind the session's admin capability; the nav entry
@@ -194,12 +193,7 @@ fn SectionPane(section: &'static Section) -> impl IntoView {
         }
         .into_view(),
         Pane::Advanced => view! { <AdvancedGroup/> }.into_view(),
-        Pane::People => view! {
-            <p class="rh-adm-status" role="status">{status}</p>
-            <section class="rh-adm-group"><AdminAccountsPanel/></section>
-            <section class="rh-adm-group"><AdminClassesPanel/></section>
-        }
-        .into_view(),
+        Pane::People => view! { <crate::admin_people_view::PeoplePane/> }.into_view(),
         Pane::Moderation => view! {
             <p class="rh-adm-status" role="status">{status}</p>
             <section class="rh-adm-group"><AdminModerationPanel/></section>

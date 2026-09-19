@@ -81,6 +81,8 @@
 pub mod a11y;
 pub mod admin;
 pub mod admin_catalog;
+pub mod admin_people;
+pub mod admin_people_view;
 pub mod admin_settings;
 pub mod admin_view;
 pub mod app;

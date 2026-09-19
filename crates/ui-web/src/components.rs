@@ -1558,7 +1558,7 @@ fn backup_identity(app: AppState) {
 /// Copy without a toast — for buttons that confirm in place (see the About
 /// window's copy control). Best-effort: a context with no clipboard simply
 /// does nothing, which the caller's own animation already implies.
-fn copy_text_quiet(text: &str) {
+pub(crate) fn copy_text_quiet(text: &str) {
     #[cfg(target_arch = "wasm32")]
     {
         use js_sys::{Function, Reflect};
@@ -5394,103 +5394,6 @@ pub(crate) fn AdminModerationPanel() -> impl IntoView {
         <div class="rh-toolbar">
             <button class="rh-btn small" on:click=do_invite>"Create invite (24h)"</button>
         </div>
-    }
-}
-
-/// Account directory: role/class/status per account, with an enable/disable
-/// toggle. Rendered as a real `<table>` — the data is tabular, and column
-/// headers give screen readers the grid context the flex rows lacked.
-#[component]
-pub(crate) fn AdminAccountsPanel() -> impl IntoView {
-    let app = expect_context::<AppState>();
-    let admin = app.admin;
-    let total = move || admin.with(|a| a.account_total);
-    view! {
-        <h2 class="rh-panel-title">"Accounts (" {total} ")"</h2>
-        <table class="rh-table">
-            <thead>
-                <tr>
-                    <th scope="col">"State"</th>
-                    <th scope="col">"Login"</th>
-                    <th scope="col">"Class"</th>
-                    <th scope="col">"Role"</th>
-                    <th scope="col"><span class="rh-visually-hidden">"Toggle"</span></th>
-                </tr>
-            </thead>
-            <tbody>
-                <For
-                    each=move || admin.with(|a| a.accounts.clone())
-                    key=|a| a.id
-                    children=move |a| {
-                        let login = a.login.clone();
-                        let disabled = a.disabled;
-                        let class = a.class.clone().unwrap_or_else(|| "\u{2014}".to_string());
-                        let (dot, state_text) = if disabled {
-                            ("rh-dot off", "disabled")
-                        } else {
-                            ("rh-dot on", "enabled")
-                        };
-                        let toggle_login = login.clone();
-                        let toggle = move |_| app.set_account_disabled(&toggle_login, !disabled);
-                        let btn_label = if disabled { "Enable" } else { "Disable" };
-                        let btn_target = login.clone();
-                        view! {
-                            <tr>
-                                <td>
-                                    <span class=dot aria-hidden="true"></span>
-                                    <span class="rh-visually-hidden">{state_text}</span>
-                                </td>
-                                <td class="rh-member-name">{login}</td>
-                                <td class="rh-member-handle">{class}</td>
-                                <td class="rh-account-role">{a.role.to_string()}</td>
-                                <td>
-                                    <button class="rh-btn small" on:click=toggle>
-                                        {btn_label}
-                                        <span class="rh-visually-hidden">" "{btn_target}</span>
-                                    </button>
-                                </td>
-                            </tr>
-                        }
-                    }
-                />
-            </tbody>
-        </table>
-    }
-}
-
-/// Permission classes: name, member count, and capability mask (hex), as a
-/// table for the same reason as the accounts panel.
-#[component]
-pub(crate) fn AdminClassesPanel() -> impl IntoView {
-    let app = expect_context::<AppState>();
-    let admin = app.admin;
-    view! {
-        <h2 class="rh-panel-title">"Classes"</h2>
-        <table class="rh-table">
-            <thead>
-                <tr>
-                    <th scope="col">"Name"</th>
-                    <th scope="col">"Members"</th>
-                    <th scope="col">"Capability mask"</th>
-                </tr>
-            </thead>
-            <tbody>
-                <For
-                    each=move || admin.with(|a| a.classes.clone())
-                    key=|c| c.name.clone()
-                    children=move |c| {
-                        let mask = format!("0x{:016x}", c.base_mask);
-                        view! {
-                            <tr>
-                                <td class="rh-member-name">{c.name}</td>
-                                <td class="rh-member-handle">{c.members.to_string()}</td>
-                                <td class="rh-file-meta">{mask}</td>
-                            </tr>
-                        }
-                    }
-                />
-            </tbody>
-        </table>
     }
 }
 

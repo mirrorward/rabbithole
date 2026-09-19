@@ -245,6 +245,64 @@ impl InvitesRepo<'_> {
         .map(|r| r.get::<i64, _>("created_by")))
     }
 
+    /// Every invitation, newest first: `(code, created_by login, expires_at,
+    /// used_by login)`. The logins are looked up here so a console never has
+    /// to ask for account ids it would only turn back into names. An account
+    /// that no longer exists reads as `#<id>`; a reservation in flight
+    /// (`used_by = 0`) reads as used, by nobody yet.
+    pub async fn list(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, String, i64, Option<String>)>, StoreError> {
+        Ok(sqlx::query(
+            "SELECT i.code, i.expires_at, i.created_by, i.used_by,
+                    c.login AS creator, u.login AS redeemer
+             FROM invites i
+             LEFT JOIN accounts c ON c.id = i.created_by
+             LEFT JOIN accounts u ON u.id = i.used_by
+             ORDER BY i.created_at DESC, i.code
+             LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(self.0)
+        .await?
+        .iter()
+        .map(|r| {
+            let creator = r
+                .get::<Option<String>, _>("creator")
+                .unwrap_or_else(|| format!("#{}", r.get::<i64, _>("created_by")));
+            let used_by = r.get::<Option<i64>, _>("used_by").map(|id| {
+                r.get::<Option<String>, _>("redeemer").unwrap_or_else(|| {
+                    if id == 0 {
+                        "someone, just now".into()
+                    } else {
+                        format!("#{id}")
+                    }
+                })
+            });
+            (
+                r.get::<String, _>("code"),
+                creator,
+                r.get::<i64, _>("expires_at"),
+                used_by,
+            )
+        })
+        .collect())
+    }
+
+    /// Withdraw an invitation nobody has used. Returns whether there was one:
+    /// a used code is history, not something to revoke.
+    pub async fn revoke(&self, code: &str) -> Result<bool, StoreError> {
+        Ok(
+            sqlx::query("DELETE FROM invites WHERE code = ? AND used_by IS NULL")
+                .bind(code)
+                .execute(self.0)
+                .await?
+                .rows_affected()
+                > 0,
+        )
+    }
+
     /// Finalise a reserved invite with the real redeemer account id (replaces
     /// the pending `0` from [`reserve`]).
     ///

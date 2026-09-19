@@ -127,8 +127,8 @@ struct Inner {
     conn_sink: Option<ConnSink>,
     file_sink: Option<FileSink>,
     admin_sink: Option<AdminSink>,
-    /// In-flight admin config keys, FIFO. `GetConfig`/`SetConfig` push
-    /// `Some(key)`; other admin verbs push `None`.
+    /// What each in-flight admin request was about, FIFO
+    /// ([`AdminCommand::tag`]): replies carry no such thing themselves.
     pending_admin: RefCell<VecDeque<Option<String>>>,
     notice_sink: Option<NoticeSink>,
     who_sink: Option<WhoSink>,
@@ -603,16 +603,7 @@ impl WsClient {
     pub fn dispatch_admin(&self, command: &AdminCommand) {
         let mut b = self.inner.borrow_mut();
         let id = b.next_request_id();
-        let pending = match command {
-            AdminCommand::GetConfig { key } | AdminCommand::SetConfig { key, .. } => {
-                Some(key.clone())
-            }
-            // Not a key: a marker, so a refusal of the describe request (an
-            // older burrow) reaches the settings model as exactly that.
-            AdminCommand::DescribeConfig => Some(crate::admin_settings::DESCRIBE.to_string()),
-            AdminCommand::GetSurfaceStatus => Some(crate::admin_settings::SURFACES.to_string()),
-            _ => None,
-        };
+        let pending = command.tag();
         match wire::admin_command_to_frame(command, id) {
             Ok(Some(frame)) => match encode_frame(&frame) {
                 Ok(bytes) => {

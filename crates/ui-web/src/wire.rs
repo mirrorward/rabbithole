@@ -74,11 +74,12 @@ use std::rc::Rc;
 
 use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::admin::{
-    AccountEntry, AccountList, AccountListRequest, AccountSet, Broadcast, ClassEntry, ClassList,
-    ClassListRequest, ClassSet, ConfigApplied, ConfigDescribeRequest, ConfigDescription, ConfigGet,
-    ConfigKeyInfo, ConfigSet, ConfigValue, GatewayStatsReply, GatewayStatsRequest, InviteCode,
-    InviteCreate, Kick, SurfaceInfo, SurfaceStatus, SurfaceStatusRequest, ThemeBundleInfo,
-    ThemeBundleSet,
+    AccountCreate, AccountEntry, AccountList, AccountListRequest, AccountPasswordSet, AccountSet,
+    AccountTotpReset, Broadcast, ClassEntry, ClassList, ClassListRequest, ClassSet, ConfigApplied,
+    ConfigDescribeRequest, ConfigDescription, ConfigGet, ConfigKeyInfo, ConfigSet, ConfigValue,
+    GatewayStatsReply, GatewayStatsRequest, InviteCode, InviteCreate, InviteEntry, InviteList,
+    InviteListRequest, InviteRevoke, Kick, SurfaceInfo, SurfaceStatus, SurfaceStatusRequest,
+    ThemeBundleInfo, ThemeBundleSet,
 };
 use rabbithole_proto::board::{
     BoardList, BoardListRequest, PostCreate, ThreadList, ThreadListRequest, ThreadPosts,
@@ -1225,6 +1226,34 @@ pub enum AdminCommand {
         /// New disabled flag, if changing.
         disabled: Option<bool>,
     },
+    /// Make an account. → empty ack.
+    CreateAccount {
+        /// The new login.
+        login: String,
+        /// Its first password.
+        password: Secret,
+        /// The `Role` ordinal it gets.
+        role: u8,
+    },
+    /// Give an account a new password, signing it out everywhere. → empty ack.
+    SetAccountPassword {
+        /// Target login.
+        login: String,
+        /// The new password.
+        password: Secret,
+    },
+    /// Remove an account's two-factor enrolment. → empty ack.
+    ResetAccountTotp {
+        /// Target login.
+        login: String,
+    },
+    /// List invitations. → [`InviteList`].
+    ListInvites,
+    /// Withdraw an unused invitation. → empty ack.
+    RevokeInvite {
+        /// The code to withdraw.
+        code: String,
+    },
     /// Mint an invite code. → [`InviteCode`].
     CreateInvite {
         /// Time-to-live in seconds.
@@ -1283,6 +1312,8 @@ pub enum AdminEvent {
     },
     /// An invite code was minted.
     InviteCreated(InviteCode),
+    /// The invitations were listed.
+    InvitesListed(Vec<InviteEntry>),
     /// A config value was read.
     ConfigLoaded {
         /// Config key.
@@ -1312,6 +1343,49 @@ pub enum AdminEvent {
     ThemeBundleApplied(ThemeBundleInfo),
 }
 
+/// A password on its way to the burrow. It prints as nothing, so a command that
+/// carries one can still derive `Debug` without ever putting it in a log.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(\u{2026})")
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(s: &str) -> Self {
+        Secret(s.to_string())
+    }
+}
+
+impl AdminCommand {
+    /// What a reply to this command is paired with when it comes back: the
+    /// wire's error frame says "refused" and nothing about *what* was, so the
+    /// transport remembers, in order, what each request was about. A config
+    /// key for the two config verbs; a `*`-prefixed marker (no key has a `*`)
+    /// for anything else whose outcome a person is waiting on.
+    pub fn tag(&self) -> Option<String> {
+        Some(match self {
+            AdminCommand::GetConfig { key } | AdminCommand::SetConfig { key, .. } => key.clone(),
+            AdminCommand::DescribeConfig => crate::admin_settings::DESCRIBE.to_string(),
+            AdminCommand::GetSurfaceStatus => crate::admin_settings::SURFACES.to_string(),
+            AdminCommand::CreateAccount { login, .. } => format!("*account-create:{login}"),
+            AdminCommand::SetAccountPassword { login, .. } => {
+                format!("*account-password:{login}")
+            }
+            AdminCommand::ResetAccountTotp { login } => format!("*account-totp:{login}"),
+            AdminCommand::SetAccount { login, .. } => format!("*account-set:{login}"),
+            AdminCommand::SetClass { name, .. } => format!("*class-set:{name}"),
+            AdminCommand::ListInvites => "*invites".to_string(),
+            AdminCommand::CreateInvite { .. } => "*invite-create".to_string(),
+            AdminCommand::RevokeInvite { code } => format!("*invite-revoke:{code}"),
+            _ => return None,
+        })
+    }
+}
+
 /// Map an [`AdminCommand`] to the ADMIN-family request [`Frame`] that carries
 /// it.
 pub fn admin_command_to_frame(
@@ -1337,6 +1411,25 @@ pub fn admin_command_to_frame(
             set.class = class.clone();
             set.disabled = *disabled;
             Frame::request(id, &set)?
+        }
+        AdminCommand::CreateAccount {
+            login,
+            password,
+            role,
+        } => Frame::request(
+            id,
+            &AccountCreate::new(login.clone(), password.0.clone(), *role),
+        )?,
+        AdminCommand::SetAccountPassword { login, password } => Frame::request(
+            id,
+            &AccountPasswordSet::new(login.clone(), password.0.clone()),
+        )?,
+        AdminCommand::ResetAccountTotp { login } => {
+            Frame::request(id, &AccountTotpReset::new(login.clone()))?
+        }
+        AdminCommand::ListInvites => Frame::request(id, &InviteListRequest)?,
+        AdminCommand::RevokeInvite { code } => {
+            Frame::request(id, &InviteRevoke::new(code.clone()))?
         }
         AdminCommand::CreateInvite { ttl_secs } => {
             Frame::request(id, &InviteCreate::new(*ttl_secs))?
@@ -1378,6 +1471,9 @@ pub fn frame_to_admin_events(frame: &Frame) -> Vec<AdminEvent> {
     }
     if let Some(Ok(m)) = frame.decode::<InviteCode>() {
         return vec![AdminEvent::InviteCreated(m)];
+    }
+    if let Some(Ok(m)) = frame.decode::<InviteList>() {
+        return vec![AdminEvent::InvitesListed(m.invites)];
     }
     if let Some(Ok(m)) = frame.decode::<ConfigValue>() {
         return vec![AdminEvent::ConfigLoaded {

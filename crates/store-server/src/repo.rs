@@ -288,6 +288,16 @@ impl SessionsRepo<'_> {
     }
 
     /// Remove expired sessions; returns how many were reaped.
+    /// Forget every saved sign-in of one account: after a password reset or
+    /// a disable, a token minted under the old state must not resume.
+    pub async fn revoke_account(&self, account_id: i64) -> Result<u64, StoreError> {
+        Ok(sqlx::query("DELETE FROM sessions WHERE account_id = ?")
+            .bind(account_id)
+            .execute(self.0)
+            .await?
+            .rows_affected())
+    }
+
     pub async fn reap_expired(&self) -> Result<u64, StoreError> {
         Ok(
             sqlx::query("DELETE FROM sessions WHERE expires_at <= unixepoch()")

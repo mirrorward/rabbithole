@@ -348,6 +348,12 @@ pub async fn handle(
         if !ctx.allows(shared, "admin", Caps::ACCOUNT_ADMIN) {
             fail!(ErrorCode::Forbidden);
         }
+        // Nobody grants a capability they do not hold. Without this, editing
+        // a class (one's own included) was a way to every capability there is.
+        let held = shared.perms.effective(&ctx.subject(shared), "admin");
+        if req.base_mask & !held != 0 {
+            fail!(ErrorCode::Forbidden);
+        }
         shared
             .classes
             .set(&shared.pool, &req.name, req.base_mask)
@@ -377,6 +383,23 @@ pub async fn handle(
         if !ctx.allows(shared, "admin", Caps::ACCOUNT_ADMIN) {
             fail!(ErrorCode::Forbidden);
         }
+        // The ordering every account operation shares (see `handlers15`):
+        // below yourself, never yourself, never a role above your own. This
+        // handler had none, so an account admin could make anyone a superuser.
+        let standing = crate::handlers15::Standing::of(ctx);
+        let Some(target) = AccountsRepo(&shared.pool).by_login(&req.login).await? else {
+            fail!(ErrorCode::NotFound)
+        };
+        if !standing.may_manage(&target) {
+            fail!(ErrorCode::Forbidden);
+        }
+        if let Some(n) = req.role {
+            match crate::handlers15::role_from_wire(n) {
+                Some(role) if standing.may_assign(role) => {}
+                Some(_) => fail!(ErrorCode::Forbidden),
+                None => fail!(ErrorCode::BadRequest),
+            }
+        }
         let changed = crate::admin_store::account_set(
             shared,
             &req.login,
@@ -387,6 +410,11 @@ pub async fn handle(
         .await?;
         if !changed {
             fail!(ErrorCode::NotFound);
+        }
+        // A disabled account is out now, not at its next sign-in; a changed
+        // role or class is picked up by its next session.
+        if req.disabled == Some(true) {
+            crate::handlers15::sign_out_everywhere(shared, target.id, "account disabled").await;
         }
         audit(shared, &ctx.login, "account-set", format!("{req:?}"));
         conn.send(Frame::ack(frame)).await?;

@@ -523,6 +523,183 @@ impl Message for SurfaceStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Accounts and invites an operator manages by hand: types 19..24.
+//
+// The rules every one of them shares (and that `AccountSet` now shares too):
+// an operator acts on accounts *below* their own role, never on themselves,
+// and never hands out a role above their own. A superuser is exempt from the
+// ordering, not from "never on yourself".
+// ---------------------------------------------------------------------------
+
+/// Create an account. → empty ack. Requires `ACCOUNT_ADMIN`.
+/// `AlreadyExists` when the login (or a persona of that name) is taken,
+/// `BadRequest` for a login or password the burrow will not accept,
+/// `Forbidden` for a role above the operator's own.
+#[non_exhaustive]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountCreate {
+    pub login: String,
+    pub password: String,
+    /// The `Role` ordinal (0 guest .. 4 superuser).
+    pub role: u8,
+}
+
+impl AccountCreate {
+    pub fn new(login: impl Into<String>, password: impl Into<String>, role: u8) -> Self {
+        Self {
+            login: login.into(),
+            password: password.into(),
+            role,
+        }
+    }
+}
+
+// A password never reaches a log by way of `{:?}`.
+impl std::fmt::Debug for AccountCreate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountCreate")
+            .field("login", &self.login)
+            .field("role", &self.role)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Message for AccountCreate {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 19;
+}
+
+/// Give an account a new password. → empty ack. Requires `ACCOUNT_ADMIN`.
+/// Every saved sign-in of that account stops working, so whoever had the old
+/// password is out as well as the person who forgot it.
+#[non_exhaustive]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountPasswordSet {
+    pub login: String,
+    pub password: String,
+}
+
+impl AccountPasswordSet {
+    pub fn new(login: impl Into<String>, password: impl Into<String>) -> Self {
+        Self {
+            login: login.into(),
+            password: password.into(),
+        }
+    }
+}
+
+impl std::fmt::Debug for AccountPasswordSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountPasswordSet")
+            .field("login", &self.login)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Message for AccountPasswordSet {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 20;
+}
+
+/// Remove an account's two-factor enrolment, for someone who lost their
+/// device and their recovery codes. → empty ack. Requires `ACCOUNT_ADMIN`.
+/// `NotFound` when the account has none.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountTotpReset {
+    pub login: String,
+}
+
+impl AccountTotpReset {
+    pub fn new(login: impl Into<String>) -> Self {
+        Self {
+            login: login.into(),
+        }
+    }
+}
+
+impl Message for AccountTotpReset {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 21;
+}
+
+/// List invitations. → [`InviteList`]. Requires `ACCOUNT_ADMIN`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteListRequest;
+
+impl Message for InviteListRequest {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 22;
+}
+
+/// One invitation.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteEntry {
+    pub code: String,
+    /// Login of whoever made it.
+    pub created_by: String,
+    /// Unix seconds.
+    pub expires_at: i64,
+    /// Login of whoever used it; `None` while it is still good (or expired).
+    pub used_by: Option<String>,
+}
+
+impl InviteEntry {
+    pub fn new(
+        code: impl Into<String>,
+        created_by: impl Into<String>,
+        expires_at: i64,
+        used_by: Option<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            created_by: created_by.into(),
+            expires_at,
+            used_by,
+        }
+    }
+}
+
+/// Reply to [`InviteListRequest`]: newest first.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteList {
+    pub invites: Vec<InviteEntry>,
+}
+
+impl InviteList {
+    pub fn new(invites: Vec<InviteEntry>) -> Self {
+        Self { invites }
+    }
+}
+
+impl Message for InviteList {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 23;
+}
+
+/// Withdraw an invitation nobody has used. → empty ack. Requires
+/// `ACCOUNT_ADMIN`. `NotFound` for an unknown code or one already used (the
+/// account it made is a separate matter).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteRevoke {
+    pub code: String,
+}
+
+impl InviteRevoke {
+    pub fn new(code: impl Into<String>) -> Self {
+        Self { code: code.into() }
+    }
+}
+
+impl Message for InviteRevoke {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 24;
+}
+
+// ---------------------------------------------------------------------------
 // Moderation suite (Wave 13): types 30..40 of the ADMIN family.
 // ---------------------------------------------------------------------------
 

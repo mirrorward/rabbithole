@@ -69,7 +69,7 @@
 |---|---|---|
 | 1 | Described settings, saved to disk; the console's shell: sections, switches, dropdowns, Reset, one save bar, descriptions | 0.216.0 |
 | 2 | Surfaces start and stop live, and say whether they are listening | 0.217.0 (`apps/server/src/surfaces.rs`; federation, port mapping and doors still wait for a restart) |
-| 3 | People: create, role, class, disable, password and 2FA reset, delete; classes with named capabilities; invites | |
+| 3 | People: create, role, class, disable, password and 2FA reset; classes with named capabilities; invites | 0.218.0. Closed two privilege holes on the way (`AccountSet` had no role ordering, `ClassSet` no capability check). **Not done: deleting an account** (it cascades through personas, sessions, keys and more; disable is the reversible answer until that is mapped) and account search beyond the loaded page |
 | 4 | Boards: create, edit, delete, reorder; moderators can remove posts | |
 | 5 | File areas and files: create, edit, delete areas; delete, describe, move files; quarantine and deny-hashes | |
 | 6 | Moderation: reports queue, sessions with Kick (no typed ids), broadcast, audit log | |

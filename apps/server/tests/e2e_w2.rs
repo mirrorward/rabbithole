@@ -333,6 +333,11 @@ async fn admin_family_classes_broadcast_kick() {
     let mut set = padm::AccountSet::new("pleb");
     set.disabled = Some(false);
     admin.request_ack(&set).await.unwrap();
+    // Disabling an account signs it out at once (it used to stay connected
+    // until it chose to leave), so pleb comes back in through the front door.
+    let mut pleb = connect(&burrow).await;
+    pleb.auth_password("pleb", "pleb-pw").await.unwrap();
+    pleb.expect_welcome().await.unwrap();
 
     // Broadcast reaches sessions as ServerNotice.
     admin

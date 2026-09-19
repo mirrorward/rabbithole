@@ -63,6 +63,13 @@ pub struct Session {
     pub files: RwSignal<FilesState>,
     /// Whether this session holds an admin capability on its server.
     pub is_admin: RwSignal<bool>,
+    /// The role this session holds on its server (the `Role` ordinal), its
+    /// effective capability mask, and the handle it signed in as. The burrow
+    /// enforces what an operator may do; the console reads these so it never
+    /// offers what would be refused ([`crate::admin_people`]).
+    pub role: RwSignal<u8>,
+    pub caps: RwSignal<u64>,
+    pub handle: RwSignal<String>,
     /// Whether this session is a guest: a handle with no account behind it.
     /// The server refuses a guest everything that is between accounts, so
     /// the DM view offers sign-in instead of asking and failing.
@@ -148,6 +155,9 @@ pub struct AppState {
     /// one burrow; they must never be saved into another because the focus
     /// moved while they were staged.
     pub admin_settings_owner: RwSignal<Option<ServerId>>,
+    /// The People pane's invitations and the outcome of its last action
+    /// ([`crate::admin_people`]).
+    pub people: RwSignal<crate::admin_people::PeopleState>,
     /// The Syndication & Gateways panel model, folded from paired config
     /// get/set replies ([`crate::syndication_admin`]).
     pub syndication: RwSignal<SynAdminState>,
@@ -217,6 +227,9 @@ impl AppState {
             files: create_rw_signal(FilesState::default()),
             is_admin: create_rw_signal(false),
             is_guest: create_rw_signal(false),
+            role: create_rw_signal(0),
+            caps: create_rw_signal(0),
+            handle: create_rw_signal(String::new()),
             live: create_rw_signal(false),
             server_theme: create_rw_signal(None),
             name: create_rw_signal(None),
@@ -242,6 +255,7 @@ impl AppState {
             admin: create_rw_signal(AdminState::default()),
             admin_settings: create_rw_signal(Default::default()),
             admin_settings_owner: create_rw_signal(None),
+            people: create_rw_signal(Default::default()),
             syndication: create_rw_signal(SynAdminState::default()),
             palette_open: create_rw_signal(false),
             switcher_open: create_rw_signal(false),
@@ -463,6 +477,9 @@ impl AppState {
                 files: create_rw_signal(FilesState::default()),
                 is_admin: create_rw_signal(false),
                 is_guest: create_rw_signal(false),
+                role: create_rw_signal(0),
+                caps: create_rw_signal(0),
+                handle: create_rw_signal(String::new()),
                 live: create_rw_signal(false),
                 server_theme: create_rw_signal(None),
                 name: create_rw_signal(None),
@@ -611,6 +628,9 @@ impl AppState {
         let session_name = self.focused().name;
         let is_admin = self.focused().is_admin;
         let is_guest = self.focused().is_guest;
+        let my_role = self.focused().role;
+        let my_caps = self.focused().caps;
+        let my_login = self.focused().handle;
         let presence = self.presence;
         let ws_sv = self.focused().ws;
         // Endpoint captured for both the "connected" toast/label and, on a
@@ -701,9 +721,12 @@ impl AppState {
                         token,
                         screen_name,
                         role,
-                        ..
+                        caps,
                     } => {
                         authed.set(true);
+                        my_role.set(*role);
+                        my_caps.set(*caps);
+                        my_login.set(screen_name.clone());
                         *my_handle.borrow_mut() = screen_name.clone();
                         // Operators get the console. The server already told
                         // us the role; the sidebar used to ignore it, so a
@@ -884,9 +907,12 @@ impl AppState {
                         a.apply(event);
                     }
                 });
-                syn_sig.update(|s| s.apply_live(key.as_deref(), &events));
+                // The feed pane reads config keys; a `*` marker is not one.
+                if !key.as_deref().is_some_and(|k| k.starts_with('*')) {
+                    syn_sig.update(|s| s.apply_live(key.as_deref(), &events));
+                }
                 if let Some(app) = current() {
-                    app.fold_settings_reply(key.as_deref(), &events);
+                    app.fold_admin_reply(key.as_deref(), &events);
                 }
             }));
             ws.on_members(std::rc::Rc::new(move |members| {
@@ -1222,6 +1248,9 @@ impl AppState {
         }
         match ask.intent {
             ConfirmIntent::Leave(id) => self.disconnect(&id),
+            ConfirmIntent::DisableAccount(login) => self.set_account_disabled(&login, true),
+            ConfirmIntent::ResetTotp(login) => self.reset_account_totp(&login),
+            ConfirmIntent::RevokeInvite(code) => self.revoke_invite(&code),
         }
     }
 
@@ -1288,6 +1317,9 @@ impl AppState {
                 files: create_rw_signal(FilesState::default()),
                 is_admin: create_rw_signal(false),
                 is_guest: create_rw_signal(false),
+                role: create_rw_signal(0),
+                caps: create_rw_signal(0),
+                handle: create_rw_signal(String::new()),
                 live: create_rw_signal(false),
                 server_theme: create_rw_signal(None),
                 name: create_rw_signal(Some(demo.name.to_string())),
@@ -1311,6 +1343,10 @@ impl AppState {
         });
         // The seeded host handle carries the admin capability.
         self.set_admin(handle == "rabbit");
+        let me = self.focused();
+        me.handle.set(handle.to_string());
+        me.role.set(if handle == "rabbit" { 3 } else { 1 });
+        me.caps.set(if handle == "rabbit" { u64::MAX } else { 0 });
         self.refresh_who();
         self.load_dms();
         self.load_radio();
@@ -2123,16 +2159,14 @@ impl AppState {
         });
     }
 
-    /// Enable or disable an account.
+    /// Enable or disable an account. A disabled account is signed out at once.
     pub fn set_account_disabled(&self, login: &str, disabled: bool) {
-        self.dispatch_admin(AdminCommand::SetAccount {
+        self.dispatch_people(AdminCommand::SetAccount {
             login: login.to_string(),
             role: None,
             class: None,
             disabled: Some(disabled),
         });
-        // Reflect the change back into the visible listing.
-        self.load_accounts();
     }
 
     /// Ask the focused burrow to describe its settings. Settings staged for
@@ -2266,9 +2300,161 @@ impl AppState {
         }
     }
 
+    /// Route a tagged admin reply to the model that is waiting for it: the
+    /// settings model for config keys and its two markers, the People model
+    /// for account, class and invitation actions.
+    pub fn fold_admin_reply(&self, tag: Option<&str>, events: &[AdminEvent]) {
+        let is_people = tag.is_some_and(|t| {
+            ["*account-", "*class-", "*invite"]
+                .iter()
+                .any(|p| t.starts_with(p))
+        });
+        if !is_people {
+            self.fold_settings_reply(tag, events);
+            return;
+        }
+        let tag = tag.unwrap_or_default().to_string();
+        let mut reload = crate::admin_people::Reload::Nothing;
+        let mut said = None;
+        self.people.update(|p| {
+            reload = p.apply(&tag, events);
+            said = p.notice.take();
+        });
+        // A toast, not a line at the top of the pane: the operator may be a
+        // screen further down, where the thing they just did is.
+        if let Some((ok, text)) = said {
+            let kind = if ok {
+                crate::toasts::ToastKind::Success
+            } else {
+                crate::toasts::ToastKind::Warn
+            };
+            self.notify(kind, text);
+        }
+        if reload == crate::admin_people::Reload::Nothing {
+            return;
+        }
+        // Live, this runs inside the transport's borrow: reload a tick later.
+        let app = *self;
+        defer(move || match reload {
+            crate::admin_people::Reload::Accounts => app.load_accounts(),
+            crate::admin_people::Reload::Classes => app.load_classes(),
+            crate::admin_people::Reload::Invites => app.load_invites(),
+            crate::admin_people::Reload::Nothing => {}
+        });
+    }
+
+    /// Drive one People action and fold its reply under its own tag, so the
+    /// pane can say what came of *that* action.
+    fn dispatch_people(&self, command: AdminCommand) {
+        let Some(tag) = command.tag() else {
+            return;
+        };
+        self.people.update(|p| p.sent(&tag));
+        #[cfg(target_arch = "wasm32")]
+        if self.focused().live.get_untracked() {
+            self.focused()
+                .ws
+                .update_value(|c| c.dispatch_admin(&command));
+            return;
+        }
+        let mut events = Vec::new();
+        self.focused()
+            .client
+            .update_value(|client| events = client.dispatch_admin(command));
+        // The demo burrow answers a list request with the list itself.
+        let admin = self.admin;
+        admin.update(|a| {
+            for event in &events {
+                a.apply(event);
+            }
+        });
+        self.fold_admin_reply(Some(&tag), &events);
+    }
+
+    /// Make an account with `role` (a `Role` ordinal).
+    pub fn create_account(&self, login: &str, password: &str, role: u8) {
+        self.dispatch_people(AdminCommand::CreateAccount {
+            login: login.trim().to_string(),
+            password: password.into(),
+            role,
+        });
+    }
+
+    /// Give an account a new password. It is signed out everywhere.
+    pub fn set_account_password(&self, login: &str, password: &str) {
+        self.dispatch_people(AdminCommand::SetAccountPassword {
+            login: login.to_string(),
+            password: password.into(),
+        });
+    }
+
+    /// Remove an account's two-factor enrolment.
+    pub fn reset_account_totp(&self, login: &str) {
+        self.dispatch_people(AdminCommand::ResetAccountTotp {
+            login: login.to_string(),
+        });
+    }
+
+    /// Change an account's role.
+    pub fn set_account_role(&self, login: &str, role: u8) {
+        self.dispatch_people(AdminCommand::SetAccount {
+            login: login.to_string(),
+            role: Some(role),
+            class: None,
+            disabled: None,
+        });
+    }
+
+    /// Put an account in a class (`""` takes it out of any).
+    pub fn set_account_class(&self, login: &str, class: &str) {
+        self.dispatch_people(AdminCommand::SetAccount {
+            login: login.to_string(),
+            role: None,
+            class: Some(class.to_string()),
+            disabled: None,
+        });
+    }
+
+    /// Create a class, or change what one allows.
+    pub fn save_class(&self, name: &str, base_mask: u64) {
+        self.dispatch_people(AdminCommand::SetClass {
+            name: name.trim().to_string(),
+            base_mask,
+        });
+    }
+
+    /// Load the invitations.
+    pub fn load_invites(&self) {
+        self.dispatch_people(AdminCommand::ListInvites);
+    }
+
+    /// Withdraw an invitation nobody has used.
+    pub fn revoke_invite(&self, code: &str) {
+        self.dispatch_people(AdminCommand::RevokeInvite {
+            code: code.to_string(),
+        });
+    }
+
+    /// A strong password to hand to someone, from the browser's randomness.
+    pub fn generate_password(&self) -> String {
+        #[cfg(target_arch = "wasm32")]
+        let bytes = {
+            let mut bytes = [0u8; 15];
+            if let Some(crypto) = web_sys::window().and_then(|w| w.crypto().ok()) {
+                let _ = crypto.get_random_values_with_u8_array(&mut bytes);
+            }
+            bytes
+        };
+        // Off the browser there is no randomness to draw on, and no one to
+        // hand a password to.
+        #[cfg(not(target_arch = "wasm32"))]
+        let bytes = [0u8; 15];
+        crate::admin_people::password_from(&bytes)
+    }
+
     /// Mint an invite code with the given time-to-live in seconds.
     pub fn create_invite(&self, ttl_secs: i64) {
-        self.dispatch_admin(AdminCommand::CreateInvite { ttl_secs });
+        self.dispatch_people(AdminCommand::CreateInvite { ttl_secs });
     }
 
     /// Broadcast a notice to every session.
@@ -2691,6 +2877,12 @@ pub fn current() -> Option<AppState> {
 pub enum ConfirmIntent {
     /// Leave this burrow: close its socket, drop its session and its token.
     Leave(ServerId),
+    /// Disable an account (by login). It is signed out at once.
+    DisableAccount(String),
+    /// Remove an account's two-factor enrolment.
+    ResetTotp(String),
+    /// Withdraw an unused invitation (by code).
+    RevokeInvite(String),
 }
 
 /// A question put to the person before something irreversible.
@@ -2705,6 +2897,40 @@ pub struct ConfirmAsk {
 }
 
 impl ConfirmAsk {
+    /// "Disable alice?"
+    pub fn disable_account(login: &str) -> Self {
+        ConfirmAsk {
+            title: format!("Disable {login}?"),
+            body: "They are signed out now, everywhere, and cannot sign in until you enable \
+                   the account again. Nothing of theirs is removed."
+                .to_string(),
+            action: "Disable".to_string(),
+            intent: ConfirmIntent::DisableAccount(login.to_string()),
+        }
+    }
+
+    /// "Remove two-factor from alice?"
+    pub fn reset_totp(login: &str) -> Self {
+        ConfirmAsk {
+            title: format!("Remove two-factor from {login}?"),
+            body: "Only do this for someone you are sure of: until they set it up again, \
+                   their password alone lets them in."
+                .to_string(),
+            action: "Remove two-factor".to_string(),
+            intent: ConfirmIntent::ResetTotp(login.to_string()),
+        }
+    }
+
+    /// "Withdraw this invitation?"
+    pub fn revoke_invite(code: &str) -> Self {
+        ConfirmAsk {
+            title: "Withdraw this invitation?".to_string(),
+            body: format!("Nobody will be able to register with {code}."),
+            action: "Withdraw".to_string(),
+            intent: ConfirmIntent::RevokeInvite(code.to_string()),
+        }
+    }
+
     /// "Leave {name}?" This used to be `window.confirm()`, which a desktop
     /// webview answers `false` to without showing anything, so in the app the
     /// Leave button did nothing at all.

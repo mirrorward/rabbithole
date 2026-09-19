@@ -102,6 +102,7 @@ pub struct MockClient {
     file_nodes: Vec<FileNodeView>,
     admin_classes: Vec<ClassEntry>,
     admin_accounts: Vec<AccountEntry>,
+    admin_invites: Vec<rabbithole_proto::admin::InviteEntry>,
     admin_config: Vec<(String, String)>,
     /// Seeded RADIO now-playing frames, served through
     /// [`MockClient::radio_routes`] so the Radio view renders in dev without a
@@ -243,6 +244,7 @@ impl MockClient {
             file_nodes: Self::seeded_file_nodes(),
             admin_classes: Self::seeded_classes(),
             admin_accounts: Self::seeded_accounts(),
+            admin_invites: Self::seeded_invites(),
             admin_config: Self::seeded_config(),
             radio_frames: Self::seeded_radio_frames(),
             invite_seq: 0,
@@ -604,6 +606,21 @@ impl MockClient {
         ]
     }
 
+    fn seeded_invites() -> Vec<rabbithole_proto::admin::InviteEntry> {
+        use rabbithole_proto::admin::InviteEntry;
+        let now = crate::clock::now_ms() / 1000;
+        vec![
+            InviteEntry::new("WARREN-TEA-PARTY", "rabbit", now + 5 * 86_400, None),
+            InviteEntry::new(
+                "WARREN-LOOKING-GLASS",
+                "rabbit",
+                now + 86_400,
+                Some("dormouse".into()),
+            ),
+            InviteEntry::new("WARREN-OLD-HAT", "alice", now - 3_600, None),
+        ]
+    }
+
     fn seeded_config() -> Vec<(String, String)> {
         let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
         vec![
@@ -744,10 +761,57 @@ impl MockClient {
                 }
                 None => vec![AdminEvent::Failed(format!("no account {login}"))],
             },
+            AdminCommand::CreateAccount {
+                login,
+                password,
+                role,
+            } => {
+                if self.admin_accounts.iter().any(|a| a.login == login) {
+                    vec![AdminEvent::Failed("server error: AlreadyExists".into())]
+                } else if password.0.chars().count() < 8 || login.contains(char::is_whitespace) {
+                    vec![AdminEvent::Failed("server error: BadRequest".into())]
+                } else {
+                    let id = self.admin_accounts.iter().map(|a| a.id).max().unwrap_or(0) + 1;
+                    self.admin_accounts
+                        .push(AccountEntry::new(id, &login, role, None, false));
+                    vec![AdminEvent::Ack(format!("Account {login} created."))]
+                }
+            }
+            AdminCommand::SetAccountPassword { login, password } => {
+                if !self.admin_accounts.iter().any(|a| a.login == login) {
+                    vec![AdminEvent::Failed("server error: NotFound".into())]
+                } else if password.0.chars().count() < 8 {
+                    vec![AdminEvent::Failed("server error: BadRequest".into())]
+                } else {
+                    vec![AdminEvent::Ack(format!("Password for {login} changed."))]
+                }
+            }
+            // Nobody in the demo burrow has two-factor set up.
+            AdminCommand::ResetAccountTotp { .. } => {
+                vec![AdminEvent::Failed("server error: NotFound".into())]
+            }
+            AdminCommand::ListInvites => {
+                vec![AdminEvent::InvitesListed(self.admin_invites.clone())]
+            }
+            AdminCommand::RevokeInvite { code } => {
+                let before = self.admin_invites.len();
+                self.admin_invites
+                    .retain(|i| i.code != code || i.used_by.is_some());
+                if self.admin_invites.len() < before {
+                    vec![AdminEvent::Ack("Invitation withdrawn.".into())]
+                } else {
+                    vec![AdminEvent::Failed("server error: NotFound".into())]
+                }
+            }
             AdminCommand::CreateInvite { ttl_secs } => {
                 self.invite_seq += 1;
                 let code = format!("WARREN-{:04}", self.invite_seq);
-                admin_events(&InviteCode::new(code, ttl_secs))
+                let expires = crate::clock::now_ms() / 1000 + ttl_secs;
+                self.admin_invites.insert(
+                    0,
+                    rabbithole_proto::admin::InviteEntry::new(&code, "rabbit", expires, None),
+                );
+                admin_events(&InviteCode::new(code, expires))
             }
             AdminCommand::Broadcast { text } => {
                 vec![AdminEvent::Ack(format!("Broadcast sent: {text}"))]

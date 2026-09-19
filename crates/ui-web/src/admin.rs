@@ -78,7 +78,9 @@ impl AdminState {
             }
             AdminEvent::ConfigLoaded { key, value } => self.upsert_config(key, value),
             // The described settings live in [`crate::admin_settings`].
-            AdminEvent::ConfigDescribed(_) | AdminEvent::SurfacesReported(_) => {}
+            AdminEvent::ConfigDescribed(_)
+            | AdminEvent::SurfacesReported(_)
+            | AdminEvent::InvitesListed(_) => {}
             AdminEvent::ConfigApplied { applied_live } => {
                 self.status = if *applied_live {
                     "Config saved and applied live.".to_string()

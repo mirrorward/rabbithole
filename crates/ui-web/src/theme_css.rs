@@ -1037,6 +1037,57 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 .rh-adm-skeleton div{height:3.6rem;background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--rh-text) 5%,transparent),transparent);background-size:200% 100%;animation:rh-adm-sheen 1.4s ease-in-out infinite}\
 .rh-adm-skeleton div+div{border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
 @keyframes rh-adm-sheen{from{background-position:200% 0}to{background-position:-200% 0}}\
+/* People: accounts, classes and invitations share one row vocabulary. A row\
+   is a summary line that opens its own controls in place, so an operator\
+   never leaves the list to act on what is in it. */\
+.rh-adm-group-head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--rh-space-2);margin:0 0 .5rem}\
+.rh-adm-group-head .rh-adm-group-h{margin:0}\
+.rh-adm-group-tools{display:flex;align-items:center;gap:var(--rh-space-2);flex-wrap:wrap}\
+.rh-adm-count{margin-left:.45rem;font-size:var(--rh-font-xs);font-weight:600;color:var(--rh-muted);font-variant-numeric:tabular-nums}\
+.rh-adm-filter{width:11rem;padding:.35rem .6rem;font-size:var(--rh-font-sm)}\
+.rh-adm-empty{margin:0;padding:var(--rh-space-4);color:var(--rh-muted);font-size:var(--rh-font-sm);text-align:center}\
+.rh-adm-acct+.rh-adm-acct,.rh-adm-invite+.rh-adm-invite{border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
+.rh-adm-acct-line{appearance:none;width:100%;border:0;background:none;font:inherit;color:inherit;text-align:left;cursor:pointer;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr) minmax(0,1fr) 5rem 1rem;align-items:center;gap:var(--rh-space-3);padding:.65rem var(--rh-space-4);font-size:var(--rh-font-sm);transition:background-color .12s ease}\
+.rh-adm-class-line{grid-template-columns:minmax(0,1.5fr) minmax(0,1fr) minmax(0,1fr) 1rem}\
+.rh-adm-acct-line:hover{background:color-mix(in srgb,var(--rh-text) 4%,transparent)}\
+.rh-adm-acct.open>.rh-adm-acct-line{background:color-mix(in srgb,var(--rh-accent) 8%,transparent)}\
+.rh-adm-acct-name{display:flex;align-items:center;gap:.5rem;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+.rh-adm-acct-role,.rh-adm-acct-class,.rh-adm-acct-state{color:var(--rh-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+.rh-adm-acct.off .rh-adm-acct-name{color:var(--rh-muted);text-decoration:line-through}\
+.rh-adm-acct.off .rh-adm-acct-state{color:var(--rh-error);font-weight:600}\
+.rh-adm-chevron{line-height:0;color:var(--rh-muted);transition:transform .18s cubic-bezier(.16,1,.3,1)}\
+.rh-adm-chevron svg{width:1rem;height:1rem}\
+.rh-adm-acct.open .rh-adm-chevron{transform:rotate(180deg)}\
+.rh-adm-acct-detail{padding:var(--rh-space-3) var(--rh-space-4) var(--rh-space-4);border-top:1px solid color-mix(in srgb,var(--rh-text) 6%,transparent);background:color-mix(in srgb,var(--rh-bg) 55%,var(--rh-surface))}\
+.rh-adm-acct-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));gap:var(--rh-space-3) var(--rh-space-4);margin:0 0 var(--rh-space-3)}\
+.rh-adm-acct-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:var(--rh-space-2)}\
+.rh-adm-field{display:flex;flex-direction:column;gap:.3rem;min-width:0;font-size:var(--rh-font-sm)}\
+.rh-adm-field>span:first-child{font-weight:600}\
+.rh-adm-field small{color:var(--rh-muted);font-size:var(--rh-font-xs);line-height:1.4}\
+.rh-adm-field .rh-input,.rh-adm-field .rh-select{width:100%}\
+.rh-adm-inline{display:flex;gap:var(--rh-space-2);align-items:center}\
+.rh-adm-inline .rh-input{flex:1;min-width:0;font-family:var(--rh-font-mono);font-size:var(--rh-font-sm)}\
+.rh-adm-inline .rh-btn{flex:none}\
+.rh-adm-form,.rh-adm-reset-form{display:grid;gap:var(--rh-space-3)}\
+.rh-adm-form{grid-template-columns:repeat(auto-fit,minmax(14rem,1fr));margin:0 0 var(--rh-space-3);padding:var(--rh-space-4);border:1px solid color-mix(in srgb,var(--rh-accent) 30%,transparent);border-radius:var(--rh-radius);background:color-mix(in srgb,var(--rh-accent) 5%,var(--rh-surface))}\
+.rh-adm-form-actions{grid-column:1/-1;display:flex;justify-content:flex-end;gap:var(--rh-space-2)}\
+.rh-adm-reset-form{margin-top:var(--rh-space-3)}\
+.rh-btn.ghost.rh-adm-danger{color:var(--rh-error);border-color:color-mix(in srgb,var(--rh-error) 40%,transparent)}\
+.rh-btn.ghost.rh-adm-danger:hover{background:color-mix(in srgb,var(--rh-error) 10%,transparent);border-color:var(--rh-error)}\
+.rh-adm-add{display:flex;gap:var(--rh-space-2);margin-top:var(--rh-space-2)}\
+.rh-adm-add .rh-input{width:14rem;max-width:100%;padding:.35rem .6rem;font-size:var(--rh-font-sm)}\
+.rh-adm-caps{margin:0 0 var(--rh-space-3);padding:0;border:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(15rem,1fr));gap:.15rem var(--rh-space-4)}\
+.rh-adm-caps legend{grid-column:1/-1;padding:0;margin:0 0 .25rem;font-size:var(--rh-font-xs);font-weight:600;color:var(--rh-muted)}\
+.rh-adm-cap{display:flex;align-items:flex-start;gap:.55rem;padding:.3rem 0;font-size:var(--rh-font-sm);cursor:pointer}\
+.rh-adm-cap input{margin:.2rem 0 0;flex:none;accent-color:var(--rh-accent)}\
+.rh-adm-cap strong{display:block;font-weight:600}\
+.rh-adm-cap small{display:block;color:var(--rh-muted);font-size:var(--rh-font-xs);line-height:1.4}\
+.rh-adm-cap.locked{cursor:not-allowed;opacity:.55}\
+.rh-adm-invite{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,.8fr) minmax(0,1fr) auto;align-items:center;gap:var(--rh-space-3);padding:.55rem var(--rh-space-4);font-size:var(--rh-font-sm)}\
+.rh-adm-invite-code{font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+.rh-adm-invite-by,.rh-adm-invite-state{color:var(--rh-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+.rh-adm-invite.spent .rh-adm-invite-code{color:var(--rh-muted);text-decoration:line-through}\
+.rh-adm-invite-actions{display:flex;gap:var(--rh-space-2);justify-content:flex-end;min-width:0}\
 /* A switch is a checkbox that says so (role=switch): the native control keeps\
    the keyboard, the form semantics and the focus ring for free. The off track\
    is dark enough to be seen as a control against the row (3:1). */\
@@ -1147,6 +1198,7 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 @media (max-width:720px){.rh-connect{display:block;flex:none}.rh-connect-side{overflow:visible;gap:var(--rh-space-4);padding:var(--rh-space-5) var(--rh-space-4);border-right:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-connect-brand{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:var(--rh-space-3);align-items:center;text-align:left}.rh-connect-logo{grid-row:1/3;width:3.5rem;height:3.5rem}.rh-connect-brand h1{margin:0;align-self:end;font-size:1.35rem}.rh-connect-tagline{align-self:start}.rh-connect-version{display:none}.rh-connect-foot{padding-top:0}.rh-connect-main{display:block}.rh-glass-head{padding:var(--rh-space-4) var(--rh-space-4) var(--rh-space-2)}.rh-glass-search{flex:1;width:auto;min-width:0}.rh-glass-cols{display:none}.rh-glass-scroll{overflow:visible;padding:0 var(--rh-space-2) var(--rh-space-3)}.rh-glass-row{grid-template-columns:1.6rem minmax(0,1fr) auto;grid-template-areas:\"mark name users\" \"mark desc desc\";row-gap:0;min-height:2.75rem;padding:.4rem .5rem}.rh-glass-mark{grid-area:mark}.rh-glass-name{grid-area:name}.rh-glass-desc{grid-area:desc}.rh-glass-users{grid-area:users}.rh-glass-detail{padding-left:calc(2.1rem + var(--rh-space-3))}.rh-glass-add{grid-template-columns:1fr 1fr}.rh-glass-add .rh-input{grid-column:1/-1}.rh-glass-page{display:block;overflow-y:auto}.rh-player-now{flex-direction:column;align-items:flex-start;gap:var(--rh-space-3)}.rh-player-cover{width:9rem;height:9rem}.rh-player-recent li{grid-template-columns:1.4rem minmax(0,1fr) auto}.rh-player-recent-artist{grid-column:2;grid-row:2}.rh-glass-status{padding:.5rem var(--rh-space-4) calc(.5rem + env(safe-area-inset-bottom))}}\
 @media (max-width:960px){.rh-adm{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}.rh-adm-nav{display:none}.rh-adm-jump{display:block;padding:var(--rh-space-3) var(--rh-space-5) 0}.rh-adm-jump .rh-select{width:100%;max-width:46rem}}\
 @media (max-width:720px){.rh-adm-jump{padding:var(--rh-space-3) var(--rh-space-4) 0}.rh-adm-pane{padding:var(--rh-space-4) var(--rh-space-4) 0}.rh-adm-row:not(.inline){grid-template-columns:minmax(0,1fr)}.rh-adm-row:not(.inline) .rh-adm-control{justify-content:flex-start}.rh-adm-number{align-items:flex-start}.rh-adm-num{text-align:left}.rh-adm-text,.rh-adm-choice{width:100%;max-width:none}.rh-adm-fixed{max-width:none;text-align:left}.rh-adm-savebar{flex-wrap:wrap}.rh-adm-savebar-text{flex-basis:100%}}\
+@media (max-width:720px){.rh-adm-acct-line{grid-template-columns:minmax(0,1fr) auto 1rem;row-gap:.1rem}.rh-adm-acct-line .rh-adm-acct-class{display:none}.rh-adm-acct-line .rh-adm-acct-state{grid-column:1;grid-row:2;font-size:var(--rh-font-xs)}.rh-adm-class-line .rh-adm-acct-role{display:none}.rh-adm-invite{grid-template-columns:minmax(0,1fr) auto}.rh-adm-invite-by{display:none}.rh-adm-invite-state{grid-column:1;font-size:var(--rh-font-xs)}.rh-adm-invite-actions{grid-column:2;grid-row:1/3}.rh-adm-filter{width:100%}.rh-adm-group-tools{width:100%}.rh-adm-inline{flex-wrap:wrap}}\
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:.01ms!important;transition-delay:0s!important;animation-duration:.01ms!important;animation-delay:0s!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}\
 ";
 
