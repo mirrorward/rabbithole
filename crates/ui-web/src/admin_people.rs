@@ -376,7 +376,9 @@ impl PeopleState {
                         "invite-revoke" => Reload::Invites,
                         "board-update" | "board-delete" => Reload::Boards,
                         "area-update" | "area-delete" => Reload::Areas,
-                        "node-delete" | "node-describe" => Reload::Folder,
+                        "node-delete" | "node-describe" | "node-rename" | "node-move" => {
+                            Reload::Folder
+                        }
                         "report-resolve" => Reload::Reports,
                         "deny-remove" => Reload::DenyHashes,
                         "kick" => Reload::Sessions,
@@ -421,6 +423,8 @@ fn succeeded(kind: &str, subject: &str) -> (String, Reload) {
         "folder-create" => (format!("Made the folder {subject}."), Reload::Folder),
         "node-delete" => (format!("Removed {subject}."), Reload::Folder),
         "node-describe" => (format!("Saved {subject}."), Reload::Folder),
+        "node-rename" => (format!("Renamed {subject}."), Reload::Folder),
+        "node-move" => (format!("Moved {subject}."), Reload::Folder),
         "report-resolve" => ("Noted.".to_string(), Reload::Reports),
         "deny-add" => (
             "That hash is refused everywhere now.".to_string(),
@@ -511,6 +515,24 @@ fn refused(kind: &str, subject: &str, detail: &str) -> String {
             "The {subject} area still has files or folders in it. Only an empty area can be \
              removed."
         ),
+        "node-rename" if code("AlreadyExists") => {
+            "There is already something called that here.".to_string()
+        }
+        "node-rename" if code("BadRequest") => {
+            "A name cannot be empty or contain a slash.".to_string()
+        }
+        "node-move" if code("AlreadyExists") => {
+            format!("There is already something called {subject} in that folder.")
+        }
+        "node-move" if code("BadRequest") => "A folder cannot go inside itself, and things \
+             only go into folders."
+            .to_string(),
+        "node-rename" | "node-move" if code("Forbidden") => {
+            "You are not allowed to manage files here.".to_string()
+        }
+        "node-rename" | "node-move" if code("NotFound") => {
+            format!("{subject} is not there any more.")
+        }
         "folder-create" if code("AlreadyExists") => {
             format!("There is already something called {subject} here.")
         }

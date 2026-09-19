@@ -738,6 +738,22 @@ impl MockClient {
         ]
     }
 
+    /// Give a demo node a new name and path; what is below it follows.
+    fn relocate_demo_node(&mut self, id: i64, name: &str, path: &str) {
+        let Some(node) = self.file_nodes.iter().find(|n| n.id == id).cloned() else {
+            return;
+        };
+        let old_prefix = format!("{}/", node.path);
+        for n in self.file_nodes.iter_mut().filter(|n| n.area == node.area) {
+            if n.id == id {
+                n.name = name.to_string();
+                n.path = path.to_string();
+            } else if let Some(rest) = n.path.strip_prefix(&old_prefix) {
+                n.path = format!("{path}/{rest}");
+            }
+        }
+    }
+
     fn seeded_peers() -> Vec<PeerEntry> {
         vec![
             PeerEntry::new(
@@ -1313,6 +1329,70 @@ impl MockClient {
                     n.id != id && !(n.area == node.area && n.path.starts_with(&inside))
                 });
                 vec![AdminEvent::Ack("Removed.".into())]
+            }
+            AdminCommand::RenameNode { id, new_name, .. } => {
+                let Some(node) = self.file_nodes.iter().find(|n| n.id == id).cloned() else {
+                    return vec![AdminEvent::Failed("server error: NotFound".into())];
+                };
+                let name = new_name.trim().to_string();
+                if name.is_empty() || name.contains('/') {
+                    return vec![AdminEvent::Failed("server error: BadRequest".into())];
+                }
+                let path = match node.path.rsplit_once('/') {
+                    Some((parent, _)) => format!("{parent}/{name}"),
+                    None => name.clone(),
+                };
+                if self
+                    .file_nodes
+                    .iter()
+                    .any(|n| n.area == node.area && n.path == path && n.id != id)
+                {
+                    return vec![AdminEvent::Failed("server error: AlreadyExists".into())];
+                }
+                self.relocate_demo_node(id, &name, &path);
+                vec![AdminEvent::Ack("Renamed.".into())]
+            }
+            AdminCommand::MoveNode { id, folder, .. } => {
+                let Some(node) = self.file_nodes.iter().find(|n| n.id == id).cloned() else {
+                    return vec![AdminEvent::Failed("server error: NotFound".into())];
+                };
+                let dest = folder.filter(|f| !f.is_empty());
+                if let Some(d) = &dest {
+                    let inside = format!("{}/", node.path);
+                    if node.kind == crate::files::KIND_FOLDER
+                        && (*d == node.path || d.starts_with(&inside))
+                    {
+                        return vec![AdminEvent::Failed("server error: BadRequest".into())];
+                    }
+                    match self
+                        .file_nodes
+                        .iter()
+                        .find(|n| n.area == node.area && n.path == *d)
+                    {
+                        Some(f) if f.kind == crate::files::KIND_FOLDER => {}
+                        Some(_) => {
+                            return vec![AdminEvent::Failed("server error: BadRequest".into())]
+                        }
+                        None => return vec![AdminEvent::Failed("server error: NotFound".into())],
+                    }
+                }
+                let path = match &dest {
+                    Some(d) => format!("{d}/{}", node.name),
+                    None => node.name.clone(),
+                };
+                if path == node.path {
+                    return vec![AdminEvent::Ack("Already there.".into())];
+                }
+                if self
+                    .file_nodes
+                    .iter()
+                    .any(|n| n.area == node.area && n.path == path)
+                {
+                    return vec![AdminEvent::Failed("server error: AlreadyExists".into())];
+                }
+                let name = node.name.clone();
+                self.relocate_demo_node(id, &name, &path);
+                vec![AdminEvent::Ack("Moved.".into())]
             }
             AdminCommand::DescribeNode { id, comment, .. } => {
                 match self.file_nodes.iter_mut().find(|n| n.id == id) {

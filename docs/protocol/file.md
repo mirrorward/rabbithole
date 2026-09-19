@@ -27,6 +27,8 @@ engine 20-42.
 | 19 | FileAdded | Push | `area`, `id` — broadcast so listings/search stay live |
 | 27 | AreaUpdate | Request | FILE_MANAGE: `slug`, `title`, `description` → empty ack. The slug is in every path and download link and never changes; `BadRequest` for an empty title, `NotFound` for an unknown area |
 | 28 | AreaDelete | Request | FILE_MANAGE: `slug` → empty ack. `BadRequest` while the area has anything in it: an area takes its whole tree with it |
+| 29 | NodeRename | Request → `NodeReply` | `id`, `name`. The uploader of a file, or FILE_MANAGE on the area. In place; a folder's descendants keep their place under the new name (their paths are rewritten in one transaction). `BadRequest` for an empty name, one with a slash, `.` or `..`; `AlreadyExists` when something by that name is beside it |
+| 30 | NodeMove | Request → `NodeReply` | `id`, `folder?` (`None` or empty: the area root). FILE_MANAGE on the area, checked where it is and where it goes. Same area only. `BadRequest` for a folder moved into itself or below, or a destination that is not a folder; `NotFound` for a destination that is not there; `AlreadyExists` when the destination has something by that name |
 
 ## Small blobs (types 100+, Wave 2)
 

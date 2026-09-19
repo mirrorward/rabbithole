@@ -60,7 +60,8 @@ use crate::dm::{
 use crate::filelib::{
     AliasCreate, AreaCreate, AreaDelete, AreaList, AreaListRequest, AreaReply, AreaUpdate,
     FileAdded, FileContent, FileDownloadRequest, FileUpload, FolderCreate, FolderListRequest,
-    NodeDelete, NodeGet, NodeList, NodeReply, RateFile, SearchRequest, SearchResults, SetMetadata,
+    NodeDelete, NodeGet, NodeList, NodeMove, NodeRename, NodeReply, RateFile, SearchRequest,
+    SearchResults, SetMetadata,
 };
 use crate::hello::{Hello, HelloAck, KeyProof};
 use crate::keybundle::{KeyBundle, KeyBundlePublish, KeyBundleRequest};
@@ -161,7 +162,7 @@ wire_registry! {
     AreaListRequest, AreaList, FolderListRequest, NodeList, NodeGet, NodeReply, AreaCreate,
     AreaReply, FolderCreate, FileUpload, FileDownloadRequest, FileContent, NodeDelete, SetMetadata,
     SearchRequest, SearchResults, RateFile, AliasCreate, FileAdded,
-    AreaUpdate, AreaDelete,
+    AreaUpdate, AreaDelete, NodeRename, NodeMove,
     TransferOpen, TransferTicket, TransferResume, UploadFinish, TransferAbort,
     FolderManifestRequest, FolderManifest, FileChunkRequest, FileChunk, FileChunkPut,
     BlobPut, BlobRef, BlobGet, BlobData,
@@ -202,7 +203,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 212;
+pub const EXPECTED: usize = 214;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

@@ -2696,6 +2696,64 @@ impl AppState {
         });
     }
 
+    /// Give a file or folder a new name.
+    pub fn rename_node(&self, id: i64, name: &str, new_name: &str) {
+        self.dispatch_people(AdminCommand::RenameNode {
+            id,
+            name: name.to_string(),
+            new_name: new_name.trim().to_string(),
+        });
+    }
+
+    /// Pick a file or folder up, to put down in another folder of its area.
+    pub fn pick_up_node(&self, id: i64, name: &str, is_folder: bool) {
+        let files = self.focused().files;
+        let (area, from) = files.with_untracked(|f| (f.current_area.clone(), join_path(&f.path)));
+        let Some(area) = area else {
+            return;
+        };
+        files.update(|f| {
+            f.carrying = Some(crate::files::Carried {
+                id,
+                name: name.to_string(),
+                area,
+                from,
+                is_folder,
+            });
+            f.selected = None;
+        });
+    }
+
+    /// Put what is carried back where it was: nothing moves.
+    pub fn put_down_node(&self) {
+        self.focused().files.update(|f| f.carrying = None);
+    }
+
+    /// Put what is carried down in the folder Files is looking at.
+    pub fn move_node_here(&self) {
+        let files = self.focused().files;
+        let (carried, why_not, here) = files.with_untracked(|f| {
+            (
+                f.carrying.clone(),
+                f.cannot_put_down_here(),
+                join_path(&f.path),
+            )
+        });
+        let Some(carried) = carried else {
+            return;
+        };
+        if let Some(why) = why_not {
+            self.notify(crate::toasts::ToastKind::Warn, why.to_string());
+            return;
+        }
+        files.update(|f| f.carrying = None);
+        self.dispatch_people(AdminCommand::MoveNode {
+            id: carried.id,
+            name: carried.name,
+            folder: here,
+        });
+    }
+
     /// Take a post down (its author, or a board moderator).
     pub fn delete_post(&self, id: &str) {
         self.dispatch_people(AdminCommand::DeletePost { id: id.to_string() });

@@ -24,6 +24,8 @@ pub enum FileError {
     NotAFile,
     #[error("the area still has files or folders in it")]
     NotEmpty,
+    #[error("a folder cannot be moved into itself")]
+    IntoItself,
     #[error("store: {0}")]
     Store(#[from] StoreError),
 }
@@ -44,6 +46,12 @@ fn clean_name(name: &str) -> Result<String, FileError> {
         return Err(FileError::BadName);
     }
     Ok(name.to_string())
+}
+
+/// The folder a path sits in: everything before its last segment, or
+/// `None` at the area root.
+fn parent_of(path: &str) -> Option<String> {
+    path.rsplit_once('/').map(|(parent, _)| parent.to_string())
 }
 
 fn child_path(parent_path: Option<&str>, name: &str) -> String {
@@ -347,6 +355,92 @@ impl FileService {
             .ok_or(FileError::NoSuchNode)
     }
 
+    /// Give a node a new name, in place. A folder's descendants follow.
+    pub async fn rename(&self, id: i64, name: &str) -> Result<FileNodeRow, FileError> {
+        let name = clean_name(name)?;
+        let node = self
+            .repo()
+            .node_by_id(id)
+            .await?
+            .ok_or(FileError::NoSuchNode)?;
+        if node.name == name {
+            return Ok(node);
+        }
+        let parent = parent_of(&node.path);
+        let path = child_path(parent.as_deref(), &name);
+        if self
+            .repo()
+            .node_by_path(node.area_id, &path)
+            .await?
+            .is_some()
+        {
+            return Err(FileError::Exists);
+        }
+        self.repo()
+            .relocate_node(
+                node.id,
+                node.area_id,
+                node.parent_id,
+                &name,
+                &node.path,
+                &path,
+            )
+            .await?;
+        self.repo()
+            .node_by_id(id)
+            .await?
+            .ok_or(FileError::NoSuchNode)
+    }
+
+    /// Move a node into `folder` (`None` or empty: the area's root) within
+    /// its own area. A folder cannot go inside itself.
+    pub async fn move_to(&self, id: i64, folder: Option<&str>) -> Result<FileNodeRow, FileError> {
+        let node = self
+            .repo()
+            .node_by_id(id)
+            .await?
+            .ok_or(FileError::NoSuchNode)?;
+        let area = self
+            .repo()
+            .area_by_id(node.area_id)
+            .await?
+            .ok_or(FileError::NoSuchArea)?;
+        let folder = folder.filter(|f| !f.is_empty());
+        if let Some(dest) = folder {
+            let inside = format!("{}/", node.path);
+            if node.kind == KIND_FOLDER && (dest == node.path || dest.starts_with(&inside)) {
+                return Err(FileError::IntoItself);
+            }
+        }
+        let parent_id = self.resolve_parent(&area, folder).await?;
+        if parent_id == node.parent_id {
+            return Ok(node);
+        }
+        let path = child_path(folder, &node.name);
+        if self
+            .repo()
+            .node_by_path(node.area_id, &path)
+            .await?
+            .is_some()
+        {
+            return Err(FileError::Exists);
+        }
+        self.repo()
+            .relocate_node(
+                node.id,
+                node.area_id,
+                parent_id,
+                &node.name,
+                &node.path,
+                &path,
+            )
+            .await?;
+        self.repo()
+            .node_by_id(id)
+            .await?
+            .ok_or(FileError::NoSuchNode)
+    }
+
     /// Record a download against a file (following aliases). Returns the
     /// resolved file row (with the bumped count) so the handler can stream
     /// its blob.
@@ -405,6 +499,112 @@ mod tests {
 
     async fn service() -> FileService {
         FileService::new(open_in_memory().await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn renaming_and_moving_carry_a_folders_contents_along() {
+        let svc = service().await;
+        svc.create_area("warez", "Warez", "").await.unwrap();
+        svc.mkdir("warez", None, "utils", false).await.unwrap();
+        let zip = svc
+            .mkdir("warez", Some("utils"), "zip", false)
+            .await
+            .unwrap();
+        let file = svc
+            .add_file(
+                "warez",
+                Some("utils/zip"),
+                "a.lha",
+                &[1u8; 32],
+                10,
+                "app/x",
+                "disk",
+                "",
+                "u@h",
+                1,
+            )
+            .await
+            .unwrap();
+        svc.mkdir("warez", None, "archive", false).await.unwrap();
+
+        // Rename the middle folder: the file's path follows.
+        let renamed = svc.rename(zip.id, " packed ").await.unwrap();
+        assert_eq!(renamed.path, "utils/packed");
+        assert_eq!(
+            svc.node(file.id).await.unwrap().unwrap().path,
+            "utils/packed/a.lha"
+        );
+        assert!(matches!(
+            svc.rename(zip.id, "a/b").await,
+            Err(FileError::BadName)
+        ));
+        assert_eq!(
+            svc.rename(zip.id, "packed").await.unwrap().id,
+            zip.id,
+            "same name is a no-op"
+        );
+        svc.mkdir("warez", Some("utils"), "other", false)
+            .await
+            .unwrap();
+        assert!(matches!(
+            svc.rename(zip.id, "other").await,
+            Err(FileError::Exists)
+        ));
+
+        // Move the folder under archive: everything below follows again.
+        let moved = svc.move_to(zip.id, Some("archive")).await.unwrap();
+        assert_eq!(moved.path, "archive/packed");
+        assert_eq!(
+            svc.node(file.id).await.unwrap().unwrap().path,
+            "archive/packed/a.lha"
+        );
+        assert_eq!(
+            svc.list("warez", Some("archive/packed"))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(svc
+            .list("warez", Some("utils"))
+            .await
+            .unwrap()
+            .iter()
+            .all(|n| n.name != "packed"));
+
+        // The rules: not into itself or below, only into a folder, no clash.
+        assert!(matches!(
+            svc.move_to(zip.id, Some("archive/packed")).await,
+            Err(FileError::IntoItself)
+        ));
+        assert!(matches!(
+            svc.move_to(file.id, Some("archive/packed/a.lha")).await,
+            Err(FileError::NotAFolder)
+        ));
+        assert!(matches!(
+            svc.move_to(zip.id, Some("nowhere")).await,
+            Err(FileError::NoSuchNode)
+        ));
+        svc.mkdir("warez", None, "packed", false).await.unwrap();
+        assert!(matches!(
+            svc.move_to(zip.id, None).await,
+            Err(FileError::Exists)
+        ));
+
+        // A file to the root, and back where it was is a no-op.
+        let up = svc.move_to(file.id, None).await.unwrap();
+        assert_eq!(up.path, "a.lha");
+        assert_eq!(up.parent_id, None);
+        assert_eq!(svc.move_to(file.id, Some("")).await.unwrap().path, "a.lha");
+
+        // A non-ASCII prefix is rewritten by characters, not bytes.
+        let cafe = svc.mkdir("warez", None, "café", false).await.unwrap();
+        let inner = svc
+            .mkdir("warez", Some("café"), "inner", false)
+            .await
+            .unwrap();
+        svc.rename(cafe.id, "thé").await.unwrap();
+        assert_eq!(svc.node(inner.id).await.unwrap().unwrap().path, "thé/inner");
     }
 
     #[tokio::test]

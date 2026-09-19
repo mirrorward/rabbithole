@@ -320,6 +320,52 @@ impl FilesRepo<'_> {
             > 0)
     }
 
+    /// Move and/or rename a node in one transaction: its own row, then the
+    /// path of everything below it (`old_path/…` becomes `new_path/…`).
+    /// Returns whether the node existed.
+    pub async fn relocate_node(
+        &self,
+        id: i64,
+        area_id: i64,
+        parent_id: Option<i64>,
+        name: &str,
+        old_path: &str,
+        new_path: &str,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.0.begin().await?;
+        let moved = sqlx::query(
+            "UPDATE file_nodes SET parent_id = ?, name = ?, path = ? WHERE id = ? AND area_id = ?",
+        )
+        .bind(parent_id)
+        .bind(name)
+        .bind(new_path)
+        .bind(id)
+        .bind(area_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+        if moved {
+            // SQLite's substr counts characters, so the prefix length must too.
+            let old_prefix = format!("{old_path}/");
+            let new_prefix = format!("{new_path}/");
+            let chars = old_prefix.chars().count() as i64;
+            sqlx::query(
+                "UPDATE file_nodes SET path = ? || substr(path, ?)
+                 WHERE area_id = ? AND substr(path, 1, ?) = ?",
+            )
+            .bind(&new_prefix)
+            .bind(chars + 1)
+            .bind(area_id)
+            .bind(chars)
+            .bind(&old_prefix)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(moved)
+    }
+
     pub async fn set_metadata(
         &self,
         id: i64,

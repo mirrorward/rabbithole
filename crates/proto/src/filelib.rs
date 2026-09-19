@@ -560,3 +560,52 @@ impl Message for AreaDelete {
     const FAMILY: Family = Family::FILE;
     const MESSAGE_TYPE: u16 = 28;
 }
+
+/// Rename a file or folder in place. Its uploader, or `FILE_MANAGE` on the
+/// area. → [`NodeReply`]. A folder takes everything below it along: their
+/// paths follow. `BadRequest` for an empty name or one with a slash;
+/// `AlreadyExists` when something by that name is already beside it.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeRename {
+    pub id: i64,
+    pub name: String,
+}
+
+impl NodeRename {
+    pub fn new(id: i64, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+        }
+    }
+}
+
+impl Message for NodeRename {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 29;
+}
+
+/// Move a file or folder into another folder of the same area (`folder`
+/// `None` or empty: the area's root). `FILE_MANAGE` on the area, where it is
+/// and where it goes. → [`NodeReply`]. `BadRequest` for a folder moved into
+/// itself or a destination that is not a folder; `NotFound` for a
+/// destination that is not there; `AlreadyExists` when the destination has
+/// something by that name.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeMove {
+    pub id: i64,
+    pub folder: Option<String>,
+}
+
+impl NodeMove {
+    pub fn new(id: i64, folder: Option<String>) -> Self {
+        Self { id, folder }
+    }
+}
+
+impl Message for NodeMove {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 30;
+}

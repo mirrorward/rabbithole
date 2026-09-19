@@ -108,6 +108,28 @@ impl Transfer {
     }
 }
 
+/// A file or folder picked up to be put down in another folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Carried {
+    pub id: i64,
+    pub name: String,
+    /// The area it lives in; a move stays within it.
+    pub area: String,
+    /// The folder it was picked up from (`None`: the root).
+    pub from: Option<String>,
+    pub is_folder: bool,
+}
+
+impl Carried {
+    /// Its path within the area.
+    pub fn path(&self) -> String {
+        match &self.from {
+            Some(f) => format!("{f}/{}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
 /// The full, flat file-library UI model. `Default` is the empty state.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FilesState {
@@ -125,6 +147,8 @@ pub struct FilesState {
     pub transfers: Vec<Transfer>,
     /// One-line status/error line for the panel.
     pub status: String,
+    /// What is being moved, while the person finds the folder for it.
+    pub carrying: Option<Carried>,
 }
 
 impl FilesState {
@@ -314,6 +338,31 @@ impl FilesState {
 }
 
 /// The current folder path as a `/`-joined string, or `None` at the root.
+impl FilesState {
+    /// Why what is carried cannot be put down in the folder shown, or `None`
+    /// when it can.
+    pub fn cannot_put_down_here(&self) -> Option<&'static str> {
+        let carried = self.carrying.as_ref()?;
+        if self.current_area.as_deref() != Some(carried.area.as_str()) {
+            return Some("Things move within one area. Go back to the area it is in.");
+        }
+        let here = join_path(&self.path);
+        if here == carried.from {
+            return Some("It is already here.");
+        }
+        if carried.is_folder {
+            let own = carried.path();
+            let inside = here
+                .as_deref()
+                .is_some_and(|h| h == own || h.starts_with(&format!("{own}/")));
+            if inside {
+                return Some("A folder cannot go inside itself.");
+            }
+        }
+        None
+    }
+}
+
 pub fn join_path(segments: &[String]) -> Option<String> {
     if segments.is_empty() {
         None
@@ -389,6 +438,49 @@ pub fn human_size(bytes: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_is_carried_can_go_anywhere_but_where_it_is_or_inside_itself() {
+        let mut files = FilesState {
+            current_area: Some("music".into()),
+            path: vec!["archive".into()],
+            ..Default::default()
+        };
+        assert_eq!(files.cannot_put_down_here(), None, "nothing carried");
+        files.carrying = Some(Carried {
+            id: 7,
+            name: "tapes".into(),
+            area: "music".into(),
+            from: Some("archive".into()),
+            is_folder: true,
+        });
+        assert_eq!(files.carrying.as_ref().unwrap().path(), "archive/tapes");
+        assert_eq!(files.cannot_put_down_here(), Some("It is already here."));
+        files.path = vec!["archive".into(), "tapes".into()];
+        assert_eq!(
+            files.cannot_put_down_here(),
+            Some("A folder cannot go inside itself.")
+        );
+        files.path = vec!["archive".into(), "tapes".into(), "deep".into()];
+        assert!(files.cannot_put_down_here().is_some());
+        files.path = vec!["archive".into(), "tapestry".into()];
+        assert_eq!(
+            files.cannot_put_down_here(),
+            None,
+            "a sibling with a longer name is fine"
+        );
+        files.path = vec![];
+        assert_eq!(files.cannot_put_down_here(), None, "the root is fine");
+        files.current_area = Some("pictures".into());
+        assert!(files
+            .cannot_put_down_here()
+            .is_some_and(|why| why.starts_with("Things move within one area")));
+        // A file has no inside.
+        files.current_area = Some("music".into());
+        files.carrying.as_mut().unwrap().is_folder = false;
+        files.path = vec!["archive".into(), "tapes".into()];
+        assert_eq!(files.cannot_put_down_here(), None);
+    }
 
     fn node(id: i64, kind: u8, name: &str) -> FileNodeView {
         FileNodeView::new(id, "warez", kind, name, name)

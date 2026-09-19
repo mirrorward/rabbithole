@@ -98,7 +98,7 @@ use rabbithole_proto::dm::{
 use rabbithole_proto::filelib::{
     AreaCreate, AreaDelete, AreaList, AreaListRequest, AreaUpdate, FileAdded, FileAreaView,
     FileContent, FileDownloadRequest, FileNodeView, FileUpload, FolderCreate, FolderListRequest,
-    NodeDelete, NodeGet, NodeList, NodeReply, SetMetadata,
+    NodeDelete, NodeGet, NodeList, NodeMove, NodeRename, NodeReply, SetMetadata,
 };
 use rabbithole_proto::hello::{CapabilitySet, Hello, HelloAck};
 use rabbithole_proto::presence::{PresenceSet, PresenceState, UserJoined, UserLeft, Who, WhoList};
@@ -1456,6 +1456,21 @@ pub enum AdminCommand {
         /// Its name, for the outcome sentence.
         name: String,
     },
+    /// Give a file or folder a new name. → `NodeReply`.
+    RenameNode {
+        id: i64,
+        /// Its name now, for the outcome.
+        name: String,
+        new_name: String,
+    },
+    /// Move a file or folder into a folder of the same area (`None`: the
+    /// root). → `NodeReply`.
+    MoveNode {
+        id: i64,
+        /// Its name, for the outcome.
+        name: String,
+        folder: Option<String>,
+    },
     /// Change a file's description. → `NodeReply`.
     DescribeNode {
         /// Which node.
@@ -1615,6 +1630,8 @@ impl AdminCommand {
             AdminCommand::CreateFolder { name, .. } => format!("*folder-create:{name}"),
             AdminCommand::DeleteNode { name, .. } => format!("*node-delete:{name}"),
             AdminCommand::DescribeNode { name, .. } => format!("*node-describe:{name}"),
+            AdminCommand::RenameNode { name, .. } => format!("*node-rename:{name}"),
+            AdminCommand::MoveNode { name, .. } => format!("*node-move:{name}"),
             _ => return None,
         })
     }
@@ -1761,6 +1778,12 @@ pub fn admin_command_to_frame(
             comment,
             ..
         } => Frame::request(id, &SetMetadata::new(*node, icon.clone(), comment.clone()))?,
+        AdminCommand::RenameNode {
+            id: node, new_name, ..
+        } => Frame::request(id, &NodeRename::new(*node, new_name.clone()))?,
+        AdminCommand::MoveNode {
+            id: node, folder, ..
+        } => Frame::request(id, &NodeMove::new(*node, folder.clone()))?,
         AdminCommand::DeletePost { id: post } => match hex_to_id(post) {
             Some(target) => Frame::request(id, &PostDelete::new(target))?,
             None => return Ok(None),

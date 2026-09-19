@@ -58,7 +58,7 @@ fn map_err(e: FileError) -> ErrorCode {
         FileError::NoSuchArea | FileError::NoSuchNode => ErrorCode::NotFound,
         FileError::Exists => ErrorCode::AlreadyExists,
         FileError::BadName | FileError::NotAFile | FileError::NotEmpty => ErrorCode::BadRequest,
-        FileError::NotAFolder => ErrorCode::BadRequest,
+        FileError::NotAFolder | FileError::IntoItself => ErrorCode::BadRequest,
         FileError::Store(_) => ErrorCode::Internal,
     }
 }
@@ -364,6 +364,36 @@ pub async fn handle(
                 .set_metadata(node.id, &req.icon, &req.comment)
                 .await
         );
+        reply!(&pf::NodeReply::new(view(&node)));
+        return Ok(true);
+    }
+
+    // ---- Rename and move -------------------------------------------------
+    if let Some(Ok(req)) = frame.decode::<pf::NodeRename>() {
+        let Some(node) = try_file!(shared.files.node(req.id).await) else {
+            fail!(ErrorCode::NotFound)
+        };
+        let is_owner = node.uploader_id == Some(ctx.account_id);
+        if !is_owner && !ctx.allows(shared, &resource(&node.area, None), Caps::FILE_MANAGE) {
+            fail!(ErrorCode::Forbidden);
+        }
+        let node = try_file!(shared.files.rename(node.id, &req.name).await);
+        reply!(&pf::NodeReply::new(view(&node)));
+        return Ok(true);
+    }
+
+    if let Some(Ok(req)) = frame.decode::<pf::NodeMove>() {
+        let Some(node) = try_file!(shared.files.node(req.id).await) else {
+            fail!(ErrorCode::NotFound)
+        };
+        let dest = req.folder.as_deref().filter(|f| !f.is_empty());
+        // Where it is and where it goes: both are the manager's to touch.
+        if !ctx.allows(shared, &resource(&node.area, None), Caps::FILE_MANAGE)
+            || !ctx.allows(shared, &resource(&node.area, dest), Caps::FILE_MANAGE)
+        {
+            fail!(ErrorCode::Forbidden);
+        }
+        let node = try_file!(shared.files.move_to(node.id, dest).await);
         reply!(&pf::NodeReply::new(view(&node)));
         return Ok(true);
     }

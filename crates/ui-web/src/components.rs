@@ -973,7 +973,7 @@ fn PersonFiles(handle: Signal<String>) -> impl IntoView {
             <ul class="rh-tree rh-person-files">
                 <For
                     each=files
-                    key=|n| n.id
+                    key=|n| (n.id, n.name.clone(), n.size, n.comment.clone())
                     children=move |n| {
                         let is_folder = n.kind == KIND_FOLDER;
                         let size = if is_folder {
@@ -4402,6 +4402,7 @@ fn FolderBrowser() -> impl IntoView {
             </button>
             <span class="rh-toolbar-hint">"or drop files here"</span>
         </div>
+        <MoveBar/>
         <h2 class="rh-visually-hidden">"Folder contents"</h2>
         // Type-to-filter over the current folder — the fastest way through a
         // busy library, matching on name or uploader.
@@ -4440,7 +4441,8 @@ fn FolderBrowser() -> impl IntoView {
         <ul class="rh-tree rh-filetable" tabindex="0" aria-label="Files" on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-file-link")>
             <For
                 each=visible
-                key=|n| n.id
+                // A row shows its name and size: a rename must re-render it.
+                key=|n| (n.id, n.name.clone(), n.size)
                 children=move |n| {
                     let id = n.id;
                     let is_folder = n.kind == KIND_FOLDER;
@@ -4720,6 +4722,12 @@ fn NodeManagement(node: rabbithole_proto::filelib::FileNodeView) -> impl IntoVie
     let saved = store_value(node.comment.clone());
     let comment = create_rw_signal(node.comment.clone());
     let changed = move || comment.get().trim() != saved.get_value();
+    let new_name = create_rw_signal(node.name.clone());
+    let name_ready = move || {
+        let n = new_name.get();
+        let n = n.trim();
+        !n.is_empty() && !n.contains('/') && n != name.get_value()
+    };
     view! {
         <div class="rh-node-manage">
             <Show when=move || !is_folder fallback=|| ()>
@@ -4748,18 +4756,84 @@ fn NodeManagement(node: rabbithole_proto::filelib::FileNodeView) -> impl IntoVie
                     </span>
                 </label>
             </Show>
-            <button
-                type="button"
-                class="rh-btn ghost small rh-adm-danger"
-                on:click=move |_| app.confirm.set(Some(crate::app::ConfirmAsk::delete_node(
+            <label class="rh-adm-field">
+                <span>"Name"</span>
+                <span class="rh-adm-inline">
+                    <input
+                        class="rh-input"
+                        maxlength="128"
+                        prop:value=move || new_name.get()
+                        on:input=move |ev| new_name.set(event_target_value(&ev))
+                    />
+                    <button
+                        type="button"
+                        class="rh-btn ghost small"
+                        disabled=move || !name_ready()
+                        on:click=move |_| app.rename_node(id, &name.get_value(), &new_name.get())
+                    >
+                        "Rename"
+                    </button>
+                </span>
+            </label>
+            <div class="rh-node-manage-row">
+                <button
+                    type="button"
+                    class="rh-btn ghost small"
+                    on:click=move |_| app.pick_up_node(id, &name.get_value(), is_folder)
+                >
+                    "Move\u{2026}"
+                </button>
+                <button
+                    type="button"
+                    class="rh-btn ghost small rh-adm-danger"
+                    on:click=move |_| app.confirm.set(Some(crate::app::ConfirmAsk::delete_node(
                     id,
                     &name.get_value(),
                     is_folder,
                 )))
             >
                 {if is_folder { "Remove folder\u{2026}" } else { "Remove file\u{2026}" }}
-            </button>
+                </button>
+            </div>
         </div>
+    }
+}
+
+/// While something is carried: what it is, and where it can be put down.
+/// The person walks to the folder with the ordinary listing; this bar
+/// follows them there.
+#[component]
+fn MoveBar() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let files = app.focused().files;
+    let carried = move || files.with(|f| f.carrying.clone());
+    let why_not = move || files.with(|f| f.cannot_put_down_here());
+    view! {
+        <Show when=move || carried().is_some() fallback=|| ()>
+            <div class="rh-move-bar" role="status">
+                <span class="rh-move-bar-text">
+                    "Moving "
+                    <strong>{move || carried().map(|c| c.name).unwrap_or_default()}</strong>
+                    ". "
+                    <span class="rh-move-bar-why">
+                        {move || why_not().unwrap_or("Open the folder it belongs in, then put it down.")}
+                    </span>
+                </span>
+                <span class="rh-move-bar-actions">
+                    <button
+                        type="button"
+                        class="rh-btn small"
+                        disabled=move || why_not().is_some()
+                        on:click=move |_| app.move_node_here()
+                    >
+                        "Move here"
+                    </button>
+                    <button type="button" class="rh-btn ghost small" on:click=move |_| app.put_down_node()>
+                        "Cancel"
+                    </button>
+                </span>
+            </div>
+        </Show>
     }
 }
 
