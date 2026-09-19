@@ -33,7 +33,10 @@ fn view(row: &PostRow) -> pb::PostView {
 fn map_err(e: BoardError) -> ErrorCode {
     match e {
         BoardError::NoSuchBoard | BoardError::NoSuchPost => ErrorCode::NotFound,
-        BoardError::NotPostable | BoardError::Empty => ErrorCode::BadRequest,
+        BoardError::NotPostable
+        | BoardError::Empty
+        | BoardError::BadSlug
+        | BoardError::NotEmpty => ErrorCode::BadRequest,
         BoardError::Forbidden => ErrorCode::Forbidden,
         BoardError::SlugExists => ErrorCode::AlreadyExists,
         BoardError::Store(_) => ErrorCode::Internal,
@@ -49,6 +52,17 @@ pub(crate) fn author_seed(shared: &Shared, account_id: i64) -> [u8; 32] {
     hasher.update(&shared.server_signing_seed);
     hasher.update(&account_id.to_le_bytes());
     *hasher.finalize().as_bytes()
+}
+
+fn audit(shared: &Arc<Shared>, actor: &str, action: &str, detail: String) {
+    let pool = shared.pool.clone();
+    let actor = actor.to_string();
+    let action = action.to_string();
+    tokio::spawn(async move {
+        let _ = rabbithole_store_server::repo::AuditRepo(&pool)
+            .record(&actor, &action, &detail)
+            .await;
+    });
 }
 
 pub async fn handle(
@@ -312,6 +326,43 @@ pub async fn handle(
                 info.description = r.description;
                 info.parent_slug = r.parent_slug;
                 reply!(&pb::BoardCreated::new(info));
+            }
+            Err(e) => fail!(map_err(e)),
+        }
+        return Ok(true);
+    }
+
+    if let Some(Ok(req)) = frame.decode::<pb::BoardUpdate>() {
+        if !ctx.allows(shared, "board", Caps::BOARD_MODERATE) {
+            fail!(ErrorCode::Forbidden);
+        }
+        match shared
+            .boards
+            .update_board(
+                &req.slug,
+                &req.title,
+                &req.description,
+                req.max_threads.map(i64::from),
+            )
+            .await
+        {
+            Ok(()) => {
+                audit(shared, &ctx.login, "board-update", req.slug.clone());
+                conn.send(Frame::ack(frame)).await?;
+            }
+            Err(e) => fail!(map_err(e)),
+        }
+        return Ok(true);
+    }
+
+    if let Some(Ok(req)) = frame.decode::<pb::BoardDelete>() {
+        if !ctx.allows(shared, "board", Caps::BOARD_MODERATE) {
+            fail!(ErrorCode::Forbidden);
+        }
+        match shared.boards.delete_board(&req.slug).await {
+            Ok(()) => {
+                audit(shared, &ctx.login, "board-delete", req.slug.clone());
+                conn.send(Frame::ack(frame)).await?;
             }
             Err(e) => fail!(map_err(e)),
         }

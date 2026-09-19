@@ -100,6 +100,8 @@ pub enum Pane {
     Feeds,
     /// Accounts, classes and invites.
     People,
+    /// The board tree.
+    Boards,
     /// Broadcast and kick.
     Moderation,
     /// The theme editor.
@@ -932,6 +934,14 @@ pub const SECTIONS: &[Section] = &[
         blurb: "Accounts, the classes that decide what they may do, and invitations.",
         area: Area::Manage,
         pane: Pane::People,
+        groups: &[],
+    },
+    Section {
+        id: "boards",
+        title: "Boards",
+        blurb: "The message boards, and the categories that group them.",
+        area: Area::Manage,
+        pane: Pane::Boards,
         groups: &[],
     },
     Section {

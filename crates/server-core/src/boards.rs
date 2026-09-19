@@ -77,8 +77,22 @@ pub enum BoardError {
     Empty,
     #[error("slug already exists")]
     SlugExists,
+    #[error("a slug is lowercase letters, digits, dots, dashes and underscores")]
+    BadSlug,
+    #[error("the board still has posts, or boards inside it")]
+    NotEmpty,
     #[error("store: {0}")]
     Store(#[from] StoreError),
+}
+
+/// A slug is a board's address: in a route, a newsgroup name, a gateway map.
+/// Lowercase letters, digits, dots, dashes and underscores; it starts with a
+/// letter or digit; 64 at most.
+pub fn slug_is_acceptable(slug: &str) -> bool {
+    let mut chars = slug.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
+        && slug.len() <= 64
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
 }
 
 pub struct BoardService {
@@ -111,15 +125,65 @@ impl BoardService {
         max_threads: i64,
     ) -> Result<BoardRow, BoardError> {
         let slug = slug.trim();
-        if slug.is_empty() || slug.len() > 64 {
-            return Err(BoardError::NoSuchBoard);
+        if !slug_is_acceptable(slug) {
+            return Err(BoardError::BadSlug);
+        }
+        if title.trim().is_empty() {
+            return Err(BoardError::Empty);
         }
         if BoardsRepo(&self.pool).by_slug(slug).await?.is_some() {
             return Err(BoardError::SlugExists);
         }
+        // A board hangs off something that exists.
+        if let Some(parent) = parent_slug {
+            if BoardsRepo(&self.pool).by_slug(parent).await?.is_none() {
+                return Err(BoardError::NoSuchBoard);
+            }
+        }
         Ok(BoardsRepo(&self.pool)
             .create(slug, title, description, kind, parent_slug, max_threads)
             .await?)
+    }
+
+    /// Change what a board is called, what it says about itself, and how many
+    /// threads it keeps. Its slug is its identity and does not change.
+    pub async fn update_board(
+        &self,
+        slug: &str,
+        title: &str,
+        description: &str,
+        max_threads: Option<i64>,
+    ) -> Result<(), BoardError> {
+        if title.trim().is_empty() {
+            return Err(BoardError::Empty);
+        }
+        if !BoardsRepo(&self.pool)
+            .update(
+                slug,
+                title.trim(),
+                description,
+                max_threads.map(|n| n.max(0)),
+            )
+            .await?
+        {
+            return Err(BoardError::NoSuchBoard);
+        }
+        Ok(())
+    }
+
+    /// Remove an empty board. One with posts in it, or boards inside it, is
+    /// refused: posts are signed history other burrows may hold, and taking a
+    /// board away from under them is not something to do by accident.
+    pub async fn delete_board(&self, slug: &str) -> Result<(), BoardError> {
+        if BoardsRepo(&self.pool).by_slug(slug).await?.is_none() {
+            return Err(BoardError::NoSuchBoard);
+        }
+        let (posts, children) = BoardsRepo(&self.pool).contents(slug).await?;
+        if posts > 0 || children > 0 {
+            return Err(BoardError::NotEmpty);
+        }
+        BoardsRepo(&self.pool).delete(slug).await?;
+        Ok(())
     }
 
     pub async fn boards(&self) -> Result<Vec<BoardRow>, BoardError> {

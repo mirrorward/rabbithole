@@ -3640,17 +3640,58 @@ pub fn BoardView() -> impl IntoView {
                                     );
                                     format!("{day} \u{00b7} {}", crate::clock::local_hhmm(p.at_unix_ms))
                                 });
+                                // Its author may take a post down, and so may
+                                // anyone who moderates boards. The burrow
+                                // decides; this only avoids offering a button
+                                // that would be refused.
+                                const BOARD_MODERATE: u64 = 1 << 22;
+                                let me = app.focused();
+                                let author = p.author.clone();
+                                let may_remove = {
+                                    let author = author.clone();
+                                    move || {
+                                        !p.removed
+                                            && (me.caps.get() & BOARD_MODERATE != 0
+                                                // A board names its authors `handle@origin`.
+                                                || author.split('@').next()
+                                                    == Some(me.handle.get().as_str()))
+                                    }
+                                };
+                                let post_id = p.id.clone();
+                                let asked_author = author.clone();
                                 view! {
-                                    <article class="rh-post">
+                                    <article class="rh-post" class:removed=p.removed>
                                         <header class="rh-post-head">
                                             <span class="rh-mark" inner_html=mark></span>
-                                            <span class="rh-from">{p.author}</span>
+                                            <span class="rh-from">{author}</span>
                                             {when.map(|w| view! { <span class="rh-post-when">{w}</span> })}
+                                            <Show when=may_remove.clone() fallback=|| ()>
+                                                <button
+                                                    type="button"
+                                                    class="rh-post-remove"
+                                                    on:click={
+                                                        let (id, who) = (post_id.clone(), asked_author.clone());
+                                                        move |_| app.confirm.set(Some(
+                                                            crate::app::ConfirmAsk::delete_post(&id, &who),
+                                                        ))
+                                                    }
+                                                >
+                                                    "Remove"
+                                                </button>
+                                            </Show>
                                         </header>
-                                        <div
-                                            class="rh-rich rh-post-body"
-                                            inner_html=crate::markdown::to_html(&p.body)
-                                        ></div>
+                                        {if p.removed {
+                                            view! { <p class="rh-post-gone">"This post was removed."</p> }
+                                                .into_view()
+                                        } else {
+                                            view! {
+                                                <div
+                                                    class="rh-rich rh-post-body"
+                                                    inner_html=crate::markdown::to_html(&p.body)
+                                                ></div>
+                                            }
+                                            .into_view()
+                                        }}
                                     </article>
                                 }
                             }

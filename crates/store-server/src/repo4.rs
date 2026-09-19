@@ -62,6 +62,62 @@ impl BoardsRepo<'_> {
             .map(|r| row_to_board(&r)))
     }
 
+    /// Change what a board is called, says about itself, and keeps. The slug
+    /// is its identity (routes, newsgroup names, gateway maps) and never moves.
+    /// Returns whether there was such a board.
+    pub async fn update(
+        &self,
+        slug: &str,
+        title: &str,
+        description: &str,
+        max_threads: Option<i64>,
+    ) -> Result<bool, StoreError> {
+        // `None` keeps the retention it has.
+        Ok(sqlx::query(
+            "UPDATE boards SET title = ?, description = ?,
+                    max_threads = COALESCE(?, max_threads)
+             WHERE slug = ?",
+        )
+        .bind(title)
+        .bind(description)
+        .bind(max_threads)
+        .bind(slug)
+        .execute(self.0)
+        .await?
+        .rows_affected()
+            > 0)
+    }
+
+    /// How much is in a board: `(posts, boards directly inside it)`.
+    pub async fn contents(&self, slug: &str) -> Result<(i64, i64), StoreError> {
+        let posts: i64 = sqlx::query("SELECT COUNT(*) AS n FROM posts WHERE board_slug = ?")
+            .bind(slug)
+            .fetch_one(self.0)
+            .await?
+            .get("n");
+        let children: i64 = sqlx::query("SELECT COUNT(*) AS n FROM boards WHERE parent_slug = ?")
+            .bind(slug)
+            .fetch_one(self.0)
+            .await?
+            .get("n");
+        Ok((posts, children))
+    }
+
+    /// Remove a board and the read marks that point at it. The caller has
+    /// already made sure it is empty.
+    pub async fn delete(&self, slug: &str) -> Result<bool, StoreError> {
+        sqlx::query("DELETE FROM read_marks WHERE board_slug = ?")
+            .bind(slug)
+            .execute(self.0)
+            .await?;
+        Ok(sqlx::query("DELETE FROM boards WHERE slug = ?")
+            .bind(slug)
+            .execute(self.0)
+            .await?
+            .rows_affected()
+            > 0)
+    }
+
     pub async fn all(&self) -> Result<Vec<BoardRow>, StoreError> {
         Ok(sqlx::query("SELECT * FROM boards ORDER BY slug")
             .fetch_all(self.0)

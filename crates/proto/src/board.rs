@@ -379,6 +379,62 @@ impl Message for BoardCreated {
     const MESSAGE_TYPE: u16 = 13;
 }
 
+/// Admin: change a board's title, description and retention. → empty ack.
+/// Requires BOARD_MODERATE. The slug is the board's identity (its route, its
+/// newsgroup name, its place in gateway maps) and cannot be changed.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardUpdate {
+    pub slug: String,
+    pub title: String,
+    pub description: String,
+    /// Keep at most this many threads (0 = all of them). `None` leaves it as
+    /// it is: a board listing does not carry it, so a client that only means
+    /// to retitle a board must not have to guess.
+    pub max_threads: Option<u32>,
+}
+
+impl BoardUpdate {
+    pub fn new(
+        slug: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+        max_threads: Option<u32>,
+    ) -> Self {
+        Self {
+            slug: slug.into(),
+            title: title.into(),
+            description: description.into(),
+            max_threads,
+        }
+    }
+}
+
+impl Message for BoardUpdate {
+    const FAMILY: Family = Family::BOARD;
+    const MESSAGE_TYPE: u16 = 15;
+}
+
+/// Admin: remove an empty board. → empty ack. Requires BOARD_MODERATE.
+/// `BadRequest` while it still has posts or boards inside it: posts are signed
+/// history, and a board is not taken from under them by accident.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardDelete {
+    pub slug: String,
+}
+
+impl BoardDelete {
+    pub fn new(slug: impl Into<String>) -> Self {
+        Self { slug: slug.into() }
+    }
+}
+
+impl Message for BoardDelete {
+    const FAMILY: Family = Family::BOARD;
+    const MESSAGE_TYPE: u16 = 16;
+}
+
 /// Push: a new post landed in a board (id + board; clients refetch as
 /// needed). Delivered to every session so unread counts stay live.
 #[non_exhaustive]

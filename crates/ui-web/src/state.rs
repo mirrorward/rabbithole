@@ -65,6 +65,23 @@ pub struct Board {
     pub unread: u64,
 }
 
+/// One node of the board tree as an operator sees it: categories and bundles
+/// included. The Boards view only wants what can hold posts ([`Board`]); the
+/// console manages all of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardNode {
+    /// The board's address.
+    pub slug: String,
+    /// What it is called.
+    pub title: String,
+    /// What it says about itself.
+    pub description: String,
+    /// 0 category, 1 bundle, 2 board (only boards hold posts).
+    pub kind: u8,
+    /// The node it hangs from, if any.
+    pub parent: Option<String>,
+}
+
 /// A discussion thread within a [`Board`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Thread {
@@ -97,6 +114,9 @@ pub struct Post {
     /// When it was posted, unix milliseconds (0 when unknown). The wire has
     /// always carried this; the reader used to drop it.
     pub at_unix_ms: i64,
+    /// Taken down by its author or a moderator. It keeps its place in the
+    /// thread (replies still hang from it) and says so instead of its body.
+    pub removed: bool,
 }
 
 /// One message in a direct-message conversation.
@@ -311,6 +331,8 @@ pub struct UiState {
     pub who: Vec<Presence>,
     /// The board tree.
     pub boards: Vec<Board>,
+    /// Every node of the board tree, for the admin console.
+    pub board_tree: Vec<BoardNode>,
     /// Threads of the currently selected board.
     pub threads: Vec<Thread>,
     /// Posts of the currently opened thread.
@@ -435,6 +457,11 @@ impl UiState {
     }
 
     /// Replace the board tree (from a client snapshot).
+    /// Replace the operator's view of the board tree.
+    pub fn set_board_tree(&mut self, tree: Vec<BoardNode>) {
+        self.board_tree = tree;
+    }
+
     pub fn set_boards(&mut self, boards: Vec<Board>) {
         self.load_failed = false;
         self.boards = boards;
@@ -875,6 +902,7 @@ mod tests {
             author: "alice".into(),
             body: "first".into(),
             at_unix_ms: 0,
+            removed: false,
         }];
         s.open_thread("1".into(), posts.clone());
         assert_eq!(s.selected_thread.as_deref(), Some("1"));

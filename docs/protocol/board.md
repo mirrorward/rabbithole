@@ -12,7 +12,9 @@ append-only signed post events, threading, read pointers, moderation.
 | 9/8 | PostEdit → PostReply | Request/Reply | author or BOARD_MODERATE |
 | 10 | PostDelete | Request | tombstone; author or BOARD_MODERATE |
 | 11 | MarkRead | Request | advance read pointer (`up_to_unix_ms`, 0 = now) |
-| 12/13 | BoardCreate → BoardCreated | Request/Reply | admin (BOARD_MODERATE) builds the tree |
+| 12/13 | BoardCreate → BoardCreated | Request/Reply | admin (BOARD_MODERATE) builds the tree. A slug is lowercase letters, digits, dots, dashes and underscores, a letter or digit first, 64 at most (`BadRequest` otherwise, and for an empty title); `AlreadyExists` when taken; `NotFound` when `parent_slug` names nothing |
+| 15 | BoardUpdate | Request | BOARD_MODERATE: `slug`, `title`, `description`, `max_threads: Option<u32>` (`None` leaves retention as it is; a listing does not carry it) → empty ack. The slug is the board's identity and never changes |
+| 16 | BoardDelete | Request | BOARD_MODERATE: `slug` → empty ack. `BadRequest` while the board has posts, or boards inside it: posts are signed history, and a board is not taken from under them by accident |
 | 14 | PostPosted | Push | `board`, `id`, `root` — broadcast so unread counts stay live |
 
 ## Signed events

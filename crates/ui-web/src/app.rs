@@ -841,6 +841,9 @@ impl AppState {
             ws.on_boards(std::rc::Rc::new(move |boards| {
                 state.update(|s| s.set_boards(boards))
             }));
+            ws.on_board_tree(std::rc::Rc::new(move |tree| {
+                state.update(|s| s.set_board_tree(tree))
+            }));
             ws.on_threads(std::rc::Rc::new(move |threads| {
                 state.update(|s| s.set_threads(threads))
             }));
@@ -1251,6 +1254,8 @@ impl AppState {
             ConfirmIntent::DisableAccount(login) => self.set_account_disabled(&login, true),
             ConfirmIntent::ResetTotp(login) => self.reset_account_totp(&login),
             ConfirmIntent::RevokeInvite(code) => self.revoke_invite(&code),
+            ConfirmIntent::DeleteBoard(slug) => self.delete_board(&slug),
+            ConfirmIntent::DeletePost(id) => self.delete_post(&id),
         }
     }
 
@@ -1407,7 +1412,11 @@ impl AppState {
             return;
         }
         let boards = self.focused().client.with_value(|c| c.boards());
-        self.focused().state.update(|s| s.set_boards(boards));
+        let tree = self.focused().client.with_value(|c| c.board_tree());
+        self.focused().state.update(|s| {
+            s.set_boards(boards);
+            s.set_board_tree(tree);
+        });
     }
 
     /// Select a board and load its threads into state.
@@ -1526,6 +1535,7 @@ impl AppState {
                 author: "you".to_string(),
                 body,
                 at_unix_ms: crate::clock::now_ms(),
+                removed: false,
             });
         });
     }
@@ -2305,7 +2315,7 @@ impl AppState {
     /// for account, class and invitation actions.
     pub fn fold_admin_reply(&self, tag: Option<&str>, events: &[AdminEvent]) {
         let is_people = tag.is_some_and(|t| {
-            ["*account-", "*class-", "*invite"]
+            ["*account-", "*class-", "*invite", "*board-", "*post-"]
                 .iter()
                 .any(|p| t.starts_with(p))
         });
@@ -2339,6 +2349,16 @@ impl AppState {
             crate::admin_people::Reload::Accounts => app.load_accounts(),
             crate::admin_people::Reload::Classes => app.load_classes(),
             crate::admin_people::Reload::Invites => app.load_invites(),
+            crate::admin_people::Reload::Boards => app.load_boards(),
+            crate::admin_people::Reload::Thread => {
+                if let Some(id) = app
+                    .focused()
+                    .state
+                    .with_untracked(|s| s.selected_thread.clone())
+                {
+                    app.open_thread(id);
+                }
+            }
             crate::admin_people::Reload::Nothing => {}
         });
     }
@@ -2432,6 +2452,45 @@ impl AppState {
     pub fn revoke_invite(&self, code: &str) {
         self.dispatch_people(AdminCommand::RevokeInvite {
             code: code.to_string(),
+        });
+    }
+
+    /// Take a post down (its author, or a board moderator).
+    pub fn delete_post(&self, id: &str) {
+        self.dispatch_people(AdminCommand::DeletePost { id: id.to_string() });
+    }
+
+    /// Make a board (`kind` 2) or a category (`kind` 0).
+    pub fn create_board(
+        &self,
+        slug: &str,
+        title: &str,
+        description: &str,
+        kind: u8,
+        parent: Option<String>,
+    ) {
+        self.dispatch_people(AdminCommand::CreateBoard {
+            slug: slug.trim().to_string(),
+            title: title.trim().to_string(),
+            description: description.trim().to_string(),
+            kind,
+            parent,
+        });
+    }
+
+    /// Change what a board is called and says about itself.
+    pub fn update_board(&self, slug: &str, title: &str, description: &str) {
+        self.dispatch_people(AdminCommand::UpdateBoard {
+            slug: slug.to_string(),
+            title: title.trim().to_string(),
+            description: description.trim().to_string(),
+        });
+    }
+
+    /// Remove an empty board.
+    pub fn delete_board(&self, slug: &str) {
+        self.dispatch_people(AdminCommand::DeleteBoard {
+            slug: slug.to_string(),
         });
     }
 
@@ -2883,6 +2942,10 @@ pub enum ConfirmIntent {
     ResetTotp(String),
     /// Withdraw an unused invitation (by code).
     RevokeInvite(String),
+    /// Remove an empty board (by slug).
+    DeleteBoard(String),
+    /// Take a post down (by id).
+    DeletePost(String),
 }
 
 /// A question put to the person before something irreversible.
@@ -2918,6 +2981,30 @@ impl ConfirmAsk {
                 .to_string(),
             action: "Remove two-factor".to_string(),
             intent: ConfirmIntent::ResetTotp(login.to_string()),
+        }
+    }
+
+    /// "Remove this post?"
+    pub fn delete_post(id: &str, author: &str) -> Self {
+        ConfirmAsk {
+            title: format!("Remove this post by {author}?"),
+            body: "It keeps its place in the thread and says it was removed. This cannot \
+                   be undone."
+                .to_string(),
+            action: "Remove".to_string(),
+            intent: ConfirmIntent::DeletePost(id.to_string()),
+        }
+    }
+
+    /// "Remove the board Tea Party?"
+    pub fn delete_board(slug: &str, title: &str) -> Self {
+        ConfirmAsk {
+            title: format!("Remove {title}?"),
+            body: "Only an empty board can be removed: one with posts in it, or boards \
+                   inside it, stays where it is."
+                .to_string(),
+            action: "Remove".to_string(),
+            intent: ConfirmIntent::DeleteBoard(slug.to_string()),
         }
     }
 

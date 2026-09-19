@@ -51,7 +51,7 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::{BinaryType, CloseEvent, Event as WebEvent, MessageEvent, WebSocket};
 
 use rabbithole_core::api::{Command, Event};
-use rabbithole_proto::{decode_frame, encode_frame, Family, RequestId};
+use rabbithole_proto::{decode_frame, encode_frame, RequestId};
 
 use crate::conn::{backoff_delay, ConnState};
 use crate::wire::{
@@ -89,6 +89,8 @@ pub type PresenceSink = Rc<dyn Fn(PresenceDelta)>;
 /// A sink the transport pushes the board list into (from a decoded
 /// [`BoardList`](rabbithole_proto::board::BoardList) reply).
 pub type BoardSink = Rc<dyn Fn(Vec<crate::state::Board>)>;
+/// Receives the whole board tree (categories included), for the console.
+pub type BoardTreeSink = Rc<dyn Fn(Vec<crate::state::BoardNode>)>;
 /// A sink the transport pushes a board's thread list into.
 pub type ThreadSink = Rc<dyn Fn(Vec<crate::state::Thread>)>;
 /// A sink the transport pushes a thread's posts into.
@@ -127,14 +129,18 @@ struct Inner {
     conn_sink: Option<ConnSink>,
     file_sink: Option<FileSink>,
     admin_sink: Option<AdminSink>,
-    /// What each in-flight admin request was about, FIFO
-    /// ([`AdminCommand::tag`]): replies carry no such thing themselves.
-    pending_admin: RefCell<VecDeque<Option<String>>>,
+    /// What each in-flight management request was about
+    /// ([`AdminCommand::tag`]), by request id: a reply carries its request's
+    /// id and nothing else about it. By id and not by arrival order, because
+    /// management requests are not all in one family (a board is created in
+    /// BOARD, an area in FILE) and order across families is nobody's promise.
+    pending_admin: RefCell<std::collections::HashMap<RequestId, Option<String>>>,
     notice_sink: Option<NoticeSink>,
     who_sink: Option<WhoSink>,
     front_page_sink: Option<FrontPageSink>,
     presence_sink: Option<PresenceSink>,
     board_sink: Option<BoardSink>,
+    board_tree_sink: Option<BoardTreeSink>,
     thread_sink: Option<ThreadSink>,
     post_sink: Option<PostSink>,
     dm_thread_sink: Option<DmThreadSink>,
@@ -301,12 +307,13 @@ impl WsClient {
                 conn_sink: None,
                 file_sink: None,
                 admin_sink: None,
-                pending_admin: RefCell::new(VecDeque::new()),
+                pending_admin: RefCell::new(std::collections::HashMap::new()),
                 notice_sink: None,
                 who_sink: None,
                 front_page_sink: None,
                 presence_sink: None,
                 board_sink: None,
+                board_tree_sink: None,
                 thread_sink: None,
                 post_sink: None,
                 dm_thread_sink: None,
@@ -411,6 +418,12 @@ impl WsClient {
         {
             Self::write(&mut b, &bytes);
         }
+    }
+
+    /// Register the sink for the whole board tree (the same reply as the
+    /// board list, unfiltered).
+    pub fn on_board_tree(&mut self, sink: BoardTreeSink) {
+        self.inner.borrow_mut().board_tree_sink = Some(sink);
     }
 
     /// Register the board-list sink. The most recent registration wins.
@@ -607,7 +620,7 @@ impl WsClient {
         match wire::admin_command_to_frame(command, id) {
             Ok(Some(frame)) => match encode_frame(&frame) {
                 Ok(bytes) => {
-                    b.pending_admin.borrow_mut().push_back(pending);
+                    b.pending_admin.borrow_mut().insert(id, pending);
                     Self::write(&mut b, &bytes);
                 }
                 Err(err) => {
@@ -767,15 +780,15 @@ impl WsClient {
                         for event in wire::frame_to_file_events(&frame) {
                             b.emit_file(event);
                         }
-                        if frame.family == Family::ADMIN {
+                        // A reply to a management request, whatever its
+                        // family: hand it on with what the request was about.
+                        let asked = b.pending_admin.borrow_mut().remove(&frame.id);
+                        if let Some(tag) = asked {
                             let mut events = wire::frame_to_admin_events(&frame);
-                            let key = b.pending_admin.borrow_mut().pop_front();
                             if events.is_empty() && frame.error.is_none() {
                                 events.push(AdminEvent::Ack("Done.".into()));
                             }
-                            if !events.is_empty() {
-                                b.emit_admin((key.flatten(), events));
-                            }
+                            b.emit_admin((tag, events));
                         }
                         // A FileContent reply only arrives in response to a user
                         // Download; deliver its bytes to the browser as a file
@@ -794,6 +807,11 @@ impl WsClient {
                         }
                         if let Some(delta) = wire::frame_to_presence(&frame) {
                             b.emit_presence(delta);
+                        }
+                        if let Some(tree) = wire::frame_to_board_tree(&frame) {
+                            if let Some(sink) = &b.board_tree_sink {
+                                sink(tree);
+                            }
                         }
                         if let Some(boards) = wire::frame_to_boards(&frame) {
                             b.emit_boards(boards);

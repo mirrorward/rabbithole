@@ -242,6 +242,30 @@ pub fn password_from(bytes: &[u8]) -> String {
     out
 }
 
+/// An address to suggest for a board called `title`: what the burrow accepts
+/// (lowercase letters, digits, dots, dashes, underscores; a letter or digit
+/// first; 64 at most), and readable.
+pub fn slugify(title: &str) -> String {
+    let mut slug = String::new();
+    for c in title.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug: String = slug.trim_end_matches('-').chars().take(64).collect();
+    slug.trim_end_matches('-').to_string()
+}
+
+/// Whether the burrow would take `slug` as a board's address.
+pub fn slug_is_acceptable(slug: &str) -> bool {
+    let mut chars = slug.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
+        && slug.len() <= 64
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
+}
+
 /// How an invitation stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InviteStatus {
@@ -273,6 +297,10 @@ pub enum Reload {
     Classes,
     /// The invitations.
     Invites,
+    /// The board tree.
+    Boards,
+    /// The thread that is open.
+    Thread,
 }
 
 /// The pane's state beyond the lists [`crate::admin::AdminState`] holds.
@@ -326,6 +354,7 @@ impl PeopleState {
                     // A stale list is the usual reason an action is refused.
                     reload = match kind {
                         "invite-revoke" => Reload::Invites,
+                        "board-update" | "board-delete" => Reload::Boards,
                         "account-set" | "account-password" | "account-totp" => Reload::Accounts,
                         _ => Reload::Nothing,
                     };
@@ -354,6 +383,10 @@ fn succeeded(kind: &str, subject: &str) -> (String, Reload) {
         "account-set" => (format!("Saved {subject}."), Reload::Accounts),
         "class-set" => (format!("Saved the {subject} class."), Reload::Classes),
         "invite-revoke" => ("Withdrew the invitation.".to_string(), Reload::Invites),
+        "board-create" => (format!("Made {subject}."), Reload::Boards),
+        "board-update" => (format!("Saved {subject}."), Reload::Boards),
+        "board-delete" => (format!("Removed {subject}."), Reload::Boards),
+        "post-delete" => ("Removed the post.".to_string(), Reload::Thread),
         _ => (String::new(), Reload::Nothing),
     }
 }
@@ -380,6 +413,29 @@ fn refused(kind: &str, subject: &str, detail: &str) -> String {
         }
         "class-set" if code("Forbidden") => {
             "You cannot grant a capability you do not hold yourself.".to_string()
+        }
+        "post-delete" if code("Forbidden") => {
+            "Only its author or a board moderator can remove a post.".to_string()
+        }
+        "post-delete" if code("NotFound") => "That post is already gone.".to_string(),
+        "board-create" if code("AlreadyExists") => {
+            format!("There is already a board at {subject}.")
+        }
+        "board-create" if code("NotFound") => {
+            "The category it was to hang from is gone.".to_string()
+        }
+        "board-create" | "board-update" if code("BadRequest") => "A board needs a title, and an \
+             address of lowercase letters, digits, dots, dashes and underscores."
+            .to_string(),
+        "board-delete" if code("BadRequest") => format!(
+            "{subject} still has posts in it, or boards inside it. Only an empty board can be \
+             removed."
+        ),
+        "board-create" | "board-update" | "board-delete" if code("Forbidden") => {
+            "You are not allowed to manage boards here.".to_string()
+        }
+        "board-update" | "board-delete" if code("NotFound") => {
+            format!("There is no board at {subject} any more.")
         }
         "invite-revoke" if code("NotFound") => {
             "That invitation was already used or withdrawn.".to_string()
@@ -501,6 +557,28 @@ mod tests {
         assert!(pw.chars().count() >= 8);
         for c in "0O1lIi".chars() {
             assert!(!pw.contains(c), "{pw} has a look-alike");
+        }
+    }
+
+    #[test]
+    fn a_suggested_address_is_one_the_burrow_accepts() {
+        assert_eq!(slugify("Tea Party"), "tea-party");
+        assert_eq!(
+            slugify("  The Queen\u{2019}s  Croquet!! "),
+            "the-queen-s-croquet"
+        );
+        assert_eq!(slugify("---"), "");
+        assert_eq!(slugify("Caf\u{e9} 2"), "caf-2");
+        assert_eq!(slugify(&"x".repeat(80)).len(), 64);
+        for title in ["Tea Party", "A", "9 lives", "Caf\u{e9} 2"] {
+            let slug = slugify(title);
+            assert!(slug_is_acceptable(&slug), "{slug}");
+            // The console's rule is the burrow's rule.
+            assert!(rabbithole_server_core::boards::slug_is_acceptable(&slug));
+        }
+        for bad in ["", "-x", "Tea", "a b", "a/b"] {
+            assert!(!slug_is_acceptable(bad), "{bad}");
+            assert!(!rabbithole_server_core::boards::slug_is_acceptable(bad));
         }
     }
 

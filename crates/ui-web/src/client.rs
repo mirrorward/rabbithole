@@ -94,6 +94,8 @@ pub struct MockClient {
     current_user: Option<String>,
     who: Vec<String>,
     boards: Vec<Board>,
+    /// The whole tree, categories included, for the admin console.
+    board_tree: Vec<crate::state::BoardNode>,
     threads: Vec<Thread>,
     posts: Vec<Post>,
     members: Vec<Member>,
@@ -218,6 +220,15 @@ impl Default for MockClient {
 }
 
 impl MockClient {
+    /// The whole board tree, categories included.
+    pub fn board_tree(&self) -> Vec<crate::state::BoardNode> {
+        self.board_tree.clone()
+    }
+
+    fn threads_by_board(&self, slug: &str) -> bool {
+        self.threads.iter().any(|t| t.board == slug)
+    }
+
     /// A fresh, disconnected mock with a seeded member list, board tree, DM
     /// conversations and directory.
     pub fn new() -> Self {
@@ -236,6 +247,7 @@ impl MockClient {
             current_user: None,
             who: demo.who.iter().map(|w| w.to_string()).collect(),
             boards: Self::seeded_boards(),
+            board_tree: Self::seeded_board_tree(),
             threads: Self::seeded_threads(),
             posts: Self::seeded_posts(),
             members: Self::seeded_members(),
@@ -284,6 +296,35 @@ impl MockClient {
         ]
     }
 
+    fn seeded_board_tree() -> Vec<crate::state::BoardNode> {
+        let node = |slug: &str, title: &str, description: &str, kind: u8, parent: Option<&str>| {
+            crate::state::BoardNode {
+                slug: slug.to_string(),
+                title: title.to_string(),
+                description: description.to_string(),
+                kind,
+                parent: parent.map(str::to_string),
+            }
+        };
+        vec![
+            node("commons", "The Commons", "Where everyone starts.", 0, None),
+            node(
+                "general",
+                "General",
+                "Warren-wide chatter and announcements.",
+                2,
+                Some("commons"),
+            ),
+            node(
+                "tech",
+                "Tech Talk",
+                "Protocols, clients and self-hosting.",
+                2,
+                Some("commons"),
+            ),
+        ]
+    }
+
     fn seeded_threads() -> Vec<Thread> {
         vec![
             Thread {
@@ -321,6 +362,7 @@ impl MockClient {
                 author: "rabbit".to_string(),
                 body: "Be excellent to each other. No spam.".to_string(),
                 at_unix_ms: 0,
+                removed: false,
             },
             Post {
                 id: "p12".to_string(),
@@ -328,6 +370,7 @@ impl MockClient {
                 author: "alice".to_string(),
                 body: "Sounds good to me!".to_string(),
                 at_unix_ms: 0,
+                removed: false,
             },
             Post {
                 id: "p21".to_string(),
@@ -335,6 +378,7 @@ impl MockClient {
                 author: "alice".to_string(),
                 body: "Hi, I'm Alice. Long-time lurker.".to_string(),
                 at_unix_ms: 0,
+                removed: false,
             },
             Post {
                 id: "p31".to_string(),
@@ -342,6 +386,7 @@ impl MockClient {
                 author: "bob".to_string(),
                 body: "Here's how I set up my burrow behind NAT.".to_string(),
                 at_unix_ms: 0,
+                removed: false,
             },
         ]
     }
@@ -845,6 +890,72 @@ impl MockClient {
                     &self.admin_config,
                 ))]
             }
+            AdminCommand::CreateBoard {
+                slug,
+                title,
+                description,
+                kind,
+                parent,
+            } => {
+                if self.board_tree.iter().any(|b| b.slug == slug) {
+                    vec![AdminEvent::Failed("server error: AlreadyExists".into())]
+                } else {
+                    if kind == 2 {
+                        self.boards.push(Board {
+                            slug: slug.clone(),
+                            name: title.clone(),
+                            description: description.clone(),
+                            unread: 0,
+                        });
+                    }
+                    self.board_tree.push(crate::state::BoardNode {
+                        slug,
+                        title,
+                        description,
+                        kind,
+                        parent,
+                    });
+                    vec![AdminEvent::Ack("Board created.".into())]
+                }
+            }
+            AdminCommand::UpdateBoard {
+                slug,
+                title,
+                description,
+            } => match self.board_tree.iter_mut().find(|b| b.slug == slug) {
+                Some(node) => {
+                    node.title = title.clone();
+                    node.description = description.clone();
+                    if let Some(b) = self.boards.iter_mut().find(|b| b.slug == slug) {
+                        b.name = title;
+                        b.description = description;
+                    }
+                    vec![AdminEvent::Ack("Board saved.".into())]
+                }
+                None => vec![AdminEvent::Failed("server error: NotFound".into())],
+            },
+            AdminCommand::DeleteBoard { slug } => {
+                let has_threads = self.threads_by_board(&slug);
+                let has_children = self
+                    .board_tree
+                    .iter()
+                    .any(|b| b.parent.as_deref() == Some(&slug));
+                if has_threads || has_children {
+                    vec![AdminEvent::Failed("server error: BadRequest".into())]
+                } else {
+                    self.board_tree.retain(|b| b.slug != slug);
+                    self.boards.retain(|b| b.slug != slug);
+                    vec![AdminEvent::Ack("Board removed.".into())]
+                }
+            }
+            AdminCommand::DeletePost { id } => match self.posts.iter_mut().find(|p| p.id == id) {
+                Some(post) => {
+                    post.removed = true;
+                    post.body.clear();
+                    vec![AdminEvent::Ack("Post removed.".into())]
+                }
+                None => vec![AdminEvent::Failed("server error: NotFound".into())],
+            },
             AdminCommand::GetSurfaceStatus => {
                 vec![AdminEvent::SurfacesReported(crate::demo_config::surfaces(
                     &self.admin_config,

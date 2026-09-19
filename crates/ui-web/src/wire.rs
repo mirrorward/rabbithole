@@ -82,8 +82,8 @@ use rabbithole_proto::admin::{
     ThemeBundleInfo, ThemeBundleSet,
 };
 use rabbithole_proto::board::{
-    BoardList, BoardListRequest, PostCreate, ThreadList, ThreadListRequest, ThreadPosts,
-    ThreadRequest,
+    BoardCreate, BoardDelete, BoardList, BoardListRequest, BoardUpdate, PostCreate, PostDelete,
+    ThreadList, ThreadListRequest, ThreadPosts, ThreadRequest,
 };
 use rabbithole_proto::chat::{ChatMessage, ChatSend};
 use rabbithole_proto::directory::{DirectoryResults, DirectorySearch, ProfileCard, ProfileGet};
@@ -262,6 +262,23 @@ pub fn frame_to_boards(frame: &Frame) -> Option<Vec<crate::state::Board>> {
     )
 }
 
+/// The whole board tree out of a `BoardList` reply, categories included.
+pub fn frame_to_board_tree(frame: &Frame) -> Option<Vec<crate::state::BoardNode>> {
+    let list = frame.decode::<BoardList>()?.ok()?;
+    Some(
+        list.boards
+            .into_iter()
+            .map(|b| crate::state::BoardNode {
+                slug: b.slug,
+                title: b.title,
+                description: b.description,
+                kind: b.kind,
+                parent: b.parent_slug,
+            })
+            .collect(),
+    )
+}
+
 /// Lower-hex a 32-byte id.
 pub fn id_to_hex(id: &[u8; 32]) -> String {
     let mut s = String::with_capacity(64);
@@ -369,6 +386,7 @@ pub fn frame_to_posts(frame: &Frame) -> Option<Vec<crate::state::Post>> {
                 author: p.author,
                 body: p.body,
                 at_unix_ms: p.created_at_unix_ms,
+                removed: p.tombstoned,
             })
             .collect(),
     )
@@ -1284,6 +1302,38 @@ pub enum AdminCommand {
     /// Ask the burrow to describe every setting: value, default, shape,
     /// choices, live or restart. → [`ConfigDescription`].
     DescribeConfig,
+    /// Make a board-tree node. → `BoardCreated`.
+    CreateBoard {
+        /// Its address: lowercase letters, digits, dots, dashes, underscores.
+        slug: String,
+        /// What it is called.
+        title: String,
+        /// What it says about itself.
+        description: String,
+        /// 0 category, 2 board.
+        kind: u8,
+        /// The category it hangs from, if any.
+        parent: Option<String>,
+    },
+    /// Change a board's title and description. → empty ack.
+    UpdateBoard {
+        /// Which board.
+        slug: String,
+        /// Its new title.
+        title: String,
+        /// Its new description.
+        description: String,
+    },
+    /// Remove an empty board. → empty ack.
+    DeleteBoard {
+        /// Which board.
+        slug: String,
+    },
+    /// Take a post down (its author, or a board moderator). → empty ack.
+    DeletePost {
+        /// The post's id, lower hex.
+        id: String,
+    },
     /// What each optional surface is actually doing. → [`SurfaceStatus`].
     GetSurfaceStatus,
     /// Live syndication + gateway counters. → [`GatewayStatsReply`].
@@ -1381,6 +1431,10 @@ impl AdminCommand {
             AdminCommand::ListInvites => "*invites".to_string(),
             AdminCommand::CreateInvite { .. } => "*invite-create".to_string(),
             AdminCommand::RevokeInvite { code } => format!("*invite-revoke:{code}"),
+            AdminCommand::CreateBoard { slug, .. } => format!("*board-create:{slug}"),
+            AdminCommand::UpdateBoard { slug, .. } => format!("*board-update:{slug}"),
+            AdminCommand::DeleteBoard { slug } => format!("*board-delete:{slug}"),
+            AdminCommand::DeletePost { id } => format!("*post-delete:{id}"),
             _ => return None,
         })
     }
@@ -1441,6 +1495,31 @@ pub fn admin_command_to_frame(
             Frame::request(id, &ConfigSet::new(key.clone(), value.clone()))?
         }
         AdminCommand::DescribeConfig => Frame::request(id, &ConfigDescribeRequest)?,
+        AdminCommand::CreateBoard {
+            slug,
+            title,
+            description,
+            kind,
+            parent,
+        } => {
+            let mut create = BoardCreate::new(slug.clone(), title.clone(), *kind);
+            create.description = description.clone();
+            create.parent_slug = parent.clone();
+            Frame::request(id, &create)?
+        }
+        AdminCommand::UpdateBoard {
+            slug,
+            title,
+            description,
+        } => Frame::request(
+            id,
+            &BoardUpdate::new(slug.clone(), title.clone(), description.clone(), None),
+        )?,
+        AdminCommand::DeleteBoard { slug } => Frame::request(id, &BoardDelete::new(slug.clone()))?,
+        AdminCommand::DeletePost { id: post } => match hex_to_id(post) {
+            Some(target) => Frame::request(id, &PostDelete::new(target))?,
+            None => return Ok(None),
+        },
         AdminCommand::GetSurfaceStatus => Frame::request(id, &SurfaceStatusRequest)?,
         AdminCommand::GetGatewayStats => Frame::request(id, &GatewayStatsRequest)?,
         AdminCommand::SetThemeBundle { bundle } => {
