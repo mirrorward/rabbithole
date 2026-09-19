@@ -9,6 +9,7 @@
 #![cfg_attr(rustfmt, rustfmt_skip)]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -33,11 +34,13 @@ pub struct TransfersManager {
     /// with two burrows joined is a coin toss, and with the origin fallback
     /// could fetch a *different file* that happens to share the id.
     ///
-    /// `Client` is `!Sync`, so they live behind an async mutex; a fetch runs
-    /// while the lock is held, so downloads serialize (concurrent downloads +
-    /// mid-fetch abort are a later refinement, unblocked by splitting the
-    /// find/ticket phase from the lock-free fetch).
-    clients: Mutex<std::collections::HashMap<String, Client>>,
+    /// `Client` is `!Sync`, so each session lives behind its own async
+    /// mutex, and the map's lock is held only long enough to find one. A
+    /// download holds *its* burrow's session for as long as it runs, so two
+    /// downloads from one burrow still take turns — but another burrow's
+    /// download, the re-announce pass, and the Settings screen no longer
+    /// wait behind it.
+    clients: Mutex<std::collections::HashMap<String, Session>>,
     /// What this machine offers to each burrow's swarm, when the person has
     /// opted in. Per burrow, like the sessions. Lock order is always
     /// `clients` then `seeders`.
@@ -102,21 +105,26 @@ pub async fn connect_native(
     // Only a session that can actually ask for things is kept. A guest has no
     // resume token; the webview knows that too and downloads over its own
     // socket instead.
-    let mut clients = state.clients.lock().await;
-    if authed {
-        clients.insert(endpoint.clone(), client);
-        // Adverts die with a session. A new one announces what is on offer.
-        let mut seeders = state.seeders.lock().await;
-        if let (Some(client), Some(seeder)) = (clients.get_mut(&endpoint), seeders.get_mut(&endpoint)) {
-            if let Err(why) = seeder.announce(client).await {
-                *state.seeding_note.lock().expect("not poisoned") = Some(why.to_string());
-            }
+    if !authed {
+        state.clients.lock().await.remove(&endpoint);
+        return Ok(());
+    }
+    let session: Session = Arc::new(Mutex::new(client));
+    state.clients.lock().await.insert(endpoint.clone(), session.clone());
+    // Adverts die with a session. A new one announces what is on offer.
+    let mut client = session.lock().await;
+    let mut seeders = state.seeders.lock().await;
+    if let Some(seeder) = seeders.get_mut(&endpoint) {
+        if let Err(why) = seeder.announce(&mut client).await {
+            *state.seeding_note.lock().expect("not poisoned") = Some(why.to_string());
         }
-    } else {
-        clients.remove(&endpoint);
     }
     Ok(())
 }
+
+/// One burrow's native session, held on its own so the rest of the app is
+/// not blocked while a download uses it.
+type Session = Arc<Mutex<Client>>;
 
 /// A `SwarmEvent` tagged with which transfer it belongs to — the `swarm://event`
 /// payload the ui-web Transfers manager routes by `transfer_id`.
@@ -155,10 +163,17 @@ pub async fn swarm_start_download(
         return Err("Save cancelled.".to_string());
     };
     eprintln!("[rh-swarm] swarm_start_download: transfer={transfer_id} root={root_hex} size={size} name={name:?}");
-    let mut guard = state.clients.lock().await;
-    let client = guard
-        .get_mut(&endpoint)
+    // The map is held only long enough to find the session; the download
+    // then holds that one burrow's session, and no other.
+    let session = state
+        .clients
+        .lock()
+        .await
+        .get(&endpoint)
+        .cloned()
         .ok_or("the app has no signed-in session to that burrow")?;
+    let mut guard = session.lock().await;
+    let client = &mut *guard;
     // A failure is reported to the webview as an event, not just returned:
     // the UI's transfer row is driven by the event stream, and an error that
     // only comes back through the invoke promise leaves that row saying
@@ -333,10 +348,14 @@ pub async fn set_seeding(app: AppHandle, state: State<'_, TransfersManager>, on:
     prefs.seed = on;
     downloads::store(&path, &prefs)?;
     if !on {
-        let mut clients = state.clients.lock().await;
+        let sessions = state.clients.lock().await.clone();
         let mut seeders = state.seeders.lock().await;
         for (endpoint, seeder) in seeders.iter_mut() {
-            seeder.stop(clients.get_mut(endpoint)).await;
+            // A burrow busy with a download is not told: closing the
+            // endpoint stops the sharing either way, and an advert nobody
+            // can dial lapses on its own.
+            let mut held = sessions.get(endpoint).and_then(|s| s.try_lock().ok());
+            seeder.stop(held.as_deref_mut()).await;
         }
         seeders.clear();
         *state.seeding_note.lock().expect("not poisoned") = None;
@@ -346,18 +365,19 @@ pub async fn set_seeding(app: AppHandle, state: State<'_, TransfersManager>, on:
 
 /// Keep adverts alive: a burrow forgets an advert that is not renewed. Runs
 /// for the life of the app and does nothing while nothing is on offer. A
-/// long download holds the session lock, so an advert can lapse during one
+/// burrow busy with a download is skipped rather than waited for, so one
+/// slow download never holds up the others' adverts; that advert can lapse
 /// and come back at the next pass: soft state, by design.
 pub async fn reannounce_loop(app: AppHandle) {
     loop {
         let wait = {
             let state = app.state::<TransfersManager>();
-            let mut clients = state.clients.lock().await;
+            let sessions = state.clients.lock().await.clone();
             let mut seeders = state.seeders.lock().await;
             let mut next = 60;
             for (endpoint, seeder) in seeders.iter_mut().filter(|(_, s)| s.files() > 0) {
-                if let Some(client) = clients.get_mut(endpoint) {
-                    if let Err(why) = seeder.announce(client).await {
+                if let Some(mut client) = sessions.get(endpoint).and_then(|s| s.try_lock().ok()) {
+                    if let Err(why) = seeder.announce(&mut client).await {
                         *state.seeding_note.lock().expect("not poisoned") = Some(why.to_string());
                     }
                 }
