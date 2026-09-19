@@ -458,6 +458,18 @@ impl Burrow {
         if !shared.radio.program_slugs().is_empty() {
             tasks.push(radio::spawn_playlist_driver(shared.clone()));
         }
+        // With the stream listener on, a library station is not just a list
+        // of titles: each one gets a pump that plays its rotation out loud.
+        // (Without the listener there is nowhere to tune in, and the timer
+        // driver above keeps now-playing moving on its own.)
+        if shared.radio.listen_port() != 0 {
+            for slug in shared.radio.program_slugs() {
+                if shared.radio.track_count(&slug) > 0 {
+                    tracing::info!(mount = %slug, "radio library station streaming");
+                    tasks.push(radio::spawn_program_pump(shared.clone(), slug));
+                }
+            }
+        }
         let mut radio_source_addr = None;
         if let Some(addr) = radio_source {
             let (bound, handle) = radio::spawn_radio_source(shared.clone(), addr).await?;

@@ -89,6 +89,13 @@ const SOURCE_CHUNK: usize = 8 * 1024;
 /// The permission resource DJ authorization is checked against.
 const RADIO_RESOURCE: &str = "radio";
 
+/// A mount's byte fan-out: what a source (a DJ, or a rotation's pump) sends
+/// into and every listener reads from.
+type Fanout = broadcast::Sender<Arc<[u8]>>;
+
+/// The slot a mount's listeners read their stream title from.
+type TitleSlot = Arc<Mutex<Option<NowPlaying>>>;
+
 /// A live mount: its byte fan-out channel plus the metadata listeners need.
 ///
 /// Only the source connection and this registry entry hold the [`broadcast::Sender`];
@@ -105,6 +112,9 @@ struct MountEntry {
     /// Current now-playing metadata, shared live with listeners for the
     /// `StreamTitle` blocks (updatable without keeping the sender alive).
     now_playing: Arc<Mutex<Option<NowPlaying>>>,
+    /// Held by a library rotation's pump rather than a live source. A DJ may
+    /// take such a mount over; a mount another DJ holds is refused.
+    program_owned: bool,
 }
 
 /// A listener's view of a mount: an event receiver plus the head it needs to
@@ -210,6 +220,12 @@ struct Program {
     live: Option<NowPlaying>,
     /// Bytes ingested from the current live DJ (observability + tests).
     source_bytes: u64,
+    /// A pump is streaming this rotation's audio, and advances it when a
+    /// track's audio actually ends. Otherwise the timer driver advances it on
+    /// a nominal duration and the station is now-playing only.
+    pumped: bool,
+    /// How many tracks the rotation holds.
+    tracks: usize,
 }
 
 impl Program {
@@ -314,6 +330,7 @@ impl Stations {
         tracks: Vec<Track>,
     ) {
         let station = Station::new(slug, STATION_CAPACITY);
+        let track_count = tracks.len();
         let playlist = Playlist::new(tracks, RotationMode::Sequential);
         let mut controller = StationController::new(station, playlist, description, AUTOMATION_DJ);
         // Start playout at the opening track so now-playing is live at once.
@@ -331,6 +348,8 @@ impl Stations {
                 controller,
                 live: None,
                 source_bytes: 0,
+                pumped: false,
+                tracks: track_count,
             },
         );
     }
@@ -394,7 +413,8 @@ impl Stations {
         let mut advanced = Vec::new();
         let mut programs = self.programs.lock();
         for (slug, p) in programs.iter_mut() {
-            if p.is_live() {
+            // A pumped rotation moves on when its audio ends, not on a timer.
+            if p.is_live() || p.pumped {
                 continue;
             }
             if p.controller.is_finished(now_ms) {
@@ -403,6 +423,90 @@ impl Stations {
             }
         }
         advanced
+    }
+
+    /// Hand a rotation to a pump: from now on it advances when told to.
+    pub fn set_pumped(&self, slug: &str, pumped: bool) {
+        if let Some(p) = self.programs.lock().get_mut(slug) {
+            p.pumped = pumped;
+        }
+    }
+
+    /// The track a rotation is on, with the blob its audio lives in.
+    pub fn current_track(&self, slug: &str) -> Option<Track> {
+        self.programs
+            .lock()
+            .get(slug)
+            .and_then(|p| p.controller.current().cloned())
+    }
+
+    /// How many tracks a rotation has.
+    pub fn track_count(&self, slug: &str) -> usize {
+        self.programs.lock().get(slug).map_or(0, |p| p.tracks)
+    }
+
+    /// Move a rotation to its next track.
+    pub fn advance(&self, slug: &str, now_ms: u64) {
+        if let Some(p) = self.programs.lock().get_mut(slug) {
+            p.controller.on_track_finished(now_ms);
+        }
+    }
+
+    /// Whether a person (a live source) holds `slug`'s mount right now.
+    pub fn dj_holds(&self, slug: &str) -> bool {
+        self.mounts
+            .lock()
+            .get(slug)
+            .is_some_and(|m| !m.program_owned)
+    }
+
+    /// The rotation's own mount: the existing one, or a fresh one. `None`
+    /// while a DJ holds the slug. Returns the byte fan-out and the slot the
+    /// listeners' stream titles are read from.
+    fn program_mount(&self, slug: &str) -> Option<(Fanout, TitleSlot)> {
+        // The controller's own station record (name, description, what is on).
+        let program = self
+            .programs
+            .lock()
+            .get(slug)
+            .map(|p| p.controller.station_meta())?;
+        let display_name = self
+            .registry
+            .get(slug)
+            .map(|i| i.display_name)
+            .unwrap_or_else(|| program.name.clone());
+        let mut mounts = self.mounts.lock();
+        if let Some(existing) = mounts.get(slug) {
+            return existing
+                .program_owned
+                .then(|| (existing.tx.clone(), existing.now_playing.clone()));
+        }
+        let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let now_playing = Arc::new(Mutex::new(program.now_playing.clone()));
+        mounts.insert(
+            slug.to_string(),
+            MountEntry {
+                tx: tx.clone(),
+                meta: StationMeta {
+                    name: display_name,
+                    genre: program.description.clone(),
+                    ..StationMeta::default()
+                },
+                content_type: "audio/mpeg".to_string(),
+                now_playing: now_playing.clone(),
+                program_owned: true,
+            },
+        );
+        Some((tx, now_playing))
+    }
+
+    /// Whether the pump holding `tx` still has the air: its mount is there,
+    /// is the rotation's, and is this very channel.
+    fn owns_air(&self, slug: &str, tx: &Fanout) -> bool {
+        self.mounts
+            .lock()
+            .get(slug)
+            .is_some_and(|m| m.program_owned && m.tx.same_channel(tx))
     }
 
     /// Slugs of all installed library programs, sorted (deterministic).
@@ -623,7 +727,10 @@ where
     // released before any `.await` so the guard never crosses a suspension.
     let claim = {
         let mut mounts = shared.radio.mounts.lock();
-        if mounts.contains_key(&slug) {
+        // A live source holding the mount is refused; a rotation's mount gives
+        // way. Replacing the entry closes the rotation's listeners, who
+        // reconnect to the DJ (whose stream may well be another codec).
+        if mounts.get(&slug).is_some_and(|m| !m.program_owned) {
             None
         } else {
             let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
@@ -638,6 +745,7 @@ where
                     meta: req.metadata.clone(),
                     content_type: req.content_type.clone(),
                     now_playing: now_playing.clone(),
+                    program_owned: false,
                 },
             );
             Some((tx, now_playing))
@@ -993,6 +1101,132 @@ pub fn station_listing(shared: &Arc<Shared>) -> Vec<rabbithole_proto::radio::Rad
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Rotation playout: a library station that actually streams
+// ---------------------------------------------------------------------------
+
+/// How much audio one send carries. Long enough that a track is a few
+/// hundred sends rather than tens of thousands, short enough that a DJ taking
+/// the air is noticed within a quarter of a second.
+const PUMP_BATCH_MICROS: u64 = 250_000;
+
+/// How far ahead of the clock the pump runs, so a player that just tuned in
+/// has something to buffer instead of starving on its first frame.
+const PUMP_LEAD: Duration = Duration::from_secs(2);
+
+/// A run of whole, contiguous frames and how long it plays for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Batch {
+    pub bytes: std::ops::Range<usize>,
+    pub micros: u64,
+}
+
+/// Cut a track into sends: whole frames only (a listener's decoder should
+/// never be handed half of one by us), contiguous bytes only (junk between
+/// frames is not audio and is not sent), about a quarter second each.
+pub fn batches(track: &[u8]) -> Vec<Batch> {
+    let mut out: Vec<Batch> = Vec::new();
+    let mut open: Option<Batch> = None;
+    for frame in rabbithole_radio::mp3::frames(track) {
+        let end = frame.offset + frame.len;
+        match open.as_mut() {
+            Some(b) if b.bytes.end == frame.offset && b.micros < PUMP_BATCH_MICROS => {
+                b.bytes.end = end;
+                b.micros += frame.micros();
+            }
+            _ => {
+                out.extend(open.take());
+                open = Some(Batch {
+                    bytes: frame.offset..end,
+                    micros: frame.micros(),
+                });
+            }
+        }
+    }
+    out.extend(open);
+    out
+}
+
+/// Start streaming a library station: one task that plays its rotation out
+/// loud, for as long as the burrow runs.
+pub fn spawn_program_pump(shared: Arc<Shared>, slug: String) -> JoinHandle<()> {
+    shared.radio.set_pumped(&slug, true);
+    tokio::spawn(program_pump(shared, slug))
+}
+
+/// Play a rotation: load the current track, send it at the speed it plays,
+/// move on when its audio ends. A station plays whether or not anyone is
+/// listening, so the clock runs regardless and only the sends are skipped.
+///
+/// A DJ may take the air at any moment (the mount is replaced under us). The
+/// pump notices within one batch, stands down, and picks the rotation back up
+/// with the next track when the DJ leaves.
+async fn program_pump(shared: Arc<Shared>, slug: String) {
+    // One clock for the station, not one per track: restarting it per track
+    // would push the lead again each time, and a listener's buffer would grow
+    // by two seconds a song.
+    let mut clock: Option<(std::time::Instant, Duration)> = None;
+    let mut unplayable = 0usize;
+    loop {
+        if shared.radio.is_live(&slug) || shared.radio.dj_holds(&slug) {
+            clock = None; // whoever comes back starts a fresh stream
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        }
+        let Some(track) = shared.radio.current_track(&slug) else {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        };
+        let blobs = shared.blobs.clone();
+        let id = rabbithole_blobs::BlobId(track.source.0);
+        let audio = tokio::task::spawn_blocking(move || blobs.get(&id))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .filter(|bytes| rabbithole_radio::mp3::looks_like_mp3(bytes));
+        let Some(audio) = audio else {
+            // Not MP3 (or unreadable): this pump cannot pace it. Skip it, and
+            // if the whole rotation is like that, stop spinning on it.
+            tracing::debug!(mount = %slug, track = %track.title, "radio: track is not streamable MP3; skipped");
+            shared.radio.advance(&slug, unix_ms());
+            unplayable += 1;
+            if unplayable >= shared.radio.track_count(&slug).max(1) {
+                unplayable = 0;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+            continue;
+        };
+        unplayable = 0;
+        let Some((tx, title_slot)) = shared.radio.program_mount(&slug) else {
+            continue; // a DJ got there first; the top of the loop waits
+        };
+        *title_slot.lock() = shared.radio.now_playing(&slug);
+        publish_now_playing(&shared, &slug, false);
+
+        let (started, mut sent) = clock.unwrap_or((std::time::Instant::now(), Duration::ZERO));
+        let mut interrupted = false;
+        for batch in batches(&audio) {
+            if !shared.radio.owns_air(&slug, &tx) {
+                interrupted = true;
+                break;
+            }
+            if tx.receiver_count() > 0 {
+                let _ = tx.send(Arc::from(&audio[batch.bytes.clone()]));
+            }
+            sent += Duration::from_micros(batch.micros);
+            let due = sent.saturating_sub(PUMP_LEAD);
+            let elapsed = started.elapsed();
+            if due > elapsed {
+                tokio::time::sleep(due - elapsed).await;
+            }
+        }
+        clock = (!interrupted).then_some((started, sent));
+        // Finished or interrupted, the rotation moves on: a station that was
+        // talked over does not replay the song from the top.
+        shared.radio.advance(&slug, unix_ms());
+    }
+}
+
 /// Bind + serve the DJ **source ingest** surface (SOURCE/PUT). Distinct from
 /// [`spawn_radio`], which is the listener *delivery* surface. Returns the bound
 /// address and the accept-loop handle. Mirrors the other legacy spawn helpers.
@@ -1196,7 +1430,10 @@ where
     let np = now_playing_from_ice(&req.metadata, &dj_name);
     let claim = {
         let mut mounts = shared.radio.mounts.lock();
-        if mounts.contains_key(&slug) {
+        // A live source holding the mount is refused; a rotation's mount gives
+        // way. Replacing the entry closes the rotation's listeners, who
+        // reconnect to the DJ (whose stream may well be another codec).
+        if mounts.get(&slug).is_some_and(|m| !m.program_owned) {
             None
         } else {
             let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
@@ -1207,6 +1444,7 @@ where
                     meta: req.metadata.clone(),
                     content_type: req.content_type.clone(),
                     now_playing: Arc::new(Mutex::new(Some(np.clone()))),
+                    program_owned: false,
                 },
             );
             Some(tx)
@@ -1327,6 +1565,102 @@ mod tests {
             rating_avg: 0.0,
             rating_count: 0,
         }
+    }
+
+    /// `count` structurally valid MP3 frames (MPEG-1 Layer III, 128 kbit/s,
+    /// 44.1 kHz: 417 bytes and 26.122 ms each) with silent bodies.
+    fn mp3_frames(count: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(count * 417);
+        for _ in 0..count {
+            out.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
+            out.extend(std::iter::repeat_n(0u8, 413));
+        }
+        out
+    }
+
+    #[test]
+    fn a_track_is_cut_into_whole_contiguous_quarter_second_sends() {
+        // 43 frames is a little over a second: four full sends and a tail.
+        let track = mp3_frames(43);
+        let cut = batches(&track);
+        assert_eq!(cut.len(), 4 + 1);
+        // Ten frames reach 250 ms (10 x 26.122 = 261 ms); nothing is split.
+        assert_eq!(cut[0].bytes, 0..4170);
+        assert_eq!(cut[0].micros, 261_220);
+        assert!(
+            cut.iter().all(|b| b.bytes.len() % 417 == 0),
+            "whole frames only"
+        );
+        assert_eq!(
+            cut.iter().map(|b| b.bytes.len()).sum::<usize>(),
+            track.len()
+        );
+        assert_eq!(
+            cut.last().unwrap().bytes.len(),
+            3 * 417,
+            "the tail is what is left"
+        );
+        assert_eq!(cut.last().unwrap().bytes.end, track.len());
+        // Junk between frames is not audio: the run ends before it and a new
+        // one starts after it, and the junk itself is never sent.
+        let mut dirty = mp3_frames(3);
+        dirty.extend_from_slice(b"\xFF\xFFgarbage, twenty-four bytes");
+        dirty.extend(mp3_frames(3));
+        let cut = batches(&dirty);
+        assert_eq!(cut.len(), 2);
+        assert_eq!(cut[0].bytes, 0..1251);
+        assert_eq!(cut[1].bytes.len(), 1251);
+        assert!(cut[1].bytes.start > 1251);
+        assert!(batches(b"not audio at all").is_empty());
+    }
+
+    #[test]
+    fn a_rotations_mount_gives_way_to_a_dj_and_not_to_a_second_one() {
+        let radio = Stations::new();
+        let track = Track::new(TrackId(1), "One.mp3", "", DEFAULT_TRACK_MS, BlobId([1; 32]));
+        radio.install_program("ambient", "Ambient", "slow", vec![track]);
+        assert_eq!(radio.track_count("ambient"), 1);
+        assert!(!radio.is_streaming("ambient"), "no pump, no audio");
+        let (tx, _) = radio.program_mount("ambient").expect("the air is free");
+        assert!(radio.is_streaming("ambient"));
+        assert!(radio.owns_air("ambient", &tx));
+        assert!(!radio.dj_holds("ambient"));
+        // Asking again is the same mount, not a second one.
+        let (again, _) = radio.program_mount("ambient").unwrap();
+        assert!(again.same_channel(&tx));
+
+        // A DJ replaces it (what both source surfaces do under the lock).
+        let (dj_tx, _) = broadcast::channel(8);
+        radio.mounts.lock().insert(
+            "ambient".into(),
+            MountEntry {
+                tx: dj_tx,
+                meta: StationMeta::default(),
+                content_type: "audio/ogg".into(),
+                now_playing: Arc::new(Mutex::new(None)),
+                program_owned: false,
+            },
+        );
+        assert!(radio.dj_holds("ambient"));
+        assert!(!radio.owns_air("ambient", &tx), "the pump must notice");
+        assert!(
+            radio.program_mount("ambient").is_none(),
+            "and must not barge back in"
+        );
+
+        // The DJ leaves; the rotation can have its air back.
+        radio.mounts.lock().remove("ambient");
+        let (fresh, _) = radio.program_mount("ambient").expect("free again");
+        assert!(
+            !fresh.same_channel(&tx),
+            "a fresh stream for fresh listeners"
+        );
+
+        // A pumped rotation is not also advanced by the timer.
+        radio.set_pumped("ambient", true);
+        assert!(radio.advance_finished(u64::MAX).is_empty());
+        radio.set_pumped("ambient", false);
+        assert_eq!(radio.advance_finished(u64::MAX), ["ambient"]);
     }
 
     #[test]

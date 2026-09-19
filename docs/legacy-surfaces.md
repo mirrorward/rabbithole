@@ -71,6 +71,12 @@ disables that class.
   `radio_library_areas` (mount slug → file-area slug, *TOML-only*) — each
   entry runs a playlist-automation station from that area's audio files; a
   live DJ source takes the mount over and rotation resumes when it leaves.
+  With `radio_enabled`, the rotation **streams**: MP3 tracks are sent at
+  playing speed, whole frames at a time, and the rotation advances when a
+  track's audio ends. Tracks that are not MP3 are skipped by the streamer
+  (it paces by MPEG frame headers and does not decode). `radio_public_base`
+  names the public stream address when it is not this host on `radio_addr`'s
+  port; clients are told it and never ask a person for it.
   The updinfo endpoints (`GET /admin/metadata`, `GET /admin.cgi`) ride the
   source-ingest listener and check the source credentials.
 - **Syndication**: `syndication_enabled`, `syndication_feeds` (URL → board
