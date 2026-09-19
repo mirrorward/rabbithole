@@ -234,19 +234,15 @@ pub async fn handle(
         if req.bytes.len() > MAX_INLINE_UPLOAD {
             fail!(ErrorCode::TooLarge);
         }
-        // Per-account storage quota (0 = unlimited) — enforced here too so it
-        // can't be sidestepped via small inline uploads.
-        let quota = shared.config.read().upload_quota_bytes;
-        if quota > 0 {
-            let used = shared
-                .files
-                .uploaded_bytes(ctx.account_id)
-                .await
-                .unwrap_or(0)
-                .max(0) as u64;
-            if used.saturating_add(req.bytes.len() as u64) > quota {
-                fail!(ErrorCode::TooLarge);
-            }
+        // The largest file and the account's space, enforced here too so
+        // neither can be sidestepped with small inline uploads. Held until
+        // the file is recorded, so two uploads cannot both fit the last of
+        // the space.
+        let _commit = crate::upload_gate::commit_lock(shared).await;
+        if let Err(refused) =
+            crate::upload_gate::check(shared, ctx.account_id, req.bytes.len() as u64).await
+        {
+            fail!(refused.code());
         }
         // Hash-deny gate: refuse denied content before it touches the blob
         // store (the blob id IS the blake3 of the bytes).
@@ -365,6 +361,21 @@ pub async fn handle(
                 .await
         );
         reply!(&pf::NodeReply::new(view(&node)));
+        return Ok(true);
+    }
+
+    // ---- What the caller may upload --------------------------------------
+    if frame.decode::<pf::UploadLimitsRequest>().is_some() {
+        let (max_file, quota) = {
+            let config = shared.config.read();
+            (config.upload_max_file_bytes, config.upload_quota_bytes)
+        };
+        let used = if ctx.is_guest {
+            0
+        } else {
+            crate::upload_gate::used_bytes(shared, ctx.account_id).await
+        };
+        reply!(&pf::UploadLimits::new(max_file, quota, used));
         return Ok(true);
     }
 

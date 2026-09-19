@@ -405,16 +405,33 @@ pub const SECTIONS: &[Section] = &[
         pane: Pane::Settings,
         groups: &[
             Group {
-                title: "Transfers",
-                blurb: "",
+                title: "Uploads",
+                blurb: "What one person may put in the file library. Checked on every surface \
+                        that takes files: the app, Hotline, telnet and the rest.",
                 items: &[
                     item(
+                        "upload_max_file_bytes",
+                        "Largest file",
+                        "The biggest single file anyone may upload, in bytes. A larger one is \
+                         refused before any of it is sent. Hotline and telnet uploads also stop \
+                         at 64 MiB, whatever this says.",
+                    )
+                    .unit(Unit::Bytes)
+                    .zero("no limit"),
+                    item(
                         "upload_quota_bytes",
-                        "Upload quota",
-                        "How much one account may keep in the file library, in bytes.",
+                        "Space per person",
+                        "How much one account may keep in the file library altogether, in \
+                         bytes. Removing a file gives its space back.",
                     )
                     .unit(Unit::Bytes)
                     .zero("no quota"),
+                ],
+            },
+            Group {
+                title: "Transfers",
+                blurb: "",
+                items: &[
                     item(
                         "max_concurrent_transfers",
                         "Transfers at once",

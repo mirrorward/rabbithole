@@ -646,6 +646,20 @@ impl MockClient {
                 vec![0u8; len as usize],
             )),
             FileCommand::AbortTransfer { .. } => Vec::new(),
+            FileCommand::GetUploadLimits => {
+                let me = self.current_user.clone().unwrap_or_else(|| "me".to_string());
+                let used = self
+                    .file_nodes
+                    .iter()
+                    .filter(|n| n.kind == KIND_FILE && n.uploader == me)
+                    .map(|n| n.size.max(0) as u64)
+                    .sum();
+                file_events(&rabbithole_proto::filelib::UploadLimits::new(
+                    50 * 1024 * 1024,
+                    0,
+                    used,
+                ))
+            }
         }
     }
 

@@ -12,7 +12,7 @@
 //! [`Transfer`] queue: a projection of the transfer-family event stream into a
 //! queued / active / done / failed list with progress.
 
-use rabbithole_proto::filelib::{FileAreaView, FileNodeView};
+use rabbithole_proto::filelib::{FileAreaView, FileNodeView, UploadLimits};
 
 use crate::wire::FileEvent;
 
@@ -149,7 +149,16 @@ pub struct FilesState {
     pub status: String,
     /// What is being moved, while the person finds the folder for it.
     pub carrying: Option<Carried>,
+    /// What the burrow said this person may upload, when it has said.
+    pub limits: Option<UploadLimits>,
 }
+
+/// Uploads started from this app, across every burrow, for their queue keys.
+static UPLOADS_STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Queue keys for uploads started here sit far above any node or transfer id
+/// the burrow hands out, so an upload row never collides with a download's.
+pub const UPLOAD_KEY_BASE: u64 = 1 << 62;
 
 impl FilesState {
     /// Fold a single [`FileEvent`] into the state. Unknown
@@ -157,6 +166,7 @@ impl FilesState {
     pub fn apply(&mut self, event: &FileEvent) {
         match event {
             FileEvent::AreasListed(areas) => self.areas = areas.clone(),
+            FileEvent::UploadLimitsLoaded(limits) => self.limits = Some(*limits),
             FileEvent::FolderListed { nodes } => self.nodes = nodes.clone(),
             FileEvent::NodeUpdated(node) => self.upsert_node(node.clone()),
             FileEvent::FileDownloaded { node, size } => {
@@ -232,11 +242,12 @@ impl FilesState {
                 self.status = format!("Error: {detail}");
                 // No transfer id on this one (a list or metadata request), so
                 // the most recent still-running transfer is the best guess.
-                if let Some(t) =
-                    self.transfers.iter_mut().rev().find(|t| {
-                        matches!(t.status, TransferStatus::Queued | TransferStatus::Active)
-                    })
-                {
+                // Uploads report their own failures, by key; a stray error
+                // must not take one over.
+                if let Some(t) = self.transfers.iter_mut().rev().find(|t| {
+                    t.dir == TransferDir::Download
+                        && matches!(t.status, TransferStatus::Queued | TransferStatus::Active)
+                }) {
                     t.status = TransferStatus::Failed;
                     // Keep the reason ON the transfer. It was already in hand
                     // here and thrown away, which is why a failed row could
@@ -339,6 +350,83 @@ impl FilesState {
 
 /// The current folder path as a `/`-joined string, or `None` at the root.
 impl FilesState {
+    /// A ticketed upload of `name` begins: a queue row, and its key.
+    pub fn upload_started(&mut self, name: &str, size: u64) -> u64 {
+        let n = UPLOADS_STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let key = UPLOAD_KEY_BASE + n;
+        self.transfers.push(Transfer {
+            id: key,
+            name: name.to_string(),
+            dir: TransferDir::Upload,
+            total: size,
+            done: 0,
+            status: TransferStatus::Queued,
+            hash: None,
+            error: None,
+            sources: None,
+            node_id: None,
+            retryable: false,
+        });
+        key
+    }
+
+    /// `sent` bytes of the upload `key` have been taken by the burrow.
+    pub fn upload_progress(&mut self, key: u64, sent: u64) {
+        if let Some(t) = self.upload_row(key) {
+            if t.status == TransferStatus::Queued || t.status == TransferStatus::Active {
+                t.status = TransferStatus::Active;
+                t.done = sent.min(t.total);
+            }
+        }
+    }
+
+    /// The upload `key` is filed, as `node` when the burrow said which.
+    pub fn upload_done(&mut self, key: u64, node: Option<i64>) {
+        if let Some(t) = self.upload_row(key) {
+            t.status = TransferStatus::Done;
+            t.done = t.total;
+            t.node_id = node;
+        }
+    }
+
+    /// The upload `key` failed, and why. A cancelled row stays cancelled.
+    pub fn upload_failed(&mut self, key: u64, why: String) {
+        if let Some(t) = self.upload_row(key) {
+            if t.status != TransferStatus::Failed {
+                t.status = TransferStatus::Failed;
+                t.error = Some(why);
+            }
+        }
+    }
+
+    /// Stop the upload `key` if it is still going. The sender sees the mark
+    /// before its next chunk and abandons the transfer.
+    pub fn cancel_upload(&mut self, key: u64) {
+        if let Some(t) = self.upload_row(key) {
+            // Once every byte is sent the burrow is filing it: too late.
+            let sending = t.status == TransferStatus::Queued
+                || (t.status == TransferStatus::Active && t.done < t.total);
+            if sending {
+                t.status = TransferStatus::Failed;
+                t.error = Some(crate::upload::CANCELLED.to_string());
+            }
+        }
+    }
+
+    /// Whether the upload `key` was cancelled (or is gone).
+    pub fn upload_cancelled(&self, key: u64) -> bool {
+        self.transfers
+            .iter()
+            .find(|t| t.id == key)
+            .is_none_or(|t| t.error.as_deref() == Some(crate::upload::CANCELLED))
+    }
+
+    fn upload_row(&mut self, key: u64) -> Option<&mut Transfer> {
+        self.transfers
+            .iter_mut()
+            .find(|t| t.id == key && t.dir == TransferDir::Upload)
+    }
+
     /// Why what is carried cannot be put down in the folder shown, or `None`
     /// when it can.
     pub fn cannot_put_down_here(&self) -> Option<&'static str> {
@@ -438,6 +526,71 @@ pub fn human_size(bytes: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_upload_row_moves_from_queued_to_done_and_a_cancel_sticks() {
+        let mut files = FilesState::default();
+        let a = files.upload_started("side-a.dmg", 1000);
+        let b = files.upload_started("side-b.dmg", 10);
+        assert_ne!(a, b);
+        assert!(a > UPLOAD_KEY_BASE && b > UPLOAD_KEY_BASE);
+        let row = |f: &FilesState, k| f.transfers.iter().find(|t| t.id == k).cloned().unwrap();
+        assert_eq!(row(&files, a).status, TransferStatus::Queued);
+        assert_eq!(row(&files, a).dir, TransferDir::Upload);
+
+        files.upload_progress(a, 400);
+        assert_eq!(row(&files, a).status, TransferStatus::Active);
+        assert_eq!(row(&files, a).percent(), 40);
+        files.upload_progress(a, 5000);
+        assert_eq!(row(&files, a).done, 1000, "never past the whole");
+        files.upload_done(a, Some(7));
+        assert_eq!(row(&files, a).status, TransferStatus::Done);
+        assert_eq!(row(&files, a).node_id, Some(7));
+
+        assert!(!files.upload_cancelled(b));
+        files.cancel_upload(b);
+        assert!(files.upload_cancelled(b));
+        files.upload_failed(b, "late failure".into());
+        assert_eq!(
+            row(&files, b).error.as_deref(),
+            Some(crate::upload::CANCELLED)
+        );
+        files.upload_progress(b, 5);
+        assert_eq!(
+            row(&files, b).status,
+            TransferStatus::Failed,
+            "a cancel sticks"
+        );
+        files.cancel_upload(a);
+        assert_eq!(
+            row(&files, a).status,
+            TransferStatus::Done,
+            "a finished upload stays done"
+        );
+        assert!(
+            files.upload_cancelled(12345),
+            "a row that is gone reads as cancelled"
+        );
+
+        let limits = UploadLimits::new(10, 0, 0);
+        files.apply(&FileEvent::UploadLimitsLoaded(limits));
+        assert_eq!(files.limits, Some(limits));
+
+        // Every byte sent: the burrow is filing it, and a cancel is too late.
+        let c = files.upload_started("side-c.dmg", 100);
+        files.upload_progress(c, 100);
+        files.cancel_upload(c);
+        assert_eq!(row(&files, c).status, TransferStatus::Active);
+        assert!(!files.upload_cancelled(c));
+
+        // A stray FILE error (a listing, a metadata request) never takes over
+        // an upload's row.
+        let d = files.upload_started("side-d.dmg", 100);
+        files.upload_progress(d, 10);
+        files.apply(&FileEvent::Failed("server error: NotFound".into()));
+        assert_eq!(row(&files, d).status, TransferStatus::Active);
+        assert_eq!(row(&files, d).error, None);
+    }
 
     #[test]
     fn what_is_carried_can_go_anywhere_but_where_it_is_or_inside_itself() {

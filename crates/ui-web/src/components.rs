@@ -1036,10 +1036,12 @@ pub fn Transfers() -> impl IntoView {
                                 } else {
                                     0
                                 };
+                                let cancelled = t.error.as_deref() == Some(crate::upload::CANCELLED);
                                 let (status_cls, status_txt) = match t.status {
                                     TransferStatus::Queued => ("rh-badge", "Queued"),
                                     TransferStatus::Active => ("rh-badge active", "Active"),
                                     TransferStatus::Done => ("rh-badge done", "Done"),
+                                    TransferStatus::Failed if cancelled => ("rh-badge", "Cancelled"),
                                     TransferStatus::Failed => ("rh-badge failed", "Failed"),
                                 };
                                 let fill = if matches!(t.status, TransferStatus::Failed) {
@@ -1061,6 +1063,11 @@ pub fn Transfers() -> impl IntoView {
                                 });
                                 // The reason, when there is one — the whole
                                 // point of the row for a failed transfer.
+                                let cancel = (t.dir == TransferDir::Upload
+                                    && (t.status == TransferStatus::Queued
+                                        || (t.status == TransferStatus::Active && t.done < t.total)))
+                                    .then_some(t.id);
+                                let upload = t.dir == TransferDir::Upload;
                                 let failure = matches!(t.status, TransferStatus::Failed).then(|| {
                                     (
                                         t.error.clone().unwrap_or_else(|| {
@@ -1089,6 +1096,11 @@ pub fn Transfers() -> impl IntoView {
                                             // reported one; the honest
                                             // single-source note otherwise.
                                             {match t.sources {
+                                                _ if upload => view! {
+                                                    <span class="rh-swarmpill" title="Where this upload is going">
+                                                        {format!("to {burrow}")}
+                                                    </span>
+                                                }.into_view(),
                                                 Some(n) => view! {
                                                     <span class="rh-swarmpill" title="Sources this download pulled from">
                                                         {format!(
@@ -1103,6 +1115,15 @@ pub fn Transfers() -> impl IntoView {
                                                     </span>
                                                 }.into_view(),
                                             }}
+                                            {cancel.map(|key| view! {
+                                                <button
+                                                    type="button"
+                                                    class="rh-btn ghost small"
+                                                    on:click=move |_| app.cancel_upload(key)
+                                                >
+                                                    "Cancel"
+                                                </button>
+                                            })}
                                         </div>
                                         // A failed transfer says WHY, and
                                         // offers to try again when trying
@@ -4190,6 +4211,7 @@ pub fn Files() -> impl IntoView {
     let app = expect_context::<AppState>();
     let files = app.focused().files;
     app.load_areas();
+    app.load_upload_limits();
 
     view! {
         <StatusBar/>
@@ -4401,6 +4423,9 @@ fn FolderBrowser() -> impl IntoView {
                 <span class="rh-btn-icon" inner_html=crate::icons::upload_icon()></span>"Upload\u{2026}"
             </button>
             <span class="rh-toolbar-hint">"or drop files here"</span>
+            {move || files
+                .with(|f| f.limits.as_ref().and_then(crate::upload::limits_line))
+                .map(|line| view! { <span class="rh-toolbar-limits">{line}</span> })}
         </div>
         <MoveBar/>
         <h2 class="rh-visually-hidden">"Folder contents"</h2>
@@ -4848,7 +4873,7 @@ fn TransferQueue() -> impl IntoView {
             <ul class="rh-queue">
                 <For
                     each=move || files.with(|f| f.transfers.clone())
-                    key=|t| format!("{}:{}:{:?}", t.id, t.percent(), t.status)
+                    key=|t| format!("{}:{}:{:?}:{:?}", t.id, t.percent(), t.status, t.error)
                     children=move |t| {
                         let pct = t.percent();
                         let (badge, bar) = match t.status {
@@ -4857,21 +4882,41 @@ fn TransferQueue() -> impl IntoView {
                             TransferStatus::Done => ("rh-badge done", "rh-bar-fill"),
                             TransferStatus::Failed => ("rh-badge failed", "rh-bar-fill failed"),
                         };
+                        let cancelled = t.error.as_deref() == Some(crate::upload::CANCELLED);
                         let status = match t.status {
                             TransferStatus::Queued => "queued",
                             TransferStatus::Active => "active",
                             TransferStatus::Done => "done",
+                            TransferStatus::Failed if cancelled => "cancelled",
                             TransferStatus::Failed => "failed",
                         };
                         let width = format!("transform:scaleX({})", f64::from(pct) / 100.0);
                         let bar_label = format!("{} transfer progress", t.name);
+                        let cancel = (t.dir == crate::files::TransferDir::Upload
+                            && (t.status == TransferStatus::Queued
+                                || (t.status == TransferStatus::Active && t.done < t.total)))
+                            .then_some(t.id);
+                        let why = t
+                            .error
+                            .clone()
+                            .filter(|_| t.status == TransferStatus::Failed && !cancelled);
                         view! {
                             <li class="rh-queue-item">
                                 <div class="rh-queue-head">
                                     <span class="rh-queue-name">{t.name.clone()}</span>
                                     <span class=badge>{status}</span>
                                     <span class="rh-queue-pct">{format!("{pct}%")}</span>
+                                    {cancel.map(|key| view! {
+                                        <button
+                                            type="button"
+                                            class="rh-btn ghost small"
+                                            on:click=move |_| app.cancel_upload(key)
+                                        >
+                                            "Cancel"
+                                        </button>
+                                    })}
                                 </div>
+                                {why.map(|why| view! { <p class="rh-queue-why">{why}</p> })}
                                 <div
                                     class="rh-bar"
                                     role="progressbar"

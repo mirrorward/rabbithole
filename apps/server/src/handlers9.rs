@@ -26,7 +26,7 @@ use rabbithole_proto::transfer as pt;
 use rabbithole_proto::{ErrorCode, Frame};
 use rabbithole_server_core::files::KIND_FILE;
 use rabbithole_server_core::ratelimit::{class as rl, Scope};
-use rabbithole_server_core::{Caps, ServerEvent};
+use rabbithole_server_core::{Caps, FileError, ServerEvent};
 
 use crate::session::SessionCtx;
 use crate::Shared;
@@ -65,7 +65,7 @@ pub struct TransferRegistry {
     next: AtomicU64,
     /// Serializes quota check + node commit so concurrent finishes cannot
     /// both observe the same free space and oversubscribe an account.
-    commit_lock: tokio::sync::Mutex<()>,
+    pub(crate) commit_lock: tokio::sync::Mutex<()>,
 }
 
 impl TransferRegistry {
@@ -269,7 +269,7 @@ where
 /// average send rate at or under `rate` bytes/sec. `rate == 0` disables it.
 /// A per-chunk sleep slightly under-utilizes the link (it ignores wire time),
 /// which is the safe direction for a cap.
-async fn throttle_after(rate: u64, bytes: usize) {
+pub(crate) async fn throttle_after(rate: u64, bytes: usize) {
     if rate > 0 && bytes > 0 {
         let secs = bytes as f64 / rate as f64;
         tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
@@ -409,7 +409,15 @@ pub async fn handle(
                 if !ctx.allows(shared, &res, Caps::FILE_UPLOAD) {
                     fail!(ErrorCode::Forbidden);
                 }
-                if req.name.trim().is_empty() || req.name.contains('/') {
+                // The library's own name rule, checked before any bytes move
+                // rather than discovered at the finish.
+                let name = req.name.trim();
+                if name.is_empty()
+                    || name.len() > 128
+                    || name.contains('/')
+                    || name == "."
+                    || name == ".."
+                {
                     fail!(ErrorCode::BadRequest);
                 }
                 // Hash-deny gate: the declared blake3 root is checked here
@@ -418,18 +426,13 @@ pub async fn handle(
                 if shared.moderation.is_denied(&req.root) {
                     fail!(ErrorCode::Forbidden);
                 }
-                // Per-account storage quota (0 = unlimited).
-                let quota = shared.config.read().upload_quota_bytes;
-                if quota > 0 {
-                    let used = shared
-                        .files
-                        .uploaded_bytes(ctx.account_id)
-                        .await
-                        .unwrap_or(0)
-                        .max(0) as u64;
-                    if used.saturating_add(req.size) > quota {
-                        fail!(ErrorCode::TooLarge);
-                    }
+                // The largest file and the account's space, on the declared
+                // size: refused before a byte is sent. UploadFinish re-checks
+                // the measured size.
+                if let Err(refused) =
+                    crate::upload_gate::check(shared, ctx.account_id, req.size).await
+                {
+                    fail!(refused.code());
                 }
                 let id = shared.transfers.next_id();
                 let token = mint_token(&shared.server_signing_seed, id);
@@ -630,18 +633,10 @@ pub async fn handle(
         // Recheck at commit time: multiple individually valid tickets may
         // have opened concurrently while the account still had free space.
         // Only committed, measured bytes are authoritative for quota.
-        let quota = shared.config.read().upload_quota_bytes;
-        if quota > 0 {
-            let used = shared
-                .files
-                .uploaded_bytes(ctx.account_id)
-                .await
-                .unwrap_or(0)
-                .max(0) as u64;
-            if used.saturating_add(measured_size) > quota {
-                let _ = tokio::fs::remove_file(&staging).await;
-                fail!(ErrorCode::TooLarge);
-            }
+        if let Err(refused) = crate::upload_gate::check(shared, ctx.account_id, measured_size).await
+        {
+            let _ = tokio::fs::remove_file(&staging).await;
+            fail!(refused.code());
         }
         // Hash-deny gate at finalize: the staged bytes must verify against
         // `ticket.root`, so a denied root can never be committed — even if
@@ -676,7 +671,13 @@ pub async fn handle(
             .await
         {
             Ok(n) => n,
-            Err(_) => fail!(ErrorCode::AlreadyExists),
+            Err(FileError::Exists) => fail!(ErrorCode::AlreadyExists),
+            // The folder went while the file was on its way.
+            Err(FileError::NoSuchArea | FileError::NoSuchNode | FileError::NotAFolder) => {
+                fail!(ErrorCode::NotFound)
+            }
+            Err(FileError::BadName) => fail!(ErrorCode::BadRequest),
+            Err(_) => fail!(ErrorCode::Internal),
         };
         shared.bus.publish(ServerEvent::FileAdded {
             area: ticket.area.clone(),

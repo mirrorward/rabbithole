@@ -1,6 +1,8 @@
 # Server-to-server transfers
 
-> Design for review. Nothing here is built. Request 7 of
+> **Reviewed by Kevin on 2026-09-19: build B only.** The answers are under
+> [Decisions](#decisions); the questions are kept at the end for the record.
+> Request 7 of
 > [`2026-09-requests.md`](2026-09-requests.md): choose files or folders on one
 > burrow and send them to another burrow you are connected to, optionally with
 > the swarm so it goes faster; permissions on both sides; clear errors; and
@@ -110,6 +112,21 @@ Build **A** first. It delivers the feature people will see, touches no
 protocol and no trust boundary, and its errors and permissions are the ones
 already tested. Build **B** after this document has been reviewed, because it
 is the first time a burrow acts on a person's behalf at another burrow.
+
+## Decisions
+
+Kevin's answers, 2026-09-19. They supersede the proposal above.
+
+1. **Pulls come from approved federation peers only**, by default. Pulling
+   from any burrow is an explicit operator opt-in (`s2s_pull_from_any`), and
+   even then private and loopback ranges stay refused.
+2. **A pulled file is filed under the requesting person**: their account is
+   its uploader and it counts against their quota. The source burrow and the
+   root are recorded as its provenance.
+3. **Folders recreate their tree** under the chosen destination folder. On a
+   name clash the newcomer is numbered, the way downloads number theirs.
+4. **No client relay.** A is dropped; only the destination-initiated pull (B)
+   is built.
 
 ## Questions for Kevin
 

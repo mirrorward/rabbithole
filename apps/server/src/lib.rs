@@ -40,6 +40,7 @@ pub mod stats;
 pub mod surfaces;
 pub mod syndication;
 pub mod telnet;
+pub mod upload_gate;
 pub mod well_known;
 pub mod zmodem;
 

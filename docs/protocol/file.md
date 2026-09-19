@@ -29,6 +29,7 @@ engine 20-42.
 | 28 | AreaDelete | Request | FILE_MANAGE: `slug` → empty ack. `BadRequest` while the area has anything in it: an area takes its whole tree with it |
 | 29 | NodeRename | Request → `NodeReply` | `id`, `name`. The uploader of a file, or FILE_MANAGE on the area. In place; a folder's descendants keep their place under the new name (their paths are rewritten in one transaction). `BadRequest` for an empty name, one with a slash, `.` or `..`; `AlreadyExists` when something by that name is beside it |
 | 30 | NodeMove | Request → `NodeReply` | `id`, `folder?` (`None` or empty: the area root). FILE_MANAGE on the area, checked where it is and where it goes. Same area only. `BadRequest` for a folder moved into itself or below, or a destination that is not a folder; `NotFound` for a destination that is not there; `AlreadyExists` when the destination has something by that name |
+| 31/32 | UploadLimitsRequest → UploadLimits | Request/Reply | Any session: `max_file_bytes`, `quota_bytes`, `used_bytes` (0 = no limit; a guest's `used_bytes` is 0). Asked before a file is sent so a refusal can say which limit and by how much; a burrow that predates it answers `Unsupported`; its own limits still hold there |
 
 ## Small blobs (types 100+, Wave 2)
 
@@ -101,12 +102,13 @@ same byte ranges (`bao-tree`).
 
 ## Rate policy & the client queue (Wave 4.3)
 
-Three server-side limits, all off by default (`0` = unlimited), settable via
-`ctl config set`:
+Four server-side limits (`0` = unlimited), all live, settable from the
+console's Files & transfers section or `ctl config set`:
 
 | config key | scope | effect |
 |---|---|---|
-| `upload_quota_bytes` | per account | total stored upload bytes; checked at upload `TransferOpen` and inline `FileUpload` → `TooLarge` |
+| `upload_max_file_bytes` | per file | the largest single file, **50 MiB by default** (Hotline and ZMODEM also stop at their own 64 MiB in-memory ceiling). Checked where the size is first declared (upload `TransferOpen`, inline `FileUpload`, Hotline's `TRANSFER_SIZE`, ZMODEM's header) and again on the bytes that arrived (`UploadFinish`, the Hotline and ZMODEM finalizers, and the streaming ceilings beneath them) → `TooLarge` |
+| `upload_quota_bytes` | per account | total stored upload bytes; checked at the same points → `TooLarge`. Off by default |
 | `max_concurrent_transfers` | per account | live tickets (up + down); a further `TransferOpen` is refused with `RateLimited` |
 | `transfer_rate_bytes_per_sec` | per transfer | download bandwidth cap, applied to both the ranged-chunk and dedicated-stream paths |
 

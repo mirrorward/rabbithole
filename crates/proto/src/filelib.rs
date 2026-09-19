@@ -609,3 +609,42 @@ impl Message for NodeMove {
     const FAMILY: Family = Family::FILE;
     const MESSAGE_TYPE: u16 = 30;
 }
+
+/// What this burrow lets the caller upload, asked before a file is sent so a
+/// refusal can say which limit and by how much. → [`UploadLimits`]. Any
+/// session. A burrow that predates it answers `Unsupported`: its uploads are
+/// still checked, only not announced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadLimitsRequest;
+
+impl Message for UploadLimitsRequest {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 31;
+}
+
+/// Reply to [`UploadLimitsRequest`]. Zero means no limit.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadLimits {
+    /// The largest single file, in bytes.
+    pub max_file_bytes: u64,
+    /// What one account may keep in the library altogether, in bytes.
+    pub quota_bytes: u64,
+    /// What the caller's account keeps there now, in bytes.
+    pub used_bytes: u64,
+}
+
+impl UploadLimits {
+    pub fn new(max_file_bytes: u64, quota_bytes: u64, used_bytes: u64) -> Self {
+        Self {
+            max_file_bytes,
+            quota_bytes,
+            used_bytes,
+        }
+    }
+}
+
+impl Message for UploadLimits {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 32;
+}

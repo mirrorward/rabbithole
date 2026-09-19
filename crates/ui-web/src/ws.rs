@@ -44,14 +44,14 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use gloo_timers::future::TimeoutFuture;
-use js_sys::{ArrayBuffer, Math, Uint8Array};
+use js_sys::{ArrayBuffer, Function, Math, Promise, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{BinaryType, CloseEvent, Event as WebEvent, MessageEvent, WebSocket};
 
 use rabbithole_core::api::{Command, Event};
-use rabbithole_proto::{decode_frame, encode_frame, RequestId};
+use rabbithole_proto::{decode_frame, encode_frame, Frame, FrameKind, RequestId};
 
 use crate::conn::{backoff_delay, ConnState};
 use crate::wire::{
@@ -138,6 +138,11 @@ struct Inner {
     /// management requests are not all in one family (a board is created in
     /// BOARD, an area in FILE) and order across families is nobody's promise.
     pending_admin: RefCell<std::collections::HashMap<RequestId, Option<String>>>,
+    /// Replies an async flow is awaiting ([`WsClient::call`]), by request id:
+    /// the resolver of the promise it awaits. A reply resolves it with the
+    /// frame's bytes and goes nowhere else; the socket closing resolves every
+    /// one with `null`, so nothing waits on a dead connection.
+    pending_calls: RefCell<std::collections::HashMap<RequestId, Function>>,
     notice_sink: Option<NoticeSink>,
     who_sink: Option<WhoSink>,
     sessions_sink: Option<SessionsSink>,
@@ -312,6 +317,7 @@ impl WsClient {
                 file_sink: None,
                 admin_sink: None,
                 pending_admin: RefCell::new(std::collections::HashMap::new()),
+                pending_calls: RefCell::new(std::collections::HashMap::new()),
                 notice_sink: None,
                 who_sink: None,
                 sessions_sink: None,
@@ -658,6 +664,58 @@ impl WsClient {
         }
     }
 
+    /// Send one request and await its reply, for flows that take several
+    /// steps (a ticketed upload: open, chunks, finish). The request is on the
+    /// wire before this returns; the future resolves with the reply frame
+    /// (errors included, on `frame.error`), or `None` when the socket is not
+    /// open or closes first. A claimed reply is not also fanned out to the
+    /// sinks, so a transfer ticket meant for an upload never shows up as a
+    /// download.
+    pub fn call<M: rabbithole_proto::Message>(
+        &self,
+        msg: &M,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Frame>>>> {
+        let promise = {
+            let mut b = self.inner.borrow_mut();
+            let id = b.next_request_id();
+            let bytes = Frame::request(id, msg)
+                .ok()
+                .and_then(|frame| encode_frame(&frame).ok());
+            let mut resolver = None;
+            let promise = Promise::new(&mut |resolve, _reject| resolver = Some(resolve));
+            let open = matches!(&b.ws, Some(ws) if ws.ready_state() == WS_OPEN);
+            match (bytes, resolver, open) {
+                (Some(bytes), Some(resolve), true) => {
+                    b.pending_calls.borrow_mut().insert(id, resolve);
+                    Self::write(&mut b, &bytes);
+                }
+                (_, Some(resolve), _) => {
+                    let _ = resolve.call1(&JsValue::NULL, &JsValue::NULL);
+                }
+                _ => {}
+            }
+            promise
+        };
+        Box::pin(async move {
+            let value = JsFuture::from(promise).await.ok()?;
+            let bytes = value.dyn_into::<Uint8Array>().ok()?.to_vec();
+            decode_frame(&bytes).ok()
+        })
+    }
+
+    /// Resolve every awaited reply with `null`: the socket is gone.
+    fn release_calls(b: &Inner) {
+        let waiting: Vec<Function> = b
+            .pending_calls
+            .borrow_mut()
+            .drain()
+            .map(|(_, f)| f)
+            .collect();
+        for resolve in waiting {
+            let _ = resolve.call1(&JsValue::NULL, &JsValue::NULL);
+        }
+    }
+
     /// Write `bytes` to the socket, surfacing failures on the api-event sink.
     fn write(b: &mut Inner, bytes: &[u8]) {
         match &b.ws {
@@ -760,6 +818,20 @@ impl WsClient {
                 let b = inner.borrow();
                 match decode_frame(&bytes) {
                     Ok(frame) => {
+                        // A reply an async flow is awaiting is its alone. Only
+                        // a reply: a push carries a stamped sequence number in
+                        // its id, which can equal a request id.
+                        let is_reply = frame.kind == FrameKind::Reply;
+                        let awaited = if is_reply {
+                            b.pending_calls.borrow_mut().remove(&frame.id)
+                        } else {
+                            None
+                        };
+                        if let Some(resolve) = awaited {
+                            let copy = Uint8Array::from(bytes.as_slice());
+                            let _ = resolve.call1(&JsValue::NULL, &copy);
+                            return;
+                        }
                         // Proof of possession: if the handshake ack challenged our
                         // identity key, sign the nonce and return a KeyProof so the
                         // burrow surfaces the key as *verified*. Fire-and-forget
@@ -792,7 +864,11 @@ impl WsClient {
                         }
                         // A reply to a management request, whatever its
                         // family: hand it on with what the request was about.
-                        let asked = b.pending_admin.borrow_mut().remove(&frame.id);
+                        let asked = if is_reply {
+                            b.pending_admin.borrow_mut().remove(&frame.id)
+                        } else {
+                            None
+                        };
                         if let Some(tag) = asked {
                             let mut events = wire::frame_to_admin_events(&frame);
                             if events.is_empty() && frame.error.is_none() {
@@ -886,6 +962,7 @@ impl WsClient {
                     let mut b = inner.borrow_mut();
                     b.alive = false;
                     b.ws = None;
+                    Self::release_calls(&b);
                     b.want_connected
                 };
                 if want {

@@ -39,6 +39,11 @@ pub fn AreasPane() -> impl IntoView {
                 "A library people browse, upload to and download from. Folders, drop boxes and \
                  the files themselves are managed in Files, where you can see them."
             </p>
+            <p class="rh-adm-group-blurb">
+                "How big one file may be and how much each person may keep are under "
+                <A href="/admin/files">"Files & transfers"</A>
+                "."
+            </p>
             <Show when=move || adding.get() fallback=|| ()>
                 <NewArea on_done=Callback::new(move |_| adding.set(false))/>
             </Show>

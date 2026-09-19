@@ -175,6 +175,11 @@ const TEMP_BAN: Duration = Duration::from_secs(30 * 60);
 /// uploads to disk staging is a documented follow-up.
 const MAX_HTXF_UPLOAD: u64 = 64 * 1024 * 1024;
 
+/// Room for the flattened-object wrapping around a file's DATA fork when its
+/// declared `TRANSFER_SIZE` is compared with the per-file limit: the headers,
+/// the INFO fork and a modest resource fork.
+const HTXF_WRAPPING_ALLOWANCE: u64 = 1024 * 1024;
+
 /// Sanity ceiling on an uploaded INFO fork (name + comment metadata).
 const MAX_INFO_FORK: u32 = 64 * 1024;
 
@@ -645,7 +650,8 @@ where
             // channel (or more than the stage allows) is refused, not
             // truncated.
             let claim = u64::from(fork.data_size);
-            let oversized = base.saturating_add(claim) > MAX_HTXF_UPLOAD
+            let ceiling = crate::upload_gate::file_ceiling(shared, MAX_HTXF_UPLOAD);
+            let oversized = base.saturating_add(claim) > ceiling
                 || ticket.declared_total.is_some_and(|d| claim > d);
             if oversized {
                 tracing::debug!(
@@ -728,21 +734,13 @@ async fn finalize_htxf_upload(
         tracing::info!(name = %ticket.name, "hotline upload refused: denied hash");
         return;
     }
-    // Per-account storage quota (0 = unlimited), re-checked against the
+    // The largest file and the account's space, re-checked against the
     // *actual* byte count (the control-channel check trusted the declared
-    // size).
-    let quota = shared.config.read().upload_quota_bytes;
-    if quota > 0 {
-        let used = shared
-            .files
-            .uploaded_bytes(ticket.account_id)
-            .await
-            .unwrap_or(0)
-            .max(0) as u64;
-        if used.saturating_add(size as u64) > quota {
-            tracing::info!(name = %ticket.name, "hotline upload refused: quota exceeded");
-            return;
-        }
+    // size), and held until the file is recorded.
+    let _commit = crate::upload_gate::commit_lock(shared).await;
+    if let Err(refused) = crate::upload_gate::check(shared, ticket.account_id, size as u64).await {
+        tracing::info!(name = %ticket.name, reason = %refused.line(), "hotline upload refused");
+        return;
     }
     let blobs = shared.blobs.clone();
     let blob_id = match tokio::task::spawn_blocking(move || blobs.put(&data)).await {
@@ -2603,19 +2601,23 @@ async fn upload_file(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -
     if declared_total.is_some_and(|d| d > MAX_HTXF_UPLOAD) {
         return err_reply(ty, id, "file too large");
     }
-    // Per-account storage quota against the declared size (fail fast; the
-    // finalize gate re-checks the actual bytes).
-    let quota = shared.config.read().upload_quota_bytes;
-    if quota > 0 {
-        let used = shared
-            .files
-            .uploaded_bytes(active.subject.account_id)
-            .await
-            .unwrap_or(0)
-            .max(0) as u64;
-        if used.saturating_add(declared_total.unwrap_or(0)) > quota {
-            return err_reply(ty, id, "storage quota exceeded");
+    // Fail fast on the declared size. It counts the whole flattened object
+    // (headers, the INFO fork, any resource fork), so the per-file limit is
+    // held against it with room for that wrapping, and exactly against the
+    // DATA fork as it streams and the bytes at finalize.
+    if let (Some(total), Some(max)) = (declared_total, crate::upload_gate::max_file_bytes(shared)) {
+        if total > max.saturating_add(HTXF_WRAPPING_ALLOWANCE) {
+            return err_reply(ty, id, &crate::upload_gate::Refusal::TooBig { max }.line());
         }
+    }
+    if let Err(refused) = crate::upload_gate::check_quota(
+        shared,
+        active.subject.account_id,
+        declared_total.unwrap_or(0),
+    )
+    .await
+    {
+        return err_reply(ty, id, &refused.line());
     }
     let key = partial_key(active.subject.account_id, &area, folder.as_deref(), &name);
     let resuming = field_bytes(txn, field::FILE_TRANSFER_OPTIONS).is_some();

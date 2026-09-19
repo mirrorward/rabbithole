@@ -98,7 +98,8 @@ use rabbithole_proto::dm::{
 use rabbithole_proto::filelib::{
     AreaCreate, AreaDelete, AreaList, AreaListRequest, AreaUpdate, FileAdded, FileAreaView,
     FileContent, FileDownloadRequest, FileNodeView, FileUpload, FolderCreate, FolderListRequest,
-    NodeDelete, NodeGet, NodeList, NodeMove, NodeRename, NodeReply, SetMetadata,
+    NodeDelete, NodeGet, NodeList, NodeMove, NodeRename, NodeReply, SetMetadata, UploadLimits,
+    UploadLimitsRequest,
 };
 use rabbithole_proto::hello::{CapabilitySet, Hello, HelloAck};
 use rabbithole_proto::presence::{PresenceSet, PresenceState, UserJoined, UserLeft, Who, WhoList};
@@ -935,6 +936,8 @@ pub enum FileCommand {
         /// Transfer id to abort.
         transfer_id: u64,
     },
+    /// What this person may upload. → [`UploadLimits`].
+    GetUploadLimits,
 }
 
 /// A file-library event decoded from an inbound FILE-family [`Frame`] by
@@ -988,6 +991,9 @@ pub enum FileEvent {
     /// A FILE request failed, with no transfer to attach it to (a list or
     /// metadata request).
     Failed(String),
+    /// What this person may upload: the largest file, their space, and how
+    /// much of it is used.
+    UploadLimitsLoaded(UploadLimits),
     /// A *specific transfer* failed. Keyed by id rather than "the most recent
     /// running one", because with two downloads in flight that guess marks the
     /// wrong row — and `retryable` tells the UI whether offering Retry is
@@ -1141,6 +1147,7 @@ pub fn file_command_to_frame(
             FileCommand::OpenDownload { node_id } => {
                 Frame::request(id, &TransferOpen::download(*node_id))?
             }
+            FileCommand::GetUploadLimits => Frame::request(id, &UploadLimitsRequest)?,
             FileCommand::RequestChunk {
                 transfer_id,
                 offset,
@@ -1182,6 +1189,9 @@ pub fn frame_to_file_events(frame: &Frame) -> Vec<FileEvent> {
     // NodeReply backs get/upload/edit/rate/alias: the reducer upserts it.
     if let Some(Ok(m)) = frame.decode::<NodeReply>() {
         return vec![FileEvent::NodeUpdated(m.node)];
+    }
+    if let Some(Ok(m)) = frame.decode::<UploadLimits>() {
+        return vec![FileEvent::UploadLimitsLoaded(m)];
     }
     if let Some(Ok(m)) = frame.decode::<FileAdded>() {
         return vec![FileEvent::FileAdded {

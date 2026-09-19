@@ -95,6 +95,10 @@ pub struct ServerConfig {
     /// Size caps for profile art blobs, in bytes.
     pub avatar_max_bytes: usize,
     pub banner_max_bytes: usize,
+    /// The largest single file anyone may upload, in bytes (0 = no limit).
+    /// Checked where the size is first declared and again on the bytes
+    /// that actually arrive, on every surface that files into the library.
+    pub upload_max_file_bytes: u64,
     /// Per-account file-library upload quota in bytes (0 = unlimited).
     pub upload_quota_bytes: u64,
     /// Max simultaneous in-flight transfers per account (0 = unlimited).
@@ -461,6 +465,7 @@ impl Default for ServerConfig {
             persona_max: 5,
             avatar_max_bytes: 256 * 1024,
             banner_max_bytes: 1024 * 1024,
+            upload_max_file_bytes: DEFAULT_UPLOAD_MAX_FILE_BYTES,
             upload_quota_bytes: 0,
             max_concurrent_transfers: 0,
             transfer_rate_bytes_per_sec: 0,
@@ -704,6 +709,7 @@ impl ServerConfig {
             "persona_max" => self.persona_max.to_string(),
             "avatar_max_bytes" => self.avatar_max_bytes.to_string(),
             "banner_max_bytes" => self.banner_max_bytes.to_string(),
+            "upload_max_file_bytes" => self.upload_max_file_bytes.to_string(),
             "upload_quota_bytes" => self.upload_quota_bytes.to_string(),
             "max_concurrent_transfers" => self.max_concurrent_transfers.to_string(),
             "transfer_rate_bytes_per_sec" => self.transfer_rate_bytes_per_sec.to_string(),
@@ -896,6 +902,14 @@ impl ServerConfig {
                     key: key.into(),
                     detail: value.into(),
                 })?;
+                Ok(true)
+            }
+            "upload_max_file_bytes" => {
+                self.upload_max_file_bytes =
+                    value.parse().map_err(|_| ConfigError::BadValue {
+                        key: key.into(),
+                        detail: value.into(),
+                    })?;
                 Ok(true)
             }
             "upload_quota_bytes" => {
@@ -1306,6 +1320,9 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// The default for [`ServerConfig::upload_max_file_bytes`]: 50 MiB a file.
+pub const DEFAULT_UPLOAD_MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
+
 /// Every key [`ServerConfig::get_key`] answers, in the order it lists them.
 /// A test reads this file and fails if an arm is missing here, so a console
 /// that asks for "every key" really gets every key.
@@ -1333,6 +1350,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "persona_max",
     "avatar_max_bytes",
     "banner_max_bytes",
+    "upload_max_file_bytes",
     "upload_quota_bytes",
     "max_concurrent_transfers",
     "transfer_rate_bytes_per_sec",
@@ -2074,6 +2092,25 @@ mod tests {
         assert_eq!(loaded.telnet_min_role, "user");
         assert_eq!(loaded.files_http_base, "http://h:1");
         assert_eq!(loaded.finger_min_role, "guest");
+    }
+
+    #[test]
+    fn a_file_may_be_fifty_mebibytes_unless_the_operator_says_otherwise() {
+        let live = LiveConfig::new(ServerConfig::default());
+        assert_eq!(live.get_key("upload_max_file_bytes").unwrap(), "52428800");
+        assert!(live.set_key("upload_max_file_bytes", "0").unwrap(), "applies live");
+        assert_eq!(live.get_key("upload_max_file_bytes").unwrap(), "0");
+        assert!(matches!(
+            live.set_key("upload_max_file_bytes", "fifty"),
+            Err(ConfigError::BadValue { .. })
+        ));
+        let described = ServerConfig::default().describe();
+        let info = described
+            .iter()
+            .find(|i| i.key == "upload_max_file_bytes")
+            .unwrap();
+        assert_eq!(info.kind, KeyKind::Number);
+        assert_eq!(info.default, "52428800");
     }
 
     #[test]

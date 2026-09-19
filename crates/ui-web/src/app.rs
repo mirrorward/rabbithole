@@ -89,7 +89,7 @@ pub struct Session {
     pub seen: RwSignal<usize>,
     /// This server's live browser WebSocket transport. wasm-only.
     #[cfg(target_arch = "wasm32")]
-    ws: StoredValue<crate::ws::WsClient>,
+    pub(crate) ws: StoredValue<crate::ws::WsClient>,
     /// This session's command seam. `MockClient` today; a real transport later.
     client: StoredValue<MockClient>,
 }
@@ -1695,6 +1695,7 @@ impl AppState {
             f.selected = None;
         });
         self.refresh_files();
+        self.load_upload_limits();
     }
 
     /// Descend into a child folder of the current location and list it.
@@ -2118,23 +2119,79 @@ impl AppState {
         }
     }
 
-    /// Upload a small file into the current area/folder, then refresh the
-    /// listing so the new node appears.
+    /// Upload a small file inline into the focused burrow's current folder.
+    /// The reply's node lands in the listing.
     pub fn upload(&self, name: &str, bytes: Vec<u8>) {
-        let (area, parent) = self
-            .focused()
+        self.upload_to(self.focused(), name, bytes);
+    }
+
+    /// Upload a small file inline into `session`'s current folder: the
+    /// burrow the upload was started on, even if focus has moved since.
+    pub fn upload_to(&self, session: Session, name: &str, bytes: Vec<u8>) {
+        let (area, parent) = session
             .files
             .with_untracked(|f| (f.current_area.clone(), join_path(&f.path)));
         let Some(area) = area else {
             return;
         };
-        self.dispatch_file(FileCommand::Upload {
+        let command = FileCommand::Upload {
             area,
             parent,
             name: name.to_string(),
-            mime: "text/plain".to_string(),
+            mime: crate::upload::guess_mime(name).to_string(),
             comment: String::new(),
             bytes,
+        };
+        #[cfg(target_arch = "wasm32")]
+        if session.live.get_untracked() {
+            session.ws.update_value(|c| c.dispatch_file(&command));
+            self.load_upload_limits_for(session);
+            return;
+        }
+        let files = session.files;
+        session.client.update_value(|client| {
+            let events = client.dispatch_file(command);
+            files.update(|f| {
+                for event in &events {
+                    f.apply(event);
+                }
+            });
+        });
+        self.load_upload_limits_for(session);
+    }
+
+    /// Ask the focused burrow what this person may upload.
+    pub fn load_upload_limits(&self) {
+        self.load_upload_limits_for(self.focused());
+    }
+
+    /// Ask `session`'s burrow what this person may upload: live, by an
+    /// awaited request (an old burrow's `Unsupported` must not land on a
+    /// transfer row); in the demo, through the seam.
+    pub fn load_upload_limits_for(&self, session: Session) {
+        #[cfg(target_arch = "wasm32")]
+        if session.live.get_untracked() {
+            crate::upload::load_limits(session);
+            return;
+        }
+        let files = session.files;
+        session.client.update_value(|client| {
+            let events = client.dispatch_file(FileCommand::GetUploadLimits);
+            files.update(|f| {
+                for event in &events {
+                    f.apply(event);
+                }
+            });
+        });
+    }
+
+    /// Stop an upload that is still going. Its row says so, and the sender
+    /// abandons the transfer before its next chunk.
+    pub fn cancel_upload(&self, key: u64) {
+        self.sessions.with_untracked(|list| {
+            for (_, session) in list {
+                session.files.update(|f| f.cancel_upload(key));
+            }
         });
     }
 

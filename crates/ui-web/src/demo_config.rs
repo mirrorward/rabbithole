@@ -33,6 +33,7 @@ pub const DEMO_SCHEMA: &[(&str, &str, u8, u8)] = &[
     ("persona_max", "5", 2, 1),
     ("avatar_max_bytes", "262144", 2, 1),
     ("banner_max_bytes", "1048576", 2, 1),
+    ("upload_max_file_bytes", "52428800", 2, 1),
     ("upload_quota_bytes", "0", 2, 1),
     ("max_concurrent_transfers", "0", 2, 1),
     ("transfer_rate_bytes_per_sec", "0", 2, 1),

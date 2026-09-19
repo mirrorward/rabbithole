@@ -1097,6 +1097,8 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 .rh-newfolder .rh-input{flex:1 1 12rem;min-width:0;padding:.35rem .6rem;font-size:var(--rh-font-sm)}\
 .rh-node-manage{display:flex;flex-direction:column;gap:var(--rh-space-2);margin-top:var(--rh-space-4);padding-top:var(--rh-space-3);border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
 .rh-node-manage-row{display:flex;gap:var(--rh-space-2);flex-wrap:wrap}\
+.rh-toolbar-limits{margin-left:auto;color:var(--rh-muted);font-size:var(--rh-font-xs);font-variant-numeric:tabular-nums;white-space:nowrap}\
+.rh-queue-why{margin:.3rem 0 0;color:var(--rh-error);font-size:var(--rh-font-xs)}\
 .rh-move-bar{display:flex;align-items:center;justify-content:space-between;gap:var(--rh-space-3);flex-wrap:wrap;margin:0 0 var(--rh-space-3);padding:.55rem var(--rh-space-4);border:1px solid color-mix(in srgb,var(--rh-accent) 35%,transparent);background:color-mix(in srgb,var(--rh-accent) 8%,transparent);border-radius:var(--rh-radius);font-size:var(--rh-font-sm)}\
 .rh-move-bar-why{color:var(--rh-muted)}\
 .rh-move-bar-actions{display:flex;gap:var(--rh-space-2);flex-shrink:0}\

@@ -483,6 +483,8 @@ struct InFlight {
     cap: u64,
     /// Staging key for parking on interruption.
     key: String,
+    /// Whether the sender declared a length (else `cap` is the ceiling).
+    declared: bool,
 }
 
 /// Receive one ZMODEM batch into `area`/`folder`. RBAC (`FILE_UPLOAD` on
@@ -586,7 +588,18 @@ where
                         break;
                     }
                     if (cur.data.len() + data.len()) as u64 > cur.cap {
-                        failed = Some(Zx::Refused("more data than declared".into()));
+                        // With no declared length the ceiling is the burrow's
+                        // limit: the file is too big, and nothing of it is
+                        // kept for a resume that could only fail again.
+                        failed = Some(Zx::Refused(if cur.declared {
+                            "more data than declared".into()
+                        } else {
+                            current = None;
+                            crate::upload_gate::Refusal::TooBig {
+                                max: crate::upload_gate::file_ceiling(shared, MAX_ZPUT_BYTES),
+                            }
+                            .line()
+                        }));
                         break;
                     }
                     cur.data.extend_from_slice(&data);
@@ -692,17 +705,10 @@ async fn vet_offer(
     if declared.is_some_and(|d| d > MAX_ZPUT_BYTES) {
         return Err("file too large".into());
     }
-    let quota = shared.config.read().upload_quota_bytes;
-    if quota > 0 {
-        let used = shared
-            .files
-            .uploaded_bytes(authed.account.id)
-            .await
-            .unwrap_or(0)
-            .max(0) as u64;
-        if used.saturating_add(declared.unwrap_or(0)) > quota {
-            return Err("storage quota exceeded".into());
-        }
+    if let Err(refused) =
+        crate::upload_gate::check(shared, authed.account.id, declared.unwrap_or(0)).await
+    {
+        return Err(refused.line());
     }
     // Resume: seed staging when a live partial fits under the declared size.
     let key = partial_key(authed.account.id, area, folder, &name);
@@ -714,7 +720,11 @@ async fn vet_offer(
     Ok(InFlight {
         name,
         data,
-        cap: declared.unwrap_or(MAX_ZPUT_BYTES).min(MAX_ZPUT_BYTES),
+        cap: {
+            let ceiling = crate::upload_gate::file_ceiling(shared, MAX_ZPUT_BYTES);
+            declared.unwrap_or(ceiling).min(ceiling)
+        },
+        declared: declared.is_some(),
         key,
     })
 }
@@ -743,24 +753,22 @@ async fn finalize_upload(
         );
         return format!("{name}: refused (that content is not allowed here)");
     }
-    // Quota re-checked against the actual byte count.
-    let quota = shared.config.read().upload_quota_bytes;
-    if quota > 0 {
-        let used = shared
-            .files
-            .uploaded_bytes(authed.account.id)
-            .await
-            .unwrap_or(0)
-            .max(0) as u64;
-        if used.saturating_add(size as u64) > quota {
-            audit(
-                shared,
-                &authed.account.login,
-                "zmodem-recv",
-                format!("{detail} outcome=quota"),
-            );
-            return format!("{name}: refused (storage quota exceeded)");
-        }
+    // The largest file and the account's space, re-checked against the
+    // actual byte count, and held until the file is recorded.
+    let _commit = crate::upload_gate::commit_lock(shared).await;
+    if let Err(refused) = crate::upload_gate::check(shared, authed.account.id, size as u64).await {
+        let (outcome, said) = match refused {
+            crate::upload_gate::Refusal::TooBig { .. } => ("too-big", "file too large"),
+            crate::upload_gate::Refusal::OverQuota { .. } => ("quota", "storage quota exceeded"),
+            crate::upload_gate::Refusal::Unavailable => ("unavailable", "try again later"),
+        };
+        audit(
+            shared,
+            &authed.account.login,
+            "zmodem-recv",
+            format!("{detail} outcome={outcome}"),
+        );
+        return format!("{name}: refused ({said})");
     }
     let blobs = shared.blobs.clone();
     let blob_id = match tokio::task::spawn_blocking(move || blobs.put(&data)).await {
