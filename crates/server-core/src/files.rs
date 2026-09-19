@@ -22,6 +22,8 @@ pub enum FileError {
     BadName,
     #[error("not a file")]
     NotAFile,
+    #[error("the area still has files or folders in it")]
+    NotEmpty,
     #[error("store: {0}")]
     Store(#[from] StoreError),
 }
@@ -69,10 +71,44 @@ impl FileService {
         description: &str,
     ) -> Result<FileAreaRow, FileError> {
         let slug = clean_name(slug)?;
+        if title.trim().is_empty() {
+            return Err(FileError::BadName);
+        }
         if self.repo().area_by_slug(&slug).await?.is_some() {
             return Err(FileError::Exists);
         }
         Ok(self.repo().create_area(&slug, title, description).await?)
+    }
+
+    /// Change what an area is called and says about itself.
+    pub async fn update_area(
+        &self,
+        slug: &str,
+        title: &str,
+        description: &str,
+    ) -> Result<(), FileError> {
+        if title.trim().is_empty() {
+            return Err(FileError::BadName);
+        }
+        if !self
+            .repo()
+            .update_area(slug, title.trim(), description)
+            .await?
+        {
+            return Err(FileError::NoSuchArea);
+        }
+        Ok(())
+    }
+
+    /// Remove an empty area. One with anything in it is refused: deleting an
+    /// area takes its whole tree with it.
+    pub async fn delete_area(&self, slug: &str) -> Result<(), FileError> {
+        let area = self.area(slug).await?;
+        if self.repo().area_node_count(area.id).await? > 0 {
+            return Err(FileError::NotEmpty);
+        }
+        self.repo().delete_area(area.id).await?;
+        Ok(())
     }
 
     pub async fn areas(&self) -> Result<Vec<FileAreaRow>, FileError> {

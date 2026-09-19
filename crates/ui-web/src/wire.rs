@@ -91,8 +91,9 @@ use rabbithole_proto::dm::{
     DmHistory, DmHistoryRequest, DmReceived, DmSend, DmThreads, DmThreadsRequest,
 };
 use rabbithole_proto::filelib::{
-    AreaList, AreaListRequest, FileAdded, FileAreaView, FileContent, FileDownloadRequest,
-    FileNodeView, FileUpload, FolderListRequest, NodeGet, NodeList, NodeReply,
+    AreaCreate, AreaDelete, AreaList, AreaListRequest, AreaUpdate, FileAdded, FileAreaView,
+    FileContent, FileDownloadRequest, FileNodeView, FileUpload, FolderCreate, FolderListRequest,
+    NodeDelete, NodeGet, NodeList, NodeReply, SetMetadata,
 };
 use rabbithole_proto::hello::{CapabilitySet, Hello, HelloAck};
 use rabbithole_proto::presence::{PresenceSet, PresenceState, UserJoined, UserLeft, Who, WhoList};
@@ -207,18 +208,23 @@ pub fn frame_to_who(frame: &Frame) -> Option<Vec<crate::state::Presence>> {
         return None;
     }
     let list = frame.decode::<WhoList>()?.ok()?;
-    Some(
-        list.users
-            .into_iter()
-            .map(|u| crate::state::Presence {
-                screen_name: u.screen_name,
-                state: u.state,
-                transport: u.transport,
-                // The verified identity key, when the burrow reports one.
-                key: u.pubkey.map(hex::encode),
-            })
-            .collect(),
-    )
+    // The burrow lists sessions; a roster lists people. Someone on their phone,
+    // on their desktop, and through the desktop's own background connection is
+    // one person, shown once (the first session the burrow named).
+    let mut people: Vec<crate::state::Presence> = Vec::new();
+    for u in list.users {
+        if people.iter().any(|p| p.screen_name == u.screen_name) {
+            continue;
+        }
+        people.push(crate::state::Presence {
+            screen_name: u.screen_name,
+            state: u.state,
+            transport: u.transport,
+            // The verified identity key, when the burrow reports one.
+            key: u.pubkey.map(hex::encode),
+        });
+    }
+    Some(people)
 }
 
 /// A live roster change decoded from a `UserJoined` / `UserLeft` push, so the
@@ -1329,6 +1335,58 @@ pub enum AdminCommand {
         /// Which board.
         slug: String,
     },
+    /// Make a file area. → `AreaReply`.
+    CreateArea {
+        /// Its address.
+        slug: String,
+        /// What it is called.
+        title: String,
+        /// What it says about itself.
+        description: String,
+    },
+    /// Change a file area's title and description. → empty ack.
+    UpdateArea {
+        /// Which area.
+        slug: String,
+        /// Its new title.
+        title: String,
+        /// Its new description.
+        description: String,
+    },
+    /// Remove an empty file area. → empty ack.
+    DeleteArea {
+        /// Which area.
+        slug: String,
+    },
+    /// Make a folder. → `NodeReply`.
+    CreateFolder {
+        /// The area it is in.
+        area: String,
+        /// The folder it is inside (`None` = the area's root).
+        parent: Option<String>,
+        /// What it is called.
+        name: String,
+        /// A drop box: people can put things in and not see what is there.
+        is_dropbox: bool,
+    },
+    /// Remove a file, or a folder with everything in it. → empty ack.
+    DeleteNode {
+        /// Which node.
+        id: i64,
+        /// Its name, for the outcome sentence.
+        name: String,
+    },
+    /// Change a file's description. → `NodeReply`.
+    DescribeNode {
+        /// Which node.
+        id: i64,
+        /// Its name, for the outcome sentence.
+        name: String,
+        /// Its icon key, kept as it was.
+        icon: String,
+        /// The new description.
+        comment: String,
+    },
     /// Take a post down (its author, or a board moderator). → empty ack.
     DeletePost {
         /// The post's id, lower hex.
@@ -1435,6 +1493,12 @@ impl AdminCommand {
             AdminCommand::UpdateBoard { slug, .. } => format!("*board-update:{slug}"),
             AdminCommand::DeleteBoard { slug } => format!("*board-delete:{slug}"),
             AdminCommand::DeletePost { id } => format!("*post-delete:{id}"),
+            AdminCommand::CreateArea { slug, .. } => format!("*area-create:{slug}"),
+            AdminCommand::UpdateArea { slug, .. } => format!("*area-update:{slug}"),
+            AdminCommand::DeleteArea { slug } => format!("*area-delete:{slug}"),
+            AdminCommand::CreateFolder { name, .. } => format!("*folder-create:{name}"),
+            AdminCommand::DeleteNode { name, .. } => format!("*node-delete:{name}"),
+            AdminCommand::DescribeNode { name, .. } => format!("*node-describe:{name}"),
             _ => return None,
         })
     }
@@ -1516,6 +1580,40 @@ pub fn admin_command_to_frame(
             &BoardUpdate::new(slug.clone(), title.clone(), description.clone(), None),
         )?,
         AdminCommand::DeleteBoard { slug } => Frame::request(id, &BoardDelete::new(slug.clone()))?,
+        AdminCommand::CreateArea {
+            slug,
+            title,
+            description,
+        } => Frame::request(
+            id,
+            &AreaCreate::new(slug.clone(), title.clone()).with_description(description.clone()),
+        )?,
+        AdminCommand::UpdateArea {
+            slug,
+            title,
+            description,
+        } => Frame::request(
+            id,
+            &AreaUpdate::new(slug.clone(), title.clone(), description.clone()),
+        )?,
+        AdminCommand::DeleteArea { slug } => Frame::request(id, &AreaDelete::new(slug.clone()))?,
+        AdminCommand::CreateFolder {
+            area,
+            parent,
+            name,
+            is_dropbox,
+        } => {
+            let mut folder = FolderCreate::new(area.clone(), parent.clone(), name.clone());
+            folder.is_dropbox = *is_dropbox;
+            Frame::request(id, &folder)?
+        }
+        AdminCommand::DeleteNode { id: node, .. } => Frame::request(id, &NodeDelete::new(*node))?,
+        AdminCommand::DescribeNode {
+            id: node,
+            icon,
+            comment,
+            ..
+        } => Frame::request(id, &SetMetadata::new(*node, icon.clone(), comment.clone()))?,
         AdminCommand::DeletePost { id: post } => match hex_to_id(post) {
             Some(target) => Frame::request(id, &PostDelete::new(target))?,
             None => return Ok(None),
@@ -1870,6 +1968,8 @@ mod tests {
         let who = WhoList::new(vec![
             UserSummary::new(1, "alice", 1, "websocket", 10),
             UserSummary::new(2, "bob", 1, "quic", 3),
+            // Bob again, from another device: still one bob.
+            UserSummary::new(3, "bob", 1, "websocket", 1),
         ]);
         let req = who_request(RequestId(1)).unwrap();
         let reply = Frame::reply_to(&req, &who).unwrap();

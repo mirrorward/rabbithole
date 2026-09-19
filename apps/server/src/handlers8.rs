@@ -57,7 +57,7 @@ fn map_err(e: FileError) -> ErrorCode {
     match e {
         FileError::NoSuchArea | FileError::NoSuchNode => ErrorCode::NotFound,
         FileError::Exists => ErrorCode::AlreadyExists,
-        FileError::BadName | FileError::NotAFile => ErrorCode::BadRequest,
+        FileError::BadName | FileError::NotAFile | FileError::NotEmpty => ErrorCode::BadRequest,
         FileError::NotAFolder => ErrorCode::BadRequest,
         FileError::Store(_) => ErrorCode::Internal,
     }
@@ -176,6 +176,30 @@ pub async fn handle(
             area.title,
             area.description
         )));
+        return Ok(true);
+    }
+
+    // ---- Edit or remove an area -------------------------------------------
+    if let Some(Ok(req)) = frame.decode::<pf::AreaUpdate>() {
+        if !ctx.allows(shared, "files", Caps::FILE_MANAGE) {
+            fail!(ErrorCode::Forbidden);
+        }
+        try_file!(
+            shared
+                .files
+                .update_area(&req.slug, &req.title, &req.description)
+                .await
+        );
+        conn.send(Frame::ack(frame)).await?;
+        return Ok(true);
+    }
+
+    if let Some(Ok(req)) = frame.decode::<pf::AreaDelete>() {
+        if !ctx.allows(shared, "files", Caps::FILE_MANAGE) {
+            fail!(ErrorCode::Forbidden);
+        }
+        try_file!(shared.files.delete_area(&req.slug).await);
+        conn.send(Frame::ack(frame)).await?;
         return Ok(true);
     }
 

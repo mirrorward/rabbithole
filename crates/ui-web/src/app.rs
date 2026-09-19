@@ -833,8 +833,13 @@ impl AppState {
                             s.who.push(p);
                         }
                     }
-                    crate::wire::PresenceDelta::Left(name) => {
-                        s.who.retain(|p| p.screen_name != name)
+                    // One session leaving is not the person leaving: they may
+                    // still be here from another device. Ask again, and let
+                    // the fresh roster say.
+                    crate::wire::PresenceDelta::Left(_) => {
+                        if let Some(app) = current() {
+                            defer(move || app.refresh_who());
+                        }
                     }
                 })
             }));
@@ -1256,6 +1261,8 @@ impl AppState {
             ConfirmIntent::RevokeInvite(code) => self.revoke_invite(&code),
             ConfirmIntent::DeleteBoard(slug) => self.delete_board(&slug),
             ConfirmIntent::DeletePost(id) => self.delete_post(&id),
+            ConfirmIntent::DeleteArea(slug) => self.delete_area(&slug),
+            ConfirmIntent::DeleteNode(id, name) => self.delete_node(id, &name),
         }
     }
 
@@ -2315,9 +2322,18 @@ impl AppState {
     /// for account, class and invitation actions.
     pub fn fold_admin_reply(&self, tag: Option<&str>, events: &[AdminEvent]) {
         let is_people = tag.is_some_and(|t| {
-            ["*account-", "*class-", "*invite", "*board-", "*post-"]
-                .iter()
-                .any(|p| t.starts_with(p))
+            [
+                "*account-",
+                "*class-",
+                "*invite",
+                "*board-",
+                "*post-",
+                "*area-",
+                "*folder-",
+                "*node-",
+            ]
+            .iter()
+            .any(|p| t.starts_with(p))
         });
         if !is_people {
             self.fold_settings_reply(tag, events);
@@ -2350,6 +2366,11 @@ impl AppState {
             crate::admin_people::Reload::Classes => app.load_classes(),
             crate::admin_people::Reload::Invites => app.load_invites(),
             crate::admin_people::Reload::Boards => app.load_boards(),
+            crate::admin_people::Reload::Areas => app.load_areas(),
+            crate::admin_people::Reload::Folder => {
+                app.focused().files.update(|f| f.selected = None);
+                app.refresh_files();
+            }
             crate::admin_people::Reload::Thread => {
                 if let Some(id) = app
                     .focused()
@@ -2452,6 +2473,66 @@ impl AppState {
     pub fn revoke_invite(&self, code: &str) {
         self.dispatch_people(AdminCommand::RevokeInvite {
             code: code.to_string(),
+        });
+    }
+
+    /// Make a file area.
+    pub fn create_area(&self, slug: &str, title: &str, description: &str) {
+        self.dispatch_people(AdminCommand::CreateArea {
+            slug: slug.trim().to_string(),
+            title: title.trim().to_string(),
+            description: description.trim().to_string(),
+        });
+    }
+
+    /// Change what a file area is called and says about itself.
+    pub fn update_area(&self, slug: &str, title: &str, description: &str) {
+        self.dispatch_people(AdminCommand::UpdateArea {
+            slug: slug.to_string(),
+            title: title.trim().to_string(),
+            description: description.trim().to_string(),
+        });
+    }
+
+    /// Remove an empty file area.
+    pub fn delete_area(&self, slug: &str) {
+        self.dispatch_people(AdminCommand::DeleteArea {
+            slug: slug.to_string(),
+        });
+    }
+
+    /// Make a folder where Files is looking.
+    pub fn create_folder_here(&self, name: &str, is_dropbox: bool) {
+        let (area, path) = self
+            .focused()
+            .files
+            .with_untracked(|f| (f.current_area.clone(), join_path(&f.path)));
+        let Some(area) = area else {
+            return;
+        };
+        self.dispatch_people(AdminCommand::CreateFolder {
+            area,
+            parent: path,
+            name: name.trim().to_string(),
+            is_dropbox,
+        });
+    }
+
+    /// Remove a file, or a folder with everything in it.
+    pub fn delete_node(&self, id: i64, name: &str) {
+        self.dispatch_people(AdminCommand::DeleteNode {
+            id,
+            name: name.to_string(),
+        });
+    }
+
+    /// Change a file's description.
+    pub fn describe_node(&self, id: i64, name: &str, icon: &str, comment: &str) {
+        self.dispatch_people(AdminCommand::DescribeNode {
+            id,
+            name: name.to_string(),
+            icon: icon.to_string(),
+            comment: comment.trim().to_string(),
         });
     }
 
@@ -2946,6 +3027,10 @@ pub enum ConfirmIntent {
     DeleteBoard(String),
     /// Take a post down (by id).
     DeletePost(String),
+    /// Remove an empty file area (by slug).
+    DeleteArea(String),
+    /// Remove a file or folder: its id and its name.
+    DeleteNode(i64, String),
 }
 
 /// A question put to the person before something irreversible.
@@ -2981,6 +3066,32 @@ impl ConfirmAsk {
                 .to_string(),
             action: "Remove two-factor".to_string(),
             intent: ConfirmIntent::ResetTotp(login.to_string()),
+        }
+    }
+
+    /// "Remove the Music area?"
+    pub fn delete_area(slug: &str, title: &str) -> Self {
+        ConfirmAsk {
+            title: format!("Remove the {title} area?"),
+            body: "Only an empty area can be removed: one with files or folders in it stays \
+                   where it is."
+                .to_string(),
+            action: "Remove".to_string(),
+            intent: ConfirmIntent::DeleteArea(slug.to_string()),
+        }
+    }
+
+    /// "Remove mix.mp3?"
+    pub fn delete_node(id: i64, name: &str, is_folder: bool) -> Self {
+        ConfirmAsk {
+            title: format!("Remove {name}?"),
+            body: if is_folder {
+                "The folder goes, with everything inside it. This cannot be undone.".to_string()
+            } else {
+                "The file is taken out of the library. This cannot be undone.".to_string()
+            },
+            action: "Remove".to_string(),
+            intent: ConfirmIntent::DeleteNode(id, name.to_string()),
         }
     }
 

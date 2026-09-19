@@ -4359,6 +4359,9 @@ fn FolderBrowser() -> impl IntoView {
             />
         </nav>
         <div class="rh-toolbar">
+            <Show when=move || may_manage_files(app) fallback=|| ()>
+                <NewFolder/>
+            </Show>
             // A real picker (the old button uploaded a hardcoded "note.txt").
             // The input is visually hidden; the button drives it, so the control
             // is a proper button with a label instead of a raw file input.
@@ -4460,6 +4463,7 @@ fn FolderBrowser() -> impl IntoView {
                         n.created_at_unix,
                         crate::clock::now_ms() / 1000,
                     );
+                    let folder_name = store_value(n.name.clone());
                     let selected = move || files.with(|f| f.selected == Some(id));
                     let class = move || {
                         if selected() {
@@ -4522,6 +4526,21 @@ fn FolderBrowser() -> impl IntoView {
                                 <span class="rh-fcol-who">{who}</span>
                                 <span class="rh-fcol-when">{when}</span>
                             </button>
+                            // A folder opens on its first click, so it is never
+                            // "selected" the way a file is: its Remove lives on
+                            // the row, for whoever may manage files here.
+                            <Show when=move || is_folder && may_manage_files(app) fallback=|| ()>
+                                <button
+                                    type="button"
+                                    class="rh-file-row-remove"
+                                    aria-label=format!("Remove the folder {}", folder_name.get_value())
+                                    on:click=move |_| app.confirm.set(Some(
+                                        crate::app::ConfirmAsk::delete_node(id, &folder_name.get_value(), true),
+                                    ))
+                                >
+                                    "Remove"
+                                </button>
+                            </Show>
                         </li>
                     }
                 }
@@ -4551,6 +4570,8 @@ fn FileDetail() -> impl IntoView {
                 files.with(|f| {
                     f.selected_node().map(|n| {
                         let id = n.id;
+                        // Owned, so the management card can outlive this borrow.
+                        let managed = n.clone();
                         view! {
                             <div class="rh-card">
                                 <h2 class="rh-card-name">{n.name.clone()}</h2>
@@ -4569,6 +4590,9 @@ fn FileDetail() -> impl IntoView {
                                 <button class="rh-btn" on:click=move |_| app.download(id)>
                                     "Download"
                                 </button>
+                                <Show when=move || may_manage_files(app) fallback=|| ()>
+                                    <NodeManagement node=managed.clone()/>
+                                </Show>
                                 // Where it comes from is a choice only the
                                 // desktop app has: a browser tab cannot reach
                                 // peers, so it has the burrow and nothing to pick.
@@ -4616,6 +4640,126 @@ fn FileDetail() -> impl IntoView {
                 })
             }}
         </Show>
+    }
+}
+
+/// Whether this session may manage files here: the burrow's `FILE_MANAGE`
+/// capability. The burrow decides; this only keeps controls that would be
+/// refused off the screen.
+fn may_manage_files(app: AppState) -> bool {
+    const FILE_MANAGE: u64 = 1 << 31;
+    app.focused().caps.get() & FILE_MANAGE != 0
+}
+
+/// "New folder" where Files is looking, with the drop-box choice.
+#[component]
+fn NewFolder() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let open = create_rw_signal(false);
+    let name = create_rw_signal(String::new());
+    let dropbox = create_rw_signal(false);
+    let ready = move || {
+        let n = name.get();
+        !n.trim().is_empty() && !n.contains('/')
+    };
+    view! {
+        <button
+            type="button"
+            class="rh-btn ghost small"
+            aria-expanded=move || open.get().to_string()
+            on:click=move |_| open.update(|o| *o = !*o)
+        >
+            "New folder"
+        </button>
+        <Show when=move || open.get() fallback=|| ()>
+            <form
+                class="rh-newfolder"
+                on:submit=move |ev| {
+                    ev.prevent_default();
+                    if ready() {
+                        app.create_folder_here(&name.get(), dropbox.get());
+                        name.set(String::new());
+                        dropbox.set(false);
+                        open.set(false);
+                    }
+                }
+            >
+                <input
+                    class="rh-input"
+                    aria-label="Folder name"
+                    placeholder="Folder name"
+                    maxlength="120"
+                    prop:value=move || name.get()
+                    on:input=move |ev| name.set(event_target_value(&ev))
+                />
+                <label class="rh-settings-check">
+                    <input
+                        type="checkbox"
+                        prop:checked=move || dropbox.get()
+                        on:change=move |ev| dropbox.set(event_target_checked(&ev))
+                    />
+                    <span>"Drop box: people can put things in and not see what is there"</span>
+                </label>
+                <button type="submit" class="rh-btn small" disabled=move || !ready()>
+                    "Create"
+                </button>
+            </form>
+        </Show>
+    }
+}
+
+/// What a file manager can do to the selected file or folder: describe it,
+/// or remove it. The burrow refuses anyone else.
+#[component]
+fn NodeManagement(node: rabbithole_proto::filelib::FileNodeView) -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let id = node.id;
+    let is_folder = node.kind == KIND_FOLDER;
+    let name = store_value(node.name.clone());
+    let icon = store_value(node.icon.clone());
+    let saved = store_value(node.comment.clone());
+    let comment = create_rw_signal(node.comment.clone());
+    let changed = move || comment.get().trim() != saved.get_value();
+    view! {
+        <div class="rh-node-manage">
+            <Show when=move || !is_folder fallback=|| ()>
+                <label class="rh-adm-field">
+                    <span>"Description"</span>
+                    <span class="rh-adm-inline">
+                        <input
+                            class="rh-input"
+                            maxlength="500"
+                            prop:value=move || comment.get()
+                            on:input=move |ev| comment.set(event_target_value(&ev))
+                        />
+                        <button
+                            type="button"
+                            class="rh-btn ghost small"
+                            disabled=move || !changed()
+                            on:click=move |_| app.describe_node(
+                                id,
+                                &name.get_value(),
+                                &icon.get_value(),
+                                &comment.get(),
+                            )
+                        >
+                            "Save"
+                        </button>
+                    </span>
+                </label>
+            </Show>
+            <button
+                type="button"
+                class="rh-btn ghost small rh-adm-danger"
+                on:click=move |_| app.confirm.set(Some(crate::app::ConfirmAsk::delete_node(
+                    id,
+                    &name.get_value(),
+                    is_folder,
+                )))
+            >
+                {if is_folder { "Remove folder\u{2026}" } else { "Remove file\u{2026}" }}
+            </button>
+        </div>
     }
 }
 

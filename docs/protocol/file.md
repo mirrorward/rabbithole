@@ -25,6 +25,8 @@ engine 20-42.
 | 17/6 | RateFile → NodeReply | Request/Reply | 1..5, one per account; FILE_DOWNLOAD |
 | 18/6 | AliasCreate → NodeReply | Request/Reply | link to an existing node; FILE_MANAGE |
 | 19 | FileAdded | Push | `area`, `id` — broadcast so listings/search stay live |
+| 27 | AreaUpdate | Request | FILE_MANAGE: `slug`, `title`, `description` → empty ack. The slug is in every path and download link and never changes; `BadRequest` for an empty title, `NotFound` for an unknown area |
+| 28 | AreaDelete | Request | FILE_MANAGE: `slug` → empty ack. `BadRequest` while the area has anything in it: an area takes its whole tree with it |
 
 ## Small blobs (types 100+, Wave 2)
 

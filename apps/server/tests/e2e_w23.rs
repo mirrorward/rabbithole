@@ -62,6 +62,8 @@ async fn welcome_screen_composition() {
 
     let mut alice = login(&burrow, "alice").await;
     let _bob = login(&burrow, "bob").await;
+    // Bob again from a second device: two people are here, not three sessions.
+    let _bob_phone = login(&burrow, "bob").await;
 
     let screen = alice.welcome_screen().await.unwrap();
     let has_motd = screen

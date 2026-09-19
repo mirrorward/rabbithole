@@ -948,6 +948,83 @@ impl MockClient {
                     vec![AdminEvent::Ack("Board removed.".into())]
                 }
             }
+            AdminCommand::CreateArea {
+                slug,
+                title,
+                description,
+            } => {
+                if self.file_areas.iter().any(|a| a.slug == slug) {
+                    vec![AdminEvent::Failed("server error: AlreadyExists".into())]
+                } else {
+                    self.file_areas
+                        .push(FileAreaView::new(slug, title, description));
+                    vec![AdminEvent::Ack("Area created.".into())]
+                }
+            }
+            AdminCommand::UpdateArea {
+                slug,
+                title,
+                description,
+            } => match self.file_areas.iter_mut().find(|a| a.slug == slug) {
+                Some(area) => {
+                    area.title = title;
+                    area.description = description;
+                    vec![AdminEvent::Ack("Area saved.".into())]
+                }
+                None => vec![AdminEvent::Failed("server error: NotFound".into())],
+            },
+            AdminCommand::DeleteArea { slug } => {
+                if self.file_nodes.iter().any(|n| n.area == slug) {
+                    vec![AdminEvent::Failed("server error: BadRequest".into())]
+                } else {
+                    self.file_areas.retain(|a| a.slug != slug);
+                    vec![AdminEvent::Ack("Area removed.".into())]
+                }
+            }
+            AdminCommand::CreateFolder {
+                area,
+                parent,
+                name,
+                is_dropbox,
+            } => {
+                let path = match parent.as_deref() {
+                    Some(p) if !p.is_empty() => format!("{p}/{name}"),
+                    _ => name.clone(),
+                };
+                if self
+                    .file_nodes
+                    .iter()
+                    .any(|n| n.area == area && n.path == path)
+                {
+                    vec![AdminEvent::Failed("server error: AlreadyExists".into())]
+                } else {
+                    let mut node =
+                        FileNodeView::new(self.next_node_id(), area, KIND_FOLDER, name, path);
+                    node.is_dropbox = is_dropbox;
+                    self.file_nodes.push(node);
+                    vec![AdminEvent::Ack("Folder created.".into())]
+                }
+            }
+            AdminCommand::DeleteNode { id, .. } => {
+                let Some(node) = self.file_nodes.iter().find(|n| n.id == id).cloned() else {
+                    return vec![AdminEvent::Failed("server error: NotFound".into())];
+                };
+                // A folder takes what is inside it along.
+                let inside = format!("{}/", node.path);
+                self.file_nodes.retain(|n| {
+                    n.id != id && !(n.area == node.area && n.path.starts_with(&inside))
+                });
+                vec![AdminEvent::Ack("Removed.".into())]
+            }
+            AdminCommand::DescribeNode { id, comment, .. } => {
+                match self.file_nodes.iter_mut().find(|n| n.id == id) {
+                    Some(node) => {
+                        node.comment = comment;
+                        vec![AdminEvent::Ack("Saved.".into())]
+                    }
+                    None => vec![AdminEvent::Failed("server error: NotFound".into())],
+                }
+            }
             AdminCommand::DeletePost { id } => match self.posts.iter_mut().find(|p| p.id == id) {
                 Some(post) => {
                     post.removed = true;

@@ -509,3 +509,54 @@ impl Message for FileAdded {
     const FAMILY: Family = Family::FILE;
     const MESSAGE_TYPE: u16 = 19;
 }
+
+/// Change what a library is called and says about itself. → empty ack.
+/// Requires FILE_MANAGE. The slug is the area's identity (it is in every path
+/// and every download link) and cannot be changed.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AreaUpdate {
+    pub slug: String,
+    pub title: String,
+    pub description: String,
+}
+
+impl AreaUpdate {
+    pub fn new(
+        slug: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            slug: slug.into(),
+            title: title.into(),
+            description: description.into(),
+        }
+    }
+}
+
+impl Message for AreaUpdate {
+    const FAMILY: Family = Family::FILE;
+    // 20..26 are the ticketed transfer messages (`transfer.rs`).
+    const MESSAGE_TYPE: u16 = 27;
+}
+
+/// Remove an empty library. → empty ack. Requires FILE_MANAGE. `BadRequest`
+/// while anything is in it: an area takes its whole tree with it, and that is
+/// not something to do with one click.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AreaDelete {
+    pub slug: String,
+}
+
+impl AreaDelete {
+    pub fn new(slug: impl Into<String>) -> Self {
+        Self { slug: slug.into() }
+    }
+}
+
+impl Message for AreaDelete {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 28;
+}

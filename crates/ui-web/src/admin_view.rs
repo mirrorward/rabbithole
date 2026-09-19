@@ -195,6 +195,7 @@ fn SectionPane(section: &'static Section) -> impl IntoView {
         Pane::Advanced => view! { <AdvancedGroup/> }.into_view(),
         Pane::People => view! { <crate::admin_people_view::PeoplePane/> }.into_view(),
         Pane::Boards => view! { <crate::admin_boards_view::BoardsPane/> }.into_view(),
+        Pane::Areas => view! { <crate::admin_areas_view::AreasPane/> }.into_view(),
         Pane::Moderation => view! {
             <p class="rh-adm-status" role="status">{status}</p>
             <section class="rh-adm-group"><AdminModerationPanel/></section>

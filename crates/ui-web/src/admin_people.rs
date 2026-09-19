@@ -301,6 +301,10 @@ pub enum Reload {
     Boards,
     /// The thread that is open.
     Thread,
+    /// The file areas.
+    Areas,
+    /// The folder that is open in Files.
+    Folder,
 }
 
 /// The pane's state beyond the lists [`crate::admin::AdminState`] holds.
@@ -355,6 +359,8 @@ impl PeopleState {
                     reload = match kind {
                         "invite-revoke" => Reload::Invites,
                         "board-update" | "board-delete" => Reload::Boards,
+                        "area-update" | "area-delete" => Reload::Areas,
+                        "node-delete" | "node-describe" => Reload::Folder,
                         "account-set" | "account-password" | "account-totp" => Reload::Accounts,
                         _ => Reload::Nothing,
                     };
@@ -387,6 +393,12 @@ fn succeeded(kind: &str, subject: &str) -> (String, Reload) {
         "board-update" => (format!("Saved {subject}."), Reload::Boards),
         "board-delete" => (format!("Removed {subject}."), Reload::Boards),
         "post-delete" => ("Removed the post.".to_string(), Reload::Thread),
+        "area-create" => (format!("Made the {subject} area."), Reload::Areas),
+        "area-update" => (format!("Saved the {subject} area."), Reload::Areas),
+        "area-delete" => (format!("Removed the {subject} area."), Reload::Areas),
+        "folder-create" => (format!("Made the folder {subject}."), Reload::Folder),
+        "node-delete" => (format!("Removed {subject}."), Reload::Folder),
+        "node-describe" => (format!("Saved {subject}."), Reload::Folder),
         _ => (String::new(), Reload::Nothing),
     }
 }
@@ -413,6 +425,31 @@ fn refused(kind: &str, subject: &str, detail: &str) -> String {
         }
         "class-set" if code("Forbidden") => {
             "You cannot grant a capability you do not hold yourself.".to_string()
+        }
+        "area-create" if code("AlreadyExists") => {
+            format!("There is already an area at {subject}.")
+        }
+        "area-create" | "area-update" if code("BadRequest") => {
+            "An area needs a title, and an address with no slashes in it.".to_string()
+        }
+        "area-delete" if code("BadRequest") => format!(
+            "The {subject} area still has files or folders in it. Only an empty area can be \
+             removed."
+        ),
+        "folder-create" if code("AlreadyExists") => {
+            format!("There is already something called {subject} here.")
+        }
+        "folder-create" if code("BadRequest") => {
+            "A folder name cannot be empty or contain a slash.".to_string()
+        }
+        "area-create" | "area-update" | "area-delete" | "folder-create" | "node-delete"
+        | "node-describe"
+            if code("Forbidden") =>
+        {
+            "You are not allowed to manage files here.".to_string()
+        }
+        "area-update" | "area-delete" | "node-delete" | "node-describe" if code("NotFound") => {
+            format!("{subject} is not there any more.")
         }
         "post-delete" if code("Forbidden") => {
             "Only its author or a board moderator can remove a post.".to_string()

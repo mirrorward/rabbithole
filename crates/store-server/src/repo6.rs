@@ -111,6 +111,47 @@ impl FilesRepo<'_> {
         Ok(self.area_by_id(id).await?.expect("just inserted"))
     }
 
+    /// Change what an area is called and says about itself. The slug stays.
+    /// Returns whether there was such an area.
+    pub async fn update_area(
+        &self,
+        slug: &str,
+        title: &str,
+        description: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(
+            sqlx::query("UPDATE file_areas SET title = ?, description = ? WHERE slug = ?")
+                .bind(title)
+                .bind(description)
+                .bind(slug)
+                .execute(self.0)
+                .await?
+                .rows_affected()
+                > 0,
+        )
+    }
+
+    /// How many nodes (folders, files, aliases) an area holds.
+    pub async fn area_node_count(&self, area_id: i64) -> Result<i64, StoreError> {
+        Ok(
+            sqlx::query("SELECT COUNT(*) AS n FROM file_nodes WHERE area_id = ?")
+                .bind(area_id)
+                .fetch_one(self.0)
+                .await?
+                .get("n"),
+        )
+    }
+
+    /// Remove an area. The caller has made sure it is empty.
+    pub async fn delete_area(&self, area_id: i64) -> Result<bool, StoreError> {
+        Ok(sqlx::query("DELETE FROM file_areas WHERE id = ?")
+            .bind(area_id)
+            .execute(self.0)
+            .await?
+            .rows_affected()
+            > 0)
+    }
+
     pub async fn area_by_id(&self, id: i64) -> Result<Option<FileAreaRow>, StoreError> {
         Ok(sqlx::query("SELECT * FROM file_areas WHERE id = ?")
             .bind(id)

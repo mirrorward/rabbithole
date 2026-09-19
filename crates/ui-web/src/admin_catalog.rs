@@ -102,6 +102,8 @@ pub enum Pane {
     People,
     /// The board tree.
     Boards,
+    /// The file areas.
+    Areas,
     /// Broadcast and kick.
     Moderation,
     /// The theme editor.
@@ -942,6 +944,14 @@ pub const SECTIONS: &[Section] = &[
         blurb: "The message boards, and the categories that group them.",
         area: Area::Manage,
         pane: Pane::Boards,
+        groups: &[],
+    },
+    Section {
+        id: "areas",
+        title: "File areas",
+        blurb: "The libraries people browse, upload to and download from.",
+        area: Area::Manage,
+        pane: Pane::Areas,
         groups: &[],
     },
     Section {

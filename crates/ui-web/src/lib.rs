@@ -80,6 +80,7 @@
 
 pub mod a11y;
 pub mod admin;
+pub mod admin_areas_view;
 pub mod admin_boards_view;
 pub mod admin_catalog;
 pub mod admin_people;

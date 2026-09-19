@@ -50,14 +50,17 @@ pub(crate) async fn compose_welcome(
         }
     }
     // Who's on now — a sample, honoring Cheshire mode for non-moderators.
+    // People, not sessions: someone on their phone, their desktop and the
+    // desktop's own background connection is one person here, not three.
     let viewer_is_mod = role >= rabbithole_server_core::Role::Moderator;
-    let visible: Vec<String> = shared
-        .presence
-        .snapshot()
-        .into_iter()
-        .filter(|e| !e.is_invisible() || viewer_is_mod || e.session_id == session_id)
-        .map(|e| e.screen_name)
-        .collect();
+    let mut visible: Vec<String> = Vec::new();
+    for e in shared.presence.snapshot() {
+        if (!e.is_invisible() || viewer_is_mod || e.session_id == session_id)
+            && !visible.contains(&e.screen_name)
+        {
+            visible.push(e.screen_name);
+        }
+    }
     widgets.push(pw::WelcomeWidget::OnlineNow {
         count: visible.len() as u32,
         sample: visible.into_iter().take(8).collect(),
