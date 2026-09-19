@@ -75,9 +75,9 @@ use std::rc::Rc;
 use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::admin::{
     AccountEntry, AccountList, AccountListRequest, AccountSet, Broadcast, ClassEntry, ClassList,
-    ClassListRequest, ClassSet, ConfigApplied, ConfigGet, ConfigSet, ConfigValue,
-    GatewayStatsReply, GatewayStatsRequest, InviteCode, InviteCreate, Kick, ThemeBundleInfo,
-    ThemeBundleSet,
+    ClassListRequest, ClassSet, ConfigApplied, ConfigDescribeRequest, ConfigDescription, ConfigGet,
+    ConfigKeyInfo, ConfigSet, ConfigValue, GatewayStatsReply, GatewayStatsRequest, InviteCode,
+    InviteCreate, Kick, ThemeBundleInfo, ThemeBundleSet,
 };
 use rabbithole_proto::board::{
     BoardList, BoardListRequest, PostCreate, ThreadList, ThreadListRequest, ThreadPosts,
@@ -1251,6 +1251,9 @@ pub enum AdminCommand {
         /// New value.
         value: String,
     },
+    /// Ask the burrow to describe every setting: value, default, shape,
+    /// choices, live or restart. → [`ConfigDescription`].
+    DescribeConfig,
     /// Live syndication + gateway counters. → [`GatewayStatsReply`].
     GetGatewayStats,
     /// Publish a postcard [`rabbithole_proto::welcome::ThemeBundle`].
@@ -1284,6 +1287,8 @@ pub enum AdminEvent {
         /// Config value.
         value: String,
     },
+    /// The burrow described its settings.
+    ConfigDescribed(Vec<ConfigKeyInfo>),
     /// A config change was applied (or saved pending restart).
     ConfigApplied {
         /// False = saved but needs a restart to take effect.
@@ -1337,6 +1342,7 @@ pub fn admin_command_to_frame(
         AdminCommand::SetConfig { key, value } => {
             Frame::request(id, &ConfigSet::new(key.clone(), value.clone()))?
         }
+        AdminCommand::DescribeConfig => Frame::request(id, &ConfigDescribeRequest)?,
         AdminCommand::GetGatewayStats => Frame::request(id, &GatewayStatsRequest)?,
         AdminCommand::SetThemeBundle { bundle } => {
             Frame::request(id, &ThemeBundleSet::new(bundle.clone(), Vec::new()))?
@@ -1372,6 +1378,9 @@ pub fn frame_to_admin_events(frame: &Frame) -> Vec<AdminEvent> {
             key: m.key,
             value: m.value,
         }];
+    }
+    if let Some(Ok(m)) = frame.decode::<ConfigDescription>() {
+        return vec![AdminEvent::ConfigDescribed(m.entries)];
     }
     if let Some(Ok(m)) = frame.decode::<ConfigApplied>() {
         return vec![AdminEvent::ConfigApplied {

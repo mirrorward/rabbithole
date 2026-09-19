@@ -607,6 +607,9 @@ impl WsClient {
             AdminCommand::GetConfig { key } | AdminCommand::SetConfig { key, .. } => {
                 Some(key.clone())
             }
+            // Not a key: a marker, so a refusal of the describe request (an
+            // older burrow) reaches the settings model as exactly that.
+            AdminCommand::DescribeConfig => Some(crate::admin_settings::DESCRIBE.to_string()),
             _ => None,
         };
         match wire::admin_command_to_frame(command, id) {

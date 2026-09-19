@@ -108,7 +108,12 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
                 .config
                 .set_key(&key, &value)
                 .map_err(|e| e.to_string())?;
-            audit("config-set", format!("{key}={value}"));
+            let shown = if rabbithole_server_core::config::is_secret_key(&key) {
+                "(changed)"
+            } else {
+                value.as_str()
+            };
+            audit("config-set", format!("{key}={shown}"));
             Ok(json!({"applied_live": live}))
         }
         "account-create" => {
@@ -345,6 +350,7 @@ async fn dispatch(shared: &Shared, req: &Value) -> Result<Value, String> {
             shared
                 .config
                 .update(rabbithole_server_core::theme::clear_config);
+            crate::handlers12::persist_theme(shared);
             audit("theme-clear", String::new());
             Ok(json!({"cleared": true}))
         }

@@ -324,6 +324,122 @@ impl Message for ConfigApplied {
     const MESSAGE_TYPE: u16 = 14;
 }
 
+/// Ask the burrow to describe its own configuration: every key an operator can
+/// see, with its value, its default and its shape. → [`ConfigDescription`].
+/// Requires `CONFIG_ADMIN`.
+///
+/// `ConfigGet` answers one key and says nothing about it. A console built on
+/// that alone has to guess which keys exist, which are switches, what a
+/// choice may be set to and what "back to the default" means, and it guesses
+/// for every burrow version at once. The burrow knows all four.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigDescribeRequest;
+
+impl Message for ConfigDescribeRequest {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 15;
+}
+
+/// The shape of a config value ([`ConfigKeyInfo::kind`]).
+pub mod config_kind {
+    /// Free text: a name, a host, an address, a path.
+    pub const TEXT: u8 = 0;
+    /// `true` or `false`.
+    pub const BOOL: u8 = 1;
+    /// A whole number.
+    pub const NUMBER: u8 = 2;
+    /// One of [`super::ConfigKeyInfo::choices`].
+    pub const CHOICE: u8 = 3;
+}
+
+/// Facts about a config key ([`ConfigKeyInfo::flags`]), as a bit set.
+pub mod config_flag {
+    /// A change takes effect at once. Clear: it is saved, and a restart applies it.
+    pub const LIVE: u8 = 1;
+    /// A credential. Its value is never sent; see [`SET`].
+    pub const SECRET: u8 = 1 << 1;
+    /// For a [`SECRET`]: one is stored.
+    pub const SET: u8 = 1 << 2;
+    /// Shown for reference. The burrow refuses a `ConfigSet` for it.
+    pub const READ_ONLY: u8 = 1 << 3;
+}
+
+/// One key of a [`ConfigDescription`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigKeyInfo {
+    /// The key, as `ConfigGet` and `ConfigSet` spell it.
+    pub key: String,
+    /// The current value (empty for a secret).
+    pub value: String,
+    /// What a burrow of this version ships with.
+    pub default: String,
+    /// One of [`config_kind`].
+    pub kind: u8,
+    /// A set of [`config_flag`] bits.
+    pub flags: u8,
+    /// The values a [`config_kind::CHOICE`] accepts; empty otherwise.
+    pub choices: Vec<String>,
+}
+
+impl ConfigKeyInfo {
+    pub fn new(
+        key: impl Into<String>,
+        value: impl Into<String>,
+        default: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+            default: default.into(),
+            kind: config_kind::TEXT,
+            flags: 0,
+            choices: Vec::new(),
+        }
+    }
+
+    pub fn kind(mut self, kind: u8) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    pub fn flags(mut self, flags: u8) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    pub fn choices<I, S>(mut self, choices: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.choices = choices.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn has(&self, flag: u8) -> bool {
+        self.flags & flag != 0
+    }
+}
+
+/// The burrow's configuration, described. Reply to [`ConfigDescribeRequest`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigDescription {
+    pub entries: Vec<ConfigKeyInfo>,
+}
+
+impl ConfigDescription {
+    pub fn new(entries: Vec<ConfigKeyInfo>) -> Self {
+        Self { entries }
+    }
+}
+
+impl Message for ConfigDescription {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 16;
+}
+
 // ---------------------------------------------------------------------------
 // Moderation suite (Wave 13): types 30..40 of the ADMIN family.
 // ---------------------------------------------------------------------------

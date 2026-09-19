@@ -861,7 +861,6 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 /* A title that follows content gets more space above than below, so it reads\
    as the head of what comes next rather than the tail of what came before. */\
 .rh-panel-title:not(:first-child){margin-top:var(--rh-space-6)}\
-.rh-config-list{max-height:min(60vh,34rem);overflow:auto;padding-right:.25rem}\
 .rh-tree{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:0}\
 /* Lists are rows with hairlines, not a stack of same-size cards: the same\
    vocabulary as the thread list and the file table, everywhere. */\
@@ -977,9 +976,86 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 .rh-radio-now::before{content:'';width:.5rem;height:.5rem;border-radius:50%;background:var(--rh-error);flex:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--rh-error) 25%,transparent)}\
 .rh-radio-now:hover{text-decoration:underline}\
 .rh-live-slot:empty{display:none}\
-.rh-admin-status{padding:var(--rh-space-2) var(--rh-space-5);color:var(--rh-muted);font-size:var(--rh-font-sm)}\
-.rh-admin-main{flex:1;display:flex;flex-direction:column;min-width:0}\
-.rh-config-row,.rh-account-row{flex-direction:row;align-items:center;gap:var(--rh-space-2);flex-wrap:wrap}\
+.rh-admin-main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}\
+/* The admin console: a sections navbar beside one pane. Settings rows sit in\
+   bordered groups, name and meaning on the left, the control on the right;\
+   nothing has a Save of its own (the bar at the pane's foot saves what is\
+   staged). Ember marks what is not saved yet: it is the operator's own\
+   pending work, the one warm thing on a burrow's cool surface. */\
+.rh-adm{flex:1;min-height:0;display:grid;grid-template-columns:13.5rem minmax(0,1fr)}\
+.rh-adm-nav{overflow-y:auto;padding:var(--rh-space-4) var(--rh-space-2) var(--rh-space-5) var(--rh-space-3);border-right:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent);background:color-mix(in srgb,var(--rh-surface) 55%,var(--rh-bg))}\
+.rh-adm-nav ul{list-style:none;margin:0 0 var(--rh-space-4);padding:0;display:flex;flex-direction:column;gap:1px}\
+.rh-adm-nav-h{margin:0 0 .3rem;padding:0 .6rem;font-size:var(--rh-font-xs);font-weight:600;color:var(--rh-muted)}\
+.rh-adm-link{display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding:.38rem .6rem;border-radius:var(--rh-radius-sm);color:var(--rh-text);text-decoration:none;font-size:var(--rh-font-sm);transition:background-color .12s ease,color .12s ease}\
+.rh-adm-link:hover{background:color-mix(in srgb,var(--rh-text) 6%,transparent)}\
+.rh-adm-link[aria-current=page]{background:color-mix(in srgb,var(--rh-accent) 14%,transparent);color:var(--rh-accent);font-weight:650}\
+.rh-adm-link-dot{flex:none;width:.45rem;height:.45rem;border-radius:50%;background:var(--rh-brand)}\
+.rh-adm-jump{display:none}\
+.rh-adm-pane{overflow-y:auto;min-width:0;display:flex;flex-direction:column;padding:var(--rh-space-5) var(--rh-space-5) 0}\
+.rh-adm-pane>*{width:100%;max-width:46rem;flex:none}\
+.rh-adm-head{margin:0 0 var(--rh-space-5)}\
+.rh-adm-title{margin:0 0 .3rem;font-family:var(--rh-font-display);font-size:1.45rem;font-weight:700;letter-spacing:-.02em;color:var(--rh-text)}\
+.rh-adm-blurb{margin:0;color:var(--rh-muted);max-width:60ch;line-height:1.5}\
+.rh-adm-group{margin:0 0 var(--rh-space-5)}\
+.rh-adm-group-h{margin:0 0 .4rem;font-size:var(--rh-font-size);font-weight:650;color:var(--rh-text)}\
+.rh-adm-group .rh-adm-group-h:not(:first-child){margin-top:var(--rh-space-5)}\
+.rh-adm-group-blurb{margin:-.1rem 0 var(--rh-space-2);color:var(--rh-muted);font-size:var(--rh-font-sm);max-width:62ch;line-height:1.5}\
+.rh-adm-rows{border:1px solid color-mix(in srgb,var(--rh-text) 10%,transparent);border-radius:var(--rh-radius);background:var(--rh-surface);overflow:clip}\
+.rh-adm-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:var(--rh-space-2) var(--rh-space-4);padding:.8rem var(--rh-space-4);transition:background-color .18s ease}\
+.rh-adm-row+.rh-adm-row{border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
+.rh-adm-row.long{grid-template-columns:minmax(0,1fr)}\
+.rh-adm-row.edited{background:color-mix(in srgb,var(--rh-brand) 8%,transparent)}\
+.rh-adm-label{display:block;font-weight:600;font-size:var(--rh-font-sm);color:var(--rh-text)}\
+.rh-adm-help{margin:.15rem 0 0;color:var(--rh-muted);font-size:var(--rh-font-sm);line-height:1.45;max-width:58ch}\
+.rh-adm-meta{margin:.35rem 0 0;display:flex;flex-wrap:wrap;align-items:center;gap:.15rem .75rem;font-size:var(--rh-font-xs);color:var(--rh-muted)}\
+.rh-adm-meta:empty{display:none}\
+.rh-adm-edited{font-weight:600;color:color-mix(in srgb,var(--rh-brand) 62%,var(--rh-text))}\
+.rh-adm-reset{appearance:none;border:0;background:none;padding:0;font:inherit;color:var(--rh-accent);cursor:pointer;text-decoration:underline;text-underline-offset:.18em;border-radius:2px}\
+.rh-adm-reset:hover{color:color-mix(in srgb,var(--rh-accent) 78%,var(--rh-text))}\
+.rh-adm-state{margin:.35rem 0 0;font-size:var(--rh-font-xs);font-weight:600;color:color-mix(in srgb,#3fbf7f 62%,var(--rh-text))}\
+.rh-adm-state.bad{color:var(--rh-error)}\
+.rh-adm-control{display:flex;align-items:center;justify-content:flex-end;min-height:2.1rem}\
+.rh-adm-row.long .rh-adm-control{justify-content:stretch}\
+.rh-adm-text{width:17rem;max-width:100%}\
+.rh-adm-long{width:100%;min-height:5.5rem;resize:vertical;line-height:1.45}\
+.rh-adm-number{display:flex;flex-direction:column;align-items:flex-end;gap:.2rem}\
+.rh-adm-num{width:9.5rem;text-align:right;font-variant-numeric:tabular-nums}\
+.rh-adm-num[aria-invalid=true]{border-color:var(--rh-error);box-shadow:0 0 0 3px color-mix(in srgb,var(--rh-error) 18%,transparent)}\
+.rh-adm-echo{font-size:var(--rh-font-xs);color:var(--rh-muted)}\
+.rh-adm-echo:empty{display:none}\
+.rh-adm-fixed{max-width:17rem;font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);color:var(--rh-muted);text-align:right;overflow-wrap:anywhere}\
+.rh-adm-choice{min-width:13rem;max-width:17rem}\
+.rh-adm-note{margin:0 0 var(--rh-space-4);padding:.7rem var(--rh-space-4);border-radius:var(--rh-radius);background:color-mix(in srgb,var(--rh-text) 5%,transparent);color:var(--rh-muted);font-size:var(--rh-font-sm);line-height:1.5}\
+.rh-adm-status{margin:0 0 var(--rh-space-3);color:var(--rh-muted);font-size:var(--rh-font-sm)}\
+.rh-adm-status:empty{display:none}\
+.rh-adm-skeleton div{height:3.6rem;background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--rh-text) 5%,transparent),transparent);background-size:200% 100%;animation:rh-adm-sheen 1.4s ease-in-out infinite}\
+.rh-adm-skeleton div+div{border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
+@keyframes rh-adm-sheen{from{background-position:200% 0}to{background-position:-200% 0}}\
+/* A switch is a checkbox that says so (role=switch): the native control keeps\
+   the keyboard, the form semantics and the focus ring for free. The off track\
+   is dark enough to be seen as a control against the row (3:1). */\
+.rh-switch{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:2.5rem;height:1.5rem;margin:0;border-radius:var(--rh-radius-full);background:color-mix(in srgb,var(--rh-text) 44%,transparent);cursor:pointer;transition:background-color .18s ease}\
+.rh-switch::before{content:\"\";position:absolute;top:.15rem;left:.15rem;width:1.2rem;height:1.2rem;border-radius:50%;background:#fff;box-shadow:0 1px 3px color-mix(in srgb,#000 38%,transparent);transition:transform .2s cubic-bezier(.16,1,.3,1)}\
+.rh-switch:hover{background:color-mix(in srgb,var(--rh-text) 54%,transparent)}\
+.rh-switch:checked{background:var(--rh-accent)}\
+.rh-switch:checked:hover{background:color-mix(in srgb,var(--rh-accent) 88%,var(--rh-text))}\
+.rh-switch:checked::before{transform:translateX(1rem)}\
+.rh-switch:active::before{width:1.4rem}\
+.rh-switch:checked:active::before{transform:translateX(.8rem)}\
+.rh-switch:focus-visible{outline:2px solid var(--rh-accent);outline-offset:2px}\
+.rh-switch:disabled{opacity:.5;cursor:not-allowed}\
+/* A dropdown in the text field's clothes. The arrow is two gradients, so it\
+   takes the theme's colour (a data: image could not). */\
+.rh-select{appearance:none;-webkit-appearance:none;font:inherit;font-size:var(--rh-font-sm);padding:.48rem 2rem .48rem .7rem;border-radius:var(--rh-radius);border:1px solid color-mix(in srgb,var(--rh-text) 16%,transparent);background-color:color-mix(in srgb,var(--rh-bg) 60%,var(--rh-surface));color:var(--rh-text);cursor:pointer;background-image:linear-gradient(45deg,transparent 50%,var(--rh-muted) 50%),linear-gradient(135deg,var(--rh-muted) 50%,transparent 50%);background-position:calc(100% - 1.02rem) 52%,calc(100% - .7rem) 52%;background-size:.32rem .32rem;background-repeat:no-repeat;transition:border-color .15s ease,box-shadow .15s ease}\
+.rh-select:hover{border-color:color-mix(in srgb,var(--rh-text) 26%,transparent)}\
+.rh-select:focus-visible{outline:2px solid transparent}\
+.rh-select:focus{border-color:var(--rh-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--rh-accent) 24%,transparent)}\
+/* The one Save. It rises when something is staged and sinks when nothing is;\
+   sticky, so it is in reach however far down the pane you are. */\
+.rh-adm-savebar{position:sticky;bottom:var(--rh-space-4);z-index:2;margin:auto 0 var(--rh-space-4);display:flex;align-items:center;gap:var(--rh-space-2);padding:.65rem .75rem .65rem var(--rh-space-4);border:1px solid color-mix(in srgb,var(--rh-brand) 38%,transparent);border-radius:var(--rh-radius);background:color-mix(in srgb,var(--rh-brand) 10%,var(--rh-surface));box-shadow:0 .7rem 1.8rem -.5rem color-mix(in srgb,#000 34%,transparent);transform:translateY(160%);opacity:0;visibility:hidden;transition:transform .24s cubic-bezier(.16,1,.3,1),opacity .18s ease,visibility 0s linear .24s}\
+.rh-adm-savebar.show{transform:none;opacity:1;visibility:visible;transition-delay:0s}\
+.rh-adm-savebar-text{flex:1;min-width:0;margin:0;display:flex;flex-wrap:wrap;gap:0 .5rem;font-size:var(--rh-font-sm);color:var(--rh-text)}\
+.rh-adm-savebar-text span{color:var(--rh-muted)}\
 .rh-table{width:100%;border-collapse:collapse;font-size:var(--rh-font-sm);margin:0 0 var(--rh-space-4)}\
 .rh-table th{text-align:left;font-size:var(--rh-font-xs);font-weight:600;color:var(--rh-muted);padding:.3rem var(--rh-space-3) .5rem 0}\
 .rh-table td{padding:.5rem var(--rh-space-3) .5rem 0;vertical-align:middle}\
@@ -987,13 +1063,9 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 .rh-table tbody tr:hover{background:color-mix(in srgb,var(--rh-text) 4%,transparent)}\
 .rh-fieldset{border:0;padding:0;margin:0;min-width:0}\
 .rh-fieldset legend{float:left;padding:0}\
-.rh-config-key{font-weight:600;min-width:12rem;font-family:var(--rh-font-mono);font-size:var(--rh-font-xs)}\
 /* A config row is a three-column grid: key, value, Save. As a wrapping flex\
    row, long keys pushed their input into the next line and short ones left\
    the inputs ragged. */\
-.rh-config-row{display:grid;grid-template-columns:minmax(8rem,14rem) minmax(0,1fr) auto;align-items:center;gap:var(--rh-space-2)}\
-.rh-config-key{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
-.rh-config-row .rh-input{min-width:0;width:100%}\
 .rh-account-role{font-size:var(--rh-font-xs);color:var(--rh-muted)}\
 .rh-editor{display:flex;flex-direction:column;gap:var(--rh-space-3)}\
 .rh-editor-row{display:flex;gap:var(--rh-space-2);align-items:center}\
@@ -1067,6 +1139,8 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 /* A phone gets one scrolling page: a compact masthead and the form, then the\
    browser, its rows two lines tall so a name and its blurb both fit. */\
 @media (max-width:720px){.rh-connect{display:block;flex:none}.rh-connect-side{overflow:visible;gap:var(--rh-space-4);padding:var(--rh-space-5) var(--rh-space-4);border-right:0;border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}.rh-connect-brand{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:var(--rh-space-3);align-items:center;text-align:left}.rh-connect-logo{grid-row:1/3;width:3.5rem;height:3.5rem}.rh-connect-brand h1{margin:0;align-self:end;font-size:1.35rem}.rh-connect-tagline{align-self:start}.rh-connect-version{display:none}.rh-connect-foot{padding-top:0}.rh-connect-main{display:block}.rh-glass-head{padding:var(--rh-space-4) var(--rh-space-4) var(--rh-space-2)}.rh-glass-search{flex:1;width:auto;min-width:0}.rh-glass-cols{display:none}.rh-glass-scroll{overflow:visible;padding:0 var(--rh-space-2) var(--rh-space-3)}.rh-glass-row{grid-template-columns:1.6rem minmax(0,1fr) auto;grid-template-areas:\"mark name users\" \"mark desc desc\";row-gap:0;min-height:2.75rem;padding:.4rem .5rem}.rh-glass-mark{grid-area:mark}.rh-glass-name{grid-area:name}.rh-glass-desc{grid-area:desc}.rh-glass-users{grid-area:users}.rh-glass-detail{padding-left:calc(2.1rem + var(--rh-space-3))}.rh-glass-add{grid-template-columns:1fr 1fr}.rh-glass-add .rh-input{grid-column:1/-1}.rh-glass-page{display:block;overflow-y:auto}.rh-player-now{flex-direction:column;align-items:flex-start;gap:var(--rh-space-3)}.rh-player-cover{width:9rem;height:9rem}.rh-player-recent li{grid-template-columns:1.4rem minmax(0,1fr) auto}.rh-player-recent-artist{grid-column:2;grid-row:2}.rh-glass-status{padding:.5rem var(--rh-space-4) calc(.5rem + env(safe-area-inset-bottom))}}\
+@media (max-width:960px){.rh-adm{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}.rh-adm-nav{display:none}.rh-adm-jump{display:block;padding:var(--rh-space-3) var(--rh-space-5) 0}.rh-adm-jump .rh-select{width:100%;max-width:46rem}}\
+@media (max-width:720px){.rh-adm-jump{padding:var(--rh-space-3) var(--rh-space-4) 0}.rh-adm-pane{padding:var(--rh-space-4) var(--rh-space-4) 0}.rh-adm-row:not(.inline){grid-template-columns:minmax(0,1fr)}.rh-adm-row:not(.inline) .rh-adm-control{justify-content:flex-start}.rh-adm-number{align-items:flex-start}.rh-adm-num{text-align:left}.rh-adm-text,.rh-adm-choice{width:100%;max-width:none}.rh-adm-fixed{max-width:none;text-align:left}.rh-adm-savebar{flex-wrap:wrap}.rh-adm-savebar-text{flex-basis:100%}}\
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:.01ms!important;transition-delay:0s!important;animation-duration:.01ms!important;animation-delay:0s!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}\
 ";
 

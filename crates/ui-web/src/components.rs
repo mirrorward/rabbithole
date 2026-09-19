@@ -2966,7 +2966,7 @@ fn Skeleton(
 /// the lobby's `.rh-chat-empty` styling so every view's "nothing here" moment
 /// reads the same.
 #[component]
-fn EmptyState(
+pub(crate) fn EmptyState(
     /// The section this empty state belongs to (a route path): its drawn
     /// icon is the mark. It used to be a dingbat, which rendered as whatever
     /// glyph the platform font had and matched nothing else in the app.
@@ -4921,86 +4921,16 @@ pub fn ArtCanvas(
     }
 }
 
-/// The web-admin console: server config, accounts & classes, and a moderation
-/// panel. Gated behind the session's admin capability ([`AppState::is_admin`]);
-/// the nav entry that reaches it is likewise gated in [`Nav`].
+/// The feeds half of Federation & feeds: the read-only feed table and the
+/// live feed and gateway counters (ADMIN 45/46). The gateway switches and the
+/// poll interval used to live here as a second, separate editor with its own
+/// Save; they are ordinary settings now ([`crate::admin_view`]). State and
+/// logic stay in the host-tested [`crate::syndication_admin`].
 #[component]
-pub fn Admin() -> impl IntoView {
-    let app = expect_context::<AppState>();
-    let is_admin = app.focused().is_admin;
-    let admin = app.admin;
-    // Load the seeded console data whenever the capability is present.
-    create_effect(move |_| {
-        if is_admin.get() {
-            app.load_classes();
-            app.load_accounts();
-            app.load_config();
-            app.load_syndication();
-        }
-    });
-    let status = move || admin.with(|a| a.status.clone());
-
-    view! {
-        <StatusBar/>
-        <main class="rh-admin-main" id=a11y::MAIN_ID tabindex="-1">
-            <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Admin"</h1>
-            <Show
-                when=move || is_admin.get()
-                fallback=|| view! {
-                    <div class="rh-body">
-                        <section class="rh-panel">
-                            <EmptyState
-                                icon="/admin"
-                                title="Operators only"
-                                sub="This console needs an admin account on this burrow."
-                            />
-                        </section>
-                    </div>
-                }
-            >
-                <div class="rh-admin-status" role="status">{status}</div>
-                <div class="rh-body rh-admin">
-                    <section class="rh-panel">
-                        <AdminConfigPanel/>
-                        <AdminModerationPanel/>
-                    </section>
-                    <section class="rh-panel">
-                        <AdminAccountsPanel/>
-                        <AdminClassesPanel/>
-                    </section>
-                </div>
-                <div class="rh-body">
-                    <section class="rh-panel">
-                        <SyndicationPanel/>
-                    </section>
-                </div>
-                <div class="rh-body">
-                    <section class="rh-panel">
-                        <ThemeEditorPanel/>
-                    </section>
-                </div>
-            </Show>
-        </main>
-    }
-}
-
-/// Syndication & Gateways: the per-network gateway matrix (enabled state,
-/// listener port, live/restart badge, toggle), the poll-interval editor with
-/// inline validation, the read-only feeds table, and the live feed/gateway
-/// monitor (ADMIN 45/46). All state and logic live in the host-tested
-/// [`crate::syndication_admin`]. Feeds are honest about being TOML-only
-/// server-side. Admin-gated by rendering inside [`Admin`]'s capability guard.
-#[component]
-fn SyndicationPanel() -> impl IntoView {
+pub(crate) fn SyndicationPanel() -> impl IntoView {
     let app = expect_context::<AppState>();
     let syn = app.syndication;
 
-    let status = move || syn.with(|s| s.status.clone());
-    let has_status = move || syn.with(|s| !s.status.is_empty());
-    let matrix = move || syn.with(|s| s.gateway_matrix());
-    let poll_error = move || syn.with(|s| s.poll_error.clone().unwrap_or_default());
-    let has_poll_error = move || syn.with(|s| s.poll_error.is_some());
-    let can_save_poll = move || syn.with(|s| s.poll_save_command().is_some());
     let feeds_unavailable = move || syn.with(|s| s.feeds == FeedsStatus::Unavailable);
     let feeds_loaded = move || syn.with(|s| matches!(s.feeds, FeedsStatus::Listed(_)));
     let feed_rows = move || syn.with(|s| s.feed_rows());
@@ -5008,106 +4938,7 @@ fn SyndicationPanel() -> impl IntoView {
     let gateway_stats = move || syn.with(|s| s.gateway_stats().to_vec());
 
     view! {
-        <h2 class="rh-panel-title">"Syndication & gateways"</h2>
-        <Show when=has_status fallback=|| ()>
-            <p class="rh-hint" role="status">{status}</p>
-        </Show>
-
-        <h3 class="rh-panel-title">"Gateway matrix"</h3>
-        <table class="rh-table">
-            <thead>
-                <tr>
-                    <th scope="col">"State"</th>
-                    <th scope="col">"Network"</th>
-                    <th scope="col">"Port"</th>
-                    <th scope="col">"Applies"</th>
-                    <th scope="col"><span class="rh-visually-hidden">"Toggle"</span></th>
-                </tr>
-            </thead>
-            <tbody>
-                <For
-                    each=matrix
-                    key=|r| format!("{}:{:?}:{:?}:{}", r.toggle_key, r.enabled, r.port, r.applies_live)
-                    children=move |r| {
-                        let (dot, state_text) = match r.enabled {
-                            Some(true) => ("rh-dot on", "enabled"),
-                            Some(false) => ("rh-dot off", "disabled"),
-                            None => ("rh-dot pending", "unknown"),
-                        };
-                        let port = r
-                            .port
-                            .map(|p| p.to_string())
-                            .unwrap_or_else(|| "\u{2014}".to_string());
-                        let (badge, badge_text) = if r.applies_live {
-                            ("rh-badge done", "live")
-                        } else {
-                            ("rh-badge", "restart")
-                        };
-                        let toggle_key = r.toggle_key;
-                        let can_toggle = r.enabled.is_some();
-                        let label = match r.enabled {
-                            Some(true) => "Disable",
-                            _ => "Enable",
-                        };
-                        view! {
-                            <tr>
-                                <td>
-                                    <span class=dot aria-hidden="true"></span>
-                                    <span class="rh-visually-hidden">{state_text}</span>
-                                </td>
-                                <td class="rh-member-name">{r.family}</td>
-                                <td class="rh-file-meta">{port}</td>
-                                <td><span class=badge>{badge_text}</span></td>
-                                <td>
-                                    <button
-                                        class="rh-btn small"
-                                        disabled=!can_toggle
-                                        on:click=move |_| app.syn_toggle(toggle_key)
-                                    >
-                                        {label}
-                                        <span class="rh-visually-hidden">" "{r.family}</span>
-                                    </button>
-                                </td>
-                            </tr>
-                        }
-                    }
-                />
-            </tbody>
-        </table>
-        <p class="rh-hint">
-            "\"restart\" keys save to burrow.toml but take effect only after a \
-             server restart (listeners bind at boot); \"live\" keys apply \
-             immediately."
-        </p>
-
-        <h3 class="rh-panel-title">"Feed polling"</h3>
-        <div class="rh-toolbar">
-            <label class="rh-config-key" for="rh-syn-poll-secs">"syndication_poll_secs"</label>
-            <input
-                id="rh-syn-poll-secs"
-                class="rh-input"
-                prop:value=move || syn.with(|s| s.poll_draft.clone())
-                on:input=move |ev| app.syn_set_poll_draft(&event_target_value(&ev))
-            />
-            <button
-                class="rh-btn small"
-                disabled=move || !can_save_poll()
-                on:click=move |_| app.syn_save_poll()
-            >
-                "Save"
-            </button>
-        </div>
-        <Show when=has_poll_error fallback=|| ()>
-            <p class="rh-warn" role="alert">{poll_error}</p>
-        </Show>
-        <p class="rh-hint">
-            "Base seconds between feed polls (1\u{2013}604800). The server \
-             clamps the effective schedule between 300 s (politeness floor) \
-             and 86400 s (backoff ceiling). Restart required \u{2014} the \
-             poll task starts at boot."
-        </p>
-
-        <h3 class="rh-panel-title">"Feeds (URL \u{2192} board)"</h3>
+        <h3 class="rh-adm-group-h">"Mapped feeds"</h3>
         <Show when=feeds_unavailable fallback=|| ()>
             <p class="rh-hint">
                 "This server does not expose syndication_feeds over the admin \
@@ -5173,7 +5004,7 @@ fn SyndicationPanel() -> impl IntoView {
             </p>
         </Show>
 
-        <h3 class="rh-panel-title">"Feed monitor"</h3>
+        <h3 class="rh-adm-group-h">"Activity"</h3>
         <Show
             when=has_stats
             fallback=|| view! {
@@ -5246,7 +5077,7 @@ fn SyndicationPanel() -> impl IntoView {
 /// component only folds [`EditorAction`]s into an `RwSignal<EditorState>`.
 /// Admin-gated by virtue of rendering inside [`Admin`]'s capability guard.
 #[component]
-fn ThemeEditorPanel() -> impl IntoView {
+pub(crate) fn ThemeEditorPanel() -> impl IntoView {
     let app = expect_context::<AppState>();
     let editor = create_rw_signal(EditorState::new(ThemePack::Clean));
     let edit_mode = create_rw_signal(Mode::Light);
@@ -5515,49 +5346,9 @@ fn ThemeEditorPreview(style: Signal<String>) -> impl IntoView {
     }
 }
 
-/// Server-config editor: one row per known key with a Save action. Each
-/// input is labelled by its config key via a real `<label for=…>` pair
-/// (ids from [`a11y::config_input_id`]).
-#[component]
-fn AdminConfigPanel() -> impl IntoView {
-    let app = expect_context::<AppState>();
-    let admin = app.admin;
-    view! {
-        <h2 class="rh-panel-title">"Server config"</h2>
-        // Thirty keys stand taller than the accounts beside them; the list
-        // scrolls inside a bounded height so the console's first screen is
-        // both columns, not one column running past the fold.
-        <ul class="rh-tree rh-config-list">
-            <For
-                each=move || admin.with(|a| a.config.clone())
-                key=|c| c.key.clone()
-                children=move |c| {
-                    let key = c.key.clone();
-                    let input_id = a11y::config_input_id(&key);
-                    let draft = create_rw_signal(c.value.clone());
-                    let save_key = key.clone();
-                    let save = move |_| app.set_config(&save_key, &draft.get());
-                    view! {
-                        <li class="rh-tree-item rh-config-row">
-                            <label class="rh-config-key" for=input_id.clone()>{key}</label>
-                            <input
-                                id=input_id
-                                class="rh-input"
-                                prop:value=move || draft.get()
-                                on:input=move |ev| draft.set(event_target_value(&ev))
-                            />
-                            <button class="rh-btn ghost small" on:click=save>"Save"</button>
-                        </li>
-                    }
-                }
-            />
-        </ul>
-    }
-}
-
 /// Moderation: broadcast a notice, kick a session, mint an invite.
 #[component]
-fn AdminModerationPanel() -> impl IntoView {
+pub(crate) fn AdminModerationPanel() -> impl IntoView {
     let app = expect_context::<AppState>();
     let notice = create_rw_signal(String::new());
     let session = create_rw_signal(String::new());
@@ -5610,7 +5401,7 @@ fn AdminModerationPanel() -> impl IntoView {
 /// toggle. Rendered as a real `<table>` — the data is tabular, and column
 /// headers give screen readers the grid context the flex rows lacked.
 #[component]
-fn AdminAccountsPanel() -> impl IntoView {
+pub(crate) fn AdminAccountsPanel() -> impl IntoView {
     let app = expect_context::<AppState>();
     let admin = app.admin;
     let total = move || admin.with(|a| a.account_total);
@@ -5670,7 +5461,7 @@ fn AdminAccountsPanel() -> impl IntoView {
 /// Permission classes: name, member count, and capability mask (hex), as a
 /// table for the same reason as the accounts panel.
 #[component]
-fn AdminClassesPanel() -> impl IntoView {
+pub(crate) fn AdminClassesPanel() -> impl IntoView {
     let app = expect_context::<AppState>();
     let admin = app.admin;
     view! {

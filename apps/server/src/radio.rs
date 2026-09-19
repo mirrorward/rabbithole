@@ -1151,6 +1151,10 @@ pub fn batches(track: &[u8]) -> Vec<Batch> {
 /// loud, for as long as the burrow runs.
 pub fn spawn_program_pump(shared: Arc<Shared>, slug: String) -> JoinHandle<()> {
     shared.radio.set_pumped(&slug, true);
+    // The station is on the air from this line, not from whenever the pump has
+    // finished loading its first track: a listener who tuned in during that
+    // moment was told 404 by a station that was about to play.
+    let _ = shared.radio.program_mount(&slug);
     tokio::spawn(program_pump(shared, slug))
 }
 

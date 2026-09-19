@@ -463,21 +463,49 @@ pub async fn handle(
         return Ok(true);
     }
 
+    if let Some(Ok(_)) = frame.decode::<padm::ConfigDescribeRequest>() {
+        if !ctx.allows(shared, "admin", Caps::CONFIG_ADMIN) {
+            fail!(ErrorCode::Forbidden);
+        }
+        reply!(&describe_config(shared));
+        return Ok(true);
+    }
+
     if let Some(Ok(req)) = frame.decode::<padm::ConfigSet>() {
         if !ctx.allows(shared, "admin", Caps::CONFIG_ADMIN) {
             fail!(ErrorCode::Forbidden);
         }
         match shared.config.set_key(&req.key, &req.value) {
             Ok(applied_live) => {
+                // The audit log is read by people. A credential is recorded
+                // as changed, never as what it was changed to.
+                let shown = if rabbithole_server_core::config::is_secret_key(&req.key) {
+                    if req.value.is_empty() {
+                        "(cleared)"
+                    } else {
+                        "(set)"
+                    }
+                } else {
+                    req.value.as_str()
+                };
                 audit(
                     shared,
                     &ctx.login,
                     "config-set",
-                    format!("{}={}", req.key, req.value),
+                    format!("{}={}", req.key, shown),
                 );
                 reply!(&padm::ConfigApplied::new(applied_live));
             }
-            Err(_) => fail!(ErrorCode::BadRequest),
+            // A value the key refuses is the asker's mistake. A config file
+            // that could not be written is ours, and the change did not happen.
+            Err(
+                rabbithole_server_core::config::ConfigError::BadValue { .. }
+                | rabbithole_server_core::config::ConfigError::UnknownKey(_),
+            ) => fail!(ErrorCode::BadRequest),
+            Err(e) => {
+                tracing::warn!("config-set {} was not saved: {e}", req.key);
+                fail!(ErrorCode::Internal)
+            }
         }
         return Ok(true);
     }
@@ -486,4 +514,38 @@ pub async fn handle(
 
     let _ = psess::ServerNotice::new("", ""); // keep import used until more session pushes land
     Ok(false)
+}
+
+/// The config, described for a console ([`padm::ConfigDescription`]).
+fn describe_config(shared: &Arc<Shared>) -> padm::ConfigDescription {
+    use padm::{config_flag as flag, config_kind as kind};
+    use rabbithole_server_core::config::KeyKind;
+    let entries = shared
+        .config
+        .describe()
+        .into_iter()
+        .map(|i| {
+            let mut flags = 0;
+            for (on, bit) in [
+                (i.applies_live, flag::LIVE),
+                (i.secret, flag::SECRET),
+                (i.is_set, flag::SET),
+                (i.read_only, flag::READ_ONLY),
+            ] {
+                if on {
+                    flags |= bit;
+                }
+            }
+            padm::ConfigKeyInfo::new(i.key, i.value, i.default)
+                .kind(match i.kind {
+                    KeyKind::Text => kind::TEXT,
+                    KeyKind::Bool => kind::BOOL,
+                    KeyKind::Number => kind::NUMBER,
+                    KeyKind::Choice => kind::CHOICE,
+                })
+                .flags(flags)
+                .choices(i.choices.iter().copied())
+        })
+        .collect();
+    padm::ConfigDescription::new(entries)
 }

@@ -431,6 +431,11 @@ pub struct ServerConfig {
     /// three land on the telnet surfaces; native clients see them via /go
     /// resolution in later waves).
     pub keywords: std::collections::HashMap<String, String>,
+    /// The file this config came from, and so where a change is written back
+    /// ([`LiveConfig::set_key`]). Not part of the file. `None` (a config built
+    /// in code, as tests do) keeps every change in memory only.
+    #[serde(skip)]
+    pub source: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -550,6 +555,7 @@ impl Default for ServerConfig {
             theme_applied_at_unix: 0,
             theme_applied_by: String::new(),
             keywords: std::collections::HashMap::new(),
+            source: None,
         }
     }
 }
@@ -572,12 +578,51 @@ impl ServerConfig {
     /// Load from a TOML file (missing file = defaults), then apply
     /// `RABBITHOLE_*` environment overrides.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
-        let mut cfg = match path {
+        let mut cfg: ServerConfig = match path {
             Some(p) if p.exists() => toml::from_str(&std::fs::read_to_string(p)?)?,
             _ => ServerConfig::default(),
         };
+        // A path that does not exist yet is still where changes belong: the
+        // first saved setting creates the file.
+        cfg.source = path.map(Path::to_path_buf);
         cfg.apply_env(|k| std::env::var(k).ok())?;
         Ok(cfg)
+    }
+
+    /// Write the named keys, as this config holds them, into the TOML file at
+    /// `path`, and leave everything else in the file exactly as it was,
+    /// comments and order included.
+    ///
+    /// One key at a time, not [`Self::save`], on purpose. A running config is
+    /// the file plus `RABBITHOLE_*` overrides plus command-line flags; saving
+    /// all of it would quietly bake `--radio` or an environment override into
+    /// the operator's file. Only what was deliberately changed is written.
+    pub fn persist_keys(&self, path: &Path, keys: &[&str]) -> Result<(), ConfigError> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e.into()),
+        };
+        let mut doc: toml_edit::DocumentMut =
+            text.parse()
+                .map_err(|e: toml_edit::TomlError| ConfigError::BadValue {
+                    key: path.display().to_string(),
+                    detail: e.to_string(),
+                })?;
+        let fresh = toml_edit::ser::to_document(self).map_err(|e| ConfigError::BadValue {
+            key: "config".into(),
+            detail: e.to_string(),
+        })?;
+        for key in keys {
+            match fresh.get(key) {
+                Some(item) => doc[key] = item.clone(),
+                // Not a serialized field (or skipped when empty): drop a stale one.
+                None => {
+                    doc.remove(key);
+                }
+            }
+        }
+        write_private(path, doc.to_string().as_bytes())
     }
 
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
@@ -799,7 +844,7 @@ impl ServerConfig {
                 Ok(true)
             }
             "registration_mode" => {
-                if !["open", "invite", "closed"].contains(&value) {
+                if !REGISTRATION_MODES.contains(&value) {
                     return Err(ConfigError::BadValue {
                         key: key.into(),
                         detail: value.into(),
@@ -1206,6 +1251,291 @@ impl ServerConfig {
     }
 }
 
+/// Replace `path` with `bytes` in one step (a crash leaves the old file or the
+/// new one, never half of either). The file can hold credentials, so a new one
+/// is readable by its owner alone; an existing file keeps the mode it had.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), ConfigError> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o777)
+            .unwrap_or(0o600);
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Every key [`ServerConfig::get_key`] answers, in the order it lists them.
+/// A test reads this file and fails if an arm is missing here, so a console
+/// that asks for "every key" really gets every key.
+pub const CONFIG_KEYS: &[&str] = &[
+    "name",
+    "motd",
+    "agreement",
+    "guest_enabled",
+    "quic_addr",
+    "ws_addr",
+    "ws_allow_insecure_remote",
+    "ws_allowed_origins",
+    "ws_public_url",
+    "advertise_host",
+    "announce_enabled",
+    "announce_trackers",
+    "announce_ttl_secs",
+    "announce_slug",
+    "announce_sysop",
+    "announce_description",
+    "data_dir",
+    "session_ttl_secs",
+    "chat_max_len",
+    "registration_mode",
+    "persona_max",
+    "avatar_max_bytes",
+    "banner_max_bytes",
+    "upload_quota_bytes",
+    "max_concurrent_transfers",
+    "transfer_rate_bytes_per_sec",
+    "swarm_advert_ttl_secs",
+    "swarm_adverts_max",
+    "swarm_cache_max_bytes",
+    "telnet_enabled",
+    "telnet_addr",
+    "telnet_min_role",
+    "finger_enabled",
+    "finger_addr",
+    "finger_min_role",
+    "files_http_base",
+    "http_enabled",
+    "http_addr",
+    "http_web_root",
+    "nntp_enabled",
+    "nntp_addr",
+    "nntp_min_role",
+    "nntp_tls_enabled",
+    "nntp_tls_addr",
+    "nntp_auth_require_tls",
+    "nntp_feed_enabled",
+    "nntp_feed_addr",
+    "nntp_feed_tls_enabled",
+    "nntp_feed_tls_addr",
+    "radio_enabled",
+    "radio_addr",
+    "radio_public_base",
+    "radio_source_enabled",
+    "radio_source_addr",
+    "radio_source_user",
+    "radio_source_password",
+    "doors_enabled",
+    "doors_dir",
+    "doors_max_nodes",
+    "doors_session_max_secs",
+    "hotline_enabled",
+    "hotline_addr",
+    "hotline_min_role",
+    "ftn_enabled",
+    "ftn_addr",
+    "ftn_node",
+    "ftn_uplink",
+    "ftn_uplink_host",
+    "ftn_password",
+    "ftn_inbound_dir",
+    "ftn_outbound_dir",
+    "qwk_enabled",
+    "qwk_spool_dir",
+    "syndication_enabled",
+    "syndication_poll_secs",
+    "federation_enabled",
+    "federation_origin",
+    "federation_addr",
+    "portmap_enabled",
+    "portmap_gateway",
+    "portmap_lifetime_secs",
+    "ratelimit_enabled",
+    "ratelimit_conn_per_min",
+    "ratelimit_conn_burst",
+    "ratelimit_auth_per_min",
+    "ratelimit_auth_burst",
+    "ratelimit_msg_per_sec",
+    "ratelimit_msg_burst",
+    "ratelimit_post_per_min",
+    "ratelimit_post_burst",
+    "ratelimit_transfer_per_min",
+    "ratelimit_transfer_burst",
+    "ratelimit_legacy_per_sec",
+    "ratelimit_legacy_burst",
+    "welcome_featured",
+    "welcome_ticker",
+    "theme_accent",
+    "theme_logo_ansi",
+    "theme_name",
+    "theme_banner",
+    "theme_applied_at_unix",
+    "theme_applied_by",
+];
+
+/// Every field a published theme writes (`theme::write_to_config`), for
+/// [`LiveConfig::persist_keys`]: a theme that vanished at the next restart was
+/// the same bug as a setting that did.
+pub const THEME_KEYS: &[&str] = &[
+    "theme_accent",
+    "theme_logo_ansi",
+    "theme_name",
+    "theme_banner",
+    "theme_icons",
+    "theme_tokens_light",
+    "theme_tokens_dark",
+    "theme_tokens_shared",
+    "theme_applied_at_unix",
+    "theme_applied_by",
+];
+
+/// The values `registration_mode` accepts.
+pub const REGISTRATION_MODES: &[&str] = &["open", "invite", "closed"];
+
+/// The values a `*_min_role` key stores (canonical spellings; see
+/// [`crate::permissions::Role::parse_min_role`]).
+pub const MIN_ROLES: &[&str] = &["guest", "user", "moderator", "admin"];
+
+/// Keys that hold a credential. A description never carries their value.
+const SECRET_KEYS: &[&str] = &["radio_source_password", "ftn_password"];
+
+/// Whether `key` holds a credential, for anything that would otherwise write
+/// its value somewhere a person can read it (a description, the audit log).
+pub fn is_secret_key(key: &str) -> bool {
+    SECRET_KEYS.contains(&key)
+}
+
+/// Settable, but not from a console: moving the data directory under a
+/// running burrow does nothing until a restart, and then starts an empty one.
+const CONSOLE_READ_ONLY: &[&str] = &["data_dir"];
+
+/// The shape of a config value, as an operator's console needs to know it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyKind {
+    /// Free text: a name, a host, an address, a path.
+    Text,
+    /// `true` or `false`.
+    Bool,
+    /// A whole number.
+    Number,
+    /// One of a fixed list.
+    Choice,
+}
+
+/// One config key, described: what it holds now, what it ships as, and how a
+/// change to it behaves. See [`ServerConfig::describe`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyInfo {
+    pub key: &'static str,
+    /// The current value; empty for a secret.
+    pub value: String,
+    /// What [`ServerConfig::default`] holds.
+    pub default: String,
+    pub kind: KeyKind,
+    /// The accepted values of a [`KeyKind::Choice`]; empty otherwise.
+    pub choices: &'static [&'static str],
+    /// Whether a change takes effect without a restart.
+    pub applies_live: bool,
+    /// A credential: `value` is withheld and `is_set` says whether one is stored.
+    pub secret: bool,
+    pub is_set: bool,
+    /// Shown for reference; not settable from a console.
+    pub read_only: bool,
+}
+
+/// What never changes about a key, worked out once.
+struct KeyMeta {
+    key: &'static str,
+    default: String,
+    kind: KeyKind,
+    choices: &'static [&'static str],
+    applies_live: bool,
+    read_only: bool,
+}
+
+fn choices_of(key: &str) -> &'static [&'static str] {
+    if key == "registration_mode" {
+        REGISTRATION_MODES
+    } else if key.ends_with("_min_role") {
+        MIN_ROLES
+    } else {
+        &[]
+    }
+}
+
+/// The shape of every key, asked of the setter itself instead of kept in a
+/// second table that could disagree with it: a key is a switch if `set_key`
+/// refuses a word that is not a boolean, a number if it refuses a word that is
+/// not one, read-only if it refuses the key, and live if it says so. All of it
+/// happens on a scratch copy of the defaults, once.
+fn key_meta() -> &'static [KeyMeta] {
+    static META: std::sync::OnceLock<Vec<KeyMeta>> = std::sync::OnceLock::new();
+    META.get_or_init(|| {
+        let base = ServerConfig::default();
+        CONFIG_KEYS
+            .iter()
+            .map(|&key| {
+                let default = base.get_key(key).unwrap_or_default();
+                let refuses = |word: &str| base.clone().set_key(key, word).is_err();
+                let outcome = base.clone().set_key(key, &default);
+                let read_only = matches!(outcome, Err(ConfigError::UnknownKey(_)))
+                    || CONSOLE_READ_ONLY.contains(&key);
+                let choices = choices_of(key);
+                let kind = if !choices.is_empty() {
+                    KeyKind::Choice
+                } else if matches!(default.as_str(), "true" | "false") && refuses("maybe") {
+                    KeyKind::Bool
+                } else if default.parse::<i128>().is_ok() && refuses("several") {
+                    KeyKind::Number
+                } else {
+                    KeyKind::Text
+                };
+                KeyMeta {
+                    key,
+                    default,
+                    kind,
+                    choices,
+                    applies_live: outcome.unwrap_or(false),
+                    read_only,
+                }
+            })
+            .collect()
+    })
+}
+
+impl ServerConfig {
+    /// Describe every key for an operator's console: the value held now beside
+    /// the default, the shape, the accepted choices, and whether a change
+    /// needs a restart. Credentials are described and never disclosed.
+    pub fn describe(&self) -> Vec<KeyInfo> {
+        key_meta()
+            .iter()
+            .map(|m| {
+                let held = self.get_key(m.key).unwrap_or_default();
+                let secret = is_secret_key(m.key);
+                KeyInfo {
+                    key: m.key,
+                    is_set: secret && !held.is_empty(),
+                    value: if secret { String::new() } else { held },
+                    default: m.default.clone(),
+                    kind: m.kind,
+                    choices: m.choices,
+                    applies_live: m.applies_live,
+                    secret,
+                    read_only: m.read_only,
+                }
+            })
+            .collect()
+    }
+}
+
 fn parse_bool(key: &str, v: &str) -> Result<bool, ConfigError> {
     match v.to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
@@ -1261,9 +1591,35 @@ impl LiveConfig {
         self.0.read().get_key(key)
     }
 
+    /// See [`ServerConfig::describe`].
+    pub fn describe(&self) -> Vec<KeyInfo> {
+        self.0.read().describe()
+    }
+
     /// Set a key; returns whether it applied live.
+    /// Change one key. The change is validated on a copy, written to the
+    /// config file, and only then made live: it is saved or it did not happen.
+    /// (It used to be neither: memory only, so "saved, restart to apply" lost
+    /// the change at the restart it asked for.)
     pub fn set_key(&self, key: &str, value: &str) -> Result<bool, ConfigError> {
-        self.0.write().set_key(key, value)
+        let mut held = self.0.write();
+        let mut next = held.clone();
+        let live = next.set_key(key, value)?;
+        if let Some(path) = next.source.clone() {
+            next.persist_keys(&path, &[key])?;
+        }
+        *held = next;
+        Ok(live)
+    }
+
+    /// Write keys changed through [`Self::update`] back to the config file.
+    /// A no-op for a config that did not come from one.
+    pub fn persist_keys(&self, keys: &[&str]) -> Result<(), ConfigError> {
+        let held = self.0.read();
+        match held.source.clone() {
+            Some(path) => held.persist_keys(&path, keys),
+            None => Ok(()),
+        }
     }
 
     /// Mutate the whole config under one write lock — for operations that
@@ -1296,6 +1652,240 @@ mod tests {
 
         let bad = cfg.apply_env(|k| (k == "RABBITHOLE_GUEST_ENABLED").then(|| "maybe".into()));
         assert!(matches!(bad, Err(ConfigError::BadValue { .. })));
+    }
+
+    /// The arms of `get_key`, read out of this file, so [`CONFIG_KEYS`] cannot
+    /// fall behind the code it lists.
+    fn get_key_arms() -> Vec<String> {
+        let src = include_str!("config.rs");
+        let start = src.find("pub fn get_key(&self").unwrap();
+        let end = start + src[start..].find("other => return Err").unwrap();
+        src[start..end]
+            .lines()
+            .filter_map(|l| {
+                l.trim()
+                    .strip_prefix('"')?
+                    .split_once("\" =>")
+                    .map(|(k, _)| k)
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn the_key_list_is_every_key_the_config_answers() {
+        let arms = get_key_arms();
+        assert!(arms.len() > 90, "the scan found too little: {}", arms.len());
+        assert_eq!(arms, CONFIG_KEYS, "CONFIG_KEYS and get_key disagree");
+        let cfg = ServerConfig::default();
+        for key in CONFIG_KEYS {
+            assert!(cfg.get_key(key).is_ok(), "{key} is listed and not gettable");
+        }
+    }
+
+    #[test]
+    fn a_description_knows_a_switch_from_a_number_from_a_choice() {
+        let info = ServerConfig::default().describe();
+        let of = |k: &str| info.iter().find(|i| i.key == k).unwrap().clone();
+        assert_eq!(info.len(), CONFIG_KEYS.len());
+
+        assert_eq!(of("guest_enabled").kind, KeyKind::Bool);
+        assert_eq!(of("nntp_enabled").kind, KeyKind::Bool);
+        assert_eq!(of("chat_max_len").kind, KeyKind::Number);
+        assert_eq!(of("upload_quota_bytes").kind, KeyKind::Number);
+        assert_eq!(of("name").kind, KeyKind::Text);
+        assert_eq!(of("quic_addr").kind, KeyKind::Text);
+
+        let mode = of("registration_mode");
+        assert_eq!(mode.kind, KeyKind::Choice);
+        assert_eq!(mode.choices, REGISTRATION_MODES);
+        assert_eq!(of("telnet_min_role").choices, MIN_ROLES);
+
+        // Every key that reads as true or false is a switch, and no other is.
+        for i in &info {
+            let looks_boolean = matches!(i.default.as_str(), "true" | "false");
+            assert_eq!(i.kind == KeyKind::Bool, looks_boolean, "{}", i.key);
+        }
+    }
+
+    #[test]
+    fn every_offered_choice_is_accepted_and_nothing_else_is() {
+        for i in ServerConfig::default().describe() {
+            if i.kind != KeyKind::Choice {
+                continue;
+            }
+            let mut cfg = ServerConfig::default();
+            for choice in i.choices {
+                assert!(cfg.set_key(i.key, choice).is_ok(), "{} = {choice}", i.key);
+                assert_eq!(
+                    cfg.get_key(i.key).unwrap(),
+                    *choice,
+                    "{} is not canonical",
+                    i.key
+                );
+            }
+            assert!(
+                cfg.set_key(i.key, "wizard").is_err(),
+                "{} took anything",
+                i.key
+            );
+            assert!(i.choices.contains(&i.default.as_str()), "{} default", i.key);
+        }
+    }
+
+    #[test]
+    fn a_description_reports_the_default_beside_the_value_and_what_is_live() {
+        let mut cfg = ServerConfig::default();
+        cfg.set_key("name", "Wonderland").unwrap();
+        let info = cfg.describe();
+        let of = |k: &str| info.iter().find(|i| i.key == k).unwrap().clone();
+        assert_eq!(of("name").value, "Wonderland");
+        assert_eq!(of("name").default, "An Unnamed Burrow");
+        assert!(of("name").applies_live);
+        assert!(
+            !of("quic_addr").applies_live,
+            "a listener address needs a restart"
+        );
+        // Resetting is just setting the default, so every default must be settable.
+        for i in info.iter().filter(|i| !i.read_only) {
+            let mut scratch = ServerConfig::default();
+            assert!(
+                scratch.set_key(i.key, &i.default).is_ok(),
+                "{} refuses its own default",
+                i.key
+            );
+        }
+    }
+
+    #[test]
+    fn a_description_never_discloses_a_credential() {
+        let mut cfg = ServerConfig::default();
+        let before = cfg.describe();
+        let pw = before
+            .iter()
+            .find(|i| i.key == "radio_source_password")
+            .unwrap();
+        assert!(pw.secret && !pw.is_set && pw.value.is_empty());
+
+        cfg.set_key("radio_source_password", "hunter2").unwrap();
+        cfg.set_key("ftn_password", "sesame").unwrap();
+        let after = cfg.describe();
+        for i in &after {
+            assert!(
+                !i.value.contains("hunter2") && !i.value.contains("sesame"),
+                "{}",
+                i.key
+            );
+            assert!(!i.default.contains("hunter2"), "{}", i.key);
+        }
+        let pw = after
+            .iter()
+            .find(|i| i.key == "radio_source_password")
+            .unwrap();
+        assert!(pw.secret && pw.is_set && pw.value.is_empty());
+        // Anything that looks like a credential is treated as one.
+        for i in &after {
+            assert_eq!(i.key.ends_with("_password"), i.secret, "{}", i.key);
+        }
+    }
+
+    #[test]
+    fn what_the_console_may_not_change_is_marked() {
+        let info = ServerConfig::default().describe();
+        let read_only: Vec<&str> = info.iter().filter(|i| i.read_only).map(|i| i.key).collect();
+        assert_eq!(
+            read_only,
+            [
+                "ws_allowed_origins",
+                "announce_trackers",
+                "data_dir",
+                "federation_origin",
+                "theme_applied_at_unix",
+                "theme_applied_by"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_saved_setting_survives_a_restart_and_disturbs_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("burrow.toml");
+        std::fs::write(
+            &path,
+            "# My burrow. Hands off this comment.\nname = \"Old Name\"\n# telnet_enabled = true\n\n[keywords]\ntea = \"room:tea\"\n",
+        )
+        .unwrap();
+
+        let live = LiveConfig::new(ServerConfig::load(Some(&path)).unwrap());
+        assert!(live.set_key("name", "Kevin\u{2019}s Burrow").unwrap());
+        assert!(!live.set_key("nntp_enabled", "true").unwrap());
+
+        // The restart: a fresh load sees both changes.
+        let again = ServerConfig::load(Some(&path)).unwrap();
+        assert_eq!(again.name, "Kevin\u{2019}s Burrow");
+        assert!(again.nntp_enabled);
+        assert_eq!(
+            again.keywords.get("tea").map(String::as_str),
+            Some("room:tea")
+        );
+
+        // And the operator's file is still theirs.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("# My burrow. Hands off this comment."),
+            "{text}"
+        );
+        assert!(text.contains("# telnet_enabled = true"), "{text}");
+        // Only what was changed was written: no other default got baked in.
+        assert!(!text.contains("guest_enabled"), "{text}");
+        assert!(!text.contains("quic_addr"), "{text}");
+    }
+
+    #[test]
+    fn a_setting_that_cannot_be_saved_does_not_happen() {
+        let dir = tempfile::tempdir().unwrap();
+        // The "file" is a directory: reading it fails, so nothing can be written.
+        let path = dir.path().join("burrow.toml");
+        std::fs::create_dir(&path).unwrap();
+        let live = LiveConfig::new(ServerConfig {
+            source: Some(path),
+            ..ServerConfig::default()
+        });
+        assert!(live.set_key("name", "Ghost").is_err());
+        assert_eq!(live.get_key("name").unwrap(), "An Unnamed Burrow");
+        // A bad value is refused before any file is touched, as before.
+        assert!(matches!(
+            live.set_key("guest_enabled", "maybe"),
+            Err(ConfigError::BadValue { .. })
+        ));
+    }
+
+    #[test]
+    fn the_first_saved_setting_creates_the_file_and_overrides_stay_out_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh").join("burrow.toml");
+        let mut cfg = ServerConfig::load(Some(&path)).unwrap();
+        assert_eq!(cfg.source.as_deref(), Some(path.as_path()));
+        // What a `--radio` flag does after loading.
+        cfg.radio_enabled = true;
+        let live = LiveConfig::new(cfg);
+        live.set_key("motd", "Hello").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("motd = \"Hello\""), "{text}");
+        assert!(
+            !text.contains("radio_enabled"),
+            "a flag was baked into the file: {text}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the file can hold credentials");
+        }
+        // A config built in code has nowhere to save to, and says nothing.
+        let memory = LiveConfig::new(ServerConfig::default());
+        assert!(memory.set_key("motd", "x").is_ok());
     }
 
     #[test]

@@ -79,7 +79,20 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let mut config = ServerConfig::load(cli.config.as_deref())?;
+    // `--config`, or burrow.toml in the data directory: what the help has
+    // always said, and until now did not do (no `--config` meant no file was
+    // read at all, and so nothing an operator changed could be kept).
+    // The data directory is known three ways before any file is read, in the
+    // order the config itself gives them: the flag, the environment (what the
+    // container and the systemd unit use), the default.
+    let config_path = cli.config.clone().unwrap_or_else(|| {
+        cli.data_dir
+            .clone()
+            .or_else(|| std::env::var_os("RABBITHOLE_DATA_DIR").map(Into::into))
+            .unwrap_or_else(|| ServerConfig::default().data_dir)
+            .join("burrow.toml")
+    });
+    let mut config = ServerConfig::load(Some(&config_path))?;
     if let Some(dir) = cli.data_dir {
         config.data_dir = dir;
     }

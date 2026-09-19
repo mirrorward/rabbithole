@@ -77,6 +77,8 @@ impl AdminState {
                 self.last_invite = Some(code.clone());
             }
             AdminEvent::ConfigLoaded { key, value } => self.upsert_config(key, value),
+            // The described settings live in [`crate::admin_settings`].
+            AdminEvent::ConfigDescribed(_) => {}
             AdminEvent::ConfigApplied { applied_live } => {
                 self.status = if *applied_live {
                     "Config saved and applied live.".to_string()
@@ -108,7 +110,6 @@ impl AdminState {
                 value: value.to_string(),
             });
         }
-        self.status = format!("Loaded {key}.");
     }
 
     /// The value currently held for `key`, if it has been read.

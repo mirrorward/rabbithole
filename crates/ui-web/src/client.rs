@@ -771,9 +771,15 @@ impl MockClient {
                 // and syndication keys the admin panel drives; for keys
                 // outside that vocabulary keep the original mock rule
                 // (listener addresses need a restart; the rest is live).
-                let live = crate::syndication_admin::expected_applies_live(&key)
+                let live = crate::demo_config::applies_live(&key)
+                    .or_else(|| crate::syndication_admin::expected_applies_live(&key))
                     .unwrap_or_else(|| !key.starts_with("listen."));
                 admin_events(&ConfigApplied::new(live))
+            }
+            AdminCommand::DescribeConfig => {
+                vec![AdminEvent::ConfigDescribed(crate::demo_config::describe(
+                    &self.admin_config,
+                ))]
             }
             AdminCommand::GetGatewayStats => admin_events(&Self::seeded_gateway_stats()),
             AdminCommand::SetThemeBundle { bundle } => {

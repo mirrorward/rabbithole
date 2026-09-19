@@ -13,11 +13,12 @@ use rabbithole_core::theme::Mode;
 use rabbithole_proto::welcome::ThemeBundle;
 
 use crate::admin::AdminState;
+use crate::admin_view::Admin;
 use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
-    About, Admin, ArtGallery, BoardView, Boards, CommandPalette, ConfirmDialog, Directory, Dms,
-    Files, Lobby, Login, Nav, People, PersonPage, Radio, ServerBrowser, Settings, Toasts,
-    Transfers, WelcomeSheet, You,
+    About, ArtGallery, BoardView, Boards, CommandPalette, ConfirmDialog, Directory, Dms, Files,
+    Lobby, Login, Nav, People, PersonPage, Radio, ServerBrowser, Settings, Toasts, Transfers,
+    WelcomeSheet, You,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -95,6 +96,16 @@ enum AuthMethod {
     Resume { token: String },
 }
 
+/// Run `f` once the current call has unwound. A reply sink runs inside the
+/// transport's own borrow, so anything in it that wants to send again has to
+/// wait a tick. Off the browser there is no such borrow, and no event loop.
+pub(crate) fn defer(f: impl FnOnce() + 'static) {
+    #[cfg(target_arch = "wasm32")]
+    leptos::set_timeout(f, std::time::Duration::ZERO);
+    #[cfg(not(target_arch = "wasm32"))]
+    f();
+}
+
 /// Reactive, `Copy` handle bundle shared through context.
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -130,6 +141,13 @@ pub struct AppState {
     pub friends: RwSignal<Vec<crate::friend::Friendship>>,
     /// The web-admin model, folded from admin events.
     pub admin: RwSignal<AdminState>,
+    /// The focused burrow's settings: what it described, what is staged, and
+    /// what came of the last save ([`crate::admin_settings`]).
+    pub admin_settings: RwSignal<crate::admin_settings::SettingsState>,
+    /// Which burrow [`Self::admin_settings`] belongs to. Drafts are edits to
+    /// one burrow; they must never be saved into another because the focus
+    /// moved while they were staged.
+    pub admin_settings_owner: RwSignal<Option<ServerId>>,
     /// The Syndication & Gateways panel model, folded from paired config
     /// get/set replies ([`crate::syndication_admin`]).
     pub syndication: RwSignal<SynAdminState>,
@@ -222,6 +240,8 @@ impl AppState {
             #[cfg(not(target_arch = "wasm32"))]
             sound_on: create_rw_signal(true),
             admin: create_rw_signal(AdminState::default()),
+            admin_settings: create_rw_signal(Default::default()),
+            admin_settings_owner: create_rw_signal(None),
             syndication: create_rw_signal(SynAdminState::default()),
             palette_open: create_rw_signal(false),
             switcher_open: create_rw_signal(false),
@@ -865,6 +885,9 @@ impl AppState {
                     }
                 });
                 syn_sig.update(|s| s.apply_live(key.as_deref(), &events));
+                if let Some(app) = current() {
+                    app.fold_settings_reply(key.as_deref(), &events);
+                }
             }));
             ws.on_members(std::rc::Rc::new(move |members| {
                 // `online` is recomputed from the live roster at render time
@@ -2112,25 +2135,121 @@ impl AppState {
         self.load_accounts();
     }
 
-    /// Load the seeded config keys the console exposes.
+    /// Ask the focused burrow to describe its settings. Settings staged for
+    /// another burrow are dropped first: a draft is an edit to one place.
     pub fn load_config(&self) {
-        // The server's own key names (`Config::get_key`). These used to be the
-        // demo mock's dotted spellings (`server.name`, `chat.slowmode_secs`),
-        // which a real burrow answers NotFound — so a live operator console
-        // showed nothing but the gateway toggles.
-        for key in crate::admin::OPERATOR_KEYS {
-            self.dispatch_admin(AdminCommand::GetConfig {
-                key: key.to_string(),
+        let here = self.focused_id.get_untracked();
+        if self.admin_settings_owner.get_untracked().as_ref() != Some(&here) {
+            self.admin_settings.set(Default::default());
+            self.admin_settings_owner.set(Some(here));
+        }
+        self.admin_settings.update(|s| s.loading());
+        self.dispatch_settings(
+            crate::admin_settings::DESCRIBE,
+            AdminCommand::DescribeConfig,
+        );
+    }
+
+    /// Drive one config command and fold its reply, paired with the key it
+    /// was about. Live, the transport does the pairing and the reply arrives
+    /// through the admin sink; the demo burrow answers on the spot.
+    fn dispatch_settings(&self, key: &str, command: AdminCommand) {
+        #[cfg(target_arch = "wasm32")]
+        if self.focused().live.get_untracked() {
+            self.focused()
+                .ws
+                .update_value(|c| c.dispatch_admin(&command));
+            return;
+        }
+        let mut events = Vec::new();
+        self.focused()
+            .client
+            .update_value(|client| events = client.dispatch_admin(command));
+        self.fold_settings_reply(Some(key), &events);
+    }
+
+    /// Fold a config reply into the settings model. `key` is what the request
+    /// was about: a config key, or [`crate::admin_settings::DESCRIBE`].
+    pub fn fold_settings_reply(&self, key: Option<&str>, events: &[AdminEvent]) {
+        let Some(key) = key else {
+            return;
+        };
+        let was_saving = self.admin_settings.with_untracked(|s| s.saving());
+        let mut fall_back = false;
+        self.admin_settings.update(|s| {
+            for event in events {
+                match event {
+                    AdminEvent::ConfigDescribed(entries) => s.described(entries),
+                    AdminEvent::ConfigLoaded { key, value } => s.bare_value(key, value),
+                    AdminEvent::ConfigApplied { applied_live } => s.saved(key, *applied_live),
+                    AdminEvent::Failed(_) if key == crate::admin_settings::DESCRIBE => {
+                        s.describe_refused();
+                        fall_back = true;
+                    }
+                    AdminEvent::Failed(detail) => s.refused(key, detail),
+                    _ => {}
+                }
+            }
+        });
+        let finished = was_saving && self.admin_settings.with_untracked(|s| !s.saving());
+        if finished {
+            if let Some((clean, line)) = self.admin_settings.with_untracked(|s| s.save_summary()) {
+                let kind = if clean {
+                    crate::toasts::ToastKind::Success
+                } else {
+                    crate::toasts::ToastKind::Warn
+                };
+                self.notify(kind, line);
+            }
+        }
+        // Anything that talks to the burrow again waits a tick: live, this
+        // runs inside the transport's own borrow.
+        if fall_back || finished {
+            let app = *self;
+            crate::app::defer(move || {
+                if fall_back {
+                    // An older burrow: read the well-known keys one at a time.
+                    for key in crate::admin::OPERATOR_KEYS {
+                        app.dispatch_settings(
+                            key,
+                            AdminCommand::GetConfig {
+                                key: key.to_string(),
+                            },
+                        );
+                    }
+                } else {
+                    // The burrow may have tidied what it was given (a role
+                    // name, a trailing slash): show what it actually holds.
+                    app.dispatch_settings(
+                        crate::admin_settings::DESCRIBE,
+                        AdminCommand::DescribeConfig,
+                    );
+                    // The feed pane reads a few of these keys on its own.
+                    app.load_syndication();
+                }
             });
         }
     }
 
-    /// Set a config key/value.
-    pub fn set_config(&self, key: &str, value: &str) {
-        self.dispatch_admin(AdminCommand::SetConfig {
-            key: key.to_string(),
-            value: value.to_string(),
-        });
+    /// Save every staged burrow setting: one `ConfigSet` per changed key.
+    /// Refuses to run if the focus moved to another burrow since the edits
+    /// were made.
+    pub fn save_admin_settings(&self) {
+        let here = self.focused_id.get_untracked();
+        if self.admin_settings_owner.get_untracked().as_ref() != Some(&here) {
+            return;
+        }
+        let mut batch = Vec::new();
+        self.admin_settings.update(|s| batch = s.begin_save());
+        for (key, value) in batch {
+            self.dispatch_settings(
+                &key,
+                AdminCommand::SetConfig {
+                    key: key.clone(),
+                    value,
+                },
+            );
+        }
     }
 
     /// Mint an invite code with the given time-to-live in seconds.
@@ -2562,6 +2681,7 @@ pub fn App() -> impl IntoView {
                                         <Route path="/servers" view=ServerBrowser/>
                                         <Route path="/art" view=ArtGallery/>
                                         <Route path="/admin" view=Admin/>
+                                        <Route path="/admin/:section" view=Admin/>
                                     </Routes>
                                 }
                             }

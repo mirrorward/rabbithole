@@ -116,3 +116,6 @@ getrandom = { version = "0.2", features = ["js"] }
 # dev-dependency, so the shipped wasm bundle never carries it.
 [dev-dependencies]
 png.workspace = true
+# Also host-only: the console's catalog and the demo burrow's settings are
+# checked against the server's own key list, so neither can drift from it.
+rabbithole-server-core.workspace = true

@@ -80,6 +80,9 @@
 
 pub mod a11y;
 pub mod admin;
+pub mod admin_catalog;
+pub mod admin_settings;
+pub mod admin_view;
 pub mod app;
 pub mod art;
 pub mod avatar;
@@ -90,6 +93,7 @@ pub mod components;
 pub mod compose;
 pub mod conn;
 pub mod connect;
+pub mod demo_config;
 pub mod demo_files;
 pub mod files;
 pub mod friend;

@@ -16,7 +16,8 @@ written to the audit log. Any authorized client is an admin console.
 | 9 | Broadcast | Request | BROADCAST | `text` — sessions receive a `ServerNotice` push |
 | 10 | Kick | Request | USER_KICK | `session_id`; refused against `>=` roles (superusers exempt) |
 | 11/12 | ConfigGet → ConfigValue | Request/Reply | CONFIG_ADMIN | key/value |
-| 13/14 | ConfigSet → ConfigApplied | Request/Reply | CONFIG_ADMIN | `applied_live: bool` (false = restart needed) |
+| 13/14 | ConfigSet → ConfigApplied | Request/Reply | CONFIG_ADMIN | `applied_live: bool` (false = restart needed). The change is written to the config file before it goes live, or it is refused: `BadRequest` for a value the key will not take, `Internal` when the file could not be written. Only the changed key is written; env and command-line overrides are never baked into the file. A credential's value never reaches the audit log |
+| 15/16 | ConfigDescribeRequest → ConfigDescription | Request/Reply | CONFIG_ADMIN | every key an operator can see, as `entries: [ConfigKeyInfo]`: `key`, `value`, `default`, `kind` (0 text, 1 bool, 2 number, 3 choice), `flags` (1 LIVE: applies without a restart; 2 SECRET: `value` is withheld; 4 SET: a secret is stored; 8 READ_ONLY: shown, not settable), `choices` (the accepted values of a choice). Derived from the setter itself on a scratch copy of the defaults, so it cannot disagree with what `ConfigSet` accepts. A client needs no list of keys, shapes or defaults of its own, and a key it has no words for is still reachable |
 
 Types 30..40 are the Wave 13 moderation suite (reports, quarantine,
 hash-deny list); see `rabbithole-proto::admin`.

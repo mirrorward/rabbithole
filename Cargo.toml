@@ -40,7 +40,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.215.0"
+version = "0.216.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]
@@ -137,6 +137,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # misc
 toml = "0.8"
+# Writes one key back into an operator's burrow.toml without disturbing the
+# comments and layout around it. Already in the tree: `toml` is built on it.
+toml_edit = { version = "0.22", features = ["serde"] }
 serde_json = "1"
 dirs = "5"
 proptest = "1"

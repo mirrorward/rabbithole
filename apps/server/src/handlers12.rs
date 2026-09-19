@@ -105,6 +105,7 @@ pub async fn handle(
                 shared
                     .config
                     .update(|c| theme::write_to_config(&applied, c, now, &ctx.login));
+                persist_theme(shared);
                 audit(
                     shared,
                     &ctx.login,
@@ -126,6 +127,7 @@ pub async fn handle(
     if frame.decode::<padm::ThemeBundleClear>().is_some() {
         config_admins_only!();
         shared.config.update(theme::clear_config);
+        persist_theme(shared);
         audit(shared, &ctx.login, "theme-clear", String::new());
         conn.send(Frame::ack(frame)).await?;
         return Ok(true);
@@ -138,4 +140,16 @@ pub async fn handle(
     }
 
     Ok(false)
+}
+
+/// Write the theme fields back to the config file. The theme is already live
+/// and the person has their answer, so a disk that refuses is logged, not
+/// turned into a failure of something that visibly worked.
+pub(crate) fn persist_theme(shared: &Shared) {
+    if let Err(e) = shared
+        .config
+        .persist_keys(rabbithole_server_core::config::THEME_KEYS)
+    {
+        tracing::warn!("theme applied but not saved to the config file: {e}");
+    }
 }

@@ -31,9 +31,15 @@ The tracker additionally listens on `5498/tcp` (HTRK listing) and `5499/udp`
 
 ## Configuration
 
-`burrow` reads a TOML file (`burrow.toml`, kept next to the data dir by
-default) and then applies `RABBITHOLE_*` environment overrides. Precedence:
-defaults < TOML file < environment < runtime `burrow ctl config-set`.
+`burrow` reads a TOML file (`--config`, or `burrow.toml` inside the data
+directory) and then applies `RABBITHOLE_*` environment overrides. Precedence:
+defaults < TOML file < environment < runtime changes.
+
+A runtime change, from the admin console or `burrow ctl config-set`, is written
+back to that file before it takes effect, so it survives a restart. Only the
+key that changed is written: comments and layout are kept, and environment or
+command-line overrides are never baked in. A file the burrow creates is
+readable by its owner alone, because it can hold gateway passwords.
 
 The **only** environment variables that exist (see
 `crates/server-core/src/config.rs`) are:
