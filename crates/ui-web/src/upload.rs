@@ -641,7 +641,10 @@ mod tests {
             "\u{201c}a.dmg\u{201d} is 52,428,801 bytes. This burrow takes files up to 52,428,800 bytes."
         );
         let used_up = check_upload("b.zip", 10, Some(&limits(0, 100, 100))).unwrap_err();
-        assert_eq!(used_up, "\u{201c}b.zip\u{201d} is 10 B, and your 100 B here is used up.");
+        assert_eq!(
+            used_up,
+            "\u{201c}b.zip\u{201d} is 10 B, and your 100 B here is used up."
+        );
         assert!(
             refusal(Some(ErrorCode::NotFound), Stage::Finish, "c.bin", 5, None)
                 .contains("was removed while it was on its way")

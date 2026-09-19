@@ -120,6 +120,9 @@ pub mod radio;
 pub mod recent;
 pub mod save;
 pub mod scroll;
+pub mod send;
+#[cfg(target_arch = "wasm32")]
+pub mod send_view;
 pub mod server_theme;
 pub mod servers;
 pub mod settings;

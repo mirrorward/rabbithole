@@ -143,6 +143,9 @@ struct Inner {
     /// frame's bytes and goes nowhere else; the socket closing resolves every
     /// one with `null`, so nothing waits on a dead connection.
     pending_calls: RefCell<std::collections::HashMap<RequestId, Function>>,
+    /// The burrow's server identity key, from its handshake: what another
+    /// burrow is told to send files to.
+    server_key: std::cell::Cell<Option<[u8; 32]>>,
     notice_sink: Option<NoticeSink>,
     who_sink: Option<WhoSink>,
     sessions_sink: Option<SessionsSink>,
@@ -318,6 +321,7 @@ impl WsClient {
                 admin_sink: None,
                 pending_admin: RefCell::new(std::collections::HashMap::new()),
                 pending_calls: RefCell::new(std::collections::HashMap::new()),
+                server_key: std::cell::Cell::new(None),
                 notice_sink: None,
                 who_sink: None,
                 sessions_sink: None,
@@ -703,6 +707,11 @@ impl WsClient {
         })
     }
 
+    /// The burrow's server key, once its handshake has arrived.
+    pub fn server_key(&self) -> Option<[u8; 32]> {
+        self.inner.borrow().server_key.get()
+    }
+
     /// Resolve every awaited reply with `null`: the socket is gone.
     fn release_calls(b: &Inner) {
         let waiting: Vec<Function> = b
@@ -837,6 +846,9 @@ impl WsClient {
                         // burrow surfaces the key as *verified*. Fire-and-forget
                         // (the server acks it); only the socket + our key are
                         // needed, so it's safe under the immutable borrow.
+                        if let Some(key) = wire::hello_ack_server_key(&frame) {
+                            b.server_key.set(Some(key));
+                        }
                         if let Some(nonce) = wire::hello_ack_challenge(&frame) {
                             if let Some(ws) = &b.ws {
                                 // The browser can't read the TLS cert, so we sign

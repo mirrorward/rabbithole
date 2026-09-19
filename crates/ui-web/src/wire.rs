@@ -98,8 +98,8 @@ use rabbithole_proto::dm::{
 use rabbithole_proto::filelib::{
     AreaCreate, AreaDelete, AreaList, AreaListRequest, AreaUpdate, FileAdded, FileAreaView,
     FileContent, FileDownloadRequest, FileNodeView, FileUpload, FolderCreate, FolderListRequest,
-    NodeDelete, NodeGet, NodeList, NodeMove, NodeRename, NodeReply, SetMetadata, UploadLimits,
-    UploadLimitsRequest,
+    NodeDelete, NodeGet, NodeList, NodeMove, NodeRename, NodeReply, RemotePullStatus, SetMetadata,
+    UploadLimits, UploadLimitsRequest,
 };
 use rabbithole_proto::hello::{CapabilitySet, Hello, HelloAck};
 use rabbithole_proto::presence::{PresenceSet, PresenceState, UserJoined, UserLeft, Who, WhoList};
@@ -145,6 +145,12 @@ pub fn hello_request(id: RequestId, pubkey: Option<[u8; 32]>) -> Result<Frame, P
     let hello =
         Hello::new(CLIENT_NAME, CLIENT_VERSION, CapabilitySet::default()).with_pubkey(pubkey);
     Frame::request(id, &hello)
+}
+
+/// The burrow's server identity key, if this frame is its [`HelloAck`]: what
+/// another burrow is told to send files to.
+pub fn hello_ack_server_key(frame: &Frame) -> Option<[u8; 32]> {
+    Some(frame.decode::<HelloAck>()?.ok()?.server_key)
 }
 
 /// The proof-of-possession challenge nonce, if this frame is a [`HelloAck`] that
@@ -994,6 +1000,8 @@ pub enum FileEvent {
     /// What this person may upload: the largest file, their space, and how
     /// much of it is used.
     UploadLimitsLoaded(UploadLimits),
+    /// How a pull between burrows into this one is going.
+    PullStatus(RemotePullStatus),
     /// A *specific transfer* failed. Keyed by id rather than "the most recent
     /// running one", because with two downloads in flight that guess marks the
     /// wrong row — and `retryable` tells the UI whether offering Retry is
@@ -1192,6 +1200,9 @@ pub fn frame_to_file_events(frame: &Frame) -> Vec<FileEvent> {
     }
     if let Some(Ok(m)) = frame.decode::<UploadLimits>() {
         return vec![FileEvent::UploadLimitsLoaded(m)];
+    }
+    if let Some(Ok(m)) = frame.decode::<RemotePullStatus>() {
+        return vec![FileEvent::PullStatus(m)];
     }
     if let Some(Ok(m)) = frame.decode::<FileAdded>() {
         return vec![FileEvent::FileAdded {

@@ -128,6 +128,61 @@ Kevin's answers, 2026-09-19. They supersede the proposal above.
 4. **No client relay.** A is dropped; only the destination-initiated pull (B)
    is built.
 
+## As built (0.225.0: the burrows' side)
+
+- **Transport: the federation session the two burrows already hold.** A peer
+  approved from the console has no dialable address or pinned fingerprint on
+  record (only `federation_peers` in `burrow.toml` carry those), so "the
+  destination dials the source" had nothing to dial. Instead each federation
+  session, whichever side dialed it, offers its QUIC connection's bulk streams
+  to pulls (`S2sState` links, registered in `run_peer_session`). The
+  destination opens one stream per file; the source answers only a grant it
+  signed, naming the peer at the other end of that session, which the
+  federation handshake authenticated by server key. No new listener, no new
+  dial, no address taken from a grant.
+- **Grant** (`crates/federation/src/pull.rs`): context `rhp-fed-pull-grant-v1`,
+  one hour to start (the source serves a pull under way for six hours past
+  that), a 16-byte nonce spent at the destination and kept in its store, at
+  most 1000 files and 384 KiB, and relative paths that cannot climb out of the
+  destination folder. Issued only for what the person may download at the
+  source (per-path `FILE_DOWNLOAD`, drop boxes, never quarantined content). It
+  names no person: the destination files under whoever hands it over.
+- **Destination** (`apps/server/src/s2s.rs`): every check before a byte moves
+  (see FILE 35 in `docs/protocol/file.md`). Recreating folders takes
+  `FILE_MANAGE` there, as making a folder always has, and never happens inside
+  a drop box, where the folders would not hide what they hold; single files go
+  anywhere the person may upload, drop boxes included. Each file is re-checked
+  against the largest file, the person's space and the deny list under the
+  upload commit lock before it reaches the store, verified against its blake3
+  root, filed under the person, and recorded with its source
+  (`file_nodes.source_burrow`, `source_key`, migration 0013). A pulled folder
+  always lands in a folder the pull made (`tapes (2)` beside an existing
+  `tapes`, never merged into it); a file the source no longer has is left out
+  and counted. A pull stops between files when pulls are switched off or the
+  person's account is closed, and gives up on a source slower than 16 KiB/s.
+- **Federation sessions stay up**: QUIC connections now send a keep-alive every
+  10 seconds. Before this, a quiet federation session idled out every 30
+  seconds and was redialed, which would have left pulls without a session
+  half the time.
+- **Settings**, all live, in the console under Federation & feeds:
+  `s2s_grants_enabled` and `s2s_pull_enabled` (off by default),
+  `s2s_max_concurrent` (2), `s2s_max_bytes` (0: no ceiling beyond the largest
+  file and the person's space).
+- **The app (0.226.0)**: "Send to another burrow…" on a selected file and on
+  folder rows, shown when the person is signed in (not a guest) here and on at
+  least one other live burrow. The dialog lists those burrows, walks the chosen
+  one's areas and folders by awaited requests on its own socket (its Files view
+  is left where it was), asks this burrow for the grant with the other's server
+  key (kept from its handshake), and hands it over. The pull gets a row on the
+  destination's queue (Transfers shows it "to" that burrow, with Cancel while it
+  runs), and its ending is a toast once; a reconnect's replay does not repeat
+  it. Every refusal names the burrow that refused and what would change it.
+- **Not built yet**: the swarm
+  leg (pieces from the source's swarm peers, needing a server-keyed capability
+  and seeders that accept it); pulling from a burrow that is not an approved
+  peer (`s2s_pull_from_any`, question 1's opt-in), which needs a dial path with
+  private-address guards.
+
 ## Questions for Kevin
 
 1. Is approved-federation-peers-only the right default for pulls, with

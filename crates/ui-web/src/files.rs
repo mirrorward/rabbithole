@@ -151,7 +151,16 @@ pub struct FilesState {
     pub carrying: Option<Carried>,
     /// What the burrow said this person may upload, when it has said.
     pub limits: Option<UploadLimits>,
+    /// Pulls into this burrow started from this app: pull id to queue key.
+    pub pulls: std::collections::BTreeMap<u64, u64>,
 }
+
+/// Queue keys for pulls into a burrow, below the upload keys and far above
+/// any id a burrow hands out.
+pub const PULL_KEY_BASE: u64 = 1 << 61;
+
+/// Pulls seen by this app, across every burrow, for their queue keys.
+static PULLS_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Uploads started from this app, across every burrow, for their queue keys.
 static UPLOADS_STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -167,6 +176,7 @@ impl FilesState {
         match event {
             FileEvent::AreasListed(areas) => self.areas = areas.clone(),
             FileEvent::UploadLimitsLoaded(limits) => self.limits = Some(*limits),
+            FileEvent::PullStatus(status) => self.pull_status(status),
             FileEvent::FolderListed { nodes } => self.nodes = nodes.clone(),
             FileEvent::NodeUpdated(node) => self.upsert_node(node.clone()),
             FileEvent::FileDownloaded { node, size } => {
@@ -350,6 +360,79 @@ impl FilesState {
 
 /// The current folder path as a `/`-joined string, or `None` at the root.
 impl FilesState {
+    /// A send of `name` into this burrow was accepted as pull `pull_id`: its
+    /// queue row, named for what is coming. Returns the row's key.
+    pub fn pull_started(&mut self, pull_id: u64, name: &str, bytes: u64) -> u64 {
+        let key = self.pull_row(pull_id, name);
+        if let Some(t) = self.transfers.iter_mut().find(|t| t.id == key) {
+            t.name = name.to_string();
+            t.total = t.total.max(bytes);
+        }
+        key
+    }
+
+    /// The pull behind queue key `key`, if it is one.
+    pub fn pull_id_of(&self, key: u64) -> Option<u64> {
+        self.pulls
+            .iter()
+            .find(|(_, k)| **k == key)
+            .map(|(pull, _)| *pull)
+    }
+
+    /// The row for `pull_id`, made on first sight (a status can arrive
+    /// before the app has named it).
+    fn pull_row(&mut self, pull_id: u64, name: &str) -> u64 {
+        if let Some(key) = self.pulls.get(&pull_id) {
+            return *key;
+        }
+        let n = PULLS_SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let key = PULL_KEY_BASE + n;
+        self.pulls.insert(pull_id, key);
+        self.transfers.push(Transfer {
+            id: key,
+            name: name.to_string(),
+            dir: TransferDir::Upload,
+            total: 0,
+            done: 0,
+            status: TransferStatus::Queued,
+            hash: None,
+            error: None,
+            sources: None,
+            node_id: None,
+            retryable: false,
+        });
+        key
+    }
+
+    fn pull_status(&mut self, status: &rabbithole_proto::filelib::RemotePullStatus) {
+        use rabbithole_proto::filelib::pull_state;
+        let fallback = format!("from {}", status.source);
+        let key = self.pull_row(status.pull_id, &fallback);
+        let Some(t) = self.transfers.iter_mut().find(|t| t.id == key) else {
+            return;
+        };
+        t.total = status.bytes_total;
+        match status.state {
+            pull_state::DONE => {
+                t.status = TransferStatus::Done;
+                t.done = t.total;
+            }
+            pull_state::FAILED => {
+                t.status = TransferStatus::Failed;
+                t.done = status.bytes_done.min(t.total);
+                t.error = Some(crate::send::stopped(status.reason, &status.source));
+            }
+            _ => {
+                t.status = if status.bytes_done > 0 {
+                    TransferStatus::Active
+                } else {
+                    TransferStatus::Queued
+                };
+                t.done = status.bytes_done.min(t.total);
+            }
+        }
+    }
+
     /// A ticketed upload of `name` begins: a queue row, and its key.
     pub fn upload_started(&mut self, name: &str, size: u64) -> u64 {
         let n = UPLOADS_STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -590,6 +673,48 @@ mod tests {
         files.apply(&FileEvent::Failed("server error: NotFound".into()));
         assert_eq!(row(&files, d).status, TransferStatus::Active);
         assert_eq!(row(&files, d).error, None);
+    }
+
+    #[test]
+    fn a_pull_row_follows_its_pushes_and_says_why_it_stopped() {
+        use rabbithole_proto::filelib::{pull_reason, pull_state, RemotePullStatus};
+        let push = |id, state, done, reason| {
+            FileEvent::PullStatus(RemotePullStatus::new(
+                id, state, 0, 3, done, 300, reason, 0, "Scratch", "inbox", "tapes",
+            ))
+        };
+        let mut files = FilesState::default();
+        let key = files.pull_started(7, "tapes", 300);
+        assert!(key > PULL_KEY_BASE && key < UPLOAD_KEY_BASE);
+        assert_eq!(files.pull_id_of(key), Some(7));
+        let row = |f: &FilesState| f.transfers.iter().find(|t| t.id == key).cloned().unwrap();
+        assert_eq!(
+            (row(&files).name.as_str(), row(&files).total),
+            ("tapes", 300)
+        );
+
+        files.apply(&push(7, pull_state::RUNNING, 150, 0));
+        assert_eq!(
+            (row(&files).status, row(&files).percent()),
+            (TransferStatus::Active, 50)
+        );
+        files.apply(&push(7, pull_state::DONE, 300, 0));
+        assert_eq!(
+            (row(&files).status, row(&files).percent()),
+            (TransferStatus::Done, 100)
+        );
+
+        // A status for a pull the app did not start here still gets a row.
+        files.apply(&push(9, pull_state::FAILED, 30, pull_reason::OVER_QUOTA));
+        let other = files.pulls[&9];
+        let other = files.transfers.iter().find(|t| t.id == other).unwrap();
+        assert_eq!(other.name, "from Scratch");
+        assert_eq!(other.status, TransferStatus::Failed);
+        assert_eq!(
+            other.error.as_deref(),
+            Some("It would have gone over your space here.")
+        );
+        assert_eq!(files.pulls.len(), 2);
     }
 
     #[test]

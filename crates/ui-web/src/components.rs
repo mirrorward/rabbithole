@@ -4554,8 +4554,19 @@ fn FolderBrowser() -> impl IntoView {
                                 <span class="rh-fcol-when">{when}</span>
                             </button>
                             // A folder opens on its first click, so it is never
-                            // "selected" the way a file is: its Remove lives on
-                            // the row, for whoever may manage files here.
+                            // "selected" the way a file is: its Send and Remove
+                            // live on the row.
+                            <Show when=move || is_folder && app.can_send() fallback=|| ()>
+                                <button
+                                    type="button"
+                                    class="rh-file-row-send"
+                                    class:beside=move || may_manage_files(app)
+                                    aria-label=format!("Send the folder {} to another burrow", folder_name.get_value())
+                                    on:click=move |_| app.ask_send(id, &folder_name.get_value(), true)
+                                >
+                                    "Send\u{2026}"
+                                </button>
+                            </Show>
                             <Show when=move || is_folder && may_manage_files(app) fallback=|| ()>
                                 <button
                                     type="button"
@@ -4599,6 +4610,7 @@ fn FileDetail() -> impl IntoView {
                         let id = n.id;
                         // Owned, so the management card can outlive this borrow.
                         let managed = n.clone();
+                        let send_name = store_value(n.name.clone());
                         view! {
                             <div class="rh-card">
                                 <h2 class="rh-card-name">{n.name.clone()}</h2>
@@ -4614,9 +4626,20 @@ fn FileDetail() -> impl IntoView {
                                     <dt>"Comment"</dt>
                                     <dd>{n.comment.clone()}</dd>
                                 </dl>
-                                <button class="rh-btn" on:click=move |_| app.download(id)>
-                                    "Download"
-                                </button>
+                                <div class="rh-card-actions">
+                                    <button class="rh-btn" on:click=move |_| app.download(id)>
+                                        "Download"
+                                    </button>
+                                    <Show when=move || app.can_send() fallback=|| ()>
+                                        <button
+                                            type="button"
+                                            class="rh-btn ghost"
+                                            on:click=move |_| app.ask_send(id, &send_name.get_value(), false)
+                                        >
+                                            "Send to another burrow\u{2026}"
+                                        </button>
+                                    </Show>
+                                </div>
                                 <Show when=move || may_manage_files(app) fallback=|| ()>
                                     <NodeManagement node=managed.clone()/>
                                 </Show>

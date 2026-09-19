@@ -194,6 +194,8 @@ pub struct AppState {
     /// A question the app is asking before it does something that can't be
     /// taken back (leaving a burrow). `None` = no dialog.
     pub confirm: RwSignal<Option<ConfirmAsk>>,
+    /// The "Send to another burrow" dialog, while it is open.
+    pub sending: RwSignal<Option<SendAsk>>,
     /// Transient toast notifications — humanized-event moments
     /// ([`crate::toasts`]).
     pub toasts: RwSignal<crate::toasts::ToastQueue>,
@@ -283,6 +285,7 @@ impl AppState {
             pending_endpoint: create_rw_signal(None),
             pending_notice: create_rw_signal(None),
             confirm: create_rw_signal(None),
+            sending: create_rw_signal(None),
             toasts: create_rw_signal(crate::toasts::ToastQueue::default()),
             theme: create_rw_signal(initial_theme_choice()),
             custom_pack: create_rw_signal(None),
@@ -914,8 +917,53 @@ impl AppState {
                 }
                 state.update(|s| s.receive_dm(&peer, msg))
             }));
+            let app = *self;
             ws.on_file_event(std::rc::Rc::new(move |event| {
-                files.update(|f| f.apply(&event))
+                // A pull's ending is worth a toast once: a reconnect replays
+                // it, and the row already says so by then.
+                let ending = match &event {
+                    FileEvent::PullStatus(status)
+                        if status.state != rabbithole_proto::filelib::pull_state::RUNNING =>
+                    {
+                        let settled = files.with_untracked(|f| {
+                            f.pulls
+                                .get(&status.pull_id)
+                                .and_then(|k| f.transfers.iter().find(|t| t.id == *k))
+                                .is_some_and(|t| {
+                                    matches!(
+                                        t.status,
+                                        crate::files::TransferStatus::Done
+                                            | crate::files::TransferStatus::Failed
+                                    )
+                                })
+                        });
+                        (!settled).then(|| status.clone())
+                    }
+                    _ => None,
+                };
+                files.update(|f| f.apply(&event));
+                if let Some(status) = ending {
+                    use rabbithole_proto::filelib::{pull_reason, pull_state};
+                    let what = files.with_untracked(|f| {
+                        f.pulls
+                            .get(&status.pull_id)
+                            .and_then(|k| f.transfers.iter().find(|t| t.id == *k))
+                            .map(|t| t.name.clone())
+                    });
+                    let what = what.unwrap_or_else(|| status.landed.clone());
+                    let dest = session_name
+                        .get_untracked()
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| "this burrow".to_string());
+                    let kind = match (status.state, status.reason) {
+                        (pull_state::DONE, _) if status.missing == 0 => {
+                            crate::toasts::ToastKind::Success
+                        }
+                        (_, pull_reason::CANCELLED) => crate::toasts::ToastKind::Info,
+                        _ => crate::toasts::ToastKind::Warn,
+                    };
+                    app.notify(kind, crate::send::ended(&status, &what, &dest));
+                }
             }));
             let admin_sig = self.admin;
             let syn_sig = self.syndication;
@@ -2188,11 +2236,95 @@ impl AppState {
     /// Stop an upload that is still going. Its row says so, and the sender
     /// abandons the transfer before its next chunk.
     pub fn cancel_upload(&self, key: u64) {
+        // A pull into a burrow is that burrow's to stop: ask it, and let its
+        // closing status say so on the row.
+        let pull = self.sessions.with_untracked(|list| {
+            list.iter().find_map(|(_, s)| {
+                s.files
+                    .with_untracked(|f| f.pull_id_of(key))
+                    .map(|p| (*s, p))
+            })
+        });
+        if let Some((session, pull_id)) = pull {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let ws = session.ws.get_value();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let _ = ws
+                        .call(&rabbithole_proto::filelib::RemotePullCancel::new(pull_id))
+                        .await;
+                });
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = (session, pull_id);
+            return;
+        }
         self.sessions.with_untracked(|list| {
             for (_, session) in list {
                 session.files.update(|f| f.cancel_upload(key));
             }
         });
+    }
+
+    /// The session for a burrow, if the app is on it.
+    pub fn session_of(&self, id: &ServerId) -> Option<Session> {
+        self.sessions
+            .with_untracked(|list| list.iter().find(|(sid, _)| sid == id).map(|(_, s)| *s))
+    }
+
+    /// What a burrow is called here: its handshake name, a published theme
+    /// name, or its host.
+    pub fn burrow_name(&self, id: &ServerId) -> String {
+        self.session_of(id)
+            .and_then(|s| {
+                s.name.get_untracked().or_else(|| {
+                    s.server_theme
+                        .with_untracked(|t| t.as_ref().map(|o| o.name.clone()))
+                })
+            })
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| server_label(id))
+    }
+
+    /// The other burrows the person could send to from the focused one: live,
+    /// connected, and signed in (a guest cannot receive anything).
+    pub fn send_targets(&self) -> Vec<(ServerId, String)> {
+        let focused = self.focused_id.get();
+        let ids: Vec<ServerId> = self.sessions.with(|list| {
+            list.iter()
+                .filter(|(id, s)| {
+                    *id != focused
+                        && !id.is_placeholder()
+                        && s.live.get()
+                        && !s.is_guest.get()
+                        && s.state.with(|st| st.conn == crate::conn::ConnState::Online)
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        });
+        ids.into_iter()
+            .map(|id| {
+                let name = self.burrow_name(&id);
+                (id, name)
+            })
+            .collect()
+    }
+
+    /// Whether "Send to another burrow" belongs on screen: a signed-in, live
+    /// session here and at least one other burrow to send to.
+    pub fn can_send(&self) -> bool {
+        let here = self.focused_tracked();
+        here.live.get() && !here.is_guest.get() && !self.send_targets().is_empty()
+    }
+
+    /// Open the send dialog for a file or folder of the focused burrow.
+    pub fn ask_send(&self, node_id: i64, name: &str, is_folder: bool) {
+        self.sending.set(Some(SendAsk {
+            node_id,
+            name: name.to_string(),
+            is_folder,
+            source: self.focused_id.get_untracked(),
+        }));
     }
 
     /// Grant or revoke the admin capability for the current session. Gates the
@@ -3024,6 +3156,15 @@ impl AppState {
 /// A short human label for a burrow rail tile before its server name is known.
 /// The offline demo session reads as "Demo"; a live session falls back to the
 /// host of its dial endpoint.
+/// The send dialog: it speaks to live burrows, so the browser build has it
+/// and the host build (tests) has nothing in its place.
+fn send_dialog() -> View {
+    #[cfg(target_arch = "wasm32")]
+    return view! { <crate::send_view::SendDialog/> }.into_view();
+    #[cfg(not(target_arch = "wasm32"))]
+    ().into_view()
+}
+
 fn server_label(id: &ServerId) -> String {
     if id.0 == "local" {
         return "Demo".to_string();
@@ -3210,6 +3351,7 @@ pub fn App() -> impl IntoView {
                 <PlaceGuard/>
                 <CommandPalette/>
                 <ConfirmDialog/>
+                {send_dialog()}
                 <WarrenSheet/>
                 <Toasts/>
                 <div class="rh-shell">
@@ -3312,6 +3454,16 @@ pub enum ConfirmIntent {
     RevokePeer([u8; 32]),
     /// Remove a snapshot (by name).
     DeleteBackup(String),
+}
+
+/// What the send dialog is sending: a file or folder of one burrow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendAsk {
+    pub node_id: i64,
+    pub name: String,
+    pub is_folder: bool,
+    /// The burrow it is on.
+    pub source: ServerId,
 }
 
 /// A question put to the person before something irreversible.
