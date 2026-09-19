@@ -1099,7 +1099,8 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
             }
             SwarmAction::Fetch { target, out } => {
                 let root = parse_swarm_target(&target)?;
-                let list = c.swarm_find(root).await?;
+                // Partial seeds too: the fetch asks each which part it holds.
+                let list = c.swarm_find_all(root).await?;
                 // Every source with a peer-wire endpoint joins the swarm
                 // fetch; work-stealing spreads units by real speed and a
                 // failing peer's units migrate to the others.

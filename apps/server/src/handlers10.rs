@@ -59,19 +59,25 @@ pub async fn handle(
         }};
     }
 
-    // ---- Advertise (or re-announce) ---------------------------------------
-    if let Some(Ok(req)) = frame.decode::<ps::AdvertiseFiles>() {
+    // ---- Advertise (or re-announce), whole or in part ----------------------
+    let advert = match frame.decode::<ps::AdvertiseFiles>() {
+        Some(Ok(req)) => Some((req.entries, req.ttl_secs, false)),
+        _ => match frame.decode::<ps::AdvertisePartial>() {
+            Some(Ok(req)) => Some((req.entries, req.ttl_secs, true)),
+            _ => None,
+        },
+    };
+    if let Some((entries, req_ttl, partial)) = advert {
         if !ctx.allows(shared, RESOURCE, Caps::SWARM_ADVERTISE) {
             fail!(ErrorCode::Forbidden);
         }
-        if req.entries.is_empty() {
+        if entries.is_empty() {
             fail!(ErrorCode::BadRequest);
         }
-        if req.entries.len() > ADVERT_BATCH_MAX {
+        if entries.len() > ADVERT_BATCH_MAX {
             fail!(ErrorCode::TooLarge);
         }
-        if req
-            .entries
+        if entries
             .iter()
             .any(|e| e.name.len() > ADVERT_NAME_MAX || e.mime.len() > ADVERT_MIME_MAX)
         {
@@ -84,20 +90,20 @@ pub async fn handle(
         // `ttl_secs == 0` asks for the server default; a configured max of 0
         // means "no maximum" (grant what was asked). Plain min/max arithmetic
         // — `clamp` would panic on a 0 max.
-        let ttl_secs = match (req.ttl_secs, max_ttl) {
+        let ttl_secs = match (req_ttl, max_ttl) {
             (0, 0) => ADVERT_TTL_FALLBACK,
             (0, max) => max,
             (req_ttl, 0) => req_ttl,
             (req_ttl, max) => req_ttl.min(max),
         };
-        let entries: Vec<NewAdvert> = req
-            .entries
+        let entries: Vec<NewAdvert> = entries
             .iter()
             .map(|e| NewAdvert {
                 root: e.root,
                 size: e.size,
                 name: e.name.clone(),
                 mime: e.mime.clone(),
+                partial,
             })
             .collect();
         let outcome = shared.swarm.advertise(
@@ -123,8 +129,15 @@ pub async fn handle(
         return Ok(true);
     }
 
-    // ---- Find sources ------------------------------------------------------
-    if let Some(Ok(req)) = frame.decode::<ps::FindSources>() {
+    // ---- Find sources: whole ones, or whole and partial ones ---------------
+    let find = match frame.decode::<ps::FindSources>() {
+        Some(Ok(req)) => Some((req.root, false)),
+        _ => match frame.decode::<ps::FindAllSources>() {
+            Some(Ok(req)) => Some((req.root, true)),
+            _ => None,
+        },
+    };
+    if let Some((root, with_partial)) = find {
         if !ctx.allows(shared, RESOURCE, Caps::FILE_LIST) {
             fail!(ErrorCode::Forbidden);
         }
@@ -132,12 +145,23 @@ pub async fn handle(
         // an advert is session-scoped, so naming its holder also confirms
         // they're online right now. Sub-moderators don't see invisible
         // sources (mirroring the who-list); a source whose presence entry is
-        // already gone (teardown race) is dropped too.
+        // already gone (teardown race) is dropped too. A client that did not
+        // ask for partial sources never meets one: it could not use it. One
+        // that did is never shown itself (a person sharing a download as it
+        // comes in has an advert of their own); the older query keeps
+        // listing everyone, as it always has.
         let viewer_is_mod = ctx.role >= Role::Moderator;
         let sources: Vec<ps::SourceInfo> = shared
             .swarm
-            .find(&req.root)
+            .find(&root)
             .into_iter()
+            .filter(|a| {
+                if with_partial {
+                    a.session_id != ctx.session_id
+                } else {
+                    !a.partial
+                }
+            })
             .filter(|a| {
                 viewer_is_mod
                     || shared
@@ -158,14 +182,13 @@ pub async fn handle(
             .collect();
         // Does the origin itself hold the blob? (Fetcher's fallback source.)
         let blobs = shared.blobs.clone();
-        let root = req.root;
         let server_size = tokio::task::spawn_blocking(move || {
             let id = BlobId(root);
             blobs.contains(&id).then(|| blobs.size(&id).ok()).flatten()
         })
         .await?;
         reply!(&ps::SourceList::new(
-            req.root,
+            root,
             server_size.is_some(),
             server_size.unwrap_or(0),
             sources

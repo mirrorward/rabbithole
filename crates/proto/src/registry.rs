@@ -80,8 +80,8 @@ use crate::session::{
     AgreementAccept, AuthGuest, AuthOk, AuthPassword, AuthResume, Ping, Pong, ServerNotice, Welcome,
 };
 use crate::swarm::{
-    AdvertWithdraw, AdvertiseAck, AdvertiseFiles, FindSources, PeerContact, SourceList,
-    SourceTicket, SourceTicketRequest,
+    AdvertWithdraw, AdvertiseAck, AdvertiseFiles, AdvertisePartial, FindAllSources, FindSources,
+    PeerContact, SourceList, SourceTicket, SourceTicketRequest,
 };
 use crate::transfer::{
     FileChunk, FileChunkPut, FileChunkRequest, FolderManifest, FolderManifestRequest,
@@ -172,7 +172,7 @@ wire_registry! {
 
     // ── Family 6: SWARM ──────────────────────────────────────────────────
     AdvertiseFiles, AdvertiseAck, AdvertWithdraw, FindSources, SourceList, PeerContact,
-    SourceTicketRequest, SourceTicket,
+    SourceTicketRequest, SourceTicket, AdvertisePartial, FindAllSources,
 
     // ── Family 7: ADMIN ──────────────────────────────────────────────────
     ClassListRequest, ClassList, ClassSet, AccountListRequest, AccountList, AccountSet,
@@ -206,7 +206,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 224;
+pub const EXPECTED: usize = 226;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

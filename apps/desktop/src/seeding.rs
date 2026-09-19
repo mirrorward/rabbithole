@@ -34,6 +34,8 @@ use rabbithole_core::{Client, ClientError};
 use rabbithole_proto::swarm::AdvertEntry;
 use rabbithole_swarm::peer::{PeerServer, SeedStore};
 
+use crate::swarm::ShareAs;
+
 /// How long an advert is asked to live. The burrow may grant less; the
 /// re-announce period follows what it granted.
 pub const ADVERT_TTL_SECS: u32 = 600;
@@ -75,14 +77,24 @@ pub struct Seeder {
     seeds: Arc<SeedStore>,
     server: Option<PeerServer>,
     entries: Vec<AdvertEntry>,
+    /// Files being shared while they download (see [`Seeder::begin`]).
+    partial: Vec<AdvertEntry>,
     /// What the burrow last granted, for pacing the re-announce.
     granted_ttl: u32,
 }
 
 impl Seeder {
-    /// How many files are on offer.
+    /// How many files are on offer, whole or still downloading (each once).
     pub fn files(&self) -> usize {
-        self.entries.len()
+        let mut roots: Vec<[u8; 32]> = self
+            .entries
+            .iter()
+            .chain(&self.partial)
+            .map(|e| e.root)
+            .collect();
+        roots.sort_unstable();
+        roots.dedup();
+        roots.len()
     }
 
     /// Seconds to wait before announcing again: two thirds of what the burrow
@@ -104,7 +116,21 @@ impl Seeder {
         name: &str,
         path: &Path,
     ) -> Result<(), SeedError> {
-        self.seeds.add(root, path)?;
+        // No longer downloading, whatever happens next.
+        let was_partial = self.partial.iter().any(|e| e.root == root);
+        self.partial.retain(|e| e.root != root);
+        // A download that shared as it went is already seeded whole from
+        // this very file, from the proofs it kept: no second pass over it.
+        if !self.seeds.holds_whole_at(&root, path) {
+            if let Err(e) = self.seeds.add(root, path) {
+                // Not seedable after all: take back what was offered in part.
+                if was_partial && !self.seeds.holds_whole(&root) {
+                    self.seeds.remove_partial(&root);
+                    let _ = client.swarm_withdraw(vec![root]).await;
+                }
+                return Err(e.into());
+            }
+        }
         if !self.entries.iter().any(|e| e.root == root) {
             self.entries
                 .push(AdvertEntry::new(root, size, name, mime_of(name)));
@@ -112,13 +138,46 @@ impl Seeder {
         self.announce(client).await
     }
 
-    /// (Re)register the contact card and (re)advertise everything on offer.
-    /// Called after a share, on the re-announce timer, and after a reconnect
-    /// (adverts die with the session).
-    pub async fn announce(&mut self, client: &mut Client) -> Result<(), SeedError> {
-        if self.entries.is_empty() {
-            return Ok(());
+    /// Get ready to share a file while it downloads: the endpoint starts (if
+    /// it has not) and its contact card is registered, and the returned
+    /// [`ShareAs`] is handed to the download. The download advertises the
+    /// file as held in part once its first verified unit lands, and shares
+    /// each unit with its proof from then on. Nothing is advertised yet.
+    pub async fn begin(
+        &mut self,
+        client: &mut Client,
+        root: [u8; 32],
+        size: u64,
+        name: &str,
+    ) -> Result<ShareAs, SeedError> {
+        let own = self.endpoint(client).await?;
+        let entry = AdvertEntry::new(root, size, name, mime_of(name));
+        if !self.partial.iter().any(|e| e.root == root) {
+            self.partial.push(entry.clone());
         }
+        Ok(ShareAs {
+            seeds: self.seeds.clone(),
+            own,
+            entry,
+            ttl_secs: ADVERT_TTL_SECS,
+        })
+    }
+
+    /// A download begun with [`Seeder::begin`] did not finish: stop offering
+    /// what it had, unless the file is seeded whole from an earlier download.
+    pub async fn abandon(&mut self, client: &mut Client, root: [u8; 32]) {
+        self.partial.retain(|e| e.root != root);
+        if self.seeds.holds_whole(&root) {
+            return;
+        }
+        self.seeds.remove_partial(&root);
+        let _ = client.swarm_withdraw(vec![root]).await;
+    }
+
+    /// This machine's peer endpoint (started on first use) with its contact
+    /// card registered. Returns the certificate fingerprint it answers with,
+    /// which this machine's own downloads leave out of their sources.
+    async fn endpoint(&mut self, client: &mut Client) -> Result<[u8; 32], SeedError> {
         if self.server.is_none() {
             let server = PeerServer::start(
                 "0.0.0.0:0".parse().expect("valid addr"),
@@ -132,6 +191,24 @@ impl Seeder {
         client
             .swarm_contact(server.addr.port(), server.fingerprint.0)
             .await?;
+        Ok(server.fingerprint.0)
+    }
+
+    /// The certificate fingerprint this machine's peer endpoint answers
+    /// with, once it has started.
+    pub fn fingerprint(&self) -> Option<[u8; 32]> {
+        self.server.as_ref().map(|s| s.fingerprint.0)
+    }
+
+    /// (Re)register the contact card and (re)advertise everything on offer.
+    /// Called after a share, on the re-announce timer, and after a reconnect
+    /// (adverts die with the session). Files still downloading are
+    /// advertised by their download.
+    pub async fn announce(&mut self, client: &mut Client) -> Result<(), SeedError> {
+        if self.entries.is_empty() {
+            return Ok(());
+        }
+        self.endpoint(client).await?;
         let ack = client
             .swarm_advertise(self.entries.clone(), ADVERT_TTL_SECS)
             .await?;
@@ -144,10 +221,18 @@ impl Seeder {
     /// and an advert nobody can dial expires on its own.
     pub async fn stop(&mut self, client: Option<&mut Client>) {
         if let Some(client) = client {
-            let roots = self.entries.iter().map(|e| e.root).collect();
+            let roots = self
+                .entries
+                .iter()
+                .chain(&self.partial)
+                .map(|e| e.root)
+                .collect();
             let _ = client.swarm_withdraw(roots).await;
         }
         for e in self.entries.drain(..) {
+            self.seeds.remove(&e.root);
+        }
+        for e in self.partial.drain(..) {
             self.seeds.remove(&e.root);
         }
         self.server = None; // dropping it aborts the listener

@@ -21,7 +21,7 @@ use crate::downloads::sanitize_name;
 
 use rabbithole_core::Client;
 
-use crate::swarm::{run_download, SourceMode, SwarmEvent, Wanted};
+use crate::swarm::{run_download_sharing, SourceMode, SwarmEvent, Wanted};
 
 /// App-managed state: the native RHP sessions, one per burrow.
 #[derive(Default)]
@@ -167,16 +167,38 @@ pub async fn swarm_start_download(
     // Peers when anyone has it, else the burrow itself, unless told otherwise.
     let mode = SourceMode::parse(mode.as_deref().unwrap_or("auto"));
     let want = Wanted { root, size, node_id, max_sources: max_sources as usize, mode };
-    let result = run_download(client, &want, &dest, move |event| {
+    // Opted in, and the size is known: offer the file from the start, so
+    // what lands is fetched from here while the rest is still coming.
+    let seeding = downloads::load(&prefs_path(&app)?).seed;
+    let share = if seeding && size > 0 && mode != SourceMode::OriginOnly {
+        let mut seeders = state.seeders.lock().await;
+        match seeders.entry(endpoint.clone()).or_default().begin(client, root, size, &name).await {
+            Ok(seeds) => Some(seeds),
+            Err(e) => {
+                *state.seeding_note.lock().expect("not poisoned") = Some(e.to_string());
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let sharing = share.is_some();
+    let result = run_download_sharing(client, &want, &dest, share, move |event| {
         let _ = emit_app.emit("swarm://event", TransferEvent { transfer_id, event });
     })
     .await;
+    if result.is_err() && sharing {
+        if let Some(seeder) = state.seeders.lock().await.get_mut(&endpoint) {
+            seeder.abandon(client, root).await;
+        }
+    }
     match result {
         Ok(_) => {
             // Opted in: what was just downloaded from this burrow is offered
             // to this burrow's swarm. A courtesy on top of the download, so a
             // failure to share is noted for Settings and never fails it.
-            if downloads::load(&prefs_path(&app)?).seed {
+            // Opted in now (it may have been switched on while this ran).
+            if seeding || downloads::load(&prefs_path(&app)?).seed {
                 let mut seeders = state.seeders.lock().await;
                 let shared = seeders
                     .entry(endpoint.clone())

@@ -23,6 +23,10 @@ pub struct Advert {
     pub name: String,
     pub mime: String,
     pub expires_at: Instant,
+    /// The session holds only part of the file (a fetch still under way),
+    /// and says which part on the peer wire: found only by clients that ask
+    /// for partial sources.
+    pub partial: bool,
 }
 
 /// What `advertise` did, for the ack.
@@ -41,6 +45,8 @@ pub struct NewAdvert {
     pub size: u64,
     pub name: String,
     pub mime: String,
+    /// Held in part only (see [`Advert::partial`]).
+    pub partial: bool,
 }
 
 /// A session's peer-wire contact card.
@@ -117,6 +123,9 @@ impl SwarmCatalog {
                 existing.name = e.name.clone();
                 existing.mime = e.mime.clone();
                 existing.screen_name = screen_name.to_string();
+                // Whole once said whole: a partial re-announce that races a
+                // finished download does not demote it.
+                existing.partial = existing.partial && e.partial;
                 accepted += 1;
                 continue;
             }
@@ -135,6 +144,7 @@ impl SwarmCatalog {
                 name: e.name.clone(),
                 mime: e.mime.clone(),
                 expires_at: now + ttl,
+                partial: e.partial,
             });
             accepted += 1;
             total += 1;
@@ -245,6 +255,7 @@ mod tests {
             size: 100,
             name: name.into(),
             mime: "application/octet-stream".into(),
+            partial: false,
         }
     }
 

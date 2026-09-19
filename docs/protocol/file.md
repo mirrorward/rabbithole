@@ -127,7 +127,8 @@ frame (u32 big-endian length, as the transfer preamble):
   its swarm (`s2s_swarm_sources`) or the person who asked for the grant may
   not, now, find and fetch from it; on OK, one frame of `PullSources { token,
   expires_unix, sources: [SwarmSource { endpoint, cert_fp }] }`: at most 16
-  seeders that are visible, still connected and hold the same size, each an
+  seeders that are visible, still connected and hold the whole file (not
+  partial seeds, which a destination before 0.229 cannot use), each an
   IP address and port, and an `S2sCapToken` for the file naming the fetching
   burrow, good for ten minutes and never past the grant's serving time.
   A source from before 0.228 reads the empty frame as a bad request and

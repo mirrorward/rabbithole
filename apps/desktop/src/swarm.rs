@@ -9,7 +9,24 @@ use std::path::Path;
 
 use rabbithole_core::{Client, ClientError};
 use rabbithole_proto::swarm::SourceList;
-use rabbithole_swarm::{fetch_swarm_resumable_with_progress, FetchReport, SourcePeer, UNIT_SIZE};
+use std::sync::Arc;
+
+use rabbithole_proto::swarm::AdvertEntry;
+use rabbithole_swarm::{
+    fetch_swarm_resumable_with_progress, fetch_swarm_sharing, FetchReport, SeedStore, SourcePeer,
+    UNIT_SIZE,
+};
+
+/// How a download shares what lands as it goes (the person opted in to
+/// seeding): the store it serves from, this machine's own endpoint (never a
+/// source for its own download), and the advert that goes out once the
+/// first verified unit is in.
+pub struct ShareAs {
+    pub seeds: Arc<SeedStore>,
+    pub own: [u8; 32],
+    pub entry: AdvertEntry,
+    pub ttl_secs: u32,
+}
 
 /// A download's lifecycle, surfaced to the caller and forwarded over Tauri IPC
 /// to the ui-web Transfers manager as the swarm fills. The JSON shape (an
@@ -144,6 +161,13 @@ pub const ORIGIN_SOURCE: &str = "the burrow";
 /// registered BOTH a peer-wire endpoint and a cert fingerprint can be dialed;
 /// coordinator-only entries (origin fallback) are dropped. Pure — unit-tested.
 pub fn sources_from_list(list: &SourceList) -> Vec<SourcePeer> {
+    sources_except(list, None)
+}
+
+/// [`sources_from_list`] without this machine's own endpoint (`own`, its
+/// certificate fingerprint): a person sharing a download as it comes in is
+/// never a source for it.
+pub fn sources_except(list: &SourceList, own: Option<[u8; 32]>) -> Vec<SourcePeer> {
     list.sources
         .iter()
         .filter_map(|s| {
@@ -152,6 +176,7 @@ pub fn sources_from_list(list: &SourceList) -> Vec<SourcePeer> {
                 cert_fp: s.cert_fp?,
             })
         })
+        .filter(|s| Some(s.cert_fp) != own)
         .collect()
 }
 
@@ -177,10 +202,12 @@ pub async fn run_swarm_download(
     size: u64,
     dest: &Path,
     max_sources: usize,
+    share: Option<ShareAs>,
     mut emit: impl FnMut(SwarmEvent),
 ) -> Result<FetchReport, SwarmError> {
-    let list = client.swarm_find(root).await?;
-    let mut sources = sources_from_list(&list);
+    // Partial seeds too: this fetch asks each source which part it holds.
+    let list = client.swarm_find_all(root).await?;
+    let mut sources = sources_except(&list, share.as_ref().map(|s| s.own));
     // The engine runs one worker per source, so the source count IS the
     // parallelism. Capped by the user's setting rather than hardcoded: on a
     // metered or narrow link, eight simultaneous peers is a cost, not a gift.
@@ -213,10 +240,44 @@ pub async fn run_swarm_download(
     // (recv -> None) when the fetch drops the last sender, i.e. when it finishes.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (sources, token, dest_owned) = (sources.clone(), ticket.token.clone(), dest.to_path_buf());
+    // The advert for what lands goes out with the first verified unit, and
+    // again before the burrow's grant lapses, for as long as units land.
+    let advert = share.as_ref().map(|s| (s.entry.clone(), s.ttl_secs));
+    let mut advertised: Option<(std::time::Instant, u64)> = None;
+    let seeds = share.map(|s| s.seeds);
     let fetch = tokio::spawn(async move {
-        fetch_swarm_resumable_with_progress(&sources, &token, root, size, &dest_owned, tx).await
+        match seeds {
+            // Opted in: every unit that lands is offered on at once, with
+            // its proof, and the whole file when it is done.
+            Some(seeds) => {
+                fetch_swarm_sharing(&sources, &token, root, size, &dest_owned, Some(tx), seeds)
+                    .await
+            }
+            None => {
+                fetch_swarm_resumable_with_progress(&sources, &token, root, size, &dest_owned, tx)
+                    .await
+            }
+        }
     });
     while let Some(u) = rx.recv().await {
+        if let Some((entry, ttl)) = &advert {
+            let due = advertised.is_none_or(|(at, after)| at.elapsed().as_secs() >= after);
+            if due {
+                // Found by peers that can use part of a file; a burrow that
+                // predates that is not told until the file is whole.
+                let granted = client
+                    .swarm_advertise_partial(vec![entry.clone()], *ttl)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|ack| ack.ttl_secs)
+                    .unwrap_or(*ttl);
+                advertised = Some((
+                    std::time::Instant::now(),
+                    crate::seeding::reannounce_after(granted),
+                ));
+            }
+        }
         emit(SwarmEvent::Chunk {
             endpoint: u.endpoint,
             offset: u.offset,
@@ -260,6 +321,19 @@ pub async fn run_download(
     client: &mut Client,
     want: &Wanted,
     dest: &Path,
+    emit: impl FnMut(SwarmEvent),
+) -> Result<Route, SwarmError> {
+    run_download_sharing(client, want, dest, None, emit).await
+}
+
+/// [`run_download`], offering what lands to this burrow's swarm through
+/// `share` as it goes (the person opted in to seeding), not only once the
+/// file is whole.
+pub async fn run_download_sharing(
+    client: &mut Client,
+    want: &Wanted,
+    dest: &Path,
+    share: Option<ShareAs>,
     mut emit: impl FnMut(SwarmEvent),
 ) -> Result<Route, SwarmError> {
     let Wanted {
@@ -272,30 +346,65 @@ pub async fn run_download(
     let (peers, server_has) = if mode == SourceMode::OriginOnly {
         (0, true) // the origin is asked directly; it answers for itself
     } else {
-        let list = client.swarm_find(root).await?;
-        (sources_from_list(&list).len(), list.server_has)
+        let list = client.swarm_find_all(root).await?;
+        let own = share.as_ref().map(|s| s.own);
+        (sources_except(&list, own).len(), list.server_has)
     };
+    let seeds = share.as_ref().map(|s| s.seeds.clone());
     match choose_route(mode, peers, server_has, node_id.is_some())? {
         Route::Swarm => {
-            run_swarm_download(client, root, size, dest, max_sources, emit).await?;
-            Ok(Route::Swarm)
+            match run_swarm_download(client, root, size, dest, max_sources, share, &mut emit).await
+            {
+                Ok(_) => Ok(Route::Swarm),
+                // The peers could not give the whole file (gone, or holding
+                // only parts of it): by default the burrow sends it instead.
+                // Not when the trouble is on this machine (a full disk): the
+                // verified progress stays for a retry.
+                Err(e)
+                    if !is_local(&e)
+                        && mode == SourceMode::Auto
+                        && server_has
+                        && node_id.is_some() =>
+                {
+                    let node_id = node_id.expect("checked");
+                    // What was offered in part is no longer here to serve.
+                    if seeds.as_ref().is_some_and(|s| !s.holds_whole(&root)) {
+                        let _ = client.swarm_withdraw(vec![root]).await;
+                    }
+                    run_origin_download(client, node_id, size, dest, &mut emit).await?;
+                    check_origin_copy(dest, root)?;
+                    Ok(Route::Origin)
+                }
+                Err(e) => Err(e),
+            }
         }
         Route::Origin => {
             let node_id = node_id.expect("choose_route requires a reachable origin");
             run_origin_download(client, node_id, size, dest, &mut emit).await?;
-            // The origin verified the file against *its* ticket. Check it
-            // against what was asked for: a node id is only a number, and the
-            // content hash is the identity.
-            let got = Client::hash_file(dest).map(|(root, _)| root).ok();
-            if got != Some(root) {
-                let _ = std::fs::remove_file(dest);
-                return Err(SwarmError::Fetch(rabbithole_swarm::peer::PeerError::Verify(
-                    "the burrow sent a different file than the one asked for".to_string(),
-                )));
-            }
+            check_origin_copy(dest, root)?;
             Ok(Route::Origin)
         }
     }
+}
+
+/// Whether a download failed on this machine (writing the file), not at the
+/// sources.
+fn is_local(e: &SwarmError) -> bool {
+    matches!(e, SwarmError::Fetch(rabbithole_swarm::peer::PeerError::Io(_)))
+}
+
+/// The origin verified the file against *its* ticket. Check it against what
+/// was asked for: a node id is only a number, and the content hash is the
+/// identity.
+fn check_origin_copy(dest: &Path, root: [u8; 32]) -> Result<(), SwarmError> {
+    let got = Client::hash_file(dest).map(|(root, _)| root).ok();
+    if got != Some(root) {
+        let _ = std::fs::remove_file(dest);
+        return Err(SwarmError::Fetch(rabbithole_swarm::peer::PeerError::Verify(
+            "the burrow sent a different file than the one asked for".to_string(),
+        )));
+    }
+    Ok(())
 }
 
 /// Fetch a file straight from the burrow (the ticketed, resumable, blake3-
@@ -311,9 +420,14 @@ async fn run_origin_download(
     // A swarm attempt leaves units at arbitrary offsets plus a `.rhstate`. The
     // origin transfer resumes by *length*, which would mistake such a file
     // for a contiguous partial and fail its final hash check. Start clean.
+    // A swarm attempt that landed nothing leaves no `.rhstate`, but it did
+    // pre-size the file (zeros) and start its proofs file: either sidecar
+    // marks the file as the swarm's, not a contiguous partial of the burrow's.
     let state = rabbithole_swarm::scheduler::rhstate_path(dest);
-    if state.exists() {
+    let proofs = rabbithole_swarm::proofs_path(dest);
+    if state.exists() || proofs.exists() {
         let _ = std::fs::remove_file(&state);
+        let _ = std::fs::remove_file(&proofs);
         let _ = std::fs::remove_file(dest);
     }
     let total_units = size.div_ceil(UNIT_SIZE).max(1);

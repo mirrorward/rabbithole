@@ -17,16 +17,25 @@
 //! (chunk-aligned) ranges. Requests are capped at [`PEER_REQUEST_MAX`]
 //! bytes so both sides can buffer whole responses; multi-range fetches
 //! loop ([`fetch_file`]).
+//!
+//! A peer need not hold a whole file. A fetcher keeps the proof (the Bao
+//! parent hashes) of every range it verifies, so what it has fetched it can
+//! serve on, proof and all, while the rest is still coming: a **partial
+//! seed**. A stream that opens with an empty frame asks a question instead
+//! ([`PeerAsk`]): which units the peer holds ([`HaveMap`]). A peer asked for
+//! a range it does not hold answers [`STATUS_NOT_HELD`]. Whoever serves a
+//! range, whole seed or partial, every block is checked against the root by
+//! the server before it goes and by the fetcher before it lands.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bao_tree::io::outboard::{EmptyOutboard, PreOrderMemOutboard};
-use bao_tree::io::sync::{decode_ranges, encode_ranges_validated};
+use bao_tree::io::outboard::{PreOrderMemOutboard, PreOrderOutboard};
+use bao_tree::io::sync::{decode_ranges, encode_ranges_validated, Outboard, OutboardMut};
 use bao_tree::io::{round_up_to_chunks, round_up_to_chunks_groups};
-use bao_tree::{blake3 as bao_blake3, BaoTree, BlockSize, ChunkRanges};
+use bao_tree::{blake3 as bao_blake3, BaoTree, BlockSize, ChunkRanges, TreeNode};
 use rabbithole_net::quic::{QuicListener, QuicTransport};
 use rabbithole_net::tls::{CertFingerprint, ServerAuth, TlsIdentity};
 use rabbithole_net::{
@@ -62,7 +71,84 @@ pub const STATUS_OK: u8 = 0;
 pub const STATUS_DENIED: u8 = 1;
 pub const STATUS_NOT_FOUND: u8 = 2;
 pub const STATUS_BAD_REQUEST: u8 = 3;
+/// The peer holds part of the file, but not that range (yet): try it
+/// elsewhere, and this peer again later.
+pub const STATUS_NOT_HELD: u8 = 4;
 
+/// The unit a [`HaveMap`] counts in, and the scheduler fetches in.
+pub const HAVE_UNIT: u64 = 1024 * 1024;
+const _: () = assert!(HAVE_UNIT % PEER_BLOCK_BYTES == 0);
+
+/// Largest [`HaveMap`] frame a fetcher reads: a bit per unit, for files up
+/// to 8 TiB.
+const HAVE_MAP_MAX: usize = 1 << 20;
+
+/// A question on the peer wire other than a range, sent in the frame after
+/// an empty one. A peer from before these reads the empty frame as a
+/// malformed request and closes the stream: it holds whole files only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PeerAsk {
+    /// Which units of `root` the peer holds, under the same capability a
+    /// range request carries.
+    Have { token: Vec<u8>, root: [u8; 32] },
+}
+
+/// Which units of a file a peer holds: bit `i` (least significant first in
+/// each byte) is the `unit` bytes from `i * unit`. Sent after an OK header.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HaveMap {
+    pub unit: u64,
+    pub bits: Vec<u8>,
+}
+
+impl HaveMap {
+    /// Every unit of a `size`-byte file.
+    pub fn whole(size: u64) -> Self {
+        let units = size.div_ceil(HAVE_UNIT).max(1) as usize;
+        let mut bits = vec![0xFF; units.div_ceil(8)];
+        if units % 8 != 0 {
+            *bits.last_mut().expect("at least one byte") = (1u8 << (units % 8)) - 1;
+        }
+        HaveMap {
+            unit: HAVE_UNIT,
+            bits,
+        }
+    }
+
+    /// Whether every unit touching `[offset, offset + len)` is held.
+    pub fn covers(&self, offset: u64, len: u64) -> bool {
+        if self.unit == 0 || len == 0 {
+            return false;
+        }
+        let first = offset / self.unit;
+        let last = (offset + len - 1) / self.unit;
+        (first..=last).all(|i| bit(&self.bits, i))
+    }
+
+    /// Forget unit `index` (the peer said it does not hold it after all).
+    pub fn clear(&mut self, index: u64) {
+        clear_bit(&mut self.bits, index);
+    }
+}
+
+fn bit(bits: &[u8], i: u64) -> bool {
+    bits.get((i / 8) as usize)
+        .is_some_and(|b| b & (1 << (i % 8)) != 0)
+}
+
+fn set_bit(bits: &mut Vec<u8>, i: u64) {
+    let byte = (i / 8) as usize;
+    if bits.len() <= byte {
+        bits.resize(byte + 1, 0);
+    }
+    bits[byte] |= 1 << (i % 8);
+}
+
+fn clear_bit(bits: &mut [u8], i: u64) {
+    if let Some(b) = bits.get_mut((i / 8) as usize) {
+        *b &= !(1 << (i % 8));
+    }
+}
 /// One framed request on a fresh bi-stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerRequest {
@@ -100,21 +186,50 @@ pub enum PeerError {
     BadRequest,
 }
 
-/// What a peer seeds: root → (path, size, precomputed outboard).
-///
-/// The outboard (the Bao parent-hash tree) is computed once at [`add`] time
-/// by reading the file through; serving then reads only the requested
-/// leaves. ~64 bytes of outboard per 16 KiB of file.
+/// What a peer seeds: root → a whole file with its outboard (the Bao
+/// parent-hash tree, ~64 bytes per 16 KiB, held in memory), or part of a
+/// file still being fetched with the proofs kept so far (on disk, beside
+/// it) and which units it holds.
 #[derive(Default)]
 pub struct SeedStore {
     inner: RwLock<HashMap<[u8; 32], Seed>>,
 }
 
 #[derive(Clone)]
-struct Seed {
-    path: PathBuf,
-    size: u64,
-    outboard: Arc<PreOrderMemOutboard>,
+enum Seed {
+    Whole {
+        path: PathBuf,
+        size: u64,
+        outboard: Arc<PreOrderMemOutboard>,
+    },
+    Partial {
+        path: PathBuf,
+        size: u64,
+        proofs: PathBuf,
+        held: Arc<RwLock<Vec<u8>>>,
+    },
+}
+
+impl Seed {
+    fn size(&self) -> u64 {
+        match self {
+            Seed::Whole { size, .. } | Seed::Partial { size, .. } => *size,
+        }
+    }
+}
+
+/// A fetch's hold on its partial seed: it marks units as they land, and
+/// the store serves them.
+#[derive(Clone)]
+pub struct Sharing {
+    held: Arc<RwLock<Vec<u8>>>,
+}
+
+impl Sharing {
+    /// Unit `index` has landed, and its proof is kept: serve it.
+    pub fn mark(&self, index: u64) {
+        set_bit(&mut self.held.write().expect("not poisoned"), index);
+    }
 }
 
 impl SeedStore {
@@ -122,22 +237,107 @@ impl SeedStore {
         Self::default()
     }
 
-    /// Read `path`, verify it hashes to `root`, and start seeding it.
+    /// Hash `path` (streamed, never all in memory), check it is `root`, and
+    /// start seeding it whole.
     pub fn add(&self, root: [u8; 32], path: &Path) -> Result<(), PeerError> {
-        let bytes = std::fs::read(path)?;
-        let outboard = PreOrderMemOutboard::create(&bytes, PEER_BLOCK);
-        if *outboard.root.as_bytes() != root {
+        let file = std::fs::File::open(path)?;
+        let size = file.metadata()?.len();
+        let tree = BaoTree::new(size, PEER_BLOCK);
+        let mut outboard = PreOrderMemOutboard {
+            root: bao_blake3::Hash::from([0; 32]),
+            tree,
+            data: vec![0u8; tree.outboard_size() as usize],
+        };
+        let hashed = bao_tree::io::sync::outboard(
+            std::io::BufReader::with_capacity(256 * 1024, file),
+            tree,
+            &mut outboard,
+        )?;
+        if *hashed.as_bytes() != root {
             return Err(PeerError::RootMismatch);
         }
+        outboard.root = hashed;
+        self.insert_whole(root, path, size, outboard);
+        Ok(())
+    }
+
+    /// Seed a whole file whose proofs were kept while it was fetched (the
+    /// fetch has checked the file against `root`): the proofs are read into
+    /// memory and checked complete against the root, without hashing the
+    /// file again.
+    pub fn add_proved(
+        &self,
+        root: [u8; 32],
+        size: u64,
+        path: &Path,
+        proofs: &Path,
+    ) -> Result<(), PeerError> {
+        let tree = BaoTree::new(size, PEER_BLOCK);
+        let mut data = std::fs::read(proofs)?;
+        data.resize(tree.outboard_size() as usize, 0);
+        let outboard = PreOrderMemOutboard {
+            root: bao_blake3::Hash::from(root),
+            tree,
+            data,
+        };
+        if !proofs_complete(&outboard, size)? {
+            return Err(PeerError::RootMismatch);
+        }
+        self.insert_whole(root, path, size, outboard);
+        Ok(())
+    }
+
+    fn insert_whole(&self, root: [u8; 32], path: &Path, size: u64, outboard: PreOrderMemOutboard) {
         self.inner.write().expect("not poisoned").insert(
             root,
-            Seed {
+            Seed::Whole {
                 path: path.to_path_buf(),
-                size: bytes.len() as u64,
+                size,
                 outboard: Arc::new(outboard),
             },
         );
-        Ok(())
+    }
+
+    /// Seed the part of `path` fetched so far: `held` units, whose proofs
+    /// are in the pre-order outboard file `proofs`. The fetch marks more
+    /// through the returned [`Sharing`]. `None` when the whole file is
+    /// already seeded here.
+    pub fn add_partial(
+        &self,
+        root: [u8; 32],
+        size: u64,
+        path: &Path,
+        proofs: &Path,
+        held: impl IntoIterator<Item = u64>,
+    ) -> Option<Sharing> {
+        let mut inner = self.inner.write().expect("not poisoned");
+        if matches!(inner.get(&root), Some(Seed::Whole { .. })) {
+            return None;
+        }
+        let mut bits = Vec::new();
+        for index in held {
+            set_bit(&mut bits, index);
+        }
+        let held = Arc::new(RwLock::new(bits));
+        inner.insert(
+            root,
+            Seed::Partial {
+                path: path.to_path_buf(),
+                size,
+                proofs: proofs.to_path_buf(),
+                held: held.clone(),
+            },
+        );
+        Some(Sharing { held })
+    }
+
+    /// Stop seeding a partial file (a fetch that failed or was dropped). A
+    /// whole seed of the same root is left as it is.
+    pub fn remove_partial(&self, root: &[u8; 32]) {
+        let mut inner = self.inner.write().expect("not poisoned");
+        if matches!(inner.get(root), Some(Seed::Partial { .. })) {
+            inner.remove(root);
+        }
     }
 
     pub fn remove(&self, root: &[u8; 32]) {
@@ -146,6 +346,152 @@ impl SeedStore {
 
     fn get(&self, root: &[u8; 32]) -> Option<Seed> {
         self.inner.read().expect("not poisoned").get(root).cloned()
+    }
+
+    /// Whether this store seeds `root` whole.
+    pub fn holds_whole(&self, root: &[u8; 32]) -> bool {
+        matches!(self.get(root), Some(Seed::Whole { .. }))
+    }
+
+    /// Whether this store seeds `root` whole, from `path`.
+    pub fn holds_whole_at(&self, root: &[u8; 32], at: &Path) -> bool {
+        matches!(self.get(root), Some(Seed::Whole { path, .. }) if path == at)
+    }
+
+    /// Stop seeding a whole file that can no longer be served (its file is
+    /// gone or changed), if it is still the seed `outboard` belongs to.
+    fn drop_whole(&self, root: &[u8; 32], outboard: &Arc<PreOrderMemOutboard>) {
+        let mut inner = self.inner.write().expect("not poisoned");
+        if matches!(inner.get(root), Some(Seed::Whole { outboard: o, .. }) if Arc::ptr_eq(o, outboard))
+        {
+            inner.remove(root);
+        }
+    }
+
+    /// Which units of `root` this store holds, if it seeds it at all.
+    pub fn have(&self, root: &[u8; 32]) -> Option<HaveMap> {
+        Some(match self.get(root)? {
+            Seed::Whole { size, .. } => HaveMap::whole(size),
+            Seed::Partial { held, .. } => HaveMap {
+                unit: HAVE_UNIT,
+                bits: held.read().expect("not poisoned").clone(),
+            },
+        })
+    }
+}
+
+/// Whether an outboard holds the proof of every block of a `size`-byte
+/// file, each checked against its root.
+fn proofs_complete(outboard: impl Outboard, size: u64) -> std::io::Result<bool> {
+    let all = ChunkRanges::from(bao_tree::ChunkNum(0)..BaoTree::new(size, PEER_BLOCK).chunks());
+    let mut proven = ChunkRanges::empty();
+    for range in bao_tree::io::sync::valid_outboard_ranges(outboard, &all) {
+        proven |= ChunkRanges::from(range?);
+    }
+    Ok(proven.is_superset(&all))
+}
+
+/// The byte ranges of a `size`-byte file whose proofs `outboard` holds,
+/// checked against its root: what a resumed fetch may serve again.
+pub fn proven_ranges(outboard: impl Outboard, size: u64) -> std::io::Result<Vec<(u64, u64)>> {
+    let all = ChunkRanges::from(bao_tree::ChunkNum(0)..BaoTree::new(size, PEER_BLOCK).chunks());
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    for range in bao_tree::io::sync::valid_outboard_ranges(outboard, &all) {
+        let range = range?;
+        let (start, end) = (range.start.to_bytes(), range.end.to_bytes().min(size));
+        match out.last_mut() {
+            Some(last) if last.1 >= start => last.1 = last.1.max(end),
+            _ => out.push((start, end)),
+        }
+    }
+    Ok(out)
+}
+
+/// The pre-order outboard file a fetch keeps its proofs in, beside `dest`.
+pub fn proofs_path(dest: &Path) -> PathBuf {
+    let mut os = dest.as_os_str().to_owned();
+    os.push(".obao");
+    PathBuf::from(os)
+}
+
+/// Open (or start) the proofs file for a `size`-byte file with `root`,
+/// sized to hold every proof.
+pub fn open_proofs(
+    path: &Path,
+    root: [u8; 32],
+    size: u64,
+) -> std::io::Result<PreOrderOutboard<std::fs::File>> {
+    let tree = BaoTree::new(size, PEER_BLOCK);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    if file.metadata()?.len() != tree.outboard_size() {
+        file.set_len(tree.outboard_size())?;
+    }
+    Ok(PreOrderOutboard {
+        root: bao_blake3::Hash::from(root),
+        tree,
+        data: file,
+    })
+}
+
+/// A range's verified bytes and the proof that came with them: the parent
+/// hash pairs on the path from the root to each of its blocks.
+pub struct Proved {
+    pub bytes: Vec<u8>,
+    pub parents: Vec<(TreeNode, (bao_blake3::Hash, bao_blake3::Hash))>,
+}
+
+impl Proved {
+    /// Keep the proof in `outboard` (nodes it does not store are skipped).
+    pub fn keep(&self, outboard: &mut impl OutboardMut) -> std::io::Result<()> {
+        for (node, pair) in &self.parents {
+            outboard.save(*node, pair)?;
+        }
+        Ok(())
+    }
+}
+
+/// An outboard that stores nothing and records every parent pair the
+/// decoder verified, so a fetch can keep the proof of what it fetched.
+struct Recorder {
+    tree: BaoTree,
+    root: bao_blake3::Hash,
+    parents: Vec<(TreeNode, (bao_blake3::Hash, bao_blake3::Hash))>,
+}
+
+impl Outboard for Recorder {
+    fn root(&self) -> bao_blake3::Hash {
+        self.root
+    }
+
+    fn tree(&self) -> BaoTree {
+        self.tree
+    }
+
+    fn load(
+        &self,
+        _node: TreeNode,
+    ) -> std::io::Result<Option<(bao_blake3::Hash, bao_blake3::Hash)>> {
+        Ok(None)
+    }
+}
+
+impl OutboardMut for Recorder {
+    fn save(
+        &mut self,
+        node: TreeNode,
+        pair: &(bao_blake3::Hash, bao_blake3::Hash),
+    ) -> std::io::Result<()> {
+        self.parents.push((node, *pair));
+        Ok(())
+    }
+
+    fn sync(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -232,62 +578,194 @@ async fn serve_stream(
     let Ok(bytes) = read_framed(&mut recv, 8192).await else {
         return;
     };
+    if bytes.is_empty() {
+        answer_ask(send, recv, server_key, seeds).await;
+        return;
+    }
     let Ok(req) = postcard::from_bytes::<PeerRequest>(&bytes) else {
         return;
-    };
-
-    let respond = |status: u8, size: u64| {
-        postcard::to_allocvec(&PeerResponseHeader { status, size }).expect("header serializes")
     };
 
     // Authorize: a valid, unexpired capability for this exact root, made
     // for a person or for another burrow a file was sent to.
     let authorized = crate::cap::token_allows(&req.token, &server_key, &req.root, now_unix());
     if !authorized {
-        let h = respond(STATUS_DENIED, 0);
-        let _ = write_framed(&mut send, &h).await;
-        let _ = send.shutdown().await;
+        refuse(&mut send, STATUS_DENIED, 0).await;
         return;
     }
     let Some(seed) = seeds.get(&req.root) else {
-        let h = respond(STATUS_NOT_FOUND, 0);
-        let _ = write_framed(&mut send, &h).await;
-        let _ = send.shutdown().await;
+        refuse(&mut send, STATUS_NOT_FOUND, 0).await;
         return;
     };
-    if req.len == 0 || req.len > PEER_REQUEST_MAX || req.offset >= seed.size {
-        let h = respond(STATUS_BAD_REQUEST, seed.size);
-        let _ = write_framed(&mut send, &h).await;
-        let _ = send.shutdown().await;
+    let size = seed.size();
+    if req.len == 0 || req.len > PEER_REQUEST_MAX || req.offset >= size {
+        refuse(&mut send, STATUS_BAD_REQUEST, size).await;
         return;
     }
-    let len = req.len.min(seed.size - req.offset);
+    let len = req.len.min(size - req.offset);
+    let (offset, root) = (req.offset, req.root);
 
-    // Encode the chunk-aligned ranges (validated against the outboard: a
-    // file that changed on disk fails here rather than serving bad bytes).
+    // Encode the chunk-aligned ranges, validated against the outboard: a
+    // block that does not match its proof (a file changed on disk, a gap in
+    // a partial file) fails here, and nothing of it is sent. What fails is
+    // no longer claimed: a whole seed whose file is gone or changed is
+    // dropped, a partial seed's units stop being offered.
+    let store = seeds.clone();
     let encoded = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, PeerError> {
-        let file = std::fs::File::open(&seed.path)?;
-        let ranges = block_ranges(req.offset, len);
+        let ranges = block_ranges(offset, len);
         let mut out = Vec::new();
-        encode_ranges_validated(&file, seed.outboard.as_ref(), &ranges, &mut out)
-            .map_err(|e| PeerError::Verify(e.to_string()))?;
+        match &seed {
+            Seed::Whole { path, outboard, .. } => {
+                let served = std::fs::File::open(path)
+                    .map_err(Unserved::from)
+                    .and_then(|file| {
+                        encode_ranges_validated(&file, outboard.as_ref(), &ranges, &mut out)
+                            .map_err(Unserved::from)
+                    });
+                match served {
+                    Ok(()) => {}
+                    // The file is gone or is no longer the one seeded.
+                    Err(Unserved::Changed) => {
+                        store.drop_whole(&root, outboard);
+                        return Err(PeerError::Refused(STATUS_NOT_FOUND));
+                    }
+                    // A passing failure (too many open files, a volume
+                    // that dozed off): not this time, and nothing more.
+                    Err(Unserved::Passing) => return Err(PeerError::Refused(STATUS_NOT_HELD)),
+                }
+            }
+            Seed::Partial {
+                path, proofs, held, ..
+            } => {
+                let covered = {
+                    let held = held.read().expect("not poisoned");
+                    HaveMap {
+                        unit: HAVE_UNIT,
+                        bits: held.clone(),
+                    }
+                    .covers(offset, len)
+                };
+                if !covered {
+                    return Err(PeerError::Refused(STATUS_NOT_HELD));
+                }
+                let served = (|| -> Result<(), Unserved> {
+                    let file = std::fs::File::open(path)?;
+                    let outboard = PreOrderOutboard {
+                        root: bao_blake3::Hash::from(root),
+                        tree: BaoTree::new(size, PEER_BLOCK),
+                        data: std::fs::File::open(proofs)?,
+                    };
+                    encode_ranges_validated(&file, &outboard, &ranges, &mut out)?;
+                    Ok(())
+                })();
+                if served == Err(Unserved::Changed) {
+                    // What was marked held does not prove out, or its file
+                    // is gone: stop offering it.
+                    let mut held = held.write().expect("not poisoned");
+                    for i in offset / HAVE_UNIT..=(offset + len - 1) / HAVE_UNIT {
+                        clear_bit(&mut held, i);
+                    }
+                }
+                if served.is_err() {
+                    return Err(PeerError::Refused(STATUS_NOT_HELD));
+                }
+            }
+        }
         Ok(out)
     })
     .await;
 
     match encoded {
         Ok(Ok(stream)) => {
-            let h = respond(STATUS_OK, seed.size);
+            let h = header(STATUS_OK, size);
             if write_framed(&mut send, &h).await.is_err() {
                 return;
             }
             let _ = send.write_all(&stream).await;
             let _ = send.shutdown().await;
         }
-        _ => {
-            // Encoding failed (stale seed, io error): drop without a body.
+        Ok(Err(PeerError::Refused(status))) => refuse(&mut send, status, size).await,
+        // Not provable from what is here: say so, so the fetcher asks
+        // someone else.
+        _ => refuse(&mut send, STATUS_NOT_HELD, size).await,
+    }
+}
+
+/// Why a range could not be served: the data is gone or no longer matches
+/// its proof (stop claiming it), or something passing got in the way (try
+/// again later).
+#[derive(Debug, PartialEq, Eq)]
+enum Unserved {
+    Changed,
+    Passing,
+}
+
+impl From<std::io::Error> for Unserved {
+    fn from(e: std::io::Error) -> Self {
+        use std::io::ErrorKind::{NotFound, UnexpectedEof};
+        if matches!(e.kind(), NotFound | UnexpectedEof) {
+            Unserved::Changed
+        } else {
+            Unserved::Passing
         }
     }
+}
+
+impl From<bao_tree::io::EncodeError> for Unserved {
+    fn from(e: bao_tree::io::EncodeError) -> Self {
+        use bao_tree::io::EncodeError;
+        match e {
+            EncodeError::ParentHashMismatch(_)
+            | EncodeError::LeafHashMismatch(_)
+            | EncodeError::SizeMismatch => Unserved::Changed,
+            EncodeError::Io(e) => Unserved::from(e),
+            _ => Unserved::Passing,
+        }
+    }
+}
+
+fn header(status: u8, size: u64) -> Vec<u8> {
+    postcard::to_allocvec(&PeerResponseHeader { status, size }).expect("header serializes")
+}
+
+async fn refuse(send: &mut BulkSend, status: u8, size: u64) {
+    use tokio::io::AsyncWriteExt;
+    let _ = write_framed(send, &header(status, size)).await;
+    let _ = send.shutdown().await;
+}
+
+/// Answer a [`PeerAsk`], the frame after an empty one.
+async fn answer_ask(
+    mut send: BulkSend,
+    mut recv: BulkRecv,
+    server_key: [u8; 32],
+    seeds: Arc<SeedStore>,
+) {
+    use tokio::io::AsyncWriteExt;
+
+    let Ok(bytes) = read_framed(&mut recv, 8192).await else {
+        return;
+    };
+    let Ok(PeerAsk::Have { token, root }) = postcard::from_bytes::<PeerAsk>(&bytes) else {
+        return;
+    };
+    if !crate::cap::token_allows(&token, &server_key, &root, now_unix()) {
+        refuse(&mut send, STATUS_DENIED, 0).await;
+        return;
+    }
+    let (Some(size), Some(map)) = (seeds.get(&root).map(|s| s.size()), seeds.have(&root)) else {
+        refuse(&mut send, STATUS_NOT_FOUND, 0).await;
+        return;
+    };
+    if write_framed(&mut send, &header(STATUS_OK, size))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let map = postcard::to_allocvec(&map).expect("a have-map serializes");
+    let _ = write_framed(&mut send, &map).await;
+    let _ = send.shutdown().await;
 }
 
 /// A `WriteAt` sink for decoded leaves: absolute file offsets land into a
@@ -326,30 +804,100 @@ pub async fn fetch_range(
     offset: u64,
     len: u64,
 ) -> Result<Vec<u8>, PeerError> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    fetch_range_proved(endpoint, cert_fp, token, root, offset, len)
+        .await
+        .map(|proved| proved.bytes)
+}
 
-    if len == 0 || len > PEER_REQUEST_MAX {
-        return Err(PeerError::BadRequest);
-    }
+/// Dial a peer and open one request stream on it, every wait bounded: a
+/// dead or unreachable peer fails fast instead of hanging on the QUIC idle
+/// timeout (the scheduler retires it and moves on), and one that never
+/// grants a stream fails like one that never answers.
+async fn open_stream(
+    endpoint: &str,
+    cert_fp: [u8; 32],
+) -> Result<(Box<dyn rabbithole_net::Connection>, BulkSend, BulkRecv), PeerError> {
     let transport = QuicTransport::new(
         "peer".to_string(),
         ServerAuth::Pinned(CertFingerprint(cert_fp)),
     );
-    // A dead or unreachable peer must fail fast, not hang on the QUIC idle
-    // timeout — the scheduler retires the source and moves on. (This is what
-    // keeps a swarm with dead entries responsive.)
     let conn = match tokio::time::timeout(PEER_CONNECT_TIMEOUT, transport.connect(endpoint)).await {
         Ok(r) => r?,
         Err(_) => return Err(PeerError::Refused(STATUS_BAD_REQUEST)),
     };
     let bulk = conn.bulk().ok_or(PeerError::BadRequest)?;
-    // A peer that never grants a stream, or never takes the request, fails
-    // like one that never answers: every wait here has a limit, so one
-    // stalled peer cannot hold a worker (and the fetch waiting on it).
-    let (mut send, mut recv) = match tokio::time::timeout(PEER_CONNECT_TIMEOUT, bulk.open()).await {
+    let (send, recv) = match tokio::time::timeout(PEER_CONNECT_TIMEOUT, bulk.open()).await {
         Ok(r) => r?,
         Err(_) => return Err(PeerError::Refused(STATUS_BAD_REQUEST)),
     };
+    Ok((conn, send, recv))
+}
+
+/// Ask a peer which units of `root` it holds. `Ok(None)` when it predates
+/// the question (it closes the stream unanswered): such a peer seeds whole
+/// files only.
+pub async fn fetch_have(
+    endpoint: &str,
+    cert_fp: [u8; 32],
+    token: &[u8],
+    root: [u8; 32],
+) -> Result<Option<HaveMap>, PeerError> {
+    use tokio::io::AsyncWriteExt;
+
+    let (conn, mut send, mut recv) = open_stream(endpoint, cert_fp).await?;
+    let ask = postcard::to_allocvec(&PeerAsk::Have {
+        token: token.to_vec(),
+        root,
+    })
+    .expect("serializes");
+    let sent = tokio::time::timeout(PEER_READ_TIMEOUT, async {
+        write_framed(&mut send, &[]).await?;
+        write_framed(&mut send, &ask).await?;
+        send.shutdown().await.map_err(NetError::from)
+    })
+    .await;
+    if !matches!(sent, Ok(Ok(()))) {
+        return Ok(None);
+    }
+    let Ok(Ok(header)) = tokio::time::timeout(PEER_READ_TIMEOUT, read_framed(&mut recv, 64)).await
+    else {
+        return Ok(None);
+    };
+    let header: PeerResponseHeader =
+        postcard::from_bytes(&header).map_err(|e| PeerError::Verify(e.to_string()))?;
+    if header.status != STATUS_OK {
+        return Err(PeerError::Refused(header.status));
+    }
+    let map =
+        match tokio::time::timeout(PEER_READ_TIMEOUT, read_framed(&mut recv, HAVE_MAP_MAX)).await {
+            Ok(r) => r?,
+            Err(_) => return Err(PeerError::Refused(STATUS_BAD_REQUEST)),
+        };
+    drop(conn);
+    let map: HaveMap = postcard::from_bytes(&map).map_err(|e| PeerError::Verify(e.to_string()))?;
+    if map.unit == 0 || map.unit % PEER_BLOCK_BYTES != 0 {
+        return Err(PeerError::Verify(
+            "a have-map in units that are not whole blocks".into(),
+        ));
+    }
+    Ok(Some(map))
+}
+
+/// [`fetch_range`], keeping the proof that came with the bytes.
+pub async fn fetch_range_proved(
+    endpoint: &str,
+    cert_fp: [u8; 32],
+    token: &[u8],
+    root: [u8; 32],
+    offset: u64,
+    len: u64,
+) -> Result<Proved, PeerError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    if len == 0 || len > PEER_REQUEST_MAX {
+        return Err(PeerError::BadRequest);
+    }
+    let (conn, mut send, mut recv) = open_stream(endpoint, cert_fp).await?;
 
     let req = PeerRequest {
         token: token.to_vec(),
@@ -411,23 +959,27 @@ pub async fn fetch_range(
     tokio::task::spawn_blocking(move || {
         let tree = BaoTree::new(size, PEER_BLOCK);
         let ranges = block_ranges(offset, len);
-        let outboard = EmptyOutboard {
+        let mut recorder = Recorder {
             tree,
             root: bao_blake3::Hash::from(root),
+            parents: Vec::new(),
         };
         let base = (offset / PEER_BLOCK_BYTES) * PEER_BLOCK_BYTES;
         let mut target = OffsetBuf {
             base,
             buf: Vec::new(),
         };
-        decode_ranges(stream.as_slice(), &ranges, &mut target, outboard)
+        decode_ranges(stream.as_slice(), &ranges, &mut target, &mut recorder)
             .map_err(|e| PeerError::Verify(e.to_string()))?;
         let start = (offset - base) as usize;
         let end = start + len as usize;
         if target.buf.len() < end {
             return Err(PeerError::Verify("short verified stream".into()));
         }
-        Ok(target.buf[start..end].to_vec())
+        Ok(Proved {
+            bytes: target.buf[start..end].to_vec(),
+            parents: recorder.parents,
+        })
     })
     .await
     .map_err(|e| PeerError::Verify(e.to_string()))?
@@ -496,6 +1048,123 @@ mod tests {
         CapToken::issue(key, root, "tester", expires)
             .unwrap()
             .to_bytes()
+    }
+
+    #[test]
+    fn a_have_map_counts_whole_units() {
+        let map = HaveMap::whole(3 * HAVE_UNIT + 5);
+        assert_eq!(map.bits, vec![0b1111]);
+        assert!(map.covers(0, 4 * HAVE_UNIT));
+        assert!(!map.covers(0, 4 * HAVE_UNIT + 1), "past the last unit");
+        let mut map = map;
+        map.clear(1);
+        assert!(map.covers(0, HAVE_UNIT));
+        assert!(!map.covers(HAVE_UNIT - 1, 2), "touches unit 1");
+        assert!(map.covers(2 * HAVE_UNIT, HAVE_UNIT + 5));
+        assert_eq!(HaveMap::whole(8 * HAVE_UNIT).bits, vec![0xFF]);
+        assert_eq!(HaveMap::whole(0).bits, vec![1]);
+    }
+
+    /// A seed of part of a file: `body` on disk with every proof, sharing
+    /// only the units in `held`.
+    fn partial(dir: &Path, body: &[u8], held: &[u64]) -> (Arc<SeedStore>, [u8; 32], PathBuf) {
+        let path = dir.join("part.bin");
+        std::fs::write(&path, body).unwrap();
+        let root = root_of(body);
+        let outboard = PreOrderMemOutboard::create(body, PEER_BLOCK);
+        let proofs = proofs_path(&path);
+        std::fs::write(&proofs, &outboard.data).unwrap();
+        let seeds = Arc::new(SeedStore::new());
+        seeds
+            .add_partial(
+                root,
+                body.len() as u64,
+                &path,
+                &proofs,
+                held.iter().copied(),
+            )
+            .unwrap();
+        (seeds, root, path)
+    }
+
+    #[tokio::test]
+    async fn a_partial_seed_serves_what_it_holds_and_proves_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = IdentityKey::from_seed(&[5; 32]);
+        let body = payload((4 * HAVE_UNIT + 100) as usize);
+        let (seeds, root, path) = partial(dir.path(), &body, &[0, 2]);
+        let server = PeerServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            key.public().0,
+            seeds.clone(),
+        )
+        .await
+        .unwrap();
+        let endpoint = format!("127.0.0.1:{}", server.addr.port());
+        let fp = server.fingerprint.0;
+        let token = token_for(&key, root, now_unix() + 60);
+        let unit = |i: u64| {
+            let start = (i * HAVE_UNIT) as usize;
+            body[start..(start + HAVE_UNIT as usize).min(body.len())].to_vec()
+        };
+
+        // It says what it holds.
+        let map = fetch_have(&endpoint, fp, &token, root)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(map.covers(0, HAVE_UNIT) && map.covers(2 * HAVE_UNIT, HAVE_UNIT));
+        assert!(!map.covers(HAVE_UNIT, 1) && !map.covers(4 * HAVE_UNIT, 1));
+
+        // It serves that, verified, with its proof.
+        let got = fetch_range_proved(&endpoint, fp, &token, root, 2 * HAVE_UNIT, HAVE_UNIT)
+            .await
+            .unwrap();
+        assert_eq!(got.bytes, unit(2));
+        assert!(!got.parents.is_empty(), "the proof came with it");
+        // And says it does not hold the rest, rather than failing.
+        let err = fetch_range(&endpoint, fp, &token, root, HAVE_UNIT, HAVE_UNIT)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PeerError::Refused(STATUS_NOT_HELD)), "{err}");
+
+        // A unit that no longer matches its proof (the file changed on
+        // disk) is not served, and not offered again.
+        let mut changed = body.clone();
+        changed[(2 * HAVE_UNIT + 7) as usize] ^= 0xFF;
+        std::fs::write(&path, &changed).unwrap();
+        let err = fetch_range(&endpoint, fp, &token, root, 2 * HAVE_UNIT, HAVE_UNIT)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PeerError::Refused(STATUS_NOT_HELD)), "{err}");
+        let map = fetch_have(&endpoint, fp, &token, root)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!map.covers(2 * HAVE_UNIT, 1) && map.covers(0, HAVE_UNIT));
+        assert_eq!(
+            fetch_range(&endpoint, fp, &token, root, 0, HAVE_UNIT)
+                .await
+                .unwrap(),
+            unit(0)
+        );
+
+        // Without a capability for the file, it says nothing of it.
+        let other = token_for(&key, [9; 32], now_unix() + 60);
+        let err = fetch_have(&endpoint, fp, &other, root).await.unwrap_err();
+        assert!(matches!(err, PeerError::Refused(STATUS_DENIED)), "{err}");
+
+        // A whole seed of the same file replaces the part, and removing the
+        // part afterwards leaves the whole one.
+        seeds.add(root, &dir.path().join("part.bin")).unwrap_err();
+        let whole = dir.path().join("whole.bin");
+        std::fs::write(&whole, &body).unwrap();
+        seeds.add(root, &whole).unwrap();
+        seeds.remove_partial(&root);
+        assert_eq!(seeds.have(&root), Some(HaveMap::whole(body.len() as u64)));
+        assert!(seeds
+            .add_partial(root, body.len() as u64, &whole, &proofs_path(&whole), [0])
+            .is_none());
     }
 
     #[tokio::test]
@@ -576,13 +1245,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = IdentityKey::from_seed(&[4; 32]);
         let body = payload(64 * 1024);
-        let (server, root, _seeds) = peer_with(&key, &body, dir.path()).await;
+        let (server, root, seeds) = peer_with(&key, &body, dir.path()).await;
         let token = token_for(&key, root, now_unix() + 60);
         let endpoint = format!("127.0.0.1:{}", server.addr.port());
 
         // Corrupt the file on disk after the outboard was computed: the
-        // peer's validated encode fails, so the fetcher gets an error —
-        // never silently wrong bytes.
+        // peer's validated encode fails, so it drops the seed and says it
+        // does not have the file, and the fetcher gets an error — never
+        // silently wrong bytes.
         let path = dir.path().join("seed.bin");
         let mut corrupted = body.clone();
         corrupted[20_000] ^= 0xFF;
@@ -601,10 +1271,15 @@ mod tests {
         assert!(
             matches!(
                 err,
-                PeerError::Verify(_) | PeerError::Io(_) | PeerError::Net(_)
+                PeerError::Refused(STATUS_NOT_HELD | STATUS_NOT_FOUND)
+                    | PeerError::Verify(_)
+                    | PeerError::Io(_)
+                    | PeerError::Net(_)
             ),
             "fetch must fail on tampered data, got: {err}"
         );
+        // And the seed is dropped: it no longer claims the file at all.
+        assert!(seeds.have(&root).is_none());
 
         // SeedStore.add refuses a file that doesn't match its root.
         let seeds = SeedStore::new();

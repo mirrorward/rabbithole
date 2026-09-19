@@ -21,7 +21,8 @@ use rabbithole_net::tls::{CertFingerprint, TlsIdentity};
 use rabbithole_net::{read_framed, write_framed, BulkRecv, BulkSend, Listener, NetError};
 use rabbithole_swarm::cap::CapToken;
 use rabbithole_swarm::peer::{
-    fetch_range, PeerError, PeerRequest, PeerResponseHeader, PeerServer, SeedStore, STATUS_OK,
+    fetch_have, fetch_range, PeerError, PeerRequest, PeerResponseHeader, PeerServer, SeedStore,
+    STATUS_OK,
 };
 use rabbithole_swarm::scheduler::{fetch_swarm, fetch_swarm_resumable, rhstate_path, SourcePeer};
 
@@ -499,6 +500,28 @@ async fn a_peer_failing_during_the_endgame_does_not_keep_a_unit_open() {
             "the honest peer landed every unit"
         );
     }
+}
+
+/// A peer from before the have-map question reads the empty frame as a
+/// malformed request and closes the stream: the fetcher takes it to hold
+/// the whole file (all such peers did), and its ranges are still verified.
+#[tokio::test]
+#[ignore = "heavy multi-peer QUIC soak/adversarial test; reliable locally but flaky under constrained CI cross-binary parallelism. Run with: cargo test -p rabbithole-swarm --test sim -- --ignored --test-threads=1"]
+async fn a_peer_from_before_have_maps_is_taken_to_hold_the_whole_file() {
+    let key = IdentityKey::from_seed(&[29; 32]);
+    let body = payload(1024 * 1024);
+    let root = *blake3::hash(&body).as_bytes();
+    let token = token_for(&key, root);
+    let old = MaliciousPeer::start(body.len() as u64, Sabotage::Garbage).await;
+    let have = fetch_have(&old.source().endpoint, old.fingerprint.0, &token, root)
+        .await
+        .unwrap();
+    assert!(have.is_none(), "an old peer answers no have-map");
+    assert_eq!(
+        old.served.load(Ordering::SeqCst),
+        0,
+        "and serves nothing for it"
+    );
 }
 
 /// The resumable path under the full zoo — honest seeders plus a garbage

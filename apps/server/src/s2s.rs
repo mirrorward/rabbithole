@@ -1441,10 +1441,11 @@ async fn ask_sources(
     postcard::from_bytes(&bytes).map_err(|_| None)
 }
 
-/// Remove what a swarm fetch given up on left: the partial file and its
-/// progress sidecars.
+/// Remove what a swarm fetch given up on left: the partial file, its
+/// progress sidecars, and the proofs it kept.
 async fn remove_swarm_partial(dest: &Path) {
     let _ = tokio::fs::remove_file(dest).await;
+    let _ = tokio::fs::remove_file(rabbithole_swarm::proofs_path(dest)).await;
     let mut sidecar = dest.as_os_str().to_owned();
     sidecar.push(".rhstate");
     let _ = tokio::fs::remove_file(&sidecar).await;
@@ -1826,7 +1827,9 @@ fn swarm_offer(
             .presence
             .get(advert.session_id)
             .is_some_and(|entry| !entry.is_invisible());
-        if !visible || advert.size != item.size {
+        // Whole seeds only: a destination from before partial seeds would
+        // count one that lacks a unit as failed, and turn the swarm off.
+        if !visible || advert.partial || advert.size != item.size {
             continue;
         }
         let Some(contact) = shared.swarm.contact(advert.session_id) else {

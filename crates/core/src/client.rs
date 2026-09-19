@@ -1018,6 +1018,45 @@ impl Client {
             .await
     }
 
+    /// Advertise files this client holds only part of so far (a download
+    /// under way, served part by part). `Ok(None)` from a burrow that
+    /// predates partial seeds: nothing was advertised, and the file is
+    /// offered once it is whole.
+    pub async fn swarm_advertise_partial(
+        &mut self,
+        entries: Vec<rabbithole_proto::swarm::AdvertEntry>,
+        ttl_secs: u32,
+    ) -> Result<Option<rabbithole_proto::swarm::AdvertiseAck>, ClientError> {
+        match self
+            .request(&rabbithole_proto::swarm::AdvertisePartial::new(
+                entries, ttl_secs,
+            ))
+            .await
+        {
+            Ok(ack) => Ok(Some(ack)),
+            Err(ClientError::Refused(rabbithole_proto::ErrorCode::Unsupported)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Who has this root, whole or in part? For a fetcher that asks each
+    /// source which part it holds. A burrow that predates partial seeds is
+    /// asked [`Client::swarm_find`] instead: it has only whole ones.
+    pub async fn swarm_find_all(
+        &mut self,
+        root: [u8; 32],
+    ) -> Result<rabbithole_proto::swarm::SourceList, ClientError> {
+        match self
+            .request(&rabbithole_proto::swarm::FindAllSources::new(root))
+            .await
+        {
+            Err(ClientError::Refused(rabbithole_proto::ErrorCode::Unsupported)) => {
+                self.swarm_find(root).await
+            }
+            other => other,
+        }
+    }
+
     /// Register this session's peer-wire contact card (the QUIC port it
     /// serves swarm fetches on + its cert fingerprint). The server pairs the
     /// port with this connection's observed IP.

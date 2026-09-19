@@ -14,6 +14,13 @@ punching + server relay fallback) is still pending. Manifests,
 | 4/5 | FindSources → SourceList | Request/Reply | root → advertising peers + whether the origin's blob store has it; needs FILE_LIST |
 | 6 | PeerContact | Request → ack | this session's peer-wire port + cert fingerprint; needs SWARM_ADVERTISE |
 | 7/8 | SourceTicketRequest → SourceTicket | Request/Reply | root → server-signed capability token (opaque `CapToken` bytes + expiry); needs FILE_DOWNLOAD |
+| 9/2 | AdvertisePartial → AdvertiseAck | Request/Reply | as AdvertiseFiles, for files this session holds only part of so far (0.229); advertising a root whole later replaces it, and a partial re-announce never demotes a whole one. Older burrows answer `Unsupported` |
+| 10/5 | FindAllSources → SourceList | Request/Reply | as FindSources, partial seeds included (0.229), for a fetcher that asks each source which part it holds. Older burrows answer `Unsupported`; the client then asks FindSources |
+
+FindAllSources never lists the asking session as a source for itself (a
+person sharing a download as it comes in has an advert of their own).
+FindSources never lists a partial seed, so a client from before them never
+meets a peer that lacks units.
 
 ## List-without-upload
 
@@ -107,6 +114,45 @@ Whole files loop 4 MiB range requests (`fetch_file`). Bytes never
 transit the origin server. `rabbit swarm share` seeds exactly this way;
 `rabbit swarm fetch <root|link> <out>` does find → ticket → swarm fetch.
 
+### Partial seeds (0.229)
+
+A peer need not hold a whole file to serve it. A fetch keeps the proof of
+every unit it verifies: the Bao parent hashes the decoder checked, saved
+into a pre-order outboard file beside the download (`<dest>.obao`, about
+64 bytes per 16 KiB). The units that have landed, with their proofs, can
+then be served on while the rest is still coming: a **partial seed**.
+When the file is whole and hashed, it is seeded whole from the proofs
+already kept, with no second pass over it.
+
+- **Which units a peer holds.** A stream that opens with an **empty
+  frame** asks a question instead of a range: the next frame is
+  `PeerAsk::Have { token, root }` (the same capability a range request
+  carries). The peer answers a framed `PeerResponseHeader { status, size }`
+  and, on OK, a framed `HaveMap { unit, bits }`: one bit per unit (1 MiB),
+  least significant bit first. A whole seed answers every bit set. A peer
+  from before this reads the empty frame as a malformed request and closes
+  the stream; the fetcher takes it to hold the whole file, which such peers
+  always did.
+- **A range not held** is answered with status 4, `NOT_HELD`, rather than
+  a dropped stream: the fetcher asks someone else for that unit and keeps
+  the peer for the rest. A peer also answers `NOT_HELD` for a range it
+  cannot prove from what is on its disk (a changed file, a gap), and stops
+  offering it.
+- **Nothing unproven moves.** The serving peer encodes every range with
+  `encode_ranges_validated` against its outboard, checked up to the root,
+  so a block that does not match its proof is never sent; the fetcher
+  decodes every block against the root before a byte lands, and hashes the
+  whole file at the end. A bogus block costs the fetcher that one request.
+- A partial seed is advertised with `AdvertisePartial` and found only
+  with `FindAllSources` (above). The desktop app, when the person has
+  opted in to seeding, advertises a download that way once its first
+  verified unit lands, serves what it has from then on, and advertises it
+  whole when it is done. Its own endpoint is never a source for its own
+  download.
+- A seed that can no longer serve what it claimed stops claiming it: a
+  whole seed whose file is gone or changed is dropped (it then answers
+  `NOT_FOUND`), and a partial seed stops offering units it cannot prove.
+
 ## Multi-source scheduling
 
 `fetch_swarm` splits a file into 1 MiB work units and runs one worker
@@ -116,6 +162,18 @@ assignment, with no rate estimator to go stale. A failing source hands
 its unit back and retires; when the queue drains, idle workers enter
 endgame and duplicate units still in flight (verified writes are
 idempotent, first-done wins), so one stalled peer can't hold the tail.
+
+Each worker first asks its source for its `HaveMap` and takes only units
+the source holds. A source holding none of what is left (a partial seed
+still fetching) is asked again every 3 seconds and let go after a minute
+(by the clock) without anything new; a known partial seed that does not
+answer a re-ask keeps its last map. One that answers `NOT_HELD` loses
+that unit, not its place (after eight such answers against its own map it
+is let go). A fetch can so be completed from peers that each hold only
+parts of the file. A unit that cannot be written on this machine (a full
+disk) fails the fetch with that error, not as if no source could serve,
+and the desktop app then keeps the verified progress for a retry instead
+of falling back to the burrow.
 Rarest-first ordering applies across files (from coordinator source
 counts) and arrives with manifest-set fetching.
 

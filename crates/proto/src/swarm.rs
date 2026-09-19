@@ -16,6 +16,14 @@
 //! | 4/5 | [`FindSources`] → [`SourceList`] | Request/Reply |
 //! | 6 | [`PeerContact`] | Request → ack |
 //! | 7/8 | [`SourceTicketRequest`] → [`SourceTicket`] | Request/Reply |
+//! | 9/2 | [`AdvertisePartial`] → [`AdvertiseAck`] | Request/Reply |
+//! | 10/5 | [`FindAllSources`] → [`SourceList`] | Request/Reply |
+//!
+//! Partial seeds (a peer that holds part of a file, and says which part on
+//! the peer wire) are advertised apart from whole ones, with
+//! [`AdvertisePartial`], and found only with [`FindAllSources`]: a client
+//! from before them asks [`FindSources`] and never meets a peer that does
+//! not hold the whole file.
 
 use serde::{Deserialize, Serialize};
 
@@ -275,6 +283,49 @@ impl SourceTicket {
 impl Message for SourceTicket {
     const FAMILY: Family = Family::SWARM;
     const MESSAGE_TYPE: u16 = 8;
+}
+
+/// Advertise (or re-announce) files this session holds **part** of, still
+/// being fetched: it serves the parts it holds, and says which on the peer
+/// wire. Same rules as [`AdvertiseFiles`]; advertising a root whole later
+/// (with [`AdvertiseFiles`]) replaces this. → [`AdvertiseAck`]. A burrow
+/// from before this answers `Unsupported`.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdvertisePartial {
+    pub entries: Vec<AdvertEntry>,
+    pub ttl_secs: u32,
+}
+
+impl AdvertisePartial {
+    pub fn new(entries: Vec<AdvertEntry>, ttl_secs: u32) -> Self {
+        Self { entries, ttl_secs }
+    }
+}
+
+impl Message for AdvertisePartial {
+    const FAMILY: Family = Family::SWARM;
+    const MESSAGE_TYPE: u16 = 9;
+}
+
+/// Who has this root, whole **or in part**? As [`FindSources`], for a client
+/// that asks each source which part it holds. → [`SourceList`]. A burrow
+/// from before this answers `Unsupported`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindAllSources {
+    pub root: [u8; 32],
+}
+
+impl FindAllSources {
+    pub fn new(root: [u8; 32]) -> Self {
+        Self { root }
+    }
+}
+
+impl Message for FindAllSources {
+    const FAMILY: Family = Family::SWARM;
+    const MESSAGE_TYPE: u16 = 10;
 }
 
 #[cfg(test)]
