@@ -85,6 +85,14 @@ enum Sabotage {
     Garbage,
     /// A few bytes, then the stream dies — a mid-transfer link drop.
     Truncate,
+    /// "OK, the file is empty": a header claiming size 0 and no body, so
+    /// there is nothing to verify (it used to count as a served unit).
+    ClaimsEmpty,
+    /// Takes the request and never answers: a peer that holds a worker.
+    Stall,
+    /// Takes the request, waits this many milliseconds, then drops it: a
+    /// peer that fails while another is duplicating its unit.
+    FailAfter(u64),
 }
 
 /// A raw QUIC endpoint speaking just enough peer wire to inject corruption.
@@ -158,15 +166,30 @@ async fn sabotage_stream(
     };
     served.fetch_add(1, Ordering::SeqCst);
 
-    // A perfectly valid framed header claiming success and the true size.
+    match mode {
+        Sabotage::Stall => std::future::pending::<()>().await,
+        Sabotage::FailAfter(ms) => {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            return Ok(());
+        }
+        _ => {}
+    }
+    // A perfectly valid framed header claiming success and the true size
+    // (or, for the liar, none at all).
+    let claimed = if let Sabotage::ClaimsEmpty = mode {
+        0
+    } else {
+        size
+    };
     let header = postcard::to_allocvec(&PeerResponseHeader {
         status: STATUS_OK,
-        size,
+        size: claimed,
     })
     .unwrap();
     write_framed(&mut send, &header).await?;
 
     match mode {
+        Sabotage::ClaimsEmpty | Sabotage::Stall | Sabotage::FailAfter(_) => {}
         Sabotage::Garbage => {
             // Roughly the size a real Bao stream for this range would be,
             // but patterned junk: every leaf fails its hash check.
@@ -380,6 +403,102 @@ async fn truncating_peer_mid_stream() {
         .map(|(_, n)| *n)
         .unwrap();
     assert_eq!(mallory_units, 0);
+}
+
+/// A peer that claims the file is empty cannot have its units counted as
+/// served: nothing it sent could be verified. It is retired like any peer
+/// that fails a unit, and the honest ones finish the file.
+#[tokio::test]
+#[ignore = "heavy multi-peer QUIC soak/adversarial test; reliable locally but flaky under constrained CI cross-binary parallelism. Run with: cargo test -p rabbithole-swarm --test sim -- --ignored --test-threads=1"]
+async fn a_peer_claiming_an_empty_file_serves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = IdentityKey::from_seed(&[26; 32]);
+    let body = payload(3 * 1024 * 1024 + 5); // four units
+    let (root, honest) = honest_swarm(&key, &body, dir.path(), 2).await;
+    let token = token_for(&key, root);
+    let liar = MaliciousPeer::start(body.len() as u64, Sabotage::ClaimsEmpty).await;
+
+    let err = fetch_range(
+        &liar.source().endpoint,
+        liar.fingerprint.0,
+        &token,
+        root,
+        0,
+        1024,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, PeerError::Verify(_)), "got: {err}");
+
+    let mut sources = vec![liar.source()];
+    sources.extend(honest.iter().map(source_of));
+    let dest = dir.path().join("out.bin");
+    let report = fetch_swarm_resumable(&sources, &token, root, body.len() as u64, &dest)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), body, "reassembled exactly");
+    assert_eq!(report.per_source[0].1, 0, "the liar landed nothing");
+    let total: u64 = report.per_source.iter().map(|(_, n)| n).sum();
+    assert_eq!(total, 4);
+}
+
+/// A peer that takes a unit and never answers does not hold back a file
+/// the others have finished: the fetch ends when the last unit lands, not
+/// when the silent peer's wait runs out (thirty seconds).
+#[tokio::test]
+#[ignore = "heavy multi-peer QUIC soak/adversarial test; reliable locally but flaky under constrained CI cross-binary parallelism. Run with: cargo test -p rabbithole-swarm --test sim -- --ignored --test-threads=1"]
+async fn a_silent_peer_does_not_hold_back_a_finished_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = IdentityKey::from_seed(&[27; 32]);
+    let body = payload(3 * 1024 * 1024 + 5); // four units
+    let (root, honest) = honest_swarm(&key, &body, dir.path(), 2).await;
+    let token = token_for(&key, root);
+    let silent = MaliciousPeer::start(body.len() as u64, Sabotage::Stall).await;
+
+    // The silent peer first, so it takes a unit before the others start.
+    let mut sources = vec![silent.source()];
+    sources.extend(honest.iter().map(source_of));
+    let dest = dir.path().join("out.bin");
+    let report = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        fetch_swarm_resumable(&sources, &token, root, body.len() as u64, &dest),
+    )
+    .await
+    .expect("the fetch ended when the file was whole")
+    .unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), body, "reassembled exactly");
+    assert_eq!(report.per_source[0].1, 0);
+}
+
+/// A peer that fails while an honest one is duplicating its unit (the
+/// endgame) used to put that unit back in the queue after the duplicate had
+/// landed it: the fetch then never saw itself finished and went on fetching
+/// that unit. Whatever the order, it now ends, whole.
+#[tokio::test]
+#[ignore = "heavy multi-peer QUIC soak/adversarial test; reliable locally but flaky under constrained CI cross-binary parallelism. Run with: cargo test -p rabbithole-swarm --test sim -- --ignored --test-threads=1"]
+async fn a_peer_failing_during_the_endgame_does_not_keep_a_unit_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = IdentityKey::from_seed(&[28; 32]);
+    let body = payload(2 * 1024 * 1024 + 7); // three units
+    let (root, honest) = honest_swarm(&key, &body, dir.path(), 1).await;
+    let token = token_for(&key, root);
+    for delay in [0, 20, 60, 150, 400] {
+        let failing = MaliciousPeer::start(body.len() as u64, Sabotage::FailAfter(delay)).await;
+        let sources = vec![failing.source(), source_of(&honest[0])];
+        let dest = dir.path().join(format!("out-{delay}.bin"));
+        let report = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            fetch_swarm_resumable(&sources, &token, root, body.len() as u64, &dest),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("the fetch ended (failing after {delay} ms)"))
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body, "whole ({delay} ms)");
+        assert_eq!(
+            report.per_source[1].1, 3,
+            "the honest peer landed every unit"
+        );
+    }
 }
 
 /// The resumable path under the full zoo — honest seeders plus a garbage

@@ -45,6 +45,10 @@ pub fn grant_refusal(code: Option<ErrorCode>, what: &str, source: &str, dest: &s
         Some(ErrorCode::BadRequest) => {
             format!("{what} holds more than one send can carry: at most 1000 files.")
         }
+        Some(ErrorCode::RateLimited) => format!(
+            "You have started as many sends and downloads on {source} as it allows in a \
+             minute. Wait a moment and try again."
+        ),
         Some(other) => format!("{source} could not send {what} ({other:?})."),
     }
 }
@@ -215,6 +219,7 @@ mod tests {
             "You may not send \u{201c}tapes\u{201d} from Scratch."
         );
         assert!(grant_refusal(None, "tapes", "Scratch", "K").contains("connection to Scratch"));
+        assert!(g(ErrorCode::RateLimited).contains("Wait a moment"));
 
         let p = |c| pull_refusal(Some(c), "tapes", false, 3 * 1024 * 1024, "Scratch", "Kevin");
         assert!(p(ErrorCode::Unsupported).starts_with("Kevin does not take files"));

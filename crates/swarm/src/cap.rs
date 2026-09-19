@@ -108,12 +108,146 @@ fn signed_bytes(claim: &CapClaim) -> Result<Vec<u8>, CapError> {
     Ok(msg)
 }
 
+/// Domain separator for capabilities a burrow signs for another burrow,
+/// fetching a file sent to it: its own context, so a person's token is never
+/// taken as a burrow's or the reverse.
+pub const S2S_CAP_CONTEXT: &[u8] = b"rhp-swarm-cap-s2s-v1";
+
+/// What a capability for another burrow asserts: that burrow's server key
+/// in place of a person's name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct S2sCapClaim {
+    /// The one blake3 root this token authorizes fetching.
+    pub root: [u8; 32],
+    /// The server key of the burrow the file was sent to. A peer cannot
+    /// check who is fetching (the peer wire has no client authentication),
+    /// so this records whom the source meant, as a person's name does.
+    pub fetcher_key: [u8; 32],
+    /// Unix seconds after which the token is dead.
+    pub expires_unix: i64,
+}
+
+/// A capability for another burrow: the claim plus the source burrow's
+/// signature over it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct S2sCapToken {
+    pub claim: S2sCapClaim,
+    pub sig: Signature,
+}
+
+impl S2sCapToken {
+    /// Sign a capability for the burrow `fetcher_key` to fetch `root` from
+    /// this burrow's peers until `expires_unix`.
+    pub fn issue(
+        key: &IdentityKey,
+        root: [u8; 32],
+        fetcher_key: [u8; 32],
+        expires_unix: i64,
+    ) -> Result<S2sCapToken, CapError> {
+        let claim = S2sCapClaim {
+            root,
+            fetcher_key,
+            expires_unix,
+        };
+        let msg = s2s_signed_bytes(&claim)?;
+        Ok(S2sCapToken {
+            sig: key.sign(&msg),
+            claim,
+        })
+    }
+
+    /// Peer-side check, as [`CapToken::verify`], under the burrows' context.
+    pub fn verify(
+        &self,
+        server_key: &[u8; 32],
+        root: &[u8; 32],
+        now_unix: i64,
+    ) -> Result<(), CapError> {
+        if self.claim.root != *root {
+            return Err(CapError::WrongRoot);
+        }
+        if now_unix >= self.claim.expires_unix {
+            return Err(CapError::Expired);
+        }
+        let msg = s2s_signed_bytes(&self.claim)?;
+        if !PublicKey(*server_key).verify(&msg, &self.sig) {
+            return Err(CapError::BadSignature);
+        }
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).expect("token serializes")
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<S2sCapToken> {
+        postcard::from_bytes(bytes).ok()
+    }
+}
+
+fn s2s_signed_bytes(claim: &S2sCapClaim) -> Result<Vec<u8>, CapError> {
+    let mut msg = S2S_CAP_CONTEXT.to_vec();
+    msg.extend(postcard::to_allocvec(claim).map_err(|_| CapError::Encoding)?);
+    Ok(msg)
+}
+
+/// Whether `token` lets its bearer fetch `root` from a peer of the burrow
+/// whose key is `server_key`, at `now_unix`: a person's capability or a
+/// burrow's, each checked under its own context. The token carries no tag,
+/// so both readings are tried; a signature made under one context never
+/// verifies under the other.
+pub fn token_allows(token: &[u8], server_key: &[u8; 32], root: &[u8; 32], now_unix: i64) -> bool {
+    let person =
+        CapToken::from_bytes(token).is_some_and(|t| t.verify(server_key, root, now_unix).is_ok());
+    person
+        || S2sCapToken::from_bytes(token)
+            .is_some_and(|t| t.verify(server_key, root, now_unix).is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn key() -> IdentityKey {
         IdentityKey::from_seed(&[42u8; 32])
+    }
+
+    #[test]
+    fn a_burrows_token_and_a_persons_are_never_taken_for_each_other() {
+        let k = key();
+        let server = k.public().0;
+        let burrow = S2sCapToken::issue(&k, [1; 32], [7; 32], 1_000).unwrap();
+        assert_eq!(burrow.verify(&server, &[1; 32], 999), Ok(()));
+        let wire = burrow.to_bytes();
+        assert_eq!(S2sCapToken::from_bytes(&wire).unwrap(), burrow);
+        assert!(token_allows(&wire, &server, &[1; 32], 999));
+        assert!(!token_allows(&wire, &server, &[1; 32], 1_000), "expired");
+        assert!(!token_allows(&wire, &server, &[2; 32], 999), "wrong root");
+        assert!(
+            !token_allows(&wire, &[9; 32], &[1; 32], 999),
+            "wrong burrow"
+        );
+
+        // The same claim signed under the person's context does not pass as
+        // a burrow's token, nor the reverse.
+        let forged = S2sCapToken {
+            claim: burrow.claim.clone(),
+            sig: k.sign(&{
+                let mut m = CAP_CONTEXT.to_vec();
+                m.extend(postcard::to_allocvec(&burrow.claim).unwrap());
+                m
+            }),
+        };
+        assert_eq!(
+            forged.verify(&server, &[1; 32], 999),
+            Err(CapError::BadSignature)
+        );
+        assert!(!token_allows(&forged.to_bytes(), &server, &[1; 32], 999));
+        let person = CapToken::issue(&k, [1; 32], "alice", 1_000).unwrap();
+        assert!(token_allows(&person.to_bytes(), &server, &[1; 32], 999));
+        let as_burrow = S2sCapToken::from_bytes(&person.to_bytes());
+        assert!(as_burrow.is_none_or(|t| t.verify(&server, &[1; 32], 999).is_err()));
+        assert!(!token_allows(&[], &server, &[1; 32], 999));
     }
 
     #[test]

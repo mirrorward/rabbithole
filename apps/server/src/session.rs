@@ -201,7 +201,7 @@ pub async fn run_session(
             let bound = peer.transport == rabbithole_net::TransportKind::Quic
                 && channel_binder(&shared, peer.transport)
                     != rabbithole_proto::hello::NO_CHANNEL_BINDING;
-            match crate::s2s::open_pull_session(&shared, verified_pubkey, bound, &req.grant) {
+            match crate::s2s::open_pull_session(&shared, verified_pubkey, bound, &req.grant).await {
                 Ok(session) => {
                     conn.send(Frame::ack(&frame)).await?;
                     tracing::info!(session_id, remote = %peer.remote_addr, "pull session");

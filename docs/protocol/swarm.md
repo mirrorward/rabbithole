@@ -75,6 +75,15 @@ is being requested, and refuse expired tokens. Tickets are short-lived
 (10 minutes) — fetchers re-request rather than hoard. Issuance is gated
 by `FILE_DOWNLOAD`, since a ticket authorizes moving file bytes.
 
+A burrow a file is sent to (see "Pull streams between burrows" in
+[`file.md`](file.md)) gets an `S2sCapToken` instead: `{root, the fetching
+burrow's server key, expiry}` under its own context `rhp-swarm-cap-s2s-v1`,
+so a person's token is never taken as a burrow's or the reverse. Peers
+accept either (`token_allows`), each checked under its own context; peers
+from before 0.228 refuse the burrow's, and the burrow fetches from the
+source instead. As with a person's token, a peer cannot check who presents
+it: the peer wire has no client authentication.
+
 ## The peer wire
 
 A sharing peer runs a QUIC endpoint (same `rabbithole-net` stack,

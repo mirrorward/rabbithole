@@ -17,7 +17,10 @@ pub mod manifest;
 pub mod peer;
 pub mod scheduler;
 
-pub use cap::{CapClaim, CapError, CapToken, CAP_CONTEXT};
+pub use cap::{
+    token_allows, CapClaim, CapError, CapToken, S2sCapClaim, S2sCapToken, CAP_CONTEXT,
+    S2S_CAP_CONTEXT,
+};
 pub use link::{
     DestinationHash, DestinationHashError, LinkAuthority, LinkError, LinkTarget, RabbitLink,
 };

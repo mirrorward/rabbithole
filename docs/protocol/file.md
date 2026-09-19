@@ -105,6 +105,45 @@ authenticated origin server. Per-chunk Bao merkle verification — needed when
 bytes come from *untrusted* peers — lands with the swarm in Wave 5, over the
 same byte ranges (`bao-tree`).
 
+## Pull streams between burrows
+
+A destination fetches what a grant (FILE 33/39) names over bulk streams:
+its federation session's, or a pull session's (SESSION 15). One stream per
+question, each opened by the destination with a length-prefixed postcard
+frame (u32 big-endian length, as the transfer preamble):
+
+- **A file's bytes**: `PullStreamRequest { grant, item, offset }`. The source
+  answers one status byte (0 OK, 1 denied, 2 gone or changed, 3 off, 4 bad),
+  then on OK the raw bytes from `offset` to the end. The grant must be the
+  source's, name the fetching burrow, and still stand (six hours' grace for a
+  pull under way); on a pull session, only the grant it was opened with; and
+  the person who asked for it (whom the grant's nonce names, readable only
+  by the source) must still have a working account there, checked again
+  every 15 seconds while a file streams. A grant from before 0.228 names no
+  one and is served without that check.
+- **The swarm peers holding a file** (0.228): an **empty frame**, then
+  `PullStreamAsk::Sources { grant, item }`. The source answers the status
+  byte a request for that file's bytes would get, or 3 when it does not share
+  its swarm (`s2s_swarm_sources`) or the person who asked for the grant may
+  not, now, find and fetch from it; on OK, one frame of `PullSources { token,
+  expires_unix, sources: [SwarmSource { endpoint, cert_fp }] }`: at most 16
+  seeders that are visible, still connected and hold the same size, each an
+  IP address and port, and an `S2sCapToken` for the file naming the fetching
+  burrow, good for ten minutes and never past the grant's serving time.
+  A source from before 0.228 reads the empty frame as a bad request and
+  answers 4, so asking costs an older source nothing.
+
+The destination asks for sources only when `s2s_swarm` is on and the file
+is at least two swarm units (2 MiB). It takes seeders only as addresses
+(never names to look up), public unless `s2s_private_addresses`, at most 32
+in one send and not again one that gave nothing; fetches the pieces with the
+swarm engine; verifies every block and the whole file; asks again for a file
+still coming when its token nears its end, resuming it while the swarm is
+getting somewhere; and fetches from the source whatever the seeders do not
+give. Once the swarm fails a file, or the source says it does not share it
+or refuses, the rest of that send comes from the source alone. Files over
+64 GiB always come from the source.
+
 ## Rate policy & the client queue (Wave 4.3)
 
 Four server-side limits (`0` = unlimited), all live, settable from the

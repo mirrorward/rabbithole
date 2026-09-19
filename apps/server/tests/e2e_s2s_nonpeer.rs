@@ -240,6 +240,21 @@ async fn a_file_crosses_between_burrows_that_are_not_peers() {
         .unwrap()
         .is_some());
 
+    // A grant stops with the account of the person who asked for it: once
+    // that account is disabled, the source opens no pull session for it, so
+    // the destination cannot reach its files.
+    let issued: PullGrantIssued = alice_s.request(&ask(tape)).await.unwrap();
+    rabbithole_store_server::repo::AccountsRepo(&source.shared.pool)
+        .admin_set("alice", None, None, Some(true))
+        .await
+        .unwrap();
+    refused(
+        alice_d
+            .request::<_, RemotePullAccepted>(&RemotePull::new(issued.grant, "inbox", None))
+            .await,
+        ErrorCode::Unavailable,
+    );
+
     source.shutdown().await;
     dest.shutdown().await;
 }

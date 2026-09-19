@@ -13,9 +13,14 @@
 //!   ([`rabbithole_swarm::cap::CapToken`]); this peer verifies it against the
 //!   burrow's key and serves nothing without it. Opting in shares files with
 //!   people the burrow would have given them to anyway.
-//! - **Only what was downloaded from that burrow, to that burrow.** A seeder
+//! - **Only what was downloaded from that burrow, for that burrow.** A seeder
 //!   is per burrow: its own store, its own peer endpoint bound to that
-//!   burrow's key. A file from one burrow is never offered to another.
+//!   burrow's key. A file from one burrow is never offered to another. The
+//!   one reach past it is the burrow's own: when it sends a file to another
+//!   burrow and its operator shares its swarm (`s2s_swarm_sources`), it may
+//!   name this peer to the receiving burrow with a capability it signed for
+//!   that burrow ([`rabbithole_swarm::cap::S2sCapToken`]), and that burrow
+//!   fetches from here and sees this machine's address.
 //! - **Nothing is read but the seeded files**, by content hash, and a fetcher
 //!   verifies every block against that hash, so a file changed on disk since
 //!   is simply refused by the fetcher.

@@ -419,6 +419,27 @@ async fn a_folder_and_a_file_cross_from_one_burrow_to_another() {
         ErrorCode::NotFound,
     );
 
+    // Between peers too, a grant stops with the account of the person who
+    // asked for it: once that is disabled at the source, it sends nothing.
+    let issued: PullGrantIssued = alice_s
+        .request(&PullGrantRequest::new(dest_key, vec![notes]))
+        .await
+        .unwrap();
+    rabbithole_store_server::repo::AccountsRepo(&source.shared.pool)
+        .admin_set("alice", None, None, Some(true))
+        .await
+        .unwrap();
+    let accepted: RemotePullAccepted = alice_d
+        .request(&RemotePull::new(issued.grant, "inbox", None))
+        .await
+        .unwrap();
+    let ended = until_done(&mut alice_d, accepted.pull_id).await;
+    assert_eq!(
+        (ended.state, ended.reason),
+        (pull_state::FAILED, pull_reason::SOURCE_REFUSED),
+        "{ended:?}"
+    );
+
     source.shutdown().await;
     dest.shutdown().await;
 }

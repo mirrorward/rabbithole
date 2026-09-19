@@ -328,6 +328,14 @@ pub struct ServerConfig {
     /// Let such a connection reach private and local addresses (a LAN, or
     /// burrows on one machine). Off: only public addresses are dialed.
     pub s2s_private_addresses: bool,
+    /// Fetch a send's larger files from the source's swarm peers too, when
+    /// the source offers them: faster, but each of those peers sees this
+    /// burrow's address.
+    pub s2s_swarm: bool,
+    /// Offer the burrows files are sent to this burrow's swarm peers holding
+    /// them, with a capability for each file: their addresses reach that
+    /// burrow. Invisible sessions are never offered.
+    pub s2s_swarm_sources: bool,
     /// Configured peer dial targets. Serialized as an array of tables in TOML;
     /// edited on disk (not via `ctl config set`), like `ftn_areas`.
     pub federation_peers: Vec<FederationPeer>,
@@ -556,6 +564,8 @@ impl Default for ServerConfig {
             s2s_grants_to_any: false,
             s2s_pull_from_any: false,
             s2s_private_addresses: false,
+            s2s_swarm: false,
+            s2s_swarm_sources: false,
             federation_peers: Vec::new(),
             federation_board_subscribe: Vec::new(),
             portmap_enabled: false,
@@ -802,6 +812,8 @@ impl ServerConfig {
             "s2s_grants_to_any" => self.s2s_grants_to_any.to_string(),
             "s2s_pull_from_any" => self.s2s_pull_from_any.to_string(),
             "s2s_private_addresses" => self.s2s_private_addresses.to_string(),
+            "s2s_swarm" => self.s2s_swarm.to_string(),
+            "s2s_swarm_sources" => self.s2s_swarm_sources.to_string(),
             "portmap_enabled" => self.portmap_enabled.to_string(),
             "portmap_gateway" => self.portmap_gateway.clone(),
             "portmap_lifetime_secs" => self.portmap_lifetime_secs.to_string(),
@@ -1238,6 +1250,14 @@ impl ServerConfig {
                 self.s2s_private_addresses = parse_bool(key, value)?;
                 Ok(true)
             }
+            "s2s_swarm" => {
+                self.s2s_swarm = parse_bool(key, value)?;
+                Ok(true)
+            }
+            "s2s_swarm_sources" => {
+                self.s2s_swarm_sources = parse_bool(key, value)?;
+                Ok(true)
+            }
             // Port mapping is set up in a startup task, so changes need a
             // restart to take effect.
             "portmap_enabled" => {
@@ -1481,6 +1501,8 @@ pub const CONFIG_KEYS: &[&str] = &[
     "s2s_grants_to_any",
     "s2s_pull_from_any",
     "s2s_private_addresses",
+    "s2s_swarm",
+    "s2s_swarm_sources",
     "portmap_enabled",
     "portmap_gateway",
     "portmap_lifetime_secs",

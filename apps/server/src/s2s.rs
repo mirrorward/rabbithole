@@ -39,7 +39,7 @@ use rabbithole_proto::{filelib as pf, ErrorCode, Frame};
 use rabbithole_proto::{CapabilitySet, FrameKind, RequestId};
 use rabbithole_server_core::files::{KIND_FILE, KIND_FOLDER};
 use rabbithole_server_core::ratelimit::{class as rl, Scope};
-use rabbithole_server_core::{Caps, FileError, ServerEvent};
+use rabbithole_server_core::{Caps, FileError, Role, ServerEvent, Subject};
 use rabbithole_store_server::repo::AccountsRepo;
 use rabbithole_store_server::repo6::FileNodeRow;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -65,6 +65,9 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(500);
 const CHUNK: usize = 256 * 1024;
 /// Pulls this burrow runs at once, for everyone.
 const MAX_RUNNING: usize = 16;
+/// The smallest file worth fetching from the swarm: two of its units, so
+/// two peers can share the work.
+const SWARM_MIN_BYTES: u64 = 2 * rabbithole_swarm::UNIT_SIZE;
 /// Longest MIME type a grant carries; a longer one travels as unknown.
 const MAX_MIME: usize = 255;
 /// Most attempts at a free name before a clash is given up on.
@@ -84,8 +87,68 @@ pub struct S2sState {
     pulls: Mutex<HashMap<u64, PullEntry>>,
     next_pull: AtomicU64,
     /// Pull sessions open here for burrows fetching directly, by the nonce
-    /// of the grant each was opened with: one at a time per grant.
-    sessions: Mutex<HashSet<[u8; 16]>>,
+    /// of the grant each was opened with (one at a time per grant), with the
+    /// account that grant names.
+    sessions: Mutex<HashMap<[u8; 16], Option<i64>>>,
+}
+
+/// What a burrow derives, from its signing seed, the key it hides the
+/// asking person's account in its grants' nonces with: nothing to store, and
+/// the same after a restart.
+fn nonce_key(shared: &Shared) -> [u8; 32] {
+    blake3::derive_key(
+        "rabbithole 2026-09-19 s2s grant nonce account v1",
+        &shared.server_signing_seed,
+    )
+}
+
+/// A grant's nonce that names the person who asked for it, readable only by
+/// the burrow holding `key`: 7 random bytes, the account id (48 bits) under a
+/// pad drawn from them, and a 3-byte tag that tells it from a nonce that
+/// names no one. An id that does not fit gets a plain random nonce.
+fn grant_nonce(key: &[u8; 32], account_id: i64) -> [u8; 16] {
+    grant_nonce_from(key, account_id, nonce())
+}
+
+/// [`grant_nonce`], its randomness given.
+fn grant_nonce_from(key: &[u8; 32], account_id: i64, random: [u8; 16]) -> [u8; 16] {
+    let mut n = random;
+    if !(0..1i64 << 48).contains(&account_id) {
+        return n;
+    }
+    let id = (account_id as u64).to_le_bytes();
+    let pad = nonce_pad(key, &n[..7]);
+    for i in 0..6 {
+        n[7 + i] = id[i] ^ pad[i];
+    }
+    let tag = nonce_tag(key, &n[..7], &id[..6]);
+    n[13..16].copy_from_slice(&tag);
+    n
+}
+
+/// The account a grant's nonce names, if this burrow made it so.
+fn nonce_account(key: &[u8; 32], nonce: &[u8; 16]) -> Option<i64> {
+    let pad = nonce_pad(key, &nonce[..7]);
+    let mut id = [0u8; 8];
+    for i in 0..6 {
+        id[i] = nonce[7 + i] ^ pad[i];
+    }
+    (nonce_tag(key, &nonce[..7], &id[..6]) == nonce[13..16]).then(|| u64::from_le_bytes(id) as i64)
+}
+
+fn nonce_pad(key: &[u8; 32], random: &[u8]) -> [u8; 6] {
+    let mut input = b"pad".to_vec();
+    input.extend_from_slice(random);
+    let hash = blake3::keyed_hash(key, &input);
+    hash.as_bytes()[..6].try_into().expect("six bytes")
+}
+
+fn nonce_tag(key: &[u8; 32], random: &[u8], id: &[u8]) -> [u8; 3] {
+    let mut input = b"tag".to_vec();
+    input.extend_from_slice(random);
+    input.extend_from_slice(id);
+    let hash = blake3::keyed_hash(key, &input);
+    hash.as_bytes()[..3].try_into().expect("three bytes")
 }
 
 struct PullEntry {
@@ -165,7 +228,8 @@ pub fn sweep_staging(data_dir: &Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with("pull-") && name.ends_with(".part") {
+        // A file's staging, and a swarm fetch's partial and its sidecars.
+        if name.starts_with("pull-") && name.contains(".part") {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -445,13 +509,16 @@ async fn grant(
         )
     };
     let now = now_unix();
+    // The nonce names who asked: the grant stops when their account does,
+    // and offers this burrow's swarm only while they may use it.
+    let grant_nonce = grant_nonce(&nonce_key(shared), ctx.account_id);
     let unsigned = fp::PullGrant {
         version,
         source_key: shared.server_key,
         fetcher_key: req.fetcher_key,
         issued_unix: now,
         expires_unix: now + GRANT_TTL_SECS,
-        nonce: nonce(),
+        nonce: grant_nonce,
         items,
         tls_fingerprint,
         endpoints,
@@ -720,6 +787,90 @@ struct Pull {
     hold: Mutex<Option<Box<dyn Connection>>>,
 }
 
+/// What one send has spent on the source's swarm.
+#[derive(Default)]
+struct SwarmBudget {
+    /// Every seeder this send has dialed.
+    dialed: HashSet<String>,
+    /// Seeders that gave nothing in a fetch that finished: not dialed again.
+    useless: HashSet<String>,
+    /// The swarm failed a file, or the source does not share it: the rest
+    /// of this send comes from the source alone.
+    off: bool,
+}
+
+/// Most seeders one send dials, whatever the source names.
+const MAX_SEND_SEEDERS: usize = 32;
+/// The largest file fetched from the swarm: past it, the swarm's resume
+/// record (an entry per megabyte, rewritten as it goes) grows too big to
+/// keep rewriting, and the source sends it.
+const SWARM_MAX_BYTES: u64 = 64 << 30;
+/// The shortest capability worth fetching with, in seconds.
+const MIN_TOKEN_LIFE_SECS: i64 = 180;
+/// How long before a capability's end a file still coming is asked for
+/// again, in seconds: room for the seeders' clocks to run ahead.
+const RENEW_MARGIN_SECS: i64 = 120;
+
+impl SwarmBudget {
+    /// The offered seeders this send will dial: addresses only (a seeder is
+    /// never a name to look up), public unless the operator allows private
+    /// ones, not one that gave nothing before, and no new one past
+    /// [`MAX_SEND_SEEDERS`].
+    fn usable(&mut self, offered: &[fp::SwarmSource], allow_private: bool) -> Usable {
+        let mut out: Vec<rabbithole_swarm::SourcePeer> = Vec::new();
+        let mut refused = 0;
+        for source in offered.iter().take(fp::MAX_SWARM_SOURCES) {
+            let Ok(addr) = source.endpoint.parse::<std::net::SocketAddr>() else {
+                refused += 1;
+                continue;
+            };
+            if addr.port() == 0 || !(allow_private || rabbithole_net::reach::is_public(addr.ip())) {
+                refused += 1;
+                continue;
+            }
+            let endpoint = addr.to_string();
+            if self.useless.contains(&endpoint) || out.iter().any(|s| s.endpoint == endpoint) {
+                continue;
+            }
+            if !self.dialed.contains(&endpoint) {
+                if self.dialed.len() >= MAX_SEND_SEEDERS {
+                    continue;
+                }
+                self.dialed.insert(endpoint.clone());
+            }
+            out.push(rabbithole_swarm::SourcePeer {
+                endpoint,
+                cert_fp: source.cert_fp,
+            });
+        }
+        Usable {
+            sources: out,
+            refused,
+        }
+    }
+}
+
+/// The seeders of one offer a send will dial, and how many it would not
+/// (a name, a port of 0, or an address it keeps off).
+struct Usable {
+    sources: Vec<rabbithole_swarm::SourcePeer>,
+    refused: usize,
+}
+
+/// How fetching one file from the swarm went.
+#[derive(Debug, PartialEq, Eq)]
+enum Swarm {
+    /// The whole file, verified.
+    Fetched,
+    /// The pull is no longer wanted here (pulls switched off, or the
+    /// person's account closed): it stops, rather than going to the source.
+    Stopped,
+    /// Not tried: not wanted, too small, or nothing offered.
+    Skipped,
+    /// Tried, and the peers did not give the whole file.
+    Failed,
+}
+
 /// Why fetching one file stopped.
 #[derive(Debug, PartialEq, Eq)]
 enum FetchError {
@@ -743,6 +894,8 @@ struct Tally {
     files: u32,
     bytes: u64,
     missing: u32,
+    /// Files that came from the source's swarm peers.
+    swarm: u32,
 }
 
 impl Pull {
@@ -775,6 +928,180 @@ impl Pull {
             .join(format!("pull-{}-{index}.part", self.id))
     }
 
+    /// Where a file fetched from the swarm is put together: apart from
+    /// [`Pull::staging`], so nothing of a swarm attempt given up on can
+    /// touch the fetch from the source that follows it.
+    fn swarm_staging(&self, index: usize) -> PathBuf {
+        let data_dir = self.shared.config.read().data_dir.clone();
+        crate::resolve_dir(&data_dir, Path::new("transfers"))
+            .join(format!("pull-{}-{index}.swarm.part", self.id))
+    }
+
+    /// Fetch one file from the source's swarm peers into `dest`, when the
+    /// operator wants that, the file is big enough to gain from it, and the
+    /// source offers any peers. Anything but [`Swarm::Fetched`] leaves
+    /// nothing behind, and the source is asked for the file then.
+    async fn fetch_from_swarm(
+        &self,
+        link: &dyn BulkStreams,
+        index: usize,
+        item: &fp::PullItem,
+        dest: &Path,
+        budget: &mut SwarmBudget,
+        progress: &mut impl FnMut(u64),
+    ) -> Swarm {
+        if budget.off || !(SWARM_MIN_BYTES..=SWARM_MAX_BYTES).contains(&item.size) {
+            return Swarm::Skipped;
+        }
+        let _ = tokio::fs::create_dir_all(dest.parent().unwrap_or(Path::new("."))).await;
+        let deadline =
+            tokio::time::Instant::now() + STREAM_IDLE + Duration::from_secs(item.size / MIN_RATE);
+        let total_units = item.size.div_ceil(rabbithole_swarm::UNIT_SIZE);
+        let mut units_done = 0u64;
+        let mut asked = false;
+        loop {
+            // Asked again when a capability nears its end and the file is
+            // still coming: the operator's settings and the person's account
+            // are read afresh each time.
+            let (wanted, allow_private) = {
+                let config = self.shared.config.read();
+                (config.s2s_swarm, config.s2s_private_addresses)
+            };
+            if !wanted {
+                budget.off = true;
+                return self.gave_up(dest, asked).await;
+            }
+            if asked && !self.still_wanted().await {
+                remove_swarm_partial(dest).await;
+                return Swarm::Stopped;
+            }
+            let offer = match self
+                .until_cancelled(ask_sources(link, &self.grant_bytes, index as u32))
+                .await
+            {
+                Some(Ok(offer)) => offer,
+                // Gone or changed at the source: nothing to say about the
+                // rest of the send.
+                Some(Err(Some(stream_status::GONE))) => return self.gave_up(dest, asked).await,
+                // The source does not share its swarm, refuses, predates the
+                // question, or did not answer: not asked again this send.
+                Some(Err(_)) => {
+                    budget.off = true;
+                    return self.gave_up(dest, asked).await;
+                }
+                None => return self.gave_up(dest, true).await,
+            };
+            let life = offer.expires_unix.saturating_sub(now_unix());
+            if offer.sources.is_empty() && !asked {
+                return Swarm::Skipped;
+            }
+            // A capability too short to fetch with is no offer at all.
+            if life < MIN_TOKEN_LIFE_SECS {
+                budget.off = true;
+                return self.gave_up(dest, asked).await;
+            }
+            let usable = budget.usable(&offer.sources, allow_private);
+            if usable.sources.is_empty() {
+                // Offered addresses this burrow will not dial: not asked
+                // again. Only ones already spent this send: the next file
+                // may name others.
+                budget.off = usable.refused > 0;
+                return self.gave_up(dest, asked).await;
+            }
+            asked = true;
+            // Measured here, from the capability's known length: seeders
+            // check its end on their own clocks.
+            let window =
+                Duration::from_secs((life.min(SWARM_TOKEN_SECS) - RENEW_MARGIN_SECS).max(0) as u64);
+            let token_ends = tokio::time::Instant::now() + window;
+            // A window must bring at least what the source is held to in
+            // the same time, or the swarm is not worth asking again.
+            let least = (MIN_RATE * window.as_secs() / rabbithole_swarm::UNIT_SIZE).max(1);
+            let (tx, mut units) = tokio::sync::mpsc::unbounded_channel();
+            let mut fetch = Box::pin(rabbithole_swarm::fetch_swarm_resumable_with_progress(
+                &usable.sources,
+                &offer.token,
+                item.root,
+                item.size,
+                dest,
+                tx,
+            ));
+            let until = tokio::time::sleep_until(token_ends.min(deadline));
+            tokio::pin!(until);
+            let mut watch = tokio::time::interval(Duration::from_millis(250));
+            let before = units_done;
+            let mut producing: HashSet<String> = HashSet::new();
+            let ended = loop {
+                tokio::select! {
+                    result = &mut fetch => break Some(result.is_ok()),
+                    Some(unit) = units.recv() => {
+                        units_done = unit.done_units;
+                        producing.insert(unit.endpoint);
+                        progress((unit.done_units * rabbithole_swarm::UNIT_SIZE).min(item.size));
+                    }
+                    // Once every unit is in, only the check of the whole file
+                    // is left: it is not cut off by the capability's end.
+                    _ = &mut until, if units_done < total_units => break None,
+                    _ = watch.tick() => {
+                        if self.cancel.load(Ordering::Relaxed) || !self.shared.config.read().s2s_swarm {
+                            break Some(false);
+                        }
+                    }
+                }
+            };
+            // Dropping the fetch stops its workers.
+            drop(fetch);
+            match ended {
+                Some(true) => return Swarm::Fetched,
+                Some(false) => {
+                    budget.off = true;
+                    return self.gave_up(dest, true).await;
+                }
+                // The capability is about to run out: ask again, but only
+                // while the swarm is getting somewhere and time remains. A
+                // seeder that gave nothing this while is not dialed again.
+                None if units_done >= before + least && tokio::time::Instant::now() < deadline => {
+                    for peer in &usable.sources {
+                        if !producing.contains(&peer.endpoint) {
+                            budget.useless.insert(peer.endpoint.clone());
+                        }
+                    }
+                }
+                None => {
+                    budget.off = true;
+                    return self.gave_up(dest, true).await;
+                }
+            }
+        }
+    }
+
+    /// The end of a swarm attempt that did not give the file: what it left
+    /// is removed. [`Swarm::Failed`] if peers were tried, else skipped.
+    async fn gave_up(&self, dest: &Path, tried: bool) -> Swarm {
+        remove_swarm_partial(dest).await;
+        if tried {
+            Swarm::Failed
+        } else {
+            Swarm::Skipped
+        }
+    }
+
+    /// `fut`, unless the pull is cancelled first (`None`).
+    async fn until_cancelled<T>(&self, fut: impl std::future::Future<Output = T>) -> Option<T> {
+        tokio::pin!(fut);
+        let mut watch = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            tokio::select! {
+                value = &mut fut => return Some(value),
+                _ = watch.tick() => {
+                    if self.cancel.load(Ordering::Relaxed) {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
     async fn run(self) {
         let (tally, outcome, landed) = self.fetch_all().await;
         let (state, reason) = match outcome {
@@ -787,8 +1114,8 @@ impl Pull {
             &self.login,
             "pull-done",
             format!(
-                "#{} files={} bytes={} missing={} reason={reason}",
-                self.id, tally.files, tally.bytes, tally.missing
+                "#{} files={} bytes={} missing={} swarm={} reason={reason}",
+                self.id, tally.files, tally.bytes, tally.missing, tally.swarm
             ),
         );
         self.shared.s2s.release(self.id);
@@ -820,6 +1147,7 @@ impl Pull {
         // Source top-level name → the folder this pull made for it here.
         let mut tops: HashMap<String, String> = HashMap::new();
         let mut last_push = Instant::now();
+        let mut swarm = SwarmBudget::default();
         for (index, item) in self.grant.grant.items.iter().enumerate() {
             if self.cancel.load(Ordering::Relaxed) {
                 return (tally, Some(pull_reason::CANCELLED), landed);
@@ -849,37 +1177,65 @@ impl Pull {
                 }
                 None => (self.folder.clone(), item.rel_path.clone()),
             };
-            let staging = self.staging(index);
             let base = tally.bytes;
+            let mut progress = |got: u64| {
+                if last_push.elapsed() >= PROGRESS_EVERY {
+                    last_push = Instant::now();
+                    let mut t = tally;
+                    t.bytes = base + got;
+                    self.push(self.status(pull_state::RUNNING, t, pull_reason::NONE, &landed));
+                }
+            };
+            // From the source's swarm peers when both burrows allow it; from
+            // the source itself for anything they do not give. Once the
+            // swarm has failed a file, the rest of this send comes from the
+            // source alone, so peers that do not answer cost one try, not one
+            // per file.
+            let swarm_staging = self.swarm_staging(index);
+            let from_swarm = self
+                .fetch_from_swarm(
+                    link.as_ref(),
+                    index,
+                    item,
+                    &swarm_staging,
+                    &mut swarm,
+                    &mut progress,
+                )
+                .await;
+            if from_swarm == Swarm::Stopped {
+                return (tally, Some(pull_reason::STOPPED), landed);
+            }
+            let from_swarm = from_swarm == Swarm::Fetched;
+            // Cancelled while the swarm had it: not on to the source.
+            if !from_swarm && self.cancel.load(Ordering::Relaxed) {
+                return (tally, Some(pull_reason::CANCELLED), landed);
+            }
+            let staging = if from_swarm {
+                swarm_staging
+            } else {
+                self.staging(index)
+            };
             // A generous deadline: the idle timeout, plus the file at the
             // slowest rate a source may keep.
             let deadline = STREAM_IDLE + Duration::from_secs(item.size / MIN_RATE);
-            let fetched = tokio::time::timeout(
-                deadline,
-                fetch_item(
-                    link.as_ref(),
-                    &self.grant_bytes,
-                    index as u32,
-                    item.size,
-                    &staging,
-                    &self.cancel,
-                    |got| {
-                        if last_push.elapsed() >= PROGRESS_EVERY {
-                            last_push = Instant::now();
-                            let mut t = tally;
-                            t.bytes = base + got;
-                            self.push(self.status(
-                                pull_state::RUNNING,
-                                t,
-                                pull_reason::NONE,
-                                &landed,
-                            ));
-                        }
-                    },
-                ),
-            )
-            .await
-            .unwrap_or(Err(FetchError::Unreachable));
+            let fetched = if from_swarm {
+                Ok(())
+            } else {
+                tokio::time::timeout(
+                    deadline,
+                    fetch_item(
+                        link.as_ref(),
+                        &self.grant_bytes,
+                        index as u32,
+                        item.size,
+                        &staging,
+                        &self.cancel,
+                        &mut progress,
+                    ),
+                )
+                .await
+                .unwrap_or(Err(FetchError::Unreachable))
+            };
             match fetched {
                 Ok(()) => {}
                 Err(FetchError::Gone) => {
@@ -910,6 +1266,7 @@ impl Pull {
                     }
                     tally.files += 1;
                     tally.bytes += item.size;
+                    tally.swarm += u32::from(from_swarm);
                     last_push = Instant::now();
                     self.push(self.status(pull_state::RUNNING, tally, pull_reason::NONE, &landed));
                 }
@@ -1042,6 +1399,59 @@ impl Pull {
     }
 }
 
+/// Ask the source, on a stream of its own, for the swarm peers holding one
+/// granted file. `Err(Some(status))` when it answers anything but OK (a
+/// source that predates the question answers the empty first frame as a bad
+/// request); `Err(None)` when the stream fails or goes quiet.
+async fn ask_sources(
+    link: &dyn BulkStreams,
+    grant: &[u8],
+    item: u32,
+) -> Result<fp::PullSources, Option<u8>> {
+    let ask = postcard::to_allocvec(&fp::PullStreamAsk::Sources {
+        grant: grant.to_vec(),
+        item,
+    })
+    .map_err(|_| None)?;
+    let quiet = |_| None;
+    let (mut send, mut recv) = tokio::time::timeout(STREAM_IDLE, link.open())
+        .await
+        .map_err(quiet)?
+        .map_err(|_| None)?;
+    tokio::time::timeout(STREAM_IDLE, async {
+        write_framed(&mut send, &[]).await?;
+        write_framed(&mut send, &ask).await
+    })
+    .await
+    .map_err(quiet)?
+    .map_err(|_| None)?;
+    let _ = send.shutdown().await;
+    let mut status = [0u8; 1];
+    tokio::time::timeout(STREAM_IDLE, recv.read_exact(&mut status))
+        .await
+        .map_err(quiet)?
+        .map_err(|_| None)?;
+    if status[0] != stream_status::OK {
+        return Err(Some(status[0]));
+    }
+    let bytes = tokio::time::timeout(STREAM_IDLE, read_framed(&mut recv, fp::MAX_SOURCES_ANSWER))
+        .await
+        .map_err(quiet)?
+        .map_err(|_| None)?;
+    postcard::from_bytes(&bytes).map_err(|_| None)
+}
+
+/// Remove what a swarm fetch given up on left: the partial file and its
+/// progress sidecars.
+async fn remove_swarm_partial(dest: &Path) {
+    let _ = tokio::fs::remove_file(dest).await;
+    let mut sidecar = dest.as_os_str().to_owned();
+    sidecar.push(".rhstate");
+    let _ = tokio::fs::remove_file(&sidecar).await;
+    sidecar.push(".tmp");
+    let _ = tokio::fs::remove_file(&sidecar).await;
+}
+
 /// The top-level thing a filed path landed as, relative to the area: the
 /// destination folder plus the path's first segment below it.
 fn top_of(path: &str, folder: Option<&str>) -> String {
@@ -1162,10 +1572,66 @@ fn serve_clock(now: i64, expires: i64) -> i64 {
     }
 }
 
+/// At the source: whether a grant this burrow signed lets `peer_key` have
+/// item `item` now, over a federation session (`direct` is `None`) or a pull
+/// session opened with the grant whose nonce `direct` holds; and the item,
+/// if the file is still the one granted. Refusals are stream statuses.
+async fn granted_item(
+    shared: &Shared,
+    peer_key: &[u8; 32],
+    direct: Option<[u8; 16]>,
+    grant: &[u8],
+    item: u32,
+) -> Result<(fp::PullItem, [u8; 16]), u8> {
+    if !shared.config.read().s2s_grants_enabled {
+        return Err(stream_status::OFF);
+    }
+    let grant = SignedPullGrant::from_bytes(grant).map_err(|_| stream_status::BAD)?;
+    let clock = serve_clock(now_unix(), grant.grant.expires_unix);
+    grant
+        .check(&shared.server_key, peer_key, clock)
+        .map_err(|_| stream_status::DENIED)?;
+    // A peer over its federation session; anyone else only over a pull
+    // session that proved its key, and only while the operator sends to
+    // any burrow.
+    let allowed = shared.peers.is_approved(peer_key)
+        || (direct.is_some() && shared.config.read().s2s_grants_to_any);
+    // A pull session serves the grant it was opened with, and no other.
+    if !allowed || direct.is_some_and(|nonce| nonce != grant.grant.nonce) {
+        return Err(stream_status::DENIED);
+    }
+    // A grant stops with the account of the person who asked for it.
+    if !grant_stands(shared, &grant.grant.nonce).await {
+        return Err(stream_status::DENIED);
+    }
+    let nonce = grant.grant.nonce;
+    let item = grant
+        .grant
+        .items
+        .get(item as usize)
+        .cloned()
+        .ok_or(stream_status::BAD)?;
+    let node = shared
+        .files
+        .node(item.node_id)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(stream_status::GONE)?;
+    let unchanged = node.kind == KIND_FILE
+        && node.blob_id == Some(item.root)
+        && node.size.max(0) as u64 == item.size;
+    if !unchanged || shared.moderation.file_quarantined(Some(&item.root)) {
+        return Err(stream_status::GONE);
+    }
+    Ok((item, nonce))
+}
+
 /// At the source: answer one pull stream a federation peer opened. The
 /// grant must be this burrow's own, name this peer as its fetcher, and still
 /// stand (with grace for a pull under way); the file must still be the one
-/// granted.
+/// granted. A stream that opens with an empty frame asks something else
+/// ([`fp::PullStreamAsk`]) in the next.
 pub async fn serve_pull_stream(
     shared: Arc<Shared>,
     peer_key: [u8; 32],
@@ -1180,51 +1646,24 @@ pub async fn serve_pull_stream(
                 .ok()
                 .and_then(Result::ok)
                 .ok_or(stream_status::BAD)?;
+        if bytes.is_empty() {
+            return Err(ANSWERED_ELSEWHERE);
+        }
         let req: PullStreamRequest =
             postcard::from_bytes(&bytes).map_err(|_| stream_status::BAD)?;
-        if !shared.config.read().s2s_grants_enabled {
-            return Err(stream_status::OFF);
-        }
-        let grant = SignedPullGrant::from_bytes(&req.grant).map_err(|_| stream_status::BAD)?;
-        let clock = serve_clock(now_unix(), grant.grant.expires_unix);
-        grant
-            .check(&shared.server_key, &peer_key, clock)
-            .map_err(|_| stream_status::DENIED)?;
-        // A peer over its federation session; anyone else only over a pull
-        // session that proved its key, and only while the operator sends to
-        // any burrow.
-        let allowed = shared.peers.is_approved(&peer_key)
-            || (direct.is_some() && shared.config.read().s2s_grants_to_any);
-        // A pull session serves the grant it was opened with, and no other.
-        if !allowed || direct.is_some_and(|nonce| nonce != grant.grant.nonce) {
-            return Err(stream_status::DENIED);
-        }
-        let item = grant
-            .grant
-            .items
-            .get(req.item as usize)
-            .ok_or(stream_status::BAD)?;
-        let node = shared
-            .files
-            .node(item.node_id)
-            .await
-            .ok()
-            .flatten()
-            .ok_or(stream_status::GONE)?;
-        let unchanged = node.kind == KIND_FILE
-            && node.blob_id == Some(item.root)
-            && node.size.max(0) as u64 == item.size;
-        if !unchanged || shared.moderation.file_quarantined(Some(&item.root)) {
-            return Err(stream_status::GONE);
-        }
+        let (item, nonce) = granted_item(&shared, &peer_key, direct, &req.grant, req.item).await?;
         if req.offset > item.size {
             return Err(stream_status::BAD);
         }
-        Ok((item.root, item.size, req.offset))
+        Ok((item.root, item.size, req.offset, nonce))
     }
     .await;
-    let (root, size, mut offset) = match answer {
+    let (root, size, mut offset, nonce) = match answer {
         Ok(v) => v,
+        Err(ANSWERED_ELSEWHERE) => {
+            answer_ask(&shared, &peer_key, direct, send, recv).await;
+            return;
+        }
         Err(status) => {
             let _ = write_timed(&mut send, &[status]).await;
             let _ = send.shutdown().await;
@@ -1242,7 +1681,16 @@ pub async fn serve_pull_stream(
     } else {
         CHUNK
     };
+    let mut checked = Instant::now();
     while offset < size {
+        // A long file is not sent on past its person's account being
+        // disabled, nor past grants being switched off.
+        if checked.elapsed() >= STANDING_EVERY {
+            checked = Instant::now();
+            if !shared.config.read().s2s_grants_enabled || !grant_stands(&shared, &nonce).await {
+                break;
+            }
+        }
         let want = ((size - offset).min(piece as u64)) as usize;
         let blobs = shared.blobs.clone();
         let at = offset;
@@ -1263,6 +1711,165 @@ pub async fn serve_pull_stream(
     let _ = send.shutdown().await;
 }
 
+/// Not a stream status: the stream opened with an empty frame, and its
+/// question is answered by [`answer_ask`].
+const ANSWERED_ELSEWHERE: u8 = u8::MAX;
+
+/// How long a capability for the swarm peers holding a sent file stands:
+/// as long as a person's ticket. A file still coming when it ends is asked
+/// for again, so an account disabled or a permission taken away holds for at
+/// most this long at the seeders.
+const SWARM_TOKEN_SECS: i64 = 600;
+
+/// At the source: answer a [`fp::PullStreamAsk`], the frame after an empty
+/// one.
+async fn answer_ask(
+    shared: &Shared,
+    peer_key: &[u8; 32],
+    direct: Option<[u8; 16]>,
+    mut send: BulkSend,
+    mut recv: BulkRecv,
+) {
+    let answer = async {
+        let bytes =
+            tokio::time::timeout(STREAM_IDLE, read_framed(&mut recv, fp::MAX_STREAM_REQUEST))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .ok_or(stream_status::BAD)?;
+        match postcard::from_bytes::<fp::PullStreamAsk>(&bytes) {
+            Ok(fp::PullStreamAsk::Sources { grant, item }) => {
+                let (item, nonce) = granted_item(shared, peer_key, direct, &grant, item).await?;
+                if !may_use_swarm(shared, &nonce).await {
+                    return Err(stream_status::OFF);
+                }
+                let serve_until = SignedPullGrant::from_bytes(&grant)
+                    .map(|g| g.grant.expires_unix.saturating_add(SERVE_GRACE_SECS))
+                    .map_err(|_| stream_status::BAD)?;
+                swarm_offer(shared, peer_key, &item, serve_until)
+            }
+            Err(_) => Err(stream_status::BAD),
+        }
+    }
+    .await;
+    match answer.and_then(|offer| postcard::to_allocvec(&offer).map_err(|_| stream_status::BAD)) {
+        Ok(bytes) => {
+            if write_timed(&mut send, &[stream_status::OK]).await {
+                let _ = tokio::time::timeout(STREAM_IDLE, write_framed(&mut send, &bytes)).await;
+            }
+        }
+        Err(status) => {
+            let _ = write_timed(&mut send, &[status]).await;
+        }
+    }
+    let _ = send.shutdown().await;
+}
+
+/// Whether a grant this burrow signed still stands for its person: the
+/// account its nonce names is there and not disabled. A grant from before
+/// 0.228 names no one, and stands.
+async fn grant_stands(shared: &Shared, nonce: &[u8; 16]) -> bool {
+    match nonce_account(&nonce_key(shared), nonce) {
+        None => true,
+        Some(account_id) => matches!(
+            AccountsRepo(&shared.pool).by_id(account_id).await,
+            Ok(Some(account)) if !account.disabled
+        ),
+    }
+}
+
+/// Whether the person who asked for a grant may, now, find and fetch from
+/// this burrow's swarm, as `FindSources` and `SourceTicket` require. False
+/// for a grant whose nonce names no one (made before 0.228).
+async fn may_use_swarm(shared: &Shared, nonce: &[u8; 16]) -> bool {
+    let Some(account_id) = nonce_account(&nonce_key(shared), nonce) else {
+        return false;
+    };
+    let Ok(Some(account)) = AccountsRepo(&shared.pool).by_id(account_id).await else {
+        return false;
+    };
+    if account.disabled {
+        return false;
+    }
+    let subject = Subject {
+        account_id: account.id,
+        role: Role::from_ordinal(account.role),
+        class_id: account.class_id,
+        class_mask: shared.classes.mask(account.class_id),
+        grant_mask: account.grant_mask,
+        revoke_mask: account.revoke_mask,
+    };
+    shared.perms.allows(&subject, "swarm", Caps::FILE_LIST)
+        && shared.perms.allows(&subject, "swarm", Caps::FILE_DOWNLOAD)
+}
+
+/// The swarm peers here holding a granted file, for the burrow it was sent
+/// to, with a capability naming that burrow, good for ten minutes and never past
+/// `serve_until` (when this burrow stops serving the grant itself). Only
+/// while the operator shares this burrow's swarm; never a session that is
+/// invisible or gone, and never one holding a different size.
+fn swarm_offer(
+    shared: &Shared,
+    peer_key: &[u8; 32],
+    item: &fp::PullItem,
+    serve_until: i64,
+) -> Result<fp::PullSources, u8> {
+    if !shared.config.read().s2s_swarm_sources {
+        return Err(stream_status::OFF);
+    }
+    let mut sources: Vec<fp::SwarmSource> = Vec::new();
+    for advert in shared.swarm.find(&item.root) {
+        if sources.len() >= fp::MAX_SWARM_SOURCES {
+            break;
+        }
+        let visible = shared
+            .presence
+            .get(advert.session_id)
+            .is_some_and(|entry| !entry.is_invisible());
+        if !visible || advert.size != item.size {
+            continue;
+        }
+        let Some(contact) = shared.swarm.contact(advert.session_id) else {
+            continue;
+        };
+        let Some(endpoint) = socket_endpoint(&contact.endpoint) else {
+            continue;
+        };
+        if !sources.iter().any(|s| s.endpoint == endpoint) {
+            sources.push(fp::SwarmSource {
+                endpoint,
+                cert_fp: contact.cert_fp,
+            });
+        }
+    }
+    let expires_unix = (now_unix() + SWARM_TOKEN_SECS).min(serve_until);
+    let token = rabbithole_swarm::S2sCapToken::issue(
+        &IdentityKey::from_seed(&shared.server_signing_seed),
+        item.root,
+        *peer_key,
+        expires_unix,
+    )
+    .map_err(|_| stream_status::BAD)?;
+    Ok(fp::PullSources {
+        token: token.to_bytes(),
+        expires_unix,
+        sources,
+    })
+}
+
+/// A seeder's `ip:port` as a socket address writes it: an IPv6 address in
+/// brackets. Seeders' contact cards join the address and port with a bare
+/// colon.
+fn socket_endpoint(endpoint: &str) -> Option<String> {
+    if let Ok(addr) = endpoint.parse::<std::net::SocketAddr>() {
+        return Some(addr.to_string());
+    }
+    let (ip, port) = endpoint.rsplit_once(':')?;
+    let ip: std::net::IpAddr = ip.parse().ok()?;
+    let port: u16 = port.parse().ok()?;
+    Some(std::net::SocketAddr::new(ip, port).to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Sources that are not federation peers: the destination connects to the
 // source's QUIC client port, proves the key the grant names, and opens a
@@ -1280,6 +1887,11 @@ const MAX_SOURCE_NAME: usize = 64;
 /// Pull sessions this burrow serves at once, for every burrow fetching
 /// directly.
 const MAX_PULL_SESSIONS: usize = 32;
+/// Pull sessions open at once for grants one person asked for.
+const MAX_PULL_SESSIONS_PER_ACCOUNT: usize = 4;
+/// How often a stream or pull session under way checks that its grant still
+/// stands: its person's account, and the operator's settings.
+const STANDING_EVERY: Duration = Duration::from_secs(15);
 /// How long past a grant's expiry a pull session may still open: room for
 /// two burrows' clocks to disagree, not the grace a pull under way gets.
 const OPEN_SKEW_SECS: i64 = 300;
@@ -1453,7 +2065,7 @@ async fn open_session(
 /// At the source, before any sign-in: whether a connection may become a pull
 /// session. `key` is the key it proved over QUIC, bound to this burrow's
 /// certificate; `None` if it proved none.
-pub fn open_pull_session(
+pub async fn open_pull_session(
     shared: &Arc<Shared>,
     key: Option<[u8; 32]>,
     bound: bool,
@@ -1480,15 +2092,23 @@ pub fn open_pull_session(
         )
         .map_err(|_| ErrorCode::Forbidden)?;
     let nonce = signed.grant.nonce;
+    if !grant_stands(shared, &nonce).await {
+        return Err(ErrorCode::Forbidden);
+    }
+    let account = nonce_account(&nonce_key(shared), &nonce);
     {
         let mut sessions = shared.s2s.sessions.lock();
-        if sessions.contains(&nonce) {
+        if sessions.contains_key(&nonce) {
             return Err(ErrorCode::AlreadyExists);
         }
-        if sessions.len() >= MAX_PULL_SESSIONS {
+        let theirs = sessions
+            .values()
+            .filter(|a| a.is_some() && **a == account)
+            .count();
+        if sessions.len() >= MAX_PULL_SESSIONS || theirs >= MAX_PULL_SESSIONS_PER_ACCOUNT {
             return Err(ErrorCode::RateLimited);
         }
-        sessions.insert(nonce);
+        sessions.insert(nonce, account);
     }
     Ok(PullSession {
         shared: shared.clone(),
@@ -1559,9 +2179,23 @@ pub async fn run_pull_session(
     let until = tokio::time::sleep(Duration::from_secs(lasts));
     tokio::pin!(until);
     let mut bus = shared.bus.subscribe();
+    let mut standing = tokio::time::interval(STANDING_EVERY);
+    standing.tick().await;
     loop {
         tokio::select! {
             _ = &mut until => break,
+            _ = standing.tick() => {
+                // The session ends with its grant's person's account, or
+                // when the operator stops sending to this burrow.
+                let still = {
+                    let config = shared.config.read();
+                    config.s2s_grants_enabled
+                        && (config.s2s_grants_to_any || shared.peers.is_approved(&key))
+                };
+                if !still || !grant_stands(&shared, &nonce).await {
+                    break;
+                }
+            }
             ev = bus.recv() => {
                 use tokio::sync::broadcast::error::RecvError;
                 if matches!(ev, Ok(ServerEvent::Shutdown) | Err(RecvError::Closed)) {
@@ -1596,6 +2230,95 @@ pub async fn run_pull_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_send_dials_only_seeder_addresses_it_may_and_only_so_many() {
+        let seeder = |endpoint: &str| fp::SwarmSource {
+            endpoint: endpoint.into(),
+            cert_fp: [1; 32],
+        };
+        let mut budget = SwarmBudget::default();
+        let offered = [
+            seeder("203.0.113.9:4000"), // documentation range: not public
+            seeder("8.8.8.8:4000"),
+            seeder("8.8.8.8:4000"),        // the same one twice
+            seeder("seeder.example:4000"), // a name, never looked up
+            seeder("1.1.1.1:0"),
+            seeder("[2606:4700::1111]:4000"),
+            seeder("127.0.0.1:4000"),
+        ];
+        let first = budget.usable(&offered, false);
+        let usable: Vec<String> = first.sources.into_iter().map(|s| s.endpoint).collect();
+        assert_eq!(usable, ["8.8.8.8:4000", "[2606:4700::1111]:4000"]);
+        // A documentation address, a name, a port of 0 and a loopback one.
+        assert_eq!(first.refused, 4);
+        // Private addresses only when the operator allows them.
+        let local = budget.usable(&offered, true);
+        assert!(local.sources.iter().any(|s| s.endpoint == "127.0.0.1:4000"));
+        // One that gave nothing is not dialed again this send.
+        budget.useless.insert("8.8.8.8:4000".into());
+        assert!(budget
+            .usable(&offered, false)
+            .sources
+            .iter()
+            .all(|s| s.endpoint != "8.8.8.8:4000"));
+        // No more than so many different seeders, whatever the source names.
+        let many: Vec<fp::SwarmSource> = (1..=200)
+            .map(|n| seeder(&format!("8.8.{}.{}:4000", n / 250, n % 250 + 1)))
+            .collect();
+        let mut budget = SwarmBudget::default();
+        let mut total = 0;
+        for chunk in many.chunks(fp::MAX_SWARM_SOURCES) {
+            total += budget.usable(chunk, false).sources.len();
+        }
+        assert_eq!(total, MAX_SEND_SEEDERS);
+    }
+
+    #[test]
+    fn a_grants_nonce_names_its_person_to_the_burrow_that_signed_it_alone() {
+        let key = [3u8; 32];
+        // Fixed randomness, so the test says the same thing every run.
+        let random = |i: u32| -> [u8; 16] {
+            blake3::hash(&i.to_le_bytes()).as_bytes()[..16]
+                .try_into()
+                .unwrap()
+        };
+        for (i, account) in [0i64, 1, 42, (1 << 48) - 1].into_iter().enumerate() {
+            let n = grant_nonce_from(&key, account, random(i as u32));
+            assert_eq!(nonce_account(&key, &n), Some(account));
+            // Another burrow's key reads nothing from it.
+            assert_eq!(nonce_account(&[4u8; 32], &n), None);
+        }
+        // The randomness is the grant's own: two grants for one person
+        // differ.
+        assert_ne!(
+            grant_nonce_from(&key, 7, random(1)),
+            grant_nonce_from(&key, 7, random(2))
+        );
+        // An id that does not fit is not written in at all.
+        let plain = grant_nonce_from(&key, 1 << 48, random(9));
+        assert_eq!(nonce_account(&key, &plain), None);
+        // Nonces made before 0.228 were only random, and name no one.
+        let named = (100..1100)
+            .filter(|&i| nonce_account(&key, &random(i)).is_some())
+            .count();
+        assert_eq!(named, 0, "a random nonce names no one");
+    }
+
+    #[test]
+    fn a_source_hands_out_seeder_addresses_as_socket_addresses() {
+        assert_eq!(
+            socket_endpoint("192.0.2.1:4000").as_deref(),
+            Some("192.0.2.1:4000")
+        );
+        assert_eq!(
+            socket_endpoint("2001:db8::1:4000").as_deref(),
+            Some("[2001:db8::1]:4000")
+        );
+        assert_eq!(socket_endpoint("[::1]:9").as_deref(), Some("[::1]:9"));
+        assert_eq!(socket_endpoint("host.example:4000"), None);
+        assert_eq!(socket_endpoint("1.2.3.4"), None);
+    }
 
     #[test]
     fn a_pull_session_opens_only_while_its_grant_stands() {

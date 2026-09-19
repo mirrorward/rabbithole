@@ -94,15 +94,51 @@ struct WorkState {
     /// Units verified-and-written (offsets) — endgame duplicates check this
     /// so both copies don't double-count.
     done: HashSet<u64>,
-    /// When resumable: persist `done` here after every unit.
+    /// When resumable: persist `done` here as units land (see
+    /// [`WorkState::landed`]).
     persist_to: Option<(PathBuf, [u8; 32], u64)>,
+    /// Units landed since the record was last written, and when it was.
+    unpersisted: u32,
+    persisted_at: std::time::Instant,
+    /// The fetch was dropped: no worker writes another byte or record.
+    stopped: bool,
+    /// Units each source landed, by its place in the source list (two
+    /// entries may share an endpoint): kept here rather than returned by the
+    /// workers, so the count stands for a worker stopped early.
+    served: Vec<u64>,
 }
 
+/// The resume record is rewritten after this many units, or this long,
+/// whichever comes first: every unit would rewrite the whole record for each
+/// megabyte, which for a large file is more than the file. A record a little
+/// behind only means those units are fetched again after a crash.
+const PERSIST_EVERY_UNITS: u32 = 32;
+const PERSIST_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl WorkState {
+    /// A unit just landed: write the record when it is due.
+    fn landed(&mut self) {
+        self.unpersisted += 1;
+        if self.unpersisted >= PERSIST_EVERY_UNITS || self.persisted_at.elapsed() >= PERSIST_EVERY {
+            self.persist();
+        }
+    }
+
+    /// Unit `off` is done: out of both queues, whoever held it (a copy that
+    /// failed may have put it back after the other copy landed it). Tells
+    /// `complete` when nothing is left.
+    fn settle(&mut self, off: u64, complete: &tokio::sync::Notify) {
+        self.in_flight.remove(&off);
+        self.pending.retain(|(o, _)| *o != off);
+        if self.pending.is_empty() && self.in_flight.is_empty() {
+            complete.notify_one();
+        }
+    }
+
     /// Write the resume record (atomically: tmp + rename). Called under the
-    /// scheduler lock right after a unit lands, so a kill at any instant
-    /// leaves a state file that matches bytes actually on disk.
-    fn persist(&self) {
+    /// scheduler lock after units land, so a kill at any instant leaves a
+    /// state file that lists only bytes actually on disk.
+    fn write_record(&self) {
         let Some((path, root, size)) = &self.persist_to else {
             return;
         };
@@ -116,6 +152,12 @@ impl WorkState {
         if std::fs::write(&tmp, &bytes).is_ok() {
             let _ = std::fs::rename(&tmp, path);
         }
+    }
+
+    fn persist(&mut self) {
+        self.write_record();
+        self.unpersisted = 0;
+        self.persisted_at = std::time::Instant::now();
     }
 }
 
@@ -217,6 +259,33 @@ async fn resumable(
     Ok(report)
 }
 
+/// The worker tasks of one fetch, stopped when the fetch is dropped: a
+/// caller that gives up (a timeout, a cancel, a fallback to another route)
+/// must not leave workers still fetching and writing its file.
+struct Workers {
+    handles: Vec<tokio::task::JoinHandle<(String, u64)>>,
+    state: Arc<Mutex<WorkState>>,
+}
+
+impl Drop for Workers {
+    fn drop(&mut self) {
+        for worker in &self.handles {
+            worker.abort();
+        }
+        // A worker running on another thread finishes the unit it is
+        // writing, which it does holding this lock, and writes nothing
+        // after it: once this returns, the file and its record are left
+        // as they are, and the caller may remove them.
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // The record catches up with what landed, so a resume skips it.
+        if state.unpersisted > 0 {
+            state.persist();
+        }
+        state.stopped = true;
+        state.persist_to = None;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn fetch_swarm_inner(
     sources: &[SourcePeer],
@@ -265,28 +334,62 @@ async fn fetch_swarm_inner(
         in_flight: HashSet::new(),
         done,
         persist_to: state_path.map(|p| (p, root, size)),
+        stopped: false,
+        served: vec![0; sources.len()],
+        unpersisted: 0,
+        persisted_at: std::time::Instant::now(),
     }));
+    // Told by the worker that lands the last unit, so a worker still stuck
+    // on a slow peer does not hold back a file that is already whole.
+    let complete = Arc::new(tokio::sync::Notify::new());
 
-    let mut workers = Vec::new();
-    for source in sources {
+    let mut workers = Workers {
+        handles: Vec::new(),
+        state: state.clone(),
+    };
+    for (index, source) in sources.iter().enumerate() {
         let source = source.clone();
         let state = state.clone();
         let token = token.to_vec();
         let dest = dest.to_path_buf();
         let progress = progress.clone();
-        workers.push(tokio::spawn(async move {
-            worker(source, state, token, root, dest, progress, total_units).await
+        let complete = complete.clone();
+        workers.handles.push(tokio::spawn(async move {
+            worker(
+                index,
+                source,
+                state,
+                token,
+                root,
+                size,
+                dest,
+                progress,
+                total_units,
+                complete,
+            )
+            .await
         }));
     }
+    drop(progress);
 
-    let mut per_source = Vec::new();
-    for w in workers {
-        if let Ok((endpoint, units)) = w.await {
-            per_source.push((endpoint, units));
+    {
+        let joined = async {
+            for w in workers.handles.iter_mut() {
+                let _ = w.await;
+            }
+        };
+        tokio::select! {
+            _ = joined => {}
+            _ = complete.notified() => {}
         }
     }
 
     let state = state.lock().expect("not poisoned");
+    let per_source = sources
+        .iter()
+        .zip(&state.served)
+        .map(|(s, units)| (s.endpoint.clone(), *units))
+        .collect();
     if !state.pending.is_empty() || !state.in_flight.is_empty() {
         return Err(PeerError::Verify(format!(
             "no source could serve {} remaining unit(s)",
@@ -303,13 +406,16 @@ async fn fetch_swarm_inner(
 /// or until this source fails one. Returns (endpoint, units it completed).
 #[allow(clippy::too_many_arguments)]
 async fn worker(
+    index: usize,
     source: SourcePeer,
     state: Arc<Mutex<WorkState>>,
     token: Vec<u8>,
     root: [u8; 32],
+    size: u64,
     dest: std::path::PathBuf,
     progress: Option<ProgressSink>,
     total_units: u64,
+    complete: Arc<tokio::sync::Notify>,
 ) -> (String, u64) {
     use std::io::{Seek, SeekFrom, Write};
     let mut completed = 0u64;
@@ -317,7 +423,14 @@ async fn worker(
         // Next pending unit, or an in-flight one to duplicate (endgame).
         let (unit, endgame) = {
             let mut s = state.lock().expect("not poisoned");
-            match s.pending.pop() {
+            if s.stopped {
+                break;
+            }
+            let mut next = s.pending.pop();
+            while next.is_some_and(|(o, _)| s.done.contains(&o)) {
+                next = s.pending.pop();
+            }
+            match next {
                 Some(u) => {
                     s.in_flight.insert(u.0);
                     (u, false)
@@ -339,10 +452,17 @@ async fn worker(
             unit
         };
 
+        // What this unit must come to: every unit is whole but the last.
+        let want = (size - off).min(UNIT_SIZE);
         match fetch_range(&source.endpoint, source.cert_fp, &token, root, off, len).await {
-            Ok(bytes) => {
+            // A verified answer of another length is still not this unit:
+            // the peer is serving some other size, and is retired below.
+            Ok(bytes) if bytes.len() as u64 == want => {
                 let write: Result<bool, std::io::Error> = (|| {
                     let mut s = state.lock().expect("not poisoned");
+                    if s.stopped {
+                        return Err(std::io::Error::other("the fetch was dropped"));
+                    }
                     if s.done.contains(&off) {
                         return Ok(false); // endgame race: other copy won
                     }
@@ -350,8 +470,9 @@ async fn worker(
                     f.seek(SeekFrom::Start(off))?;
                     f.write_all(&bytes)?;
                     s.done.insert(off);
-                    s.in_flight.remove(&off);
-                    s.persist();
+                    s.served[index] += 1;
+                    s.landed();
+                    s.settle(off, &complete);
                     // Emit the live progress event under the lock, so
                     // `done_units` is a consistent snapshot.
                     if let Some(tx) = progress.as_ref() {
@@ -366,11 +487,14 @@ async fn worker(
                 })();
                 match write {
                     Ok(true) => completed += 1,
-                    Ok(false) => {}
+                    // The other copy landed it first.
+                    Ok(false) => state.lock().expect("not poisoned").settle(off, &complete),
                     Err(_) => {
                         // Local IO failure: put the unit back and stop.
                         let mut s = state.lock().expect("not poisoned");
-                        if !endgame && !s.done.contains(&off) {
+                        if s.done.contains(&off) {
+                            s.settle(off, &complete);
+                        } else if !endgame {
                             s.in_flight.remove(&off);
                             s.pending.push((off, len));
                         }
@@ -378,16 +502,16 @@ async fn worker(
                     }
                 }
             }
-            Err(_) => {
+            Ok(_) | Err(_) => {
                 // This source failed: hand the unit back (unless it was an
-                // endgame duplicate — the original holder still has it) and
-                // retire the source.
-                if !endgame {
-                    let mut s = state.lock().expect("not poisoned");
-                    if !s.done.contains(&off) {
-                        s.in_flight.remove(&off);
-                        s.pending.push((off, len));
-                    }
+                // endgame duplicate — the original holder still has it, or
+                // it is done) and retire the source.
+                let mut s = state.lock().expect("not poisoned");
+                if s.done.contains(&off) {
+                    s.settle(off, &complete);
+                } else if !endgame {
+                    s.in_flight.remove(&off);
+                    s.pending.push((off, len));
                 }
                 break;
             }
@@ -427,6 +551,52 @@ mod tests {
             endpoint: format!("127.0.0.1:{}", p.addr.port()),
             cert_fp: p.fingerprint.0,
         }
+    }
+
+    /// A caller that drops the fetch (a timeout, a cancel) stops its
+    /// workers: nothing goes on fetching and writing its file.
+    #[tokio::test]
+    async fn dropping_a_fetch_stops_its_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = IdentityKey::from_seed(&[8; 32]);
+        let body = payload(24 * 1024 * 1024);
+        let src = dir.path().join("seed.bin");
+        std::fs::write(&src, &body).unwrap();
+        let root = *blake3::hash(&body).as_bytes();
+        let peer = seeding_peer(&key, root, &src).await;
+        let token = CapToken::issue(&key, root, "t", now() + 600)
+            .unwrap()
+            .to_bytes();
+        let dest = dir.path().join("out.bin");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sources = [peer_source(&peer)];
+        let fetch = fetch_swarm_resumable_with_progress(
+            &sources,
+            &token,
+            root,
+            body.len() as u64,
+            &dest,
+            tx,
+        );
+        tokio::select! {
+            _ = fetch => panic!("24 units fetched before the first was reported"),
+            first = rx.recv() => assert!(first.is_some()),
+        }
+        // The fetch is dropped: its worker, the last holder of the progress
+        // channel, is stopped, so the channel closes with the file unfinished.
+        let mut after = 0;
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while rx.recv().await.is_some() {
+                after += 1;
+            }
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "the worker went on after the fetch was dropped"
+        );
+        assert!(after < 4, "{after} more units after the fetch was dropped");
+        peer.stop();
     }
 
     #[tokio::test]

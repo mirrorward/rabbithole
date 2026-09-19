@@ -391,6 +391,43 @@ pub struct PullStreamRequest {
     pub offset: u64,
 }
 
+/// What the destination asks on a bulk stream that opens with an empty
+/// frame, in the frame after it: something other than a file's bytes. A
+/// source from before these reads the empty frame as a bad request and
+/// answers [`stream_status::BAD`], so asking never harms an older source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PullStreamAsk {
+    /// The swarm peers holding one granted file, and a capability for them.
+    /// Answered with [`stream_status::OK`] and a [`PullSources`] frame, or
+    /// the status a [`PullStreamRequest`] for that item would get
+    /// ([`stream_status::OFF`] too when the source does not share its swarm).
+    Sources { grant: Vec<u8>, item: u32 },
+}
+
+/// A swarm peer holding a granted file: where it listens, as `host:port`,
+/// and its certificate's fingerprint, which the fetcher pins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmSource {
+    pub endpoint: String,
+    pub cert_fp: [u8; 32],
+}
+
+/// The source's answer to [`PullStreamAsk::Sources`]: its swarm peers
+/// holding the file, and a capability (a `rabbithole_swarm::S2sCapToken`
+/// naming the fetching burrow) they accept for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullSources {
+    pub token: Vec<u8>,
+    pub expires_unix: i64,
+    pub sources: Vec<SwarmSource>,
+}
+
+/// Most swarm peers one answer names.
+pub const MAX_SWARM_SOURCES: usize = 16;
+
+/// Largest encoded [`PullSources`], in bytes.
+pub const MAX_SOURCES_ANSWER: usize = 16 * 1024;
+
 /// The source's first byte in answer to a [`PullStreamRequest`].
 pub mod stream_status {
     /// The bytes follow, from the requested offset to the end.
@@ -561,6 +598,31 @@ mod tests {
             back.check(&source.public().0, &dest, 500),
             Err(PullGrantError::Version)
         );
+    }
+
+    #[test]
+    fn a_question_on_a_stream_is_never_read_as_a_request_for_bytes() {
+        // An older source decodes the empty first frame as a request for a
+        // file's bytes, fails, and answers BAD.
+        assert!(postcard::from_bytes::<PullStreamRequest>(&[]).is_err());
+        let ask = PullStreamAsk::Sources {
+            grant: vec![1, 2, 3],
+            item: 7,
+        };
+        let bytes = postcard::to_allocvec(&ask).unwrap();
+        assert_eq!(postcard::from_bytes::<PullStreamAsk>(&bytes).unwrap(), ask);
+        let most = PullSources {
+            token: vec![0; 256],
+            expires_unix: i64::MAX,
+            sources: vec![
+                SwarmSource {
+                    endpoint: format!("[{}]:65535", "ffff:".repeat(7) + "ffff"),
+                    cert_fp: [0xff; 32],
+                };
+                MAX_SWARM_SOURCES
+            ],
+        };
+        assert!(postcard::to_allocvec(&most).unwrap().len() <= MAX_SOURCES_ANSWER);
     }
 
     #[test]

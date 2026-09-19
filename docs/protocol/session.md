@@ -88,12 +88,14 @@ and only when the grant names that key, verifies, and has not run out (five
 minutes' leeway for the two clocks); refusals are `Unauthenticated` (no key
 proved over QUIC), `Unsupported` (grants off, or grants only to peers and the
 key is not one), `BadRequest` (unreadable or over 384 KiB), `Forbidden` (not
-this burrow's grant, not for that key, or run out), `AlreadyExists` (a
-session for that grant is already open) and `RateLimited` (32 open already).
+this burrow's grant, not for that key, run out, or its person's account is
+disabled), `AlreadyExists` (a session for that grant is already open) and
+`RateLimited` (32 open already, or 4 for grants one person asked for).
 Each refusal is charged to the address's sign-in budget. Once open, the
 connection answers only `Ping` on the control stream and pull streams for
 that grant on bulk streams, eight at a time, until the grant's six-hour grace
-ends, it closes, or the burrow shuts down.
+ends, it closes, the burrow shuts down, or (checked every 15 seconds) the
+grant's person's account is disabled or the operator stops sending to it.
 
 ## Push replay
 

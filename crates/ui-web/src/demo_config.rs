@@ -97,6 +97,8 @@ pub const DEMO_SCHEMA: &[(&str, &str, u8, u8)] = &[
     ("s2s_grants_to_any", "false", 1, 1),
     ("s2s_pull_from_any", "false", 1, 1),
     ("s2s_private_addresses", "false", 1, 1),
+    ("s2s_swarm", "false", 1, 1),
+    ("s2s_swarm_sources", "false", 1, 1),
     ("portmap_enabled", "false", 1, 0),
     ("portmap_gateway", "", 0, 0),
     ("portmap_lifetime_secs", "7200", 2, 0),

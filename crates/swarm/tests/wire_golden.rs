@@ -11,7 +11,7 @@
 #![forbid(unsafe_code)]
 
 use rabbithole_identity::IdentityKey;
-use rabbithole_swarm::{CapToken, Manifest, ManifestFile};
+use rabbithole_swarm::{CapToken, Manifest, ManifestFile, S2sCapToken};
 
 /// A one-file manifest whose postcard encoding is pinned below.
 ///
@@ -91,6 +91,29 @@ fn cap_token_wire_form_is_stable() {
     let back = CapToken::from_bytes(&wire).expect("golden decodes");
     assert_eq!(back, token);
     assert_eq!(back.to_bytes(), wire);
+}
+
+/// A burrow's capability: the fetching burrow's 32-byte server key where a
+/// person's token has a name, then the expiry and signature.
+#[test]
+fn s2s_cap_token_wire_form_is_stable() {
+    let key = IdentityKey::from_seed(&[42u8; 32]);
+    let token = S2sCapToken::issue(&key, [1u8; 32], [2u8; 32], 1_000).expect("issue");
+    let wire = token.to_bytes();
+    //   claim.root (32) ++ claim.fetcher_key (32) ++
+    //   zigzag-varint(1000) = D0 0F ++ varint(64) = 40 ++ signature (64).
+    assert_eq!(&wire[..32], &[1u8; 32]);
+    assert_eq!(&wire[32..64], &[2u8; 32]);
+    assert_eq!(&wire[64..66], &[0xD0, 0x0F]);
+    assert_eq!(wire[66], 0x40);
+    assert_eq!(wire.len(), 67 + 64);
+    let back = S2sCapToken::from_bytes(&wire).expect("golden decodes");
+    assert_eq!(back, token);
+    assert_eq!(back.to_bytes(), wire);
+    // Total on every truncation.
+    for cut in 0..wire.len() {
+        let _ = S2sCapToken::from_bytes(&wire[..cut]);
+    }
 }
 
 /// Deterministic 64-bit LCG (std only, reproducible without `rand`).

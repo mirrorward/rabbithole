@@ -996,6 +996,20 @@ pub const SECTIONS: &[Section] = &[
                          on one network or one machine. Off, only public addresses are dialed, \
                          so a send cannot be used to reach this burrow\u{2019}s own network.",
                     ),
+                    item(
+                        "s2s_swarm_sources",
+                        "Offer this burrow\u{2019}s swarm to receiving burrows",
+                        "A burrow a file is sent to may also fetch it from people here who \
+                         seed it, which is faster. Their addresses reach that burrow; \
+                         invisible people are never offered.",
+                    ),
+                    item(
+                        "s2s_swarm",
+                        "Fetch sends from the sender\u{2019}s swarm",
+                        "Fetch larger files sent here from the sending burrow\u{2019}s seeders \
+                         too, when it offers them, and from the sender for the rest. Each of \
+                         those seeders sees this burrow\u{2019}s address.",
+                    ),
                 ],
             },
             Group {

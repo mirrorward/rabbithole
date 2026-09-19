@@ -677,7 +677,9 @@ pub fn Settings() -> impl IntoView {
                         "When this is on, a file you download from a burrow is offered to other \
                          people on that same burrow, from this Mac, while the app is open. The \
                          burrow decides who may fetch it, and only files it already lists are \
-                         shared. Turning it off stops it at once."
+                         shared. If that burrow lets people send files to other burrows, a \
+                         burrow one of those files is sent to may fetch it from you too, and \
+                         sees your address. Turning it off stops it at once."
                     </p>
                 </Show>
 

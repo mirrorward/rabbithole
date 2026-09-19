@@ -180,8 +180,7 @@ Kevin's answers, 2026-09-19. They supersede the proposal above.
   destination's queue (Transfers shows it "to" that burrow, with Cancel while it
   runs), and its ending is a toast once; a reconnect's replay does not repeat
   it. Every refusal names the burrow that refused and what would change it.
-- **Not built yet**: the swarm leg (pieces from the source's swarm peers,
-  needing a server-keyed capability and seeders that accept it).
+- **The swarm leg** came in 0.228.0; see below.
 
 ## As built (0.227.0: burrows that are not peers)
 
@@ -244,10 +243,74 @@ Kevin's answers, 2026-09-19. They supersede the proposal above.
   or its key's fingerprint; an approved peer reached this way keeps the name
   its operator approved. The audit line quotes the name and carries the key's
   fingerprint, and provenance keeps the key.
-- **Known limit**: a pull session does not know which person at the source
-  asked for its grant, so disabling that account does not end a session
-  already open; the grant still runs out within the hour, and switching off
-  `s2s_grants_to_any` ends new streams at once.
+- **A grant stops with its person's account** (0.228): the grant's nonce
+  carries the asking person's account id, hidden under a key the source
+  derives from its signing seed (7 random bytes, the id under a pad drawn
+  from them, a 3-byte tag). So the source reads, from any grant it signed,
+  whose it is, with nothing stored, after a restart as before, and refuses
+  its files once that account is disabled or gone: a file already streaming
+  and an open pull session check again every 15 seconds and stop, and a
+  person's grants hold at most 4 of the 32 pull sessions at once. A grant
+  made before 0.228 names no one: it still sends its files, but offers no
+  swarm.
+
+## As built (0.228.0: the swarm leg)
+
+- **Each end opts in.** The source offers its swarm peers only with
+  `s2s_swarm_sources`: their addresses reach the burrow the file is sent to.
+  The destination uses them only with `s2s_swarm`: each of them sees its
+  address. Both are off by default, live, under Federation & feeds.
+- **The destination asks per file**, for files of at least two swarm units
+  (2 MiB), on a stream of the link it already has (the federation session or
+  the pull session): an empty frame, then `PullStreamAsk::Sources`. A source
+  from before this answers "bad request" and nothing else changes.
+- **The source answers** only for a grant it would serve that file on, and
+  only if the person who asked for the grant may, at that moment, find and
+  fetch from its swarm (`FILE_LIST` and `FILE_DOWNLOAD` on `swarm`, as
+  `FindSources` and `SourceTicket` require), read from the grant's nonce
+  and that account as it stands. It lists at most 16 seeders that are visible
+  (never an invisible session, whoever asks), still connected, and hold the
+  same size, with an `S2sCapToken` naming the destination's server key under
+  `rhp-swarm-cap-s2s-v1`, good for ten minutes, as a person's ticket is.
+  Seeders accept it beside a
+  person's token (`rabbithole_swarm::token_allows`); older seeders refuse it.
+- **The destination fetches** with the swarm engine into its own staging
+  file (never the one the source's bytes go to), every seeder address held to
+  the same guard as any address it dials, within a deadline as long as a
+  fetch from the source gets and the same cancel (a cancel while the swarm
+  has a file ends the send; it does not go on to the source). Blocks are verified against the root as they
+  arrive and the whole file again before it is filed. Whatever the swarm
+  does not give comes from the source; once the swarm fails a file, the rest
+  of that send comes from the source alone, so a source naming seeders that
+  do not answer costs one round of dials, not one per file. The pull's audit
+  line counts the files that came from the swarm (`swarm=`). A capability
+  lasts ten minutes (never past the grant's own serving time); two minutes
+  before its end by this burrow's own count (seeders check it on their
+  clocks), a file still coming is asked for again, with the settings and the
+  person's account read afresh, and resumes where it was, as long as that
+  window brought at least what the source is held to in the same time and
+  the file's deadline has not passed. Once every unit is in, the check of
+  the whole file is not cut short. If the person's account closes or pulls
+  are switched off meanwhile, the send stops rather than going to the
+  source. Seeders are taken only as addresses, never names to look up; a
+  send dials at most 32 of them, not again one that gave nothing while
+  others gave, and stops asking a source that does not share its swarm or
+  refuses. A file over 64 GiB comes from the source.
+- **The engine got harder to stall** (it is the one the desktop app and the
+  command-line client use too): dropping a swarm fetch aborts its workers
+  and they write nothing after (they used to go on fetching and writing);
+  every wait on a peer has a limit; a peer's answer is read only up to what
+  a Bao stream for the range can take; a peer that claims the file ends
+  before the range, or answers a unit short, is retired instead of counted;
+  the fetch ends when the last unit lands, not when the slowest peer gives
+  up; a unit a failing peer put back after another peer landed it no
+  longer keeps the fetch going round (a fault older than this work); and the
+  resume record is rewritten every 32 units or two seconds, and when the
+  fetch is dropped, rather than after every unit.
+- **Seeders are told**: the app's "Help other people's downloads" note says
+  a burrow a file is sent to may fetch it from them and sees their address.
+- **Not built**: a person's own choice per send (the operators decide);
+  resuming a swarm fetch across a fallback (the source sends the whole file).
 
 ## Questions for Kevin
 

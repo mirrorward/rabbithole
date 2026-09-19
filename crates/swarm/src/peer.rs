@@ -4,7 +4,9 @@
 //! A sharing peer runs a [`PeerServer`] — a QUIC endpoint (the same
 //! `rabbithole-net` stack the client already speaks, fingerprint-pinned
 //! self-signed TLS) that serves byte ranges of files it seeds. Every
-//! request carries a server-signed [`CapToken`]; every response is a Bao
+//! request carries a server-signed [`CapToken`](crate::cap::CapToken) (or,
+//! for a burrow a file was sent to, an
+//! [`S2sCapToken`](crate::cap::S2sCapToken)); every response is a Bao
 //! stream, so the fetcher verifies each 16 KiB block against the file's
 //! blake3 root *as it arrives* — an untrusted peer can waste a fetcher's
 //! time, but never feed it a wrong byte.
@@ -33,6 +35,7 @@ use rabbithole_net::{
 use range_collections::RangeSet2;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use crate::cap::CapToken;
 
 /// Bao block size on the peer wire: 16 KiB chunk groups (log2(16) = 4).
@@ -237,10 +240,9 @@ async fn serve_stream(
         postcard::to_allocvec(&PeerResponseHeader { status, size }).expect("header serializes")
     };
 
-    // Authorize: a valid, unexpired capability for this exact root.
-    let authorized = CapToken::from_bytes(&req.token)
-        .map(|t| t.verify(&server_key, &req.root, now_unix()).is_ok())
-        .unwrap_or(false);
+    // Authorize: a valid, unexpired capability for this exact root, made
+    // for a person or for another burrow a file was sent to.
+    let authorized = crate::cap::token_allows(&req.token, &server_key, &req.root, now_unix());
     if !authorized {
         let h = respond(STATUS_DENIED, 0);
         let _ = write_framed(&mut send, &h).await;
@@ -341,7 +343,13 @@ pub async fn fetch_range(
         Err(_) => return Err(PeerError::Refused(STATUS_BAD_REQUEST)),
     };
     let bulk = conn.bulk().ok_or(PeerError::BadRequest)?;
-    let (mut send, mut recv) = bulk.open().await?;
+    // A peer that never grants a stream, or never takes the request, fails
+    // like one that never answers: every wait here has a limit, so one
+    // stalled peer cannot hold a worker (and the fetch waiting on it).
+    let (mut send, mut recv) = match tokio::time::timeout(PEER_CONNECT_TIMEOUT, bulk.open()).await {
+        Ok(r) => r?,
+        Err(_) => return Err(PeerError::Refused(STATUS_BAD_REQUEST)),
+    };
 
     let req = PeerRequest {
         token: token.to_vec(),
@@ -349,8 +357,15 @@ pub async fn fetch_range(
         offset,
         len,
     };
-    write_framed(&mut send, &postcard::to_allocvec(&req).expect("serializes")).await?;
-    send.shutdown().await?;
+    let req = postcard::to_allocvec(&req).expect("serializes");
+    match tokio::time::timeout(PEER_READ_TIMEOUT, write_framed(&mut send, &req)).await {
+        Ok(r) => r?,
+        Err(_) => return Err(PeerError::Refused(STATUS_BAD_REQUEST)),
+    }
+    match tokio::time::timeout(PEER_READ_TIMEOUT, send.shutdown()).await {
+        Ok(r) => r?,
+        Err(_) => return Err(PeerError::Refused(STATUS_BAD_REQUEST)),
+    }
 
     let header = match tokio::time::timeout(PEER_READ_TIMEOUT, read_framed(&mut recv, 64)).await {
         Ok(r) => r?,
@@ -361,15 +376,29 @@ pub async fn fetch_range(
     if header.status != STATUS_OK {
         return Err(PeerError::Refused(header.status));
     }
-    let len = len.min(header.size.saturating_sub(offset));
-    if len == 0 {
-        return Ok(Vec::new());
+    // An honest peer asked for a range inside the file says the file goes
+    // past it; one that says it ends before claims to have nothing, and is
+    // not taken at its word (nothing it sent could be verified).
+    if header.size <= offset {
+        return Err(PeerError::Verify(
+            "peer claims the file ends before the range".into(),
+        ));
     }
+    let len = len.min(header.size - offset);
     // Bound the body read: a peer that sent a valid header then stalls mid-stream
     // must fail (freeing the worker + the scheduler's join/progress-drain) rather
-    // than park here until the QUIC idle timeout — or forever.
+    // than park here until the QUIC idle timeout — or forever. And bound its
+    // size: a Bao stream for `len` bytes is the covered 16 KiB blocks (one
+    // more at each end for alignment) and their 64-byte parent hashes, so a
+    // peer sending more than twice that is lying, and the rest is never read.
+    let limit = 2 * len + 64 * 1024;
     let mut stream = Vec::new();
-    match tokio::time::timeout(PEER_READ_TIMEOUT, recv.read_to_end(&mut stream)).await {
+    match tokio::time::timeout(
+        PEER_READ_TIMEOUT,
+        (&mut recv).take(limit).read_to_end(&mut stream),
+    )
+    .await
+    {
         Ok(r) => {
             r?;
         }
