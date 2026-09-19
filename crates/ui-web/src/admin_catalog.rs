@@ -972,6 +972,27 @@ pub const SECTIONS: &[Section] = &[
                     )
                     .unit(Unit::Bytes)
                     .zero("no limit beyond those"),
+                    item(
+                        "s2s_grants_to_any",
+                        "Send to burrows that are not peers",
+                        "Let people send to any burrow they are also on, not only approved \
+                         peers. That burrow connects to this one\u{2019}s QUIC port and proves \
+                         it is the one named; people still send only what they may download.",
+                    ),
+                    item(
+                        "s2s_pull_from_any",
+                        "Take sends from burrows that are not peers",
+                        "Let people bring files from any burrow they are also on. This burrow \
+                         connects to that one to fetch them, and files them under the person \
+                         as any send.",
+                    ),
+                    item(
+                        "s2s_private_addresses",
+                        "Reach private addresses",
+                        "Let those connections go to private and local addresses: for burrows \
+                         on one network or one machine. Off, only public addresses are dialed, \
+                         so a send cannot be used to reach this burrow\u{2019}s own network.",
+                    ),
                 ],
             },
             Group {

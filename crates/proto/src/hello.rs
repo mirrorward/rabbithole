@@ -216,6 +216,32 @@ impl Message for KeyProof {
     const MESSAGE_TYPE: u16 = 3;
 }
 
+/// Before signing in: turn this connection into a pull session, for a burrow
+/// fetching files another burrow granted it (a send between burrows that are
+/// not federation peers). The sender must have offered its server key in
+/// [`Hello`] and proved it with [`KeyProof`] over QUIC, bound to this
+/// burrow's certificate; the grant must be this burrow's, name that key, and
+/// still stand. → empty ack, after which the connection serves pull streams
+/// and nothing else. `Unauthenticated` without a proven key or off QUIC;
+/// `Unsupported` when this burrow does not send to burrows that are not its
+/// peers; `Forbidden` for a grant that does not hold.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullSessionOpen {
+    pub grant: Vec<u8>,
+}
+
+impl PullSessionOpen {
+    pub fn new(grant: Vec<u8>) -> Self {
+        Self { grant }
+    }
+}
+
+impl Message for PullSessionOpen {
+    const FAMILY: Family = Family::SESSION;
+    const MESSAGE_TYPE: u16 = 15;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

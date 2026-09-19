@@ -43,6 +43,7 @@
 #![forbid(unsafe_code)]
 
 pub mod quic;
+pub mod reach;
 pub mod tls;
 pub mod ws;
 

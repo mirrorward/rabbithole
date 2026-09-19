@@ -127,6 +127,9 @@ Kevin's answers, 2026-09-19. They supersede the proposal above.
    name clash the newcomer is numbered, the way downloads number theirs.
 4. **No client relay.** A is dropped; only the destination-initiated pull (B)
    is built.
+5. **Non-peers too** (Kevin, 2026-09-19, later): a person may send between two
+   burrows that are not federation peers, honoring their permissions at each.
+   Per answer 1 it stays an operator's choice at each end, off by default.
 
 ## As built (0.225.0: the burrows' side)
 
@@ -177,11 +180,74 @@ Kevin's answers, 2026-09-19. They supersede the proposal above.
   destination's queue (Transfers shows it "to" that burrow, with Cancel while it
   runs), and its ending is a toast once; a reconnect's replay does not repeat
   it. Every refusal names the burrow that refused and what would change it.
-- **Not built yet**: the swarm
-  leg (pieces from the source's swarm peers, needing a server-keyed capability
-  and seeders that accept it); pulling from a burrow that is not an approved
-  peer (`s2s_pull_from_any`, question 1's opt-in), which needs a dial path with
-  private-address guards.
+- **Not built yet**: the swarm leg (pieces from the source's swarm peers,
+  needing a server-keyed capability and seeders that accept it).
+
+## As built (0.227.0: burrows that are not peers)
+
+- **Each end opts in.** The source signs for a burrow that is not its peer
+  only with `s2s_grants_to_any`; the destination fetches from one only with
+  `s2s_pull_from_any`. Both are off by default, live, and sit under Federation
+  & feeds beside the other send settings. Approved peers keep using their
+  federation session and need neither.
+- **The grant says where to connect** (grant version 2). It carries the
+  source's certificate fingerprint and up to four different `host:port`
+  addresses: the host the operator advertises (`advertise_host`), then the
+  host the person's app reached the source at, each with the source's QUIC
+  client port. The app sends that host with the new `PullGrantAsk` (FILE 39);
+  a source that predates it answers `Unsupported` and the app asks the older
+  way. Hosts are names or IP literals only, no ports, schemes or paths.
+- **Peers keep the first grant format.** A grant for an approved peer is
+  still version 1, without the certificate or addresses, byte for byte what
+  0.225 and 0.226 write and read, so peers on different releases still send
+  to each other. Every burrow reads both versions. No grant is taken that
+  stands more than two hours from when it is checked (a source signs for
+  one).
+- **The destination dials the source's client port**, never its federation
+  port, which may not be open. Each address is resolved once and refused if
+  any answer is private, loopback, link-local, carrier-grade NAT, multicast,
+  documentation or otherwise not public (`rabbithole_net::reach`), unless the
+  operator allows private addresses (`s2s_private_addresses`, off). The
+  connection is pinned to the grant's certificate fingerprint, so an address
+  that answers with another certificate is dropped. Ten seconds per address,
+  twenty in all, while the person's request waits.
+- **The destination proves its key there.** It says Hello offering its server
+  key, checks the key the source claims is the one that signed the grant,
+  signs the source's challenge bound to that certificate (the same key proof
+  people use), and opens a pull session with the grant (`PullSessionOpen`,
+  SESSION 15). The source opens one only over QUIC, only for a key that
+  proved itself on that connection, only while the grant it signed names that
+  key and stands (five minutes' leeway for the clocks, not the six-hour
+  grace), and only one at a time per grant; 32 at once in all. A pull session
+  has no account, no presence, no chat and no pushes: it answers pull streams
+  for that grant alone, eight at a time, and Ping, until the grant's six-hour
+  grace ends, the connection closes, a reply goes unread for ten seconds, or
+  the burrow shuts down. A failed open is charged to the sign-in budget of its
+  address.
+- **Connecting out costs the person.** At the destination a send from a
+  burrow that is not a peer is charged to the person's transfer budget and
+  takes its place among the pulls running (the person's `s2s_max_concurrent`
+  and the burrow's 16) before anything is dialed, so no one can make the
+  burrow connect out faster than they could start pulls. Anyone there can
+  sign a grant with a key of their own, so these limits, the address guard
+  and the certificate pin are what bound it.
+- **The client port takes connections in parallel.** The QUIC listener used
+  to wait on each client's handshake and first stream in turn, so one client
+  that connected and said nothing held up every other, including
+  destinations dialing in for their pulls. Each handshake now runs on its own
+  task, ten seconds for the handshake and ten for the first stream, 256 at
+  once.
+- **Everything else is the peers' path**: the same checks at the destination
+  before a byte moves, the same one-stream-per-file fetch, blake3 roots,
+  provenance and queue row. The source's name for the person and the record is
+  what it calls itself in the handshake, printable and at most 64 characters,
+  or its key's fingerprint; an approved peer reached this way keeps the name
+  its operator approved. The audit line quotes the name and carries the key's
+  fingerprint, and provenance keeps the key.
+- **Known limit**: a pull session does not know which person at the source
+  asked for its grant, so disabling that account does not end a session
+  already open; the grant still runs out within the hour, and switching off
+  `s2s_grants_to_any` ends new streams at once.
 
 ## Questions for Kevin
 

@@ -611,6 +611,7 @@ async fn run_peer_session(
                 tokio::spawn(crate::s2s::serve_pull_stream(
                     shared.clone(),
                     peer_key,
+                    None,
                     send,
                     recv,
                 ));

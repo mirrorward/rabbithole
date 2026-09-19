@@ -9,9 +9,10 @@
 
 use leptos::*;
 use rabbithole_proto::filelib::{
-    AreaList, AreaListRequest, FileAreaView, FolderListRequest, NodeList, PullGrantIssued,
-    PullGrantRequest, RemotePull, RemotePullAccepted,
+    AreaList, AreaListRequest, FileAreaView, FolderListRequest, NodeList, PullGrantAsk,
+    PullGrantIssued, PullGrantRequest, RemotePull, RemotePullAccepted,
 };
+use rabbithole_proto::ErrorCode;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::app::{AppState, SendAsk, ServerId};
@@ -403,9 +404,18 @@ fn start(
             busy.set(false);
             problem.set(Some(why));
         };
-        let reply = from_ws
-            .call(&PullGrantRequest::new(dest_key, vec![ask.node_id]))
+        // Ask with the host this app reaches the source at: a destination
+        // that is not the source's peer connects there. A source that
+        // predates the question is asked the older way.
+        let host = send::reach_host(&ask.source.0);
+        let mut reply = from_ws
+            .call(&PullGrantAsk::new(dest_key, vec![ask.node_id], host))
             .await;
+        if reply.as_ref().and_then(|f| f.error) == Some(ErrorCode::Unsupported) {
+            reply = from_ws
+                .call(&PullGrantRequest::new(dest_key, vec![ask.node_id]))
+                .await;
+        }
         let issued = match reply {
             Some(f) if f.error.is_none() => f.decode::<PullGrantIssued>().and_then(Result::ok),
             Some(f) => {

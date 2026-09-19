@@ -28,8 +28,23 @@ use serde::{Deserialize, Serialize};
 /// a handshake or a swarm capability can never verify as a grant.
 pub const PULL_GRANT_CONTEXT: &[u8] = b"rhp-fed-pull-grant-v1";
 
-/// The grant format this crate writes and accepts.
-pub const PULL_GRANT_VERSION: u32 = 1;
+/// The grant format this crate writes for destinations that are not the
+/// source's federation peers: 2 adds the source's certificate fingerprint and
+/// addresses.
+pub const PULL_GRANT_VERSION: u32 = 2;
+
+/// The first grant format, without the certificate or addresses. Still read,
+/// and still written for approved federation peers, which fetch over their
+/// federation session: a peer on a release before version 2 reads it.
+pub const PULL_GRANT_V1: u32 = 1;
+
+/// Longest a grant may stand from the moment it is checked, in seconds. A
+/// source signs for an hour; this leaves room for two burrows' clocks to
+/// disagree, and refuses a grant made to last.
+pub const MAX_GRANT_LIFETIME_SECS: i64 = 2 * 3600;
+
+/// Most addresses a grant carries.
+pub const MAX_ENDPOINTS: usize = 4;
 
 /// Most files one grant may name.
 pub const MAX_PULL_ITEMS: usize = 1000;
@@ -78,6 +93,13 @@ pub struct PullGrant {
     /// Single use: the destination refuses a nonce it has seen.
     pub nonce: [u8; 16],
     pub items: Vec<PullItem>,
+    /// The source's TLS certificate fingerprint (blake3 of the DER), which a
+    /// destination that is not a federation peer pins when it connects.
+    pub tls_fingerprint: [u8; 32],
+    /// Where the source's QUIC client port can be reached, as `host:port`,
+    /// for a destination that is not a federation peer. The source vouches
+    /// for them by signing; the destination still refuses private ones.
+    pub endpoints: Vec<String>,
 }
 
 /// A grant and the source's signature over it.
@@ -87,6 +109,53 @@ pub struct SignedPullGrant {
     /// Ed25519 over [`PULL_GRANT_CONTEXT`] ‖ postcard(grant), by
     /// `grant.source_key`.
     pub sig: Signature,
+}
+
+/// The first grant format on the wire: [`PullGrant`] without its last two
+/// fields.
+#[derive(Serialize, Deserialize)]
+struct PullGrantV1 {
+    version: u32,
+    source_key: [u8; 32],
+    fetcher_key: [u8; 32],
+    issued_unix: i64,
+    expires_unix: i64,
+    nonce: [u8; 16],
+    items: Vec<PullItem>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SignedPullGrantV1 {
+    grant: PullGrantV1,
+    sig: Signature,
+}
+
+impl PullGrantV1 {
+    fn of(g: &PullGrant) -> Self {
+        Self {
+            version: g.version,
+            source_key: g.source_key,
+            fetcher_key: g.fetcher_key,
+            issued_unix: g.issued_unix,
+            expires_unix: g.expires_unix,
+            nonce: g.nonce,
+            items: g.items.clone(),
+        }
+    }
+
+    fn into_grant(self) -> PullGrant {
+        PullGrant {
+            version: self.version,
+            source_key: self.source_key,
+            fetcher_key: self.fetcher_key,
+            issued_unix: self.issued_unix,
+            expires_unix: self.expires_unix,
+            nonce: self.nonce,
+            items: self.items,
+            tls_fingerprint: [0; 32],
+            endpoints: Vec::new(),
+        }
+    }
 }
 
 /// Why a grant is refused.
@@ -108,12 +177,20 @@ pub enum PullGrantError {
     Count,
     #[error("the grant carries a path this burrow will not file")]
     BadPath,
+    #[error("the grant stands longer than any burrow signs one for")]
+    TooLong,
 }
 
 impl PullGrant {
     /// Sign as the source. `source_key` is set from `key`, so the grant
-    /// always names its signer.
+    /// always names its signer. A version 1 grant carries no certificate or
+    /// addresses: that format has nowhere to put them.
     pub fn sign(mut self, key: &IdentityKey) -> Result<SignedPullGrant, PullGrantError> {
+        if self.version == PULL_GRANT_V1
+            && (self.tls_fingerprint != [0; 32] || !self.endpoints.is_empty())
+        {
+            return Err(PullGrantError::Version);
+        }
         self.source_key = key.public().0;
         let sig = key.sign(&signed_bytes(&self)?);
         Ok(SignedPullGrant { grant: self, sig })
@@ -129,12 +206,34 @@ impl PullGrant {
 }
 
 impl SignedPullGrant {
+    /// The grant in its own version's layout.
     pub fn to_bytes(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("a grant always encodes")
+        if self.grant.version == PULL_GRANT_V1 {
+            let v1 = SignedPullGrantV1 {
+                grant: PullGrantV1::of(&self.grant),
+                sig: self.sig,
+            };
+            postcard::to_allocvec(&v1).expect("a grant always encodes")
+        } else {
+            postcard::to_allocvec(self).expect("a grant always encodes")
+        }
     }
 
+    /// Either version: the leading version number says which layout
+    /// follows.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PullGrantError> {
-        postcard::from_bytes(bytes).map_err(|_| PullGrantError::Decode)
+        let (version, _) =
+            postcard::take_from_bytes::<u32>(bytes).map_err(|_| PullGrantError::Decode)?;
+        if version == PULL_GRANT_V1 {
+            let v1: SignedPullGrantV1 =
+                postcard::from_bytes(bytes).map_err(|_| PullGrantError::Decode)?;
+            Ok(Self {
+                grant: v1.grant.into_grant(),
+                sig: v1.sig,
+            })
+        } else {
+            postcard::from_bytes(bytes).map_err(|_| PullGrantError::Decode)
+        }
     }
 
     /// Everything a burrow must check before acting on the grant: its
@@ -147,7 +246,7 @@ impl SignedPullGrant {
         now_unix: i64,
     ) -> Result<(), PullGrantError> {
         let g = &self.grant;
-        if g.version != PULL_GRANT_VERSION {
+        if g.version != PULL_GRANT_VERSION && g.version != PULL_GRANT_V1 {
             return Err(PullGrantError::Version);
         }
         if &g.source_key != source {
@@ -162,18 +261,39 @@ impl SignedPullGrant {
         if now_unix >= g.expires_unix {
             return Err(PullGrantError::Expired);
         }
+        if g.expires_unix.saturating_sub(now_unix) > MAX_GRANT_LIFETIME_SECS {
+            return Err(PullGrantError::TooLong);
+        }
         if g.items.is_empty() || g.items.len() > MAX_PULL_ITEMS {
             return Err(PullGrantError::Count);
         }
         if !g.items.iter().all(|i| rel_path_is_acceptable(&i.rel_path)) {
             return Err(PullGrantError::BadPath);
         }
+        let repeated = g
+            .endpoints
+            .iter()
+            .enumerate()
+            .any(|(i, e)| g.endpoints[..i].contains(e));
+        if g.endpoints.len() > MAX_ENDPOINTS
+            || repeated
+            || !g.endpoints.iter().all(|e| endpoint_is_acceptable(e))
+        {
+            return Err(PullGrantError::BadPath);
+        }
         Ok(())
     }
 }
 
+/// What the source signs: the context, then the grant in its own version's
+/// layout.
 fn signed_bytes(grant: &PullGrant) -> Result<Vec<u8>, PullGrantError> {
-    let body = postcard::to_allocvec(grant).map_err(|_| PullGrantError::Decode)?;
+    let body = if grant.version == PULL_GRANT_V1 {
+        postcard::to_allocvec(&PullGrantV1::of(grant))
+    } else {
+        postcard::to_allocvec(grant)
+    }
+    .map_err(|_| PullGrantError::Decode)?;
     let mut msg = Vec::with_capacity(PULL_GRANT_CONTEXT.len() + body.len());
     msg.extend_from_slice(PULL_GRANT_CONTEXT);
     msg.extend_from_slice(&body);
@@ -204,6 +324,58 @@ pub fn rel_path_is_acceptable(path: &str) -> bool {
         && path.len() <= MAX_PULL_PATH
         && segments.len() <= MAX_PULL_DEPTH
         && segments.iter().all(|s| segment_is_acceptable(s))
+}
+
+/// Whether `host` is a bare host name or IP address a grant may name: DNS
+/// labels (letters, digits, hyphens, dots), an IPv4 literal, or an IPv6
+/// literal with or without brackets. No scheme, port, path or user info.
+pub fn host_is_acceptable(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if bare.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    !host.starts_with('.')
+        && !host.ends_with('.')
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+/// `host:port` for a QUIC endpoint, IPv6 literals bracketed.
+pub fn endpoint(host: &str, port: u16) -> String {
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if bare.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{bare}]:{port}")
+    } else {
+        format!("{bare}:{port}")
+    }
+}
+
+/// Whether an endpoint in a grant is a `host:port` this crate would write.
+pub fn endpoint_is_acceptable(endpoint: &str) -> bool {
+    match endpoint.rsplit_once(':') {
+        Some((host, port)) => {
+            port.parse::<u16>().is_ok_and(|p| p != 0)
+                && host_is_acceptable(host)
+                && (!host.contains(':') || (host.starts_with('[') && host.ends_with(']')))
+        }
+        None => false,
+    }
 }
 
 /// What the destination sends first on a bulk stream of the federation
@@ -250,6 +422,8 @@ mod tests {
             expires_unix: 700,
             nonce: [9; 16],
             items,
+            tls_fingerprint: [4; 32],
+            endpoints: vec!["burrow.example:4653".into()],
         }
     }
 
@@ -318,6 +492,157 @@ mod tests {
         forged.grant.source_key = src;
         assert_eq!(
             forged.check(&src, &dest, 500),
+            Err(PullGrantError::BadSignature)
+        );
+    }
+
+    /// The first format exactly as releases before version 2 wrote and
+    /// signed it, defined here apart from the crate's own copy.
+    #[derive(Serialize)]
+    struct OldGrant {
+        version: u32,
+        source_key: [u8; 32],
+        fetcher_key: [u8; 32],
+        issued_unix: i64,
+        expires_unix: i64,
+        nonce: [u8; 16],
+        items: Vec<PullItem>,
+    }
+
+    #[derive(Serialize)]
+    struct OldSigned {
+        grant: OldGrant,
+        sig: Signature,
+    }
+
+    #[test]
+    fn a_first_format_grant_still_reads_verifies_and_is_written_for_peers() {
+        let source = key(1);
+        let dest = key(2).public().0;
+        let old = OldGrant {
+            version: 1,
+            source_key: source.public().0,
+            fetcher_key: dest,
+            issued_unix: 100,
+            expires_unix: 700,
+            nonce: [9; 16],
+            items: vec![item("a", 1)],
+        };
+        let mut msg = PULL_GRANT_CONTEXT.to_vec();
+        msg.extend(postcard::to_allocvec(&old).unwrap());
+        let sig = source.sign(&msg);
+        let bytes = postcard::to_allocvec(&OldSigned { grant: old, sig }).unwrap();
+
+        // An older source's grant reads here and verifies.
+        let read = SignedPullGrant::from_bytes(&bytes).unwrap();
+        assert_eq!(read.grant.version, PULL_GRANT_V1);
+        assert!(read.grant.endpoints.is_empty());
+        assert_eq!(read.check(&source.public().0, &dest, 500), Ok(()));
+        // What this crate writes for a peer is byte for byte what an older
+        // destination reads.
+        assert_eq!(read.to_bytes(), bytes);
+        let mut fresh = grant(dest, vec![item("a", 1)]);
+        fresh.version = PULL_GRANT_V1;
+        fresh.tls_fingerprint = [0; 32];
+        fresh.endpoints.clear();
+        let signed = fresh.sign(&source).unwrap();
+        assert_eq!(signed.to_bytes(), bytes);
+
+        // The first format has nowhere to put addresses.
+        let mut mixed = grant(dest, vec![item("a", 1)]);
+        mixed.version = PULL_GRANT_V1;
+        assert_eq!(mixed.sign(&source).err(), Some(PullGrantError::Version));
+        // Nor is a version this crate never wrote read.
+        let mut later = grant(dest, vec![item("a", 1)]);
+        later.version = 3;
+        let later = later.sign(&source).unwrap();
+        let back = SignedPullGrant::from_bytes(&later.to_bytes()).unwrap();
+        assert_eq!(
+            back.check(&source.public().0, &dest, 500),
+            Err(PullGrantError::Version)
+        );
+    }
+
+    #[test]
+    fn a_grant_made_to_last_or_naming_an_address_twice_is_refused() {
+        let source = key(1);
+        let dest = key(2).public().0;
+        let mut g = grant(dest, vec![item("a", 1)]);
+        g.expires_unix = 500 + MAX_GRANT_LIFETIME_SECS + 1;
+        let long = g.sign(&source).unwrap();
+        assert_eq!(
+            long.check(&source.public().0, &dest, 500),
+            Err(PullGrantError::TooLong)
+        );
+        assert_eq!(long.check(&source.public().0, &dest, 501), Ok(()));
+        let mut g = grant(dest, vec![item("a", 1)]);
+        g.endpoints = vec!["a.example:1".into(), "a.example:1".into()];
+        let twice = g.sign(&source).unwrap();
+        assert_eq!(
+            twice.check(&source.public().0, &dest, 500),
+            Err(PullGrantError::BadPath)
+        );
+    }
+
+    #[test]
+    fn a_grant_names_only_hosts_and_ports() {
+        for good in [
+            "burrow.example",
+            "a-b.c",
+            "127.0.0.1",
+            "::1",
+            "[2001:db8::1]",
+        ] {
+            assert!(host_is_acceptable(good), "{good}");
+        }
+        for bad in [
+            "",
+            "http://x",
+            "x/y",
+            "x:1",
+            "-x.example",
+            "x..y",
+            "user@x",
+            "x example",
+        ] {
+            assert!(!host_is_acceptable(bad), "{bad:?}");
+        }
+        assert_eq!(endpoint("burrow.example", 4653), "burrow.example:4653");
+        assert_eq!(endpoint("::1", 4653), "[::1]:4653");
+        assert_eq!(endpoint("[::1]", 4653), "[::1]:4653");
+        for good in ["burrow.example:4653", "127.0.0.1:1", "[::1]:4653"] {
+            assert!(endpoint_is_acceptable(good), "{good}");
+        }
+        for bad in [
+            "burrow.example",
+            "burrow.example:0",
+            "::1:4653",
+            "x:99999",
+            "http://x:1",
+        ] {
+            assert!(!endpoint_is_acceptable(bad), "{bad}");
+        }
+        let source = key(1);
+        let dest = key(2).public().0;
+        let mut g = grant(dest, vec![item("a", 1)]);
+        g.endpoints = vec!["http://evil:1".into()];
+        let bad = g.sign(&source).unwrap();
+        assert_eq!(
+            bad.check(&source.public().0, &dest, 500),
+            Err(PullGrantError::BadPath)
+        );
+        let mut g = grant(dest, vec![item("a", 1)]);
+        g.endpoints = vec!["a.example:1".into(); MAX_ENDPOINTS + 1];
+        let many = g.sign(&source).unwrap();
+        assert_eq!(
+            many.check(&source.public().0, &dest, 500),
+            Err(PullGrantError::BadPath)
+        );
+        // The fingerprint and addresses are signed: changing them breaks it.
+        let mut moved = grant(dest, vec![item("a", 1)]).sign(&source).unwrap();
+        moved.grant.endpoints = vec!["elsewhere.example:4653".into()];
+        assert_eq!(
+            moved.check(&source.public().0, &dest, 500),
             Err(PullGrantError::BadSignature)
         );
     }

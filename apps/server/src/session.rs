@@ -193,6 +193,31 @@ pub async fn run_session(
             continue;
         }
 
+        // A burrow fetching files another burrow granted it: no account, only
+        // the key it proved above, bound to this burrow's certificate (so QUIC
+        // only). From here the connection serves that grant's files and
+        // nothing else.
+        if let Some(Ok(req)) = frame.decode::<rabbithole_proto::hello::PullSessionOpen>() {
+            let bound = peer.transport == rabbithole_net::TransportKind::Quic
+                && channel_binder(&shared, peer.transport)
+                    != rabbithole_proto::hello::NO_CHANNEL_BINDING;
+            match crate::s2s::open_pull_session(&shared, verified_pubkey, bound, &req.grant) {
+                Ok(session) => {
+                    conn.send(Frame::ack(&frame)).await?;
+                    tracing::info!(session_id, remote = %peer.remote_addr, "pull session");
+                    return crate::s2s::run_pull_session(conn, shared, session).await;
+                }
+                Err(code) => {
+                    conn.send(Frame::error_reply(&frame, code)).await?;
+                    if !shared.rate_allow(Scope::Ip(peer_ip), rl::AUTH) {
+                        conn.close().await;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+        }
+
         let attempt: Option<Result<AuthedUser, AuthError>> =
             if let Some(Ok(req)) = frame.decode::<psess::AuthPassword>() {
                 Some(

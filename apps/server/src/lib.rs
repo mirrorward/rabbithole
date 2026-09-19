@@ -84,6 +84,9 @@ pub struct Shared {
     /// Ed25519 signing seed for theme bundles and (later) federation.
     pub server_signing_seed: [u8; 32],
     pub fingerprint_hex: String,
+    /// Where the QUIC client listener is bound: its port goes into pull
+    /// grants for burrows that are not federation peers.
+    pub quic_bound: SocketAddr,
     /// The shared dupe/seen gate — prevents reprocessing and rebroadcast
     /// loops once federation (W9) and syndication (W10) come online.
     pub dedup: DedupStore,
@@ -317,6 +320,7 @@ impl Burrow {
             server_key: identity.signing.public().0,
             server_signing_seed: identity.signing.seed(),
             fingerprint_hex: fingerprint.to_hex(),
+            quic_bound: quic_addr,
             dedup: DedupStore::with_defaults(),
             transfers: handlers9::TransferRegistry::new(),
             s2s: s2s::S2sState::default(),

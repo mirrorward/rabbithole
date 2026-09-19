@@ -28,9 +28,15 @@ use parking_lot::Mutex;
 use rabbithole_blobs::BlobId;
 use rabbithole_federation::pull::{self as fp, stream_status, PullStreamRequest, SignedPullGrant};
 use rabbithole_identity::IdentityKey;
-use rabbithole_net::{read_framed, write_framed, BulkRecv, BulkSend, BulkStreams, Connection};
+use rabbithole_net::quic::QuicTransport;
+use rabbithole_net::tls::{CertFingerprint, ServerAuth};
+use rabbithole_net::{
+    read_framed, write_framed, BulkRecv, BulkSend, BulkStreams, Connection, Transport,
+};
 use rabbithole_proto::filelib::{pull_reason, pull_state};
+use rabbithole_proto::hello::{key_auth_message, Hello, HelloAck, KeyProof, PullSessionOpen};
 use rabbithole_proto::{filelib as pf, ErrorCode, Frame};
+use rabbithole_proto::{CapabilitySet, FrameKind, RequestId};
 use rabbithole_server_core::files::{KIND_FILE, KIND_FOLDER};
 use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::{Caps, FileError, ServerEvent};
@@ -77,6 +83,9 @@ pub struct S2sState {
     next_link: AtomicU64,
     pulls: Mutex<HashMap<u64, PullEntry>>,
     next_pull: AtomicU64,
+    /// Pull sessions open here for burrows fetching directly, by the nonce
+    /// of the grant each was opened with: one at a time per grant.
+    sessions: Mutex<HashSet<[u8; 16]>>,
 }
 
 struct PullEntry {
@@ -230,8 +239,17 @@ pub async fn handle(
         }};
     }
 
+    if let Some(Ok(req)) = frame.decode::<pf::PullGrantAsk>() {
+        let plain = pf::PullGrantRequest::new(req.fetcher_key, req.nodes);
+        match grant(shared, ctx, &plain, &req.reach_host).await {
+            Ok(issued) => conn.send(Frame::reply_to(frame, &issued)?).await?,
+            Err(code) => fail!(code),
+        }
+        return Ok(true);
+    }
+
     if let Some(Ok(req)) = frame.decode::<pf::PullGrantRequest>() {
-        match grant(shared, ctx, &req).await {
+        match grant(shared, ctx, &req, "").await {
             Ok(issued) => conn.send(Frame::reply_to(frame, &issued)?).await?,
             Err(code) => fail!(code),
         }
@@ -324,6 +342,7 @@ async fn grant(
     shared: &Arc<Shared>,
     ctx: &SessionCtx,
     req: &pf::PullGrantRequest,
+    reach_host: &str,
 ) -> Result<pf::PullGrantIssued, ErrorCode> {
     if !shared.config.read().s2s_grants_enabled {
         return Err(ErrorCode::Unsupported);
@@ -334,7 +353,11 @@ async fn grant(
     if req.nodes.is_empty() || req.nodes.len() > MAX_REQUEST_NODES {
         return Err(ErrorCode::BadRequest);
     }
-    if req.fetcher_key == shared.server_key || !shared.peers.is_approved(&req.fetcher_key) {
+    // A peer, or any burrow when the operator allows it: the fetcher proves
+    // its key when it comes to fetch either way.
+    if req.fetcher_key == shared.server_key
+        || !(shared.peers.is_approved(&req.fetcher_key) || shared.config.read().s2s_grants_to_any)
+    {
         return Err(ErrorCode::Unavailable);
     }
     if !shared.rate_allow(Scope::Account(ctx.account_id), rl::TRANSFER) {
@@ -406,15 +429,32 @@ async fn grant(
             ErrorCode::NotFound
         });
     }
+    // A peer fetches over the federation session and gets the first
+    // format, which a peer on an older release reads too. Anyone else is
+    // told where to connect, and which certificate to expect there.
+    let (version, tls_fingerprint, endpoints) = if shared.peers.is_approved(&req.fetcher_key) {
+        (fp::PULL_GRANT_V1, [0; 32], Vec::new())
+    } else {
+        let certificate = CertFingerprint::from_hex(&shared.fingerprint_hex)
+            .map(|fp| fp.0)
+            .ok_or(ErrorCode::Internal)?;
+        (
+            fp::PULL_GRANT_VERSION,
+            certificate,
+            reachable_at(shared, reach_host),
+        )
+    };
     let now = now_unix();
     let unsigned = fp::PullGrant {
-        version: fp::PULL_GRANT_VERSION,
+        version,
         source_key: shared.server_key,
         fetcher_key: req.fetcher_key,
         issued_unix: now,
         expires_unix: now + GRANT_TTL_SECS,
         nonce: nonce(),
         items,
+        tls_fingerprint,
+        endpoints,
     };
     let files = unsigned.items.len() as u32;
     let bytes = unsigned.total_bytes();
@@ -440,6 +480,25 @@ async fn grant(
     Ok(pf::PullGrantIssued::new(
         encoded, files, bytes, skipped, expires,
     ))
+}
+
+/// Where a burrow that is not a federation peer can reach this one's QUIC
+/// port: the host the operator advertises, then the one the person's app
+/// used. Each is a claim this burrow signs; the destination still refuses
+/// private addresses unless its operator allows them.
+fn reachable_at(shared: &Shared, reach_host: &str) -> Vec<String> {
+    let port = shared.quic_bound.port();
+    let advertised = shared.config.read().advertise_host.clone();
+    let mut out: Vec<String> = Vec::new();
+    for host in [advertised.trim(), reach_host.trim()] {
+        if !host.is_empty() && fp::host_is_acceptable(host) {
+            let e = fp::endpoint(host, port);
+            if !out.contains(&e) && out.len() < fp::MAX_ENDPOINTS {
+                out.push(e);
+            }
+        }
+    }
+    out
 }
 
 /// The peer's federation name, or its key's fingerprint when it has none.
@@ -493,9 +552,15 @@ async fn accept(
     }
     let signed = SignedPullGrant::from_bytes(&req.grant).map_err(|_| ErrorCode::BadRequest)?;
     let source = signed.grant.source_key;
-    // The source must be a peer this burrow approved, with a session up now.
-    // Its key comes from the registry, never from the grant's own say-so.
-    if !shared.peers.is_approved(&source) || shared.s2s.link(&source).is_none() {
+    // An approved peer with a session up now is fetched from over that
+    // session. Anyone else only if the operator takes sends from any burrow:
+    // then this burrow connects to it, at an address the grant carries.
+    let peer_link = shared
+        .peers
+        .is_approved(&source)
+        .then(|| shared.s2s.link(&source))
+        .flatten();
+    if peer_link.is_none() && !shared.config.read().s2s_pull_from_any {
         return Err(ErrorCode::Unavailable);
     }
     let now = now_unix();
@@ -547,8 +612,36 @@ async fn accept(
     if max_bytes > 0 && total > max_bytes {
         return Err(ErrorCode::TooLarge);
     }
+    // Every check passed. Reaching a burrow that is not a peer means
+    // connecting out on the person's behalf: that costs from their transfer
+    // budget, and the pull's place is taken first, so the limits on pulls
+    // bound connections in progress too.
+    if peer_link.is_none() && !shared.rate_allow(Scope::Account(ctx.account_id), rl::TRANSFER) {
+        return Err(ErrorCode::RateLimited);
+    }
     let Some((pull_id, cancel)) = shared.s2s.reserve(ctx.account_id, per_account) else {
         return Err(ErrorCode::RateLimited);
+    };
+    let (link, hold, source_name) = match peer_link {
+        Some(link) => (link, None, peer_name(shared, &source)),
+        None => match dial_source(shared, &signed, &req.grant).await {
+            // An approved peer keeps the name its operator approved, not
+            // the one it gives itself.
+            Ok(direct) if shared.peers.is_approved(&source) => {
+                (direct.bulk, Some(direct.conn), peer_name(shared, &source))
+            }
+            Ok(direct) => (direct.bulk, Some(direct.conn), direct.name),
+            Err(why) => {
+                shared.s2s.release(pull_id);
+                tracing::info!(%why, "pull: could not reach the source");
+                return Err(ErrorCode::Unavailable);
+            }
+        },
+    };
+    let close_hold = |hold: Option<Box<dyn Connection>>| async move {
+        if let Some(mut conn) = hold {
+            conn.close().await;
+        }
     };
     // Spent last, so a refusal above leaves the grant good for another try.
     match shared
@@ -559,21 +652,23 @@ async fn accept(
         Ok(true) => {}
         Ok(false) => {
             shared.s2s.release(pull_id);
+            close_hold(hold).await;
             return Err(ErrorCode::AlreadyExists);
         }
         Err(_) => {
             shared.s2s.release(pull_id);
+            close_hold(hold).await;
             return Err(ErrorCode::Internal);
         }
     }
-    let source_name = peer_name(shared, &source);
     let files = signed.grant.items.len() as u32;
     audit(
         shared,
         &ctx.login,
         "pull-accept",
         format!(
-            "#{pull_id} from={source_name} files={files} bytes={total} into={}/{}",
+            "#{pull_id} from={source_name:?} key={} files={files} bytes={total} into={}/{}",
+            rabbithole_identity::PublicKey(source).fingerprint(),
             req.area,
             folder.as_deref().unwrap_or("")
         ),
@@ -591,6 +686,8 @@ async fn accept(
         area: req.area,
         folder,
         cancel,
+        link,
+        hold: Mutex::new(hold),
     };
     tokio::spawn(job.run());
     Ok(pf::RemotePullAccepted::new(
@@ -615,6 +712,12 @@ struct Pull {
     area: String,
     folder: Option<String>,
     cancel: Arc<AtomicBool>,
+    /// The streams to fetch over: the federation session's, or this pull's
+    /// own connection's.
+    link: Arc<dyn BulkStreams>,
+    /// This pull's own connection to a source that is not a peer, held open
+    /// for as long as the pull runs.
+    hold: Mutex<Option<Box<dyn Connection>>>,
 }
 
 /// Why fetching one file stopped.
@@ -689,6 +792,10 @@ impl Pull {
             ),
         );
         self.shared.s2s.release(self.id);
+        let held = self.hold.lock().take();
+        if let Some(mut conn) = held {
+            conn.close().await;
+        }
     }
 
     /// Whether this burrow still takes the pull: pulls on, and the person's
@@ -709,9 +816,7 @@ impl Pull {
         let mut tally = Tally::default();
         let mut landed = String::new();
         self.push(self.status(pull_state::RUNNING, tally, pull_reason::NONE, ""));
-        let Some(link) = self.shared.s2s.link(&self.source) else {
-            return (tally, Some(pull_reason::SOURCE_UNREACHABLE), landed);
-        };
+        let link = self.link.clone();
         // Source top-level name → the folder this pull made for it here.
         let mut tops: HashMap<String, String> = HashMap::new();
         let mut last_push = Instant::now();
@@ -1064,6 +1169,7 @@ fn serve_clock(now: i64, expires: i64) -> i64 {
 pub async fn serve_pull_stream(
     shared: Arc<Shared>,
     peer_key: [u8; 32],
+    direct: Option<[u8; 16]>,
     mut send: BulkSend,
     mut recv: BulkRecv,
 ) {
@@ -1084,7 +1190,13 @@ pub async fn serve_pull_stream(
         grant
             .check(&shared.server_key, &peer_key, clock)
             .map_err(|_| stream_status::DENIED)?;
-        if !shared.peers.is_approved(&peer_key) {
+        // A peer over its federation session; anyone else only over a pull
+        // session that proved its key, and only while the operator sends to
+        // any burrow.
+        let allowed = shared.peers.is_approved(&peer_key)
+            || (direct.is_some() && shared.config.read().s2s_grants_to_any);
+        // A pull session serves the grant it was opened with, and no other.
+        if !allowed || direct.is_some_and(|nonce| nonce != grant.grant.nonce) {
             return Err(stream_status::DENIED);
         }
         let item = grant
@@ -1151,9 +1263,363 @@ pub async fn serve_pull_stream(
     let _ = send.shutdown().await;
 }
 
+// ---------------------------------------------------------------------------
+// Sources that are not federation peers: the destination connects to the
+// source's QUIC client port, proves the key the grant names, and opens a
+// pull session.
+// ---------------------------------------------------------------------------
+
+/// How long connecting to one of a source's addresses, or opening a pull
+/// session there, may take.
+const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long reaching a source may take across all its addresses: the
+/// person's request waits on it.
+const DIAL_BUDGET: Duration = Duration::from_secs(20);
+/// The longest name a source that is not a peer may go by here.
+const MAX_SOURCE_NAME: usize = 64;
+/// Pull sessions this burrow serves at once, for every burrow fetching
+/// directly.
+const MAX_PULL_SESSIONS: usize = 32;
+/// How long past a grant's expiry a pull session may still open: room for
+/// two burrows' clocks to disagree, not the grace a pull under way gets.
+const OPEN_SKEW_SECS: i64 = 300;
+/// How long a reply on a pull session's control stream may take to go.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Pull streams a pull session serves at once.
+const SESSION_STREAMS: usize = 8;
+
+/// A pull's own connection to a source that is not a peer.
+struct Direct {
+    conn: Box<dyn Connection>,
+    bulk: Arc<dyn BulkStreams>,
+    /// What the source calls itself, for the person and the record.
+    name: String,
+}
+
+/// Connect to the source a grant names, at the addresses it carries, pinned
+/// to its certificate, and open a pull session proving this burrow's key.
+async fn dial_source(
+    shared: &Arc<Shared>,
+    signed: &SignedPullGrant,
+    grant: &[u8],
+) -> Result<Direct, String> {
+    match tokio::time::timeout(DIAL_BUDGET, dial_endpoints(shared, signed, grant)).await {
+        Ok(result) => result,
+        Err(_) => Err("timed out".into()),
+    }
+}
+
+/// What a source that is not a peer calls itself, fit to show: printable,
+/// one line, not too long, and its key's fingerprint when that leaves
+/// nothing.
+fn source_name(claimed: &str, key: &[u8; 32]) -> String {
+    let name: String = claimed
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !c.is_control() && !is_invisible(*c))
+        .take(MAX_SOURCE_NAME)
+        .collect();
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        rabbithole_identity::PublicKey(*key).fingerprint()
+    } else {
+        name
+    }
+}
+
+/// Characters that draw nothing, or turn the text around them.
+fn is_invisible(c: char) -> bool {
+    matches!(c,
+        '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}'
+        | '\u{feff}' | '\u{00ad}')
+}
+
+async fn dial_endpoints(
+    shared: &Arc<Shared>,
+    signed: &SignedPullGrant,
+    grant: &[u8],
+) -> Result<Direct, String> {
+    let g = &signed.grant;
+    if g.endpoints.is_empty() {
+        return Err("the grant carries no address".into());
+    }
+    let allow_private = shared.config.read().s2s_private_addresses;
+    let fingerprint = CertFingerprint(g.tls_fingerprint);
+    let mut last = String::new();
+    for endpoint in &g.endpoints {
+        let addr = match rabbithole_net::reach::resolve_public(endpoint, allow_private).await {
+            Ok(addr) => addr,
+            Err(e) => {
+                last = e.to_string();
+                continue;
+            }
+        };
+        let transport = QuicTransport::new("localhost", ServerAuth::Pinned(fingerprint));
+        let conn =
+            match tokio::time::timeout(DIAL_TIMEOUT, transport.connect(&addr.to_string())).await {
+                Ok(Ok(conn)) => conn,
+                Ok(Err(e)) => {
+                    last = format!("{endpoint}: {e}");
+                    continue;
+                }
+                Err(_) => {
+                    last = format!("{endpoint}: timed out");
+                    continue;
+                }
+            };
+        let mut conn = conn;
+        match tokio::time::timeout(DIAL_TIMEOUT, open_session(&mut conn, shared, g, grant)).await {
+            Ok(Ok(name)) => {
+                let Some(bulk) = conn.bulk() else {
+                    conn.close().await;
+                    last = format!("{endpoint}: no streams");
+                    continue;
+                };
+                return Ok(Direct {
+                    conn,
+                    bulk: Arc::from(bulk),
+                    name: source_name(&name, &g.source_key),
+                });
+            }
+            Ok(Err(e)) => last = format!("{endpoint}: {e}"),
+            Err(_) => last = format!("{endpoint}: timed out"),
+        }
+        conn.close().await;
+    }
+    Err(last)
+}
+
+/// The reply to request `id`, skipping pushes.
+async fn reply(conn: &mut Box<dyn Connection>, id: RequestId) -> Result<Frame, String> {
+    loop {
+        let frame = conn
+            .recv()
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("the source closed the connection")?;
+        if frame.kind == FrameKind::Reply && frame.id == id {
+            return match frame.error {
+                Some(code) => Err(format!("the source refused: {code:?}")),
+                None => Ok(frame),
+            };
+        }
+    }
+}
+
+/// Hello offering this burrow's key, the proof of it bound to the source's
+/// certificate, then the grant. Returns the source's name.
+async fn open_session(
+    conn: &mut Box<dyn Connection>,
+    shared: &Shared,
+    g: &fp::PullGrant,
+    grant: &[u8],
+) -> Result<String, String> {
+    let e = |e: rabbithole_proto::ProtoError| e.to_string();
+    let hello = Hello::new(
+        "burrow",
+        env!("CARGO_PKG_VERSION"),
+        CapabilitySet::default(),
+    )
+    .with_pubkey(Some(shared.server_key));
+    conn.send(Frame::request(RequestId(1), &hello).map_err(e)?)
+        .await
+        .map_err(|e| e.to_string())?;
+    let ack: HelloAck = reply(conn, RequestId(1))
+        .await?
+        .decode::<HelloAck>()
+        .ok_or("no handshake")?
+        .map_err(e)?;
+    // The pin already authenticated the certificate; the key it claims must
+    // be the one that signed the grant.
+    if ack.server_key != g.source_key {
+        return Err("the source is not the burrow that signed the grant".into());
+    }
+    let nonce = ack
+        .challenge
+        .ok_or("the source did not challenge this burrow's key")?;
+    let key = IdentityKey::from_seed(&shared.server_signing_seed);
+    let proof = key.sign(&key_auth_message(&g.tls_fingerprint, &nonce));
+    conn.send(Frame::request(RequestId(2), &KeyProof::new(proof.0.to_vec())).map_err(e)?)
+        .await
+        .map_err(|e| e.to_string())?;
+    reply(conn, RequestId(2)).await?;
+    conn.send(Frame::request(RequestId(3), &PullSessionOpen::new(grant.to_vec())).map_err(e)?)
+        .await
+        .map_err(|e| e.to_string())?;
+    reply(conn, RequestId(3)).await?;
+    Ok(ack.server_name)
+}
+
+/// At the source, before any sign-in: whether a connection may become a pull
+/// session. `key` is the key it proved over QUIC, bound to this burrow's
+/// certificate; `None` if it proved none.
+pub fn open_pull_session(
+    shared: &Arc<Shared>,
+    key: Option<[u8; 32]>,
+    bound: bool,
+    grant: &[u8],
+) -> Result<PullSession, ErrorCode> {
+    let key = key.filter(|_| bound).ok_or(ErrorCode::Unauthenticated)?;
+    let (grants, to_any) = {
+        let config = shared.config.read();
+        (config.s2s_grants_enabled, config.s2s_grants_to_any)
+    };
+    if !grants || !(to_any || shared.peers.is_approved(&key)) {
+        return Err(ErrorCode::Unsupported);
+    }
+    if grant.len() > fp::MAX_GRANT_BYTES {
+        return Err(ErrorCode::BadRequest);
+    }
+    let signed = SignedPullGrant::from_bytes(grant).map_err(|_| ErrorCode::BadRequest)?;
+    let expires_unix = signed.grant.expires_unix;
+    signed
+        .check(
+            &shared.server_key,
+            &key,
+            open_clock(now_unix(), expires_unix),
+        )
+        .map_err(|_| ErrorCode::Forbidden)?;
+    let nonce = signed.grant.nonce;
+    {
+        let mut sessions = shared.s2s.sessions.lock();
+        if sessions.contains(&nonce) {
+            return Err(ErrorCode::AlreadyExists);
+        }
+        if sessions.len() >= MAX_PULL_SESSIONS {
+            return Err(ErrorCode::RateLimited);
+        }
+        sessions.insert(nonce);
+    }
+    Ok(PullSession {
+        shared: shared.clone(),
+        key,
+        nonce,
+        expires_unix,
+    })
+}
+
+/// The clock a pull session is opened by: a grant opens one only while it
+/// stands, give or take the two burrows' clocks.
+fn open_clock(now: i64, expires: i64) -> i64 {
+    if now >= expires && now < expires.saturating_add(OPEN_SKEW_SECS) {
+        expires - 1
+    } else {
+        now
+    }
+}
+
+/// A pull session's place at the source, given up when it is dropped: then
+/// the grant may open another (a destination that lost its connection
+/// retries).
+pub struct PullSession {
+    shared: Arc<Shared>,
+    key: [u8; 32],
+    nonce: [u8; 16],
+    expires_unix: i64,
+}
+
+impl Drop for PullSession {
+    fn drop(&mut self) {
+        self.shared.s2s.sessions.lock().remove(&self.nonce);
+    }
+}
+
+/// At the source: a connection that opened a pull session serves pull
+/// streams for the key it proved, and nothing else, until it closes, the
+/// grant's grace runs out, or the burrow shuts down.
+pub async fn run_pull_session(
+    mut conn: Box<dyn Connection>,
+    shared: Arc<Shared>,
+    session: PullSession,
+) -> anyhow::Result<()> {
+    let Some(bulk) = conn.bulk() else {
+        conn.close().await;
+        return Ok(());
+    };
+    let (key, nonce, expires_unix) = (session.key, session.nonce, session.expires_unix);
+    let limit = Arc::new(tokio::sync::Semaphore::new(SESSION_STREAMS));
+    let server = {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            while let Ok((mut send, recv)) = bulk.accept().await {
+                let Ok(permit) = limit.clone().try_acquire_owned() else {
+                    // Too many at once: this one is refused, the rest go on.
+                    let _ = write_timed(&mut send, &[stream_status::BAD]).await;
+                    continue;
+                };
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    serve_pull_stream(shared, key, Some(nonce), send, recv).await;
+                    drop(permit);
+                });
+            }
+        })
+    };
+    let lasts = (expires_unix.saturating_add(SERVE_GRACE_SECS) - now_unix()).max(0) as u64;
+    let until = tokio::time::sleep(Duration::from_secs(lasts));
+    tokio::pin!(until);
+    let mut bus = shared.bus.subscribe();
+    loop {
+        tokio::select! {
+            _ = &mut until => break,
+            ev = bus.recv() => {
+                use tokio::sync::broadcast::error::RecvError;
+                if matches!(ev, Ok(ServerEvent::Shutdown) | Err(RecvError::Closed)) {
+                    break;
+                }
+            }
+            frame = conn.recv() => {
+                let Ok(Some(frame)) = frame else { break };
+                if frame.kind != FrameKind::Request {
+                    continue;
+                }
+                let answer = if frame.decode::<rabbithole_proto::session::Ping>().is_some() {
+                    Frame::reply_to(&frame, &rabbithole_proto::session::Pong)
+                        .unwrap_or_else(|_| Frame::error_reply(&frame, ErrorCode::Internal))
+                } else {
+                    Frame::error_reply(&frame, ErrorCode::Unsupported)
+                };
+                // A fetcher that stops reading its replies is let go, so the
+                // grace and a shutdown are still watched.
+                if !matches!(tokio::time::timeout(REPLY_TIMEOUT, conn.send(answer)).await, Ok(Ok(()))) {
+                    break;
+                }
+            }
+        }
+    }
+    server.abort();
+    conn.close().await;
+    drop(session);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pull_session_opens_only_while_its_grant_stands() {
+        // Before expiry: the real time.
+        assert_eq!(open_clock(100, 200), 100);
+        // Just past it, within the skew: as if at the last second.
+        assert_eq!(open_clock(200, 200), 199);
+        assert_eq!(open_clock(200 + OPEN_SKEW_SECS - 1, 200), 199);
+        // Not the six hours a pull under way gets.
+        assert_eq!(open_clock(200 + OPEN_SKEW_SECS, 200), 200 + OPEN_SKEW_SECS);
+    }
+
+    const _: () = assert!(OPEN_SKEW_SECS < SERVE_GRACE_SECS);
+
+    #[test]
+    fn a_source_that_is_not_a_peer_goes_by_a_name_fit_to_show() {
+        let key = [9u8; 32];
+        assert_eq!(source_name("Lonely  Source", &key), "Lonely Source");
+        assert_eq!(source_name("Evil\u{202e}txt.exe\n", &key), "Eviltxt.exe");
+        assert_eq!(source_name("a\tb", &key), "a b");
+        assert_eq!(source_name(&"x".repeat(200), &key).len(), MAX_SOURCE_NAME);
+        let fingerprint = rabbithole_identity::PublicKey(key).fingerprint();
+        assert_eq!(source_name(" \u{200b}\u{0007} ", &key), fingerprint);
+    }
 
     #[test]
     fn a_clash_is_numbered_the_way_downloads_number_one() {

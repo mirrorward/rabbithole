@@ -279,6 +279,13 @@ async fn a_folder_and_a_file_cross_from_one_burrow_to_another() {
         ErrorCode::AlreadyExists,
     );
     let spent = rabbithole_federation::pull::SignedPullGrant::from_bytes(&issued.grant).unwrap();
+    // A peer gets the first format, which a peer on an older release reads:
+    // no certificate, no addresses.
+    assert_eq!(
+        spent.grant.version,
+        rabbithole_federation::pull::PULL_GRANT_V1
+    );
+    assert!(spent.grant.endpoints.is_empty());
     assert!(!landed
         .spend_pull_grant(&spent.grant.nonce, spent.grant.expires_unix, 0)
         .await

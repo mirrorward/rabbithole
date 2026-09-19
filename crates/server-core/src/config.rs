@@ -317,6 +317,17 @@ pub struct ServerConfig {
     /// The most one pull may bring in altogether, in bytes (0 = no limit
     /// beyond the largest file and the person's space).
     pub s2s_max_bytes: u64,
+    /// Sign grants for burrows that are not approved federation peers too:
+    /// they connect to this burrow's QUIC port and prove the key the grant
+    /// names.
+    pub s2s_grants_to_any: bool,
+    /// Accept sends from burrows that are not approved federation peers:
+    /// this burrow connects to the source's QUIC port, at an address the
+    /// grant carries.
+    pub s2s_pull_from_any: bool,
+    /// Let such a connection reach private and local addresses (a LAN, or
+    /// burrows on one machine). Off: only public addresses are dialed.
+    pub s2s_private_addresses: bool,
     /// Configured peer dial targets. Serialized as an array of tables in TOML;
     /// edited on disk (not via `ctl config set`), like `ftn_areas`.
     pub federation_peers: Vec<FederationPeer>,
@@ -542,6 +553,9 @@ impl Default for ServerConfig {
             s2s_pull_enabled: false,
             s2s_max_concurrent: 2,
             s2s_max_bytes: 0,
+            s2s_grants_to_any: false,
+            s2s_pull_from_any: false,
+            s2s_private_addresses: false,
             federation_peers: Vec::new(),
             federation_board_subscribe: Vec::new(),
             portmap_enabled: false,
@@ -785,6 +799,9 @@ impl ServerConfig {
             "s2s_pull_enabled" => self.s2s_pull_enabled.to_string(),
             "s2s_max_concurrent" => self.s2s_max_concurrent.to_string(),
             "s2s_max_bytes" => self.s2s_max_bytes.to_string(),
+            "s2s_grants_to_any" => self.s2s_grants_to_any.to_string(),
+            "s2s_pull_from_any" => self.s2s_pull_from_any.to_string(),
+            "s2s_private_addresses" => self.s2s_private_addresses.to_string(),
             "portmap_enabled" => self.portmap_enabled.to_string(),
             "portmap_gateway" => self.portmap_gateway.clone(),
             "portmap_lifetime_secs" => self.portmap_lifetime_secs.to_string(),
@@ -1209,6 +1226,18 @@ impl ServerConfig {
                 })?;
                 Ok(true)
             }
+            "s2s_grants_to_any" => {
+                self.s2s_grants_to_any = parse_bool(key, value)?;
+                Ok(true)
+            }
+            "s2s_pull_from_any" => {
+                self.s2s_pull_from_any = parse_bool(key, value)?;
+                Ok(true)
+            }
+            "s2s_private_addresses" => {
+                self.s2s_private_addresses = parse_bool(key, value)?;
+                Ok(true)
+            }
             // Port mapping is set up in a startup task, so changes need a
             // restart to take effect.
             "portmap_enabled" => {
@@ -1449,6 +1478,9 @@ pub const CONFIG_KEYS: &[&str] = &[
     "s2s_pull_enabled",
     "s2s_max_concurrent",
     "s2s_max_bytes",
+    "s2s_grants_to_any",
+    "s2s_pull_from_any",
+    "s2s_private_addresses",
     "portmap_enabled",
     "portmap_gateway",
     "portmap_lifetime_secs",

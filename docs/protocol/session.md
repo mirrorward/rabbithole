@@ -10,13 +10,15 @@ keyword messages (types 42-47) also live on this family — see
 
 | type | name | direction | payload |
 |---|---|---|---|
-| 1 | Hello | client → server (Request) | `version: u16`, `capabilities: [string]`, `client_name: string`, `client_version: string` |
-| 2 | HelloAck | server → client (Reply) | `version: u16` (negotiated), `capabilities: [string]`, `server_name: string`, `server_version: string`, `server_key: [u8; 32]` |
+| 1 | Hello | client → server (Request) | `version: u16`, `capabilities: [string]`, `client_name: string`, `client_version: string`, `client_pubkey: option<[u8; 32]>` (a key to prove) |
+| 2 | HelloAck | server → client (Reply) | `version: u16` (negotiated), `capabilities: [string]`, `server_name: string`, `server_version: string`, `server_key: [u8; 32]`, `challenge: option<[u8; 32]>` (a fresh nonce when a key was offered) |
+| 3 | KeyProof | Request (pre-auth) | `signature: bytes`: the offered key's Ed25519 signature over `rabbithole-key-auth-v2`, the channel binder (the server's certificate fingerprint over QUIC, zeros over WebSocket) and the challenge. Always acked; a wrong proof simply proves nothing |
 | 10 | AuthPassword | Request | `login: string`, `password: string`, `totp: option<string>` (current TOTP code or a recovery code, when 2FA is enrolled) |
 | 11 | AuthGuest | Request | `desired_name: option<string>` |
 | 12 | AuthResume | Request | `token: string`, `replay_cursor: u64` |
 | 13 | AuthOk | Reply (to 10/11/12/14) | `token: string` (empty for guests), `account_id: i64`, `screen_name: string`, `role: u8`, `caps: u64`, `resumed: bool` |
 | 14 | Register | Request (pre-auth) | `login`, `password`, `invite_code: option<string>` — honors the registration mode (open/invite/closed); success auto-signs-in → `AuthOk`; else `Forbidden`/`AlreadyExists` |
+| 15 | PullSessionOpen | Request (pre-auth) | `grant: bytes`: a pull grant this burrow signed. A burrow fetching files it was granted, with no account here (see below) |
 | 20 | Ping | Request | — |
 | 21 | Pong | Reply | — |
 | 30 | AgreementAccept | Request | — (empty ack reply) |
@@ -74,6 +76,24 @@ answers `TotpRequired`; a recovery code is accepted in the `totp` field.
    the client must send `AgreementAccept` before participating (until
    then, participating requests answer `Forbidden`).
 4. Re-`Hello` or re-auth on an authenticated session is a `BadRequest`.
+
+## Pull sessions
+
+A burrow that is not this one's federation peer fetches files it was granted
+over a pull session on the client QUIC port (see FILE 39 in
+[`file.md`](file.md)). It sends `Hello` offering its server key, `KeyProof`
+bound to this burrow's certificate, then `PullSessionOpen` with the grant.
+The session opens only over QUIC, only for the key proved on that connection,
+and only when the grant names that key, verifies, and has not run out (five
+minutes' leeway for the two clocks); refusals are `Unauthenticated` (no key
+proved over QUIC), `Unsupported` (grants off, or grants only to peers and the
+key is not one), `BadRequest` (unreadable or over 384 KiB), `Forbidden` (not
+this burrow's grant, not for that key, or run out), `AlreadyExists` (a
+session for that grant is already open) and `RateLimited` (32 open already).
+Each refusal is charged to the address's sign-in budget. Once open, the
+connection answers only `Ping` on the control stream and pull streams for
+that grant on bulk streams, eight at a time, until the grant's six-hour grace
+ends, it closes, or the burrow shuts down.
 
 ## Push replay
 

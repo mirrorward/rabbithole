@@ -1,7 +1,7 @@
 # RabbitHole Protocol (RHP) wire registry — golden snapshot. DO NOT hand-edit.
 # One line per (family, message_type): <family#> <FAMILY> <type#> <MessageName>
 # Re-bless an *intentional* wire change: BLESS=1 cargo test -p rabbithole-proto --test registry
-# total: 222
+# total: 224
   0 SESSION         1  Hello
   0 SESSION         2  HelloAck
   0 SESSION         3  KeyProof
@@ -10,6 +10,7 @@
   0 SESSION        12  AuthResume
   0 SESSION        13  AuthOk
   0 SESSION        14  Register
+  0 SESSION        15  PullSessionOpen
   0 SESSION        20  Ping
   0 SESSION        21  Pong
   0 SESSION        30  AgreementAccept
@@ -141,6 +142,7 @@
   5 FILE           36  RemotePullAccepted
   5 FILE           37  RemotePullCancel
   5 FILE           38  RemotePullStatus
+  5 FILE           39  PullGrantAsk
   5 FILE           40  FileChunkRequest
   5 FILE           41  FileChunk
   5 FILE           42  FileChunkPut

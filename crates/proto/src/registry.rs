@@ -60,11 +60,11 @@ use crate::dm::{
 use crate::filelib::{
     AliasCreate, AreaCreate, AreaDelete, AreaList, AreaListRequest, AreaReply, AreaUpdate,
     FileAdded, FileContent, FileDownloadRequest, FileUpload, FolderCreate, FolderListRequest,
-    NodeDelete, NodeGet, NodeList, NodeMove, NodeRename, NodeReply, PullGrantIssued,
+    NodeDelete, NodeGet, NodeList, NodeMove, NodeRename, NodeReply, PullGrantAsk, PullGrantIssued,
     PullGrantRequest, RateFile, RemotePull, RemotePullAccepted, RemotePullCancel, RemotePullStatus,
     SearchRequest, SearchResults, SetMetadata, UploadLimits, UploadLimitsRequest,
 };
-use crate::hello::{Hello, HelloAck, KeyProof};
+use crate::hello::{Hello, HelloAck, KeyProof, PullSessionOpen};
 use crate::keybundle::{KeyBundle, KeyBundlePublish, KeyBundleRequest};
 use crate::persona::{
     KeyEnroll, PersonaCreate, PersonaDelete, PersonaList, PersonaListRequest, PersonaReply,
@@ -129,7 +129,7 @@ macro_rules! wire_registry {
 
 wire_registry! {
     // ── Family 0: SESSION ────────────────────────────────────────────────
-    Hello, HelloAck, KeyProof,
+    Hello, HelloAck, KeyProof, PullSessionOpen,
     AuthPassword, AuthGuest, AuthResume, AuthOk, Register,
     Ping, Pong, AgreementAccept, Welcome, ServerNotice,
     WelcomeScreenRequest, WelcomeScreen, ThemeGet, ThemeReply, KeywordGo, KeywordTarget,
@@ -165,7 +165,7 @@ wire_registry! {
     SearchRequest, SearchResults, RateFile, AliasCreate, FileAdded,
     AreaUpdate, AreaDelete, NodeRename, NodeMove, UploadLimitsRequest, UploadLimits,
     PullGrantRequest, PullGrantIssued, RemotePull, RemotePullAccepted, RemotePullCancel,
-    RemotePullStatus,
+    RemotePullStatus, PullGrantAsk,
     TransferOpen, TransferTicket, TransferResume, UploadFinish, TransferAbort,
     FolderManifestRequest, FolderManifest, FileChunkRequest, FileChunk, FileChunkPut,
     BlobPut, BlobRef, BlobGet, BlobData,
@@ -206,7 +206,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 222;
+pub const EXPECTED: usize = 224;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

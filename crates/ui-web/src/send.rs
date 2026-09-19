@@ -36,8 +36,9 @@ pub fn grant_refusal(code: Option<ErrorCode>, what: &str, source: &str, dest: &s
              turn that on under Federation & feeds."
         ),
         Some(ErrorCode::Unavailable) => format!(
-            "{source} and {dest} are not peers, so files cannot go between them. Their \
-             operators approve each other under Peers."
+            "{source} sends only to its federation peers, and {dest} is not one. Its operator \
+             can approve {dest} under Peers, or let it send to any burrow under Federation & \
+             feeds."
         ),
         Some(ErrorCode::Forbidden) => format!("You may not send {what} from {source}."),
         Some(ErrorCode::NotFound) => format!("{what} is empty, or no longer on {source}."),
@@ -64,9 +65,11 @@ pub fn pull_refusal(
             "{dest} does not take files sent from other burrows. Its operator can turn that \
              on under Federation & feeds."
         ),
-        Some(ErrorCode::Unavailable) => {
-            format!("{dest} is not connected to {source} right now, so it cannot fetch {what}.")
-        }
+        Some(ErrorCode::Unavailable) => format!(
+            "{dest} could not fetch {what} from {source}: it takes sends only from its peers, \
+             or it could not reach {source}. Its operator can let it take sends from any \
+             burrow under Federation & feeds."
+        ),
         // A folder is recreated there, which takes the right to make folders,
         // and never inside a drop box.
         Some(ErrorCode::Forbidden) if is_folder => format!(
@@ -137,6 +140,29 @@ pub fn ended(status: &RemotePullStatus, what: &str, dest: &str) -> String {
     }
 }
 
+/// The host part of an address the app reached a burrow at: what a burrow
+/// that is not a peer should connect to. `wss://bbs.example.org/rhp` gives
+/// `bbs.example.org`, `ws://127.0.0.1:4664` gives `127.0.0.1`, and an IPv6
+/// literal keeps its brackets off. Empty when there is none.
+pub fn reach_host(endpoint: &str) -> String {
+    let rest = endpoint
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(endpoint);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    if let Some(v6) = authority.strip_prefix('[') {
+        return v6.split(']').next().unwrap_or("").to_string();
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if port.bytes().all(|b| b.is_ascii_digit()) => host.to_string(),
+        _ => authority.to_string(),
+    }
+}
+
 /// A folder picked on the destination: its area and the folders within.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Place {
@@ -183,7 +209,7 @@ mod tests {
     fn each_refusal_says_which_burrow_and_what_to_do() {
         let g = |c| grant_refusal(Some(c), "tapes", "Scratch", "Kevin\u{2019}s Burrow");
         assert!(g(ErrorCode::Unsupported).contains("Scratch does not let people send"));
-        assert!(g(ErrorCode::Unavailable).contains("approve each other under Peers"));
+        assert!(g(ErrorCode::Unavailable).contains("let it send to any burrow"));
         assert_eq!(
             g(ErrorCode::Forbidden),
             "You may not send \u{201c}tapes\u{201d} from Scratch."
@@ -192,7 +218,7 @@ mod tests {
 
         let p = |c| pull_refusal(Some(c), "tapes", false, 3 * 1024 * 1024, "Scratch", "Kevin");
         assert!(p(ErrorCode::Unsupported).starts_with("Kevin does not take files"));
-        assert!(p(ErrorCode::Unavailable).contains("not connected to Scratch"));
+        assert!(p(ErrorCode::Unavailable).contains("could not reach Scratch"));
         assert!(p(ErrorCode::TooLarge).contains("(3.0 MB) is more than Kevin takes"));
         assert!(p(ErrorCode::RateLimited).contains("as many sends coming in to Kevin"));
         assert!(p(ErrorCode::SessionExpired).contains("ran out"));
@@ -243,6 +269,20 @@ mod tests {
         assert_eq!(stopped(250, "S"), "This burrow could not file it.");
         assert_eq!(amount(1, 12), "1 file, 12 B");
         assert_eq!(amount(3, 1024 * 1024), "3 files, 1.0 MB");
+    }
+
+    #[test]
+    fn the_host_an_app_reaches_a_burrow_at_is_the_one_it_offers() {
+        assert_eq!(reach_host("wss://bbs.example.org/rhp"), "bbs.example.org");
+        assert_eq!(reach_host("ws://127.0.0.1:4664"), "127.0.0.1");
+        assert_eq!(
+            reach_host("wss://user@host.example:443/x?y"),
+            "host.example"
+        );
+        assert_eq!(reach_host("ws://[2001:db8::1]:4664/rhp"), "2001:db8::1");
+        assert_eq!(reach_host("burrow.example:4653"), "burrow.example");
+        assert_eq!(reach_host("local"), "local");
+        assert_eq!(reach_host(""), "");
     }
 
     #[test]

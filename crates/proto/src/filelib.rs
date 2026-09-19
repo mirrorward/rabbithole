@@ -884,3 +884,34 @@ impl Message for RemotePullStatus {
     const FAMILY: Family = Family::FILE;
     const MESSAGE_TYPE: u16 = 38;
 }
+
+/// At the **source**, as [`PullGrantRequest`], with the host the person's
+/// app reaches this burrow at. A burrow that is not a federation peer has no
+/// session to fetch over; it connects to this burrow's QUIC port, at this
+/// host or at the one the operator advertises, and the grant carries both,
+/// signed, with this burrow's certificate fingerprint to pin.
+/// → [`PullGrantIssued`], refusals as [`PullGrantRequest`]. A burrow that
+/// predates it answers `Unsupported`; ask again with [`PullGrantRequest`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullGrantAsk {
+    pub fetcher_key: [u8; 32],
+    pub nodes: Vec<i64>,
+    /// A host name or IP address, without a port or scheme; empty for none.
+    pub reach_host: String,
+}
+
+impl PullGrantAsk {
+    pub fn new(fetcher_key: [u8; 32], nodes: Vec<i64>, reach_host: impl Into<String>) -> Self {
+        Self {
+            fetcher_key,
+            nodes,
+            reach_host: reach_host.into(),
+        }
+    }
+}
+
+impl Message for PullGrantAsk {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 39;
+}

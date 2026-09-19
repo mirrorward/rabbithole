@@ -172,3 +172,42 @@ async fn ws_loopback_hello() {
     )
     .await;
 }
+
+/// A client that shakes hands and then says nothing (its control stream
+/// never reaches the server) used to hold the listener for everyone: each
+/// handshake and control stream was awaited in turn. Now the next client is
+/// taken while the silent one waits out its own timeout.
+#[tokio::test]
+async fn a_silent_quic_client_holds_up_no_one_else() {
+    let identity = TlsIdentity::self_signed(&["localhost".into()]).unwrap();
+    let fingerprint = identity.fingerprint();
+    let mut listener = QuicListener::bind("127.0.0.1:0".parse().unwrap(), &identity).unwrap();
+    let endpoint = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+
+    let silent = QuicTransport::new("localhost", ServerAuth::Pinned(fingerprint))
+        .connect(&endpoint)
+        .await
+        .expect("the silent client connects");
+
+    let talker = tokio::spawn({
+        let endpoint = endpoint.clone();
+        async move {
+            let mut conn = QuicTransport::new("localhost", ServerAuth::Pinned(fingerprint))
+                .connect(&endpoint)
+                .await
+                .expect("the talker connects");
+            conn.send(Frame::request(RequestId(1), &hello()).unwrap())
+                .await
+                .expect("send");
+            conn
+        }
+    });
+    let mut conn = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+        .await
+        .expect("the talker is taken while the silent client waits")
+        .expect("accept");
+    let frame = conn.recv().await.expect("recv").expect("open");
+    assert!(frame.decode::<Hello>().is_some());
+    drop(talker.await.unwrap());
+    drop(silent);
+}

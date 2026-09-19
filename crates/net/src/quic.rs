@@ -32,13 +32,30 @@ use crate::{
     TransportKind,
 };
 
-/// A listening QUIC endpoint.
+/// Handshakes a listener runs at once. Past this a new connection is
+/// refused until one finishes, so a flood of half-open clients costs only
+/// itself.
+const MAX_HANDSHAKES: usize = 256;
+
+/// How long a client may take over the handshake, and then over opening its
+/// control stream, before it is let go.
+const ACCEPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Connections that finished their handshake and wait for [`Listener::accept`].
+const READY_QUEUE: usize = 64;
+
+/// A listening QUIC endpoint. Each client's handshake runs on its own task,
+/// so one that stalls (or never opens its control stream) holds up no one
+/// else; `accept` hands out connections as they become ready.
 pub struct QuicListener {
     endpoint: quinn::Endpoint,
+    ready: tokio::sync::mpsc::Receiver<QuicConnection>,
+    driver: tokio::task::JoinHandle<()>,
 }
 
 impl QuicListener {
-    /// Bind a QUIC server on `addr` with the given TLS identity.
+    /// Bind a QUIC server on `addr` with the given TLS identity. Must be
+    /// called within a tokio runtime.
     pub fn bind(addr: SocketAddr, identity: &TlsIdentity) -> Result<Self, NetError> {
         ensure_crypto_provider();
         let mut server_crypto = rustls::ServerConfig::builder()
@@ -52,58 +69,108 @@ impl QuicListener {
         ));
         server_config.transport_config(keep_alive());
         let endpoint = quinn::Endpoint::server(server_config, addr)?;
-        Ok(Self { endpoint })
+        let (tx, ready) = tokio::sync::mpsc::channel(READY_QUEUE);
+        let driver = tokio::spawn(drive(endpoint.clone(), tx));
+        Ok(Self {
+            endpoint,
+            ready,
+            driver,
+        })
     }
+}
+
+impl Drop for QuicListener {
+    fn drop(&mut self) {
+        self.driver.abort();
+    }
+}
+
+/// Take every incoming connection, and shake hands with each on its own
+/// task.
+async fn drive(endpoint: quinn::Endpoint, ready: tokio::sync::mpsc::Sender<QuicConnection>) {
+    let limit = Arc::new(tokio::sync::Semaphore::new(MAX_HANDSHAKES));
+    while let Some(incoming) = endpoint.accept().await {
+        if ready.is_closed() {
+            break;
+        }
+        let Ok(permit) = limit.clone().try_acquire_owned() else {
+            tracing::debug!("quic: too many handshakes at once, refusing one");
+            incoming.refuse();
+            continue;
+        };
+        let ready = ready.clone();
+        tokio::spawn(async move {
+            let conn = handshake(incoming).await;
+            drop(permit);
+            if let Some(conn) = conn {
+                let _ = ready.send(conn).await;
+            }
+        });
+    }
+}
+
+/// One client's handshake and control stream, each within
+/// [`ACCEPT_TIMEOUT`]. `None` if either fails or takes too long: that
+/// dooms only this connection.
+async fn handshake(incoming: quinn::Incoming) -> Option<QuicConnection> {
+    let connecting = match incoming.accept() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!("rejected incoming quic connection: {e}");
+            return None;
+        }
+    };
+    // A failed handshake (e.g. a client pinning the wrong fingerprint)
+    // dooms only this connection.
+    let conn = match tokio::time::timeout(ACCEPT_TIMEOUT, connecting).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            tracing::debug!("quic handshake failed: {e}");
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!("quic handshake took too long");
+            return None;
+        }
+    };
+    // The client opens the control stream; accept it here so the returned
+    // Connection is immediately usable.
+    let (send, recv) = match tokio::time::timeout(ACCEPT_TIMEOUT, conn.accept_bi()).await {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => {
+            tracing::debug!("quic control stream not opened: {e}");
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!("quic control stream not opened in time");
+            conn.close(0u32.into(), b"no control stream");
+            return None;
+        }
+    };
+    let peer = PeerInfo {
+        remote_addr: conn.remote_address(),
+        transport: TransportKind::Quic,
+    };
+    Some(QuicConnection {
+        // Server side: the listening endpoint is shared across every
+        // accepted connection, so it is not held here — a server connection
+        // can't migrate its socket (and wouldn't want to; it's the roaming
+        // client that moves). `migrate` reports Unsupported for these.
+        endpoint: None,
+        conn,
+        send,
+        recv,
+        codec: FrameCodec::new(),
+        peer,
+    })
 }
 
 #[async_trait]
 impl Listener for QuicListener {
     async fn accept(&mut self) -> Result<Box<dyn Connection>, NetError> {
-        loop {
-            let incoming = self.endpoint.accept().await.ok_or(NetError::Closed)?;
-            let connecting = match incoming.accept() {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::debug!("rejected incoming quic connection: {e}");
-                    continue;
-                }
-            };
-            // A failed handshake (e.g. a client pinning the wrong
-            // fingerprint) dooms only this connection — skip it rather than
-            // tearing down the whole accept loop for every other peer.
-            let conn = match connecting.await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::debug!("quic handshake failed: {e}");
-                    continue;
-                }
-            };
-            // The client opens the control stream; accept it here so the
-            // returned Connection is immediately usable.
-            let (send, recv) = match conn.accept_bi().await {
-                Ok(pair) => pair,
-                Err(e) => {
-                    tracing::debug!("quic control stream not opened: {e}");
-                    continue;
-                }
-            };
-            let peer = PeerInfo {
-                remote_addr: conn.remote_address(),
-                transport: TransportKind::Quic,
-            };
-            return Ok(Box::new(QuicConnection {
-                // Server side: the listening endpoint is shared across every
-                // accepted connection, so it is not held here — a server
-                // connection can't migrate its socket (and wouldn't want to;
-                // it's the roaming client that moves). `migrate` reports
-                // Unsupported for these.
-                endpoint: None,
-                conn,
-                send,
-                recv,
-                codec: FrameCodec::new(),
-                peer,
-            }));
+        match self.ready.recv().await {
+            Some(conn) => Ok(Box::new(conn)),
+            None => Err(NetError::Closed),
         }
     }
 
