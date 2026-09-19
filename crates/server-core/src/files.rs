@@ -441,6 +441,37 @@ impl FileService {
             .ok_or(FileError::NoSuchNode)
     }
 
+    /// Record where a pulled file came from.
+    pub async fn set_provenance(
+        &self,
+        id: i64,
+        burrow: &str,
+        key: &[u8; 32],
+    ) -> Result<(), FileError> {
+        if !self.repo().set_provenance(id, burrow, key).await? {
+            return Err(FileError::NoSuchNode);
+        }
+        Ok(())
+    }
+
+    /// Spend a pull grant's nonce; `false` if it was used before.
+    pub async fn spend_pull_grant(
+        &self,
+        nonce: &[u8; 16],
+        expires_unix: i64,
+        now_unix: i64,
+    ) -> Result<bool, FileError> {
+        Ok(self
+            .repo()
+            .spend_pull_grant(nonce, expires_unix, now_unix)
+            .await?)
+    }
+
+    /// Where a file came from, if it was pulled from another burrow.
+    pub async fn provenance(&self, id: i64) -> Result<Option<(String, [u8; 32])>, FileError> {
+        Ok(self.repo().provenance(id).await?)
+    }
+
     /// Record a download against a file (following aliases). Returns the
     /// resolved file row (with the bumped count) so the handler can stream
     /// its blob.

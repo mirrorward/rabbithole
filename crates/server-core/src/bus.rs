@@ -115,6 +115,13 @@ pub enum ServerEvent {
         to_account: i64,
         wish: rabbithole_proto::wish::WishView,
     },
+    /// How a pull between burrows is going, for the person who started it
+    /// (every session of that account). Progress is not replayed after a
+    /// reconnect; the ending is.
+    PullStatus {
+        to_account: i64,
+        status: rabbithole_proto::filelib::RemotePullStatus,
+    },
     /// A file landed in a library (broadcast so listings/search stay live).
     FileAdded { area: String, id: i64 },
     /// A radio station's now-playing changed — a DJ took over the mount, or the

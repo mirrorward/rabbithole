@@ -370,7 +370,20 @@ pub async fn run_session(
                         }
                         Ok(ev) => {
                             if let Some(push) = push_for_event(&ev, &shared, ctx.role, ctx.account_id, ctx.session_id) {
-                                conn.send(shared.pushlog.stamp(ctx.account_id, push)).await?;
+                                // A pull's progress is for whoever is watching
+                                // now: kept out of the replay log, where it
+                                // would crowd out what a reconnect needs.
+                                let passing = matches!(
+                                    &ev,
+                                    ServerEvent::PullStatus { status, .. }
+                                        if status.state == rabbithole_proto::filelib::pull_state::RUNNING
+                                );
+                                let push = if passing {
+                                    push
+                                } else {
+                                    shared.pushlog.stamp(ctx.account_id, push)
+                                };
+                                conn.send(push).await?;
                             }
                             if matches!(ev, ServerEvent::Shutdown) {
                                 break;
@@ -618,6 +631,9 @@ async fn handle_request(
     if crate::handlers16::handle(conn, frame, shared, ctx).await? {
         return Ok(());
     }
+    if crate::s2s::handle(conn, frame, shared, ctx).await? {
+        return Ok(());
+    }
 
     // Anything else: tolerated, answered, never fatal.
     conn.send(Frame::error_reply(frame, ErrorCode::Unsupported))
@@ -812,6 +828,18 @@ pub(crate) fn push_for_event(
         }
         ServerEvent::BoardPost { .. } => crate::handlers6::board_push(event),
         ServerEvent::FileAdded { .. } => crate::handlers8::file_push(event),
+        ServerEvent::PullStatus { to_account, status } => {
+            if *to_account != viewer_account {
+                return None;
+            }
+            // Progress is for whoever is watching now; an offline replay only
+            // carries how the pull ended.
+            if viewer_session == 0 && status.state == rabbithole_proto::filelib::pull_state::RUNNING
+            {
+                return None;
+            }
+            Frame::push(status).ok()
+        }
         ServerEvent::WishUpdated { to_account, wish } => {
             if *to_account != viewer_account {
                 return None;

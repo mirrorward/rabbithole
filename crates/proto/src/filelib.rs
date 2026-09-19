@@ -648,3 +648,239 @@ impl Message for UploadLimits {
     const FAMILY: Family = Family::FILE;
     const MESSAGE_TYPE: u16 = 32;
 }
+
+// ---------------------------------------------------------------------------
+// Pulls between burrows (FILE 33..38): a person sends files from one burrow
+// they are on to another. The source grants, the destination fetches over its
+// federation session with the source. See docs/design/server-to-server-transfers.md.
+// ---------------------------------------------------------------------------
+
+/// Where a pull is, in a [`RemotePullStatus`].
+pub mod pull_state {
+    /// Files are on their way.
+    pub const RUNNING: u8 = 0;
+    /// Everything that could be fetched is filed.
+    pub const DONE: u8 = 1;
+    /// It stopped; `reason` says why.
+    pub const FAILED: u8 = 2;
+}
+
+/// Why a pull stopped, in a [`RemotePullStatus`]. The client turns these into
+/// sentences.
+pub mod pull_reason {
+    pub const NONE: u8 = 0;
+    /// The source refused to serve (grant no longer holds there, or pulls off).
+    pub const SOURCE_REFUSED: u8 = 1;
+    /// The session with the source is gone.
+    pub const SOURCE_UNREACHABLE: u8 = 2;
+    /// A file is bigger than this burrow takes.
+    pub const TOO_LARGE: u8 = 3;
+    /// It would put the person over their space here.
+    pub const OVER_QUOTA: u8 = 4;
+    /// This burrow refuses that content.
+    pub const DENIED_CONTENT: u8 = 5;
+    /// A file did not match the content id the source granted.
+    pub const VERIFY_FAILED: u8 = 6;
+    /// The person cancelled it.
+    pub const CANCELLED: u8 = 7;
+    /// Something went wrong here.
+    pub const INTERNAL: u8 = 8;
+    /// This burrow stopped taking it: pulls were switched off, or the
+    /// person's account was closed.
+    pub const STOPPED: u8 = 9;
+}
+
+/// At the **source**: sign a grant letting the burrow whose server key is
+/// `fetcher_key` fetch `nodes` (files, or folders with everything the person
+/// may download in them). → [`PullGrantIssued`]. `Unsupported` when this
+/// burrow does not issue grants; `Unavailable` when `fetcher_key` is not an
+/// approved federation peer here; `Forbidden` when the person may download
+/// none of it; `NotFound` for a node that is gone or an empty folder;
+/// `BadRequest` for no nodes, or more files than one grant may name.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullGrantRequest {
+    pub fetcher_key: [u8; 32],
+    pub nodes: Vec<i64>,
+}
+
+impl PullGrantRequest {
+    pub fn new(fetcher_key: [u8; 32], nodes: Vec<i64>) -> Self {
+        Self { fetcher_key, nodes }
+    }
+}
+
+impl Message for PullGrantRequest {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 33;
+}
+
+/// Reply to [`PullGrantRequest`]: the signed grant, opaque to the client,
+/// and what it covers. `skipped` counts files left out because the person may
+/// not download them or the source will not send them.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullGrantIssued {
+    pub grant: Vec<u8>,
+    pub files: u32,
+    pub bytes: u64,
+    pub skipped: u32,
+    pub expires_unix: i64,
+}
+
+impl PullGrantIssued {
+    pub fn new(grant: Vec<u8>, files: u32, bytes: u64, skipped: u32, expires_unix: i64) -> Self {
+        Self {
+            grant,
+            files,
+            bytes,
+            skipped,
+            expires_unix,
+        }
+    }
+}
+
+impl Message for PullGrantIssued {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 34;
+}
+
+/// At the **destination**: fetch what `grant` names into `area`/`folder`
+/// (`None` or empty: the area root), filed under the caller.
+/// → [`RemotePullAccepted`], then [`RemotePullStatus`] pushes. Refused before
+/// a byte moves: `Unsupported` when this burrow does not pull; `Unavailable`
+/// when the source is not an approved peer with a live session here;
+/// `SessionExpired` for an expired grant; `BadRequest` for a grant that is
+/// not for this burrow or does not verify; `AlreadyExists` for a grant
+/// already used; `Forbidden` when the caller may not upload there or a file
+/// is refused content; `NotFound` for a folder that is not there;
+/// `TooLarge` for a file over the largest this burrow takes, or a total over
+/// the caller's space or a pull's ceiling; `RateLimited` when the caller
+/// already has as many pulls running as allowed.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePull {
+    pub grant: Vec<u8>,
+    pub area: String,
+    pub folder: Option<String>,
+}
+
+impl RemotePull {
+    pub fn new(grant: Vec<u8>, area: impl Into<String>, folder: Option<String>) -> Self {
+        Self {
+            grant,
+            area: area.into(),
+            folder,
+        }
+    }
+}
+
+impl Message for RemotePull {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 35;
+}
+
+/// Reply to [`RemotePull`]: the pull is under way.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePullAccepted {
+    pub pull_id: u64,
+    pub files: u32,
+    pub bytes: u64,
+    /// The source burrow's federation name.
+    pub source: String,
+}
+
+impl RemotePullAccepted {
+    pub fn new(pull_id: u64, files: u32, bytes: u64, source: impl Into<String>) -> Self {
+        Self {
+            pull_id,
+            files,
+            bytes,
+            source: source.into(),
+        }
+    }
+}
+
+impl Message for RemotePullAccepted {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 36;
+}
+
+/// Stop a pull the caller started. → empty ack; `NotFound` for one that is
+/// not running or not theirs.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePullCancel {
+    pub pull_id: u64,
+}
+
+impl RemotePullCancel {
+    pub fn new(pull_id: u64) -> Self {
+        Self { pull_id }
+    }
+}
+
+impl Message for RemotePullCancel {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 37;
+}
+
+/// Push to the person who started a pull: how far it has got, or how it
+/// ended. Progress is not replayed after a reconnect; the ending is.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePullStatus {
+    pub pull_id: u64,
+    /// One of [`pull_state`].
+    pub state: u8,
+    pub files_done: u32,
+    pub files_total: u32,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    /// One of [`pull_reason`]; `NONE` unless it failed.
+    pub reason: u8,
+    /// Files the source no longer had, left out of a finished pull.
+    pub missing: u32,
+    /// The source burrow's federation name.
+    pub source: String,
+    /// Where it landed: the area and the path of the first thing filed.
+    pub area: String,
+    pub landed: String,
+}
+
+impl RemotePullStatus {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        pull_id: u64,
+        state: u8,
+        files_done: u32,
+        files_total: u32,
+        bytes_done: u64,
+        bytes_total: u64,
+        reason: u8,
+        missing: u32,
+        source: impl Into<String>,
+        area: impl Into<String>,
+        landed: impl Into<String>,
+    ) -> Self {
+        Self {
+            pull_id,
+            state,
+            files_done,
+            files_total,
+            bytes_done,
+            bytes_total,
+            reason,
+            missing,
+            source: source.into(),
+            area: area.into(),
+            landed: landed.into(),
+        }
+    }
+}
+
+impl Message for RemotePullStatus {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 38;
+}

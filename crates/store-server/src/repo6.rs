@@ -366,6 +366,63 @@ impl FilesRepo<'_> {
         Ok(moved)
     }
 
+    /// Record where a pulled file came from: the source burrow's name and
+    /// server key.
+    pub async fn set_provenance(
+        &self,
+        id: i64,
+        burrow: &str,
+        key: &[u8; 32],
+    ) -> Result<bool, StoreError> {
+        Ok(
+            sqlx::query("UPDATE file_nodes SET source_burrow = ?, source_key = ? WHERE id = ?")
+                .bind(burrow)
+                .bind(key.as_slice())
+                .bind(id)
+                .execute(self.0)
+                .await?
+                .rows_affected()
+                > 0,
+        )
+    }
+
+    /// Spend a pull grant's nonce: `false` when it was spent before and its
+    /// grant has not lapsed. Lapsed ones are forgotten on the way.
+    pub async fn spend_pull_grant(
+        &self,
+        nonce: &[u8; 16],
+        expires_unix: i64,
+        now_unix: i64,
+    ) -> Result<bool, StoreError> {
+        sqlx::query("DELETE FROM s2s_spent_grants WHERE expires_unix <= ?")
+            .bind(now_unix)
+            .execute(self.0)
+            .await?;
+        let inserted = sqlx::query(
+            "INSERT OR IGNORE INTO s2s_spent_grants (nonce, expires_unix) VALUES (?, ?)",
+        )
+        .bind(nonce.as_slice())
+        .bind(expires_unix)
+        .execute(self.0)
+        .await?
+        .rows_affected();
+        Ok(inserted == 1)
+    }
+
+    /// Where a file came from, if it was pulled from another burrow.
+    pub async fn provenance(&self, id: i64) -> Result<Option<(String, [u8; 32])>, StoreError> {
+        let row = sqlx::query("SELECT source_burrow, source_key FROM file_nodes WHERE id = ?")
+            .bind(id)
+            .fetch_optional(self.0)
+            .await?;
+        Ok(row.and_then(|r| {
+            let burrow: String = r.get("source_burrow");
+            let key: Option<Vec<u8>> = r.get("source_key");
+            let key: [u8; 32] = key?.try_into().ok()?;
+            (!burrow.is_empty()).then_some((burrow, key))
+        }))
+    }
+
     pub async fn set_metadata(
         &self,
         id: i64,

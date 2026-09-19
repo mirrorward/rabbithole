@@ -599,6 +599,24 @@ async fn run_peer_session(
     serve_catalog: bool,
 ) {
     let mut edge = FloodEdge::new(peer_key, peer_origin);
+    // Pulls between burrows ride this session's bulk streams: offer it to
+    // this burrow's pulls, and answer the peer's pull streams on it.
+    let pull_link = conn
+        .bulk()
+        .map(|bulk| shared.s2s.link_up(peer_key, Arc::from(bulk)));
+    let pull_server = conn.bulk().map(|bulk| {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            while let Ok((send, recv)) = bulk.accept().await {
+                tokio::spawn(crate::s2s::serve_pull_stream(
+                    shared.clone(),
+                    peer_key,
+                    send,
+                    recv,
+                ));
+            }
+        })
+    });
     // The dialer announces its interest first (after its synchronous catalog
     // pull has completed, so it can't collide with that request/reply). The
     // listener stays quiet until it receives a subscription, then replies with
@@ -672,6 +690,12 @@ async fn run_peer_session(
                 }
             }
         }
+    }
+    if let Some(gen) = pull_link {
+        shared.s2s.link_down(peer_key, gen);
+    }
+    if let Some(task) = pull_server {
+        task.abort();
     }
     shared.peers.set_disconnected(&peer_key);
     tracing::info!(peer = %PublicKey(peer_key).fingerprint(), "federation peer disconnected");

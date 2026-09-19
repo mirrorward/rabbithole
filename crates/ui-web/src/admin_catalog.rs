@@ -923,7 +923,7 @@ pub const SECTIONS: &[Section] = &[
             Group {
                 title: "Federation",
                 blurb: "Approved burrows share catalogs, search and board posts. Peers are \
-                        approved from the burrow\u{2019}s command line.",
+                        approved under Peers.",
                 items: &[
                     item(
                         "federation_enabled",
@@ -938,6 +938,40 @@ pub const SECTIONS: &[Section] = &[
                         "The permanent name this burrow signs federated posts with. Set once \
                          in burrow.toml and never changed.",
                     ),
+                ],
+            },
+            Group {
+                title: "Sending files between burrows",
+                blurb: "Someone on this burrow and another can send files and folders from one \
+                        to the other. The receiving burrow fetches them itself, over its \
+                        federation session with the sender, so both must be approved peers.",
+                items: &[
+                    item(
+                        "s2s_grants_enabled",
+                        "Let people send from here",
+                        "People may send what they can download here to a peer burrow. The \
+                         permission names that burrow alone and lapses after an hour.",
+                    ),
+                    item(
+                        "s2s_pull_enabled",
+                        "Take files sent from peers",
+                        "People may bring files from a peer burrow into this one. They are \
+                         filed under the person who asked, and count against their space.",
+                    ),
+                    item(
+                        "s2s_max_concurrent",
+                        "Sends at once, per person",
+                        "How many sends one person may have coming in at the same time.",
+                    )
+                    .zero("no limit"),
+                    item(
+                        "s2s_max_bytes",
+                        "Largest send",
+                        "The most one send may bring in altogether, in bytes. The largest file \
+                         and each person\u{2019}s space still apply.",
+                    )
+                    .unit(Unit::Bytes)
+                    .zero("no limit beyond those"),
                 ],
             },
             Group {

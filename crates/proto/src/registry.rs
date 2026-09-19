@@ -60,9 +60,9 @@ use crate::dm::{
 use crate::filelib::{
     AliasCreate, AreaCreate, AreaDelete, AreaList, AreaListRequest, AreaReply, AreaUpdate,
     FileAdded, FileContent, FileDownloadRequest, FileUpload, FolderCreate, FolderListRequest,
-    NodeDelete, NodeGet, NodeList, NodeMove, NodeRename, NodeReply, RateFile, SearchRequest,
-    UploadLimits, UploadLimitsRequest,
-    SearchResults, SetMetadata,
+    NodeDelete, NodeGet, NodeList, NodeMove, NodeRename, NodeReply, PullGrantIssued,
+    PullGrantRequest, RateFile, RemotePull, RemotePullAccepted, RemotePullCancel, RemotePullStatus,
+    SearchRequest, SearchResults, SetMetadata, UploadLimits, UploadLimitsRequest,
 };
 use crate::hello::{Hello, HelloAck, KeyProof};
 use crate::keybundle::{KeyBundle, KeyBundlePublish, KeyBundleRequest};
@@ -164,6 +164,8 @@ wire_registry! {
     AreaReply, FolderCreate, FileUpload, FileDownloadRequest, FileContent, NodeDelete, SetMetadata,
     SearchRequest, SearchResults, RateFile, AliasCreate, FileAdded,
     AreaUpdate, AreaDelete, NodeRename, NodeMove, UploadLimitsRequest, UploadLimits,
+    PullGrantRequest, PullGrantIssued, RemotePull, RemotePullAccepted, RemotePullCancel,
+    RemotePullStatus,
     TransferOpen, TransferTicket, TransferResume, UploadFinish, TransferAbort,
     FolderManifestRequest, FolderManifest, FileChunkRequest, FileChunk, FileChunkPut,
     BlobPut, BlobRef, BlobGet, BlobData,
@@ -204,7 +206,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 216;
+pub const EXPECTED: usize = 222;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

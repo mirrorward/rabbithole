@@ -47,9 +47,10 @@ impl QuicListener {
             .map_err(|e| NetError::Tls(e.to_string()))?;
         server_crypto.alpn_protocols = vec![ALPN.to_vec()];
 
-        let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+        let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
             QuicServerConfig::try_from(server_crypto).map_err(|e| NetError::Tls(e.to_string()))?,
         ));
+        server_config.transport_config(keep_alive());
         let endpoint = quinn::Endpoint::server(server_config, addr)?;
         Ok(Self { endpoint })
     }
@@ -143,10 +144,25 @@ impl QuicTransport {
         };
         let mut client_crypto = client_crypto;
         client_crypto.alpn_protocols = vec![ALPN.to_vec()];
-        Ok(quinn::ClientConfig::new(Arc::new(
+        let mut config = quinn::ClientConfig::new(Arc::new(
             QuicClientConfig::try_from(client_crypto).map_err(|e| NetError::Tls(e.to_string()))?,
-        )))
+        ));
+        config.transport_config(keep_alive());
+        Ok(config)
     }
+}
+
+/// How often an otherwise quiet connection says it is still there. QUIC
+/// closes a connection that hears nothing for its idle timeout (30 seconds by
+/// default); a long-lived session that only speaks now and then (a federation
+/// peering, a client between requests) would otherwise drop and be redialed
+/// every half minute.
+const KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn keep_alive() -> Arc<quinn::TransportConfig> {
+    let mut transport = quinn::TransportConfig::default();
+    transport.keep_alive_interval(Some(KEEP_ALIVE));
+    Arc::new(transport)
 }
 
 #[async_trait]

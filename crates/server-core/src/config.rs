@@ -306,6 +306,17 @@ pub struct ServerConfig {
     /// Federation S2S listener address (default 0.0.0.0:4655 — alongside the
     /// QUIC 4653 / WebSocket 4654 client transports).
     pub federation_addr: SocketAddr,
+    /// Sign pull grants: let people send files from here to another burrow
+    /// this one federates with (the source's side of a pull).
+    pub s2s_grants_enabled: bool,
+    /// Accept pulls: fetch files another federated burrow granted, on a
+    /// person's behalf, into this burrow (the destination's side).
+    pub s2s_pull_enabled: bool,
+    /// Pulls one account may have running at once (0 = no limit).
+    pub s2s_max_concurrent: u32,
+    /// The most one pull may bring in altogether, in bytes (0 = no limit
+    /// beyond the largest file and the person's space).
+    pub s2s_max_bytes: u64,
     /// Configured peer dial targets. Serialized as an array of tables in TOML;
     /// edited on disk (not via `ctl config set`), like `ftn_areas`.
     pub federation_peers: Vec<FederationPeer>,
@@ -527,6 +538,10 @@ impl Default for ServerConfig {
             federation_enabled: false,
             federation_origin: String::new(),
             federation_addr: "0.0.0.0:4655".parse().expect("valid"),
+            s2s_grants_enabled: false,
+            s2s_pull_enabled: false,
+            s2s_max_concurrent: 2,
+            s2s_max_bytes: 0,
             federation_peers: Vec::new(),
             federation_board_subscribe: Vec::new(),
             portmap_enabled: false,
@@ -766,6 +781,10 @@ impl ServerConfig {
             "federation_enabled" => self.federation_enabled.to_string(),
             "federation_origin" => self.federation_origin.clone(),
             "federation_addr" => self.federation_addr.to_string(),
+            "s2s_grants_enabled" => self.s2s_grants_enabled.to_string(),
+            "s2s_pull_enabled" => self.s2s_pull_enabled.to_string(),
+            "s2s_max_concurrent" => self.s2s_max_concurrent.to_string(),
+            "s2s_max_bytes" => self.s2s_max_bytes.to_string(),
             "portmap_enabled" => self.portmap_enabled.to_string(),
             "portmap_gateway" => self.portmap_gateway.clone(),
             "portmap_lifetime_secs" => self.portmap_lifetime_secs.to_string(),
@@ -905,11 +924,10 @@ impl ServerConfig {
                 Ok(true)
             }
             "upload_max_file_bytes" => {
-                self.upload_max_file_bytes =
-                    value.parse().map_err(|_| ConfigError::BadValue {
-                        key: key.into(),
-                        detail: value.into(),
-                    })?;
+                self.upload_max_file_bytes = value.parse().map_err(|_| ConfigError::BadValue {
+                    key: key.into(),
+                    detail: value.into(),
+                })?;
                 Ok(true)
             }
             "upload_quota_bytes" => {
@@ -1171,6 +1189,26 @@ impl ServerConfig {
                 self.federation_addr = parse_addr(key, value)?;
                 Ok(false)
             }
+            // Pulls ride federation sessions that are already up: all live.
+            "s2s_grants_enabled" => {
+                self.s2s_grants_enabled = parse_bool(key, value)?;
+                Ok(true)
+            }
+            "s2s_pull_enabled" => {
+                self.s2s_pull_enabled = parse_bool(key, value)?;
+                Ok(true)
+            }
+            "s2s_max_concurrent" => {
+                self.s2s_max_concurrent = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "s2s_max_bytes" => {
+                self.s2s_max_bytes = value.parse().map_err(|_| ConfigError::BadValue {
+                    key: key.into(),
+                    detail: value.into(),
+                })?;
+                Ok(true)
+            }
             // Port mapping is set up in a startup task, so changes need a
             // restart to take effect.
             "portmap_enabled" => {
@@ -1407,6 +1445,10 @@ pub const CONFIG_KEYS: &[&str] = &[
     "federation_enabled",
     "federation_origin",
     "federation_addr",
+    "s2s_grants_enabled",
+    "s2s_pull_enabled",
+    "s2s_max_concurrent",
+    "s2s_max_bytes",
     "portmap_enabled",
     "portmap_gateway",
     "portmap_lifetime_secs",
@@ -2098,7 +2140,10 @@ mod tests {
     fn a_file_may_be_fifty_mebibytes_unless_the_operator_says_otherwise() {
         let live = LiveConfig::new(ServerConfig::default());
         assert_eq!(live.get_key("upload_max_file_bytes").unwrap(), "52428800");
-        assert!(live.set_key("upload_max_file_bytes", "0").unwrap(), "applies live");
+        assert!(
+            live.set_key("upload_max_file_bytes", "0").unwrap(),
+            "applies live"
+        );
         assert_eq!(live.get_key("upload_max_file_bytes").unwrap(), "0");
         assert!(matches!(
             live.set_key("upload_max_file_bytes", "fifty"),

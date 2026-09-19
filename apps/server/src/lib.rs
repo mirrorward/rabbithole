@@ -35,6 +35,7 @@ pub mod nntp_feed;
 pub mod portmap;
 pub mod qwk;
 pub mod radio;
+pub mod s2s;
 pub mod session;
 pub mod stats;
 pub mod surfaces;
@@ -88,6 +89,9 @@ pub struct Shared {
     pub dedup: DedupStore,
     /// Live bulk-transfer tickets (Wave 4.2).
     pub transfers: handlers9::TransferRegistry,
+    /// Pulls between burrows: live federation links, pulls running, spent
+    /// grants ([`s2s`]).
+    pub s2s: s2s::S2sState,
     /// TTL'd who-has-what soft state for the Warren (Wave 5).
     pub swarm: SwarmCatalog,
     /// Radio station directory + live ICY mount fan-out (Wave 11.4).
@@ -240,6 +244,7 @@ impl Burrow {
 
         let data_dir = config.data_dir.clone();
         std::fs::create_dir_all(&data_dir)?;
+        s2s::sweep_staging(&data_dir);
 
         let identity = identity_store::load_or_create(&data_dir, &["localhost".into()])?;
         let fingerprint = identity.tls.fingerprint();
@@ -314,6 +319,7 @@ impl Burrow {
             fingerprint_hex: fingerprint.to_hex(),
             dedup: DedupStore::with_defaults(),
             transfers: handlers9::TransferRegistry::new(),
+            s2s: s2s::S2sState::default(),
             swarm: SwarmCatalog::new(),
             radio: radio::Stations::new(),
             hotline: hotline::Hub::new(),

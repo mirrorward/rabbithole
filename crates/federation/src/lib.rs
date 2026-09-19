@@ -24,6 +24,9 @@
 //!   servers into one result carrying all its sources.
 //! - [`fanout`]: pull fan-out planning — turning a deduped match's sources
 //!   into an ordered [`fanout::FetchPlan`] for the transfer layer.
+//! - [`pull`]: a source burrow's signed permission for one other burrow to
+//!   fetch named files on a person's behalf, and the stream request that
+//!   fetches them.
 //! - [`attestation`]: cross-server identity — `persona@server` addressing,
 //!   home-server-signed [`attestation::PersonaAttestation`]s, and
 //!   key-continuity chains where every rotation is cross-signed by the
@@ -50,6 +53,7 @@ pub mod fanout;
 pub mod floodfill;
 pub mod handshake;
 pub mod policy;
+pub mod pull;
 pub mod redaction;
 pub mod search;
 
