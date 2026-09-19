@@ -33,6 +33,7 @@ pub mod legacy;
 pub mod nntp;
 pub mod nntp_feed;
 pub mod portmap;
+pub mod proved;
 pub mod qwk;
 pub mod radio;
 pub mod s2s;
@@ -534,13 +535,26 @@ fn validate_federation_policy(config: &ServerConfig) -> Result<()> {
 /// Periodic housekeeping: enforce the blob cache policy
 /// (`swarm_cache_max_bytes`) by evicting oldest unreferenced blobs over the
 /// cap. Referenced library content is never touched; `0` means unlimited
-/// ("mirror"), so the sweep is a no-op. Stops on shutdown.
+/// ("mirror"), so the sweep is a no-op. Whatever the cap, at startup and
+/// hourly, clear what the blob store keeps beside its blobs that no longer
+/// belongs (proofs of a removed blob, a write that never finished). Stops on
+/// shutdown.
 async fn maintenance(shared: Arc<Shared>) {
     let mut rx = shared.bus.subscribe();
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+    let mut ticks: u64 = 0;
     loop {
         tokio::select! {
             _ = tick.tick() => {
+                if ticks % 12 == 0 {
+                    let blobs = shared.blobs.clone();
+                    if let Ok(Ok(n)) = tokio::task::spawn_blocking(move || blobs.sweep_sidecars()).await {
+                        if n > 0 {
+                            tracing::info!(removed = n, "blob store sidecars swept");
+                        }
+                    }
+                }
+                ticks += 1;
                 let cap = shared.config.read().swarm_cache_max_bytes;
                 if cap == 0 {
                     continue; // mirror: keep everything

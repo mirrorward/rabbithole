@@ -82,6 +82,7 @@ resumable, integrity-checked way. Messages (types 20-42):
 | 25/26 | FolderManifestRequest → FolderManifest | Request/Reply | `area`, `path?` → whole subtree in one round trip; entries {node_id, rel_path, root, size, mime} |
 | — | BulkPreamble | (stream, **not a frame**) | first bytes on a dedicated QUIC bulk stream: a length-prefixed postcard `{transfer_id, token, offset, direction}` binding the raw stream to a ticket. It carries no message-type number — it never rides the control framing |
 | 40/41 | FileChunkRequest → FileChunk | Request/Reply | `transfer_id`, `offset`, `len` → `{transfer_id, offset, last, bytes}` — ranged download (WS / control-stream path) |
+| 43/44 | ProvedRangeRequest → ProvedRange | Request/Reply | `transfer_id` (a download ticket), `offset`, `len` ≤ 512 KiB → `{transfer_id, offset, len, size, stream}`: the **Bao stream** for the range (the bytes and the proof of every 16 KiB block up to the root), which the client checks against the file's root before it keeps a byte. The burrow as one source of a swarm fetch (0.230): it makes the file's proofs in the background the first time a range is asked for, answering `Unavailable` (ask again shortly) until they are ready, and keeps them beside it in the blob store. The ticket stays open (close it with TransferAbort); held to the transfer rate. `BadRequest` over 512 KiB or past the end, `Forbidden` on another person's ticket, `NotFound` when the stored file no longer proves out (not read again for ten minutes). Older burrows answer `Unsupported`, and the app asks only a burrow that reports 0.230 or later |
 | 42 | FileChunkPut | Request → ack | `{transfer_id, offset, last, bytes}` — ranged upload |
 
 **Transports.** On QUIC, `Connection::bulk()` yields a `BulkStreams` handle:
@@ -121,6 +122,30 @@ frame (u32 big-endian length, as the transfer preamble):
   by the source) must still have a working account there, checked again
   every 15 seconds while a file streams. A grant from before 0.228 names no
   one and is served without that check.
+- **A range with its proof** (0.230): an **empty frame**, then
+  `PullStreamAsk::Range { grant, item, offset, len }` (`len` ≤ 1 MiB). The
+  source answers the status byte a request for that file's bytes would get,
+  and on OK one frame holding the range's Bao stream, which the destination
+  checks against the file's root. It makes the file's proofs in the
+  background the first time one is asked for, and answers 5 (`BUSY`, ask
+  again shortly) until they are ready, holding no stream meanwhile. The
+  ranges of one file go out together at the rate one download may take
+  (`transfer_rate_bytes_per_sec`), however many are asked at once; one
+  queued further out than the asker waits is answered 5 as well, so no
+  stream is held for an answer nobody is waiting for. When the source names
+  seeders for a file, the destination takes it this way from the source
+  (four asks at a time, never two for one unit) and its seeders together,
+  each unit from whichever holds it, all checked alike; it asks a busy
+  source again for a minute, and the time the file takes to prove at
+  64 MiB/s, then takes the rest of the send the plain way. With no seeders
+  there is nothing to mix, and the file comes as a plain stream checked
+  whole at the end, as before, with no proofs made. A file that does not
+  prove out at the source is answered 6 (`UNPROVABLE`) and comes the plain
+  way, the rest of the send still by ranges; a source from before this
+  answers 4, and everything comes the plain way. Empty files, and files
+  over 64 GiB, always do. A federation session serves at most 16 of a
+  peer's pull streams at once; the rest wait. An answer is written in
+  pieces, each with its own idle limit, like a plain stream.
 - **The swarm peers holding a file** (0.228): an **empty frame**, then
   `PullStreamAsk::Sources { grant, item }`. The source answers the status
   byte a request for that file's bytes would get, or 3 when it does not share

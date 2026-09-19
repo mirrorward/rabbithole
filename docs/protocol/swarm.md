@@ -114,6 +114,30 @@ Whole files loop 4 MiB range requests (`fetch_file`). Bytes never
 transit the origin server. `rabbit swarm share` seeds exactly this way;
 `rabbit swarm fetch <root|link> <out>` does find → ticket → swarm fetch.
 
+### Burrows as sources (0.230)
+
+The burrow a file is stored on is one of a fetch's sources too, sending
+each range with its proof like any peer: `ProvedRangeRequest` under a
+download ticket (FILE 43, half a unit per message, see
+[`file.md`](file.md)), its Bao outboard computed once and kept beside the
+blob. The outboard is built in the background, once per file at a time (two
+files at most at once), and written to disk as it is computed. An ask that
+comes before it is ready is told to ask again (`Unavailable`), so nothing
+waits on it. The desktop app adds the burrow beside the peers
+whenever the person has not asked for peers only and the burrow reports
+0.230 or later, as one more source taking units: whatever the peers do not
+hold comes from it, unit by unit, instead of the download going all to the
+peers or all to the burrow. The download ticket is opened only when the
+burrow is first asked and closed as soon as the burrow is let go. One range
+may take it at most a minute, and a burrow still making the proofs is asked
+again for a minute plus the file at 64 MiB/s. Between burrows, the sending
+burrow does the same on the pull link (`PullStreamAsk::Range`) when it
+names seeders for the file, with four ranges in flight at once. In the
+engine, every source (a peer, a burrow) only hands over Bao streams
+(`RangeSource`), and may take several units at once (its lanes, never two
+for one unit); the fetch checks each piece against the root itself
+(`fetch_proved`), so no source is trusted with the checking.
+
 ### Partial seeds (0.229)
 
 A peer need not hold a whole file to serve it. A fetch keeps the proof of

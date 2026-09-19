@@ -59,6 +59,12 @@ pub struct BlobStore {
     root: PathBuf,
 }
 
+/// How long a temporary file in the store must have sat untouched before a
+/// sweep takes it for abandoned. Well past the longest write anything here
+/// does: computing a huge file's proofs writes to its temporary all the way
+/// through, but reads the whole file to do it.
+const STALE_TEMP: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
 impl BlobStore {
     /// Open (creating if needed) a store rooted at `root`.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, BlobError> {
@@ -74,6 +80,18 @@ impl BlobStore {
 
     fn refs_path(&self, id: &BlobId) -> PathBuf {
         self.blob_path(id).with_extension("refs")
+    }
+
+    /// Where a blob's content lives on disk (for serving ranges of it).
+    pub fn file_path(&self, id: &BlobId) -> PathBuf {
+        self.blob_path(id)
+    }
+
+    /// Where a blob's Bao outboard (the proofs of every 16 KiB block, for
+    /// serving proved ranges) is kept beside it, once computed. Removed with
+    /// the blob.
+    pub fn outboard_path(&self, id: &BlobId) -> PathBuf {
+        self.blob_path(id).with_extension("obao")
     }
 
     /// Store bytes, returning their id. Idempotent: storing existing
@@ -257,8 +275,34 @@ impl BlobStore {
             }
             fs::remove_file(self.blob_path(&id))?;
             let _ = fs::remove_file(self.refs_path(&id));
+            let _ = fs::remove_file(self.outboard_path(&id));
             total = total.saturating_sub(size);
             removed.push(id);
+        }
+        let _ = self.sweep_sidecars();
+        Ok(removed)
+    }
+
+    /// Remove proofs (`.obao`) left beside no blob (one computed as its blob
+    /// was evicted), and temporary files older than [`STALE_TEMP`] (a write
+    /// that never finished).
+    pub fn sweep_sidecars(&self) -> Result<usize, BlobError> {
+        let mut removed = 0;
+        for path in walk(&self.root)? {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let orphan =
+                path.extension().is_some_and(|e| e == "obao") && !path.with_extension("").exists();
+            let stale = name.ends_with(".tmp")
+                && fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > STALE_TEMP);
+            if (orphan || stale) && fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
         }
         Ok(removed)
     }
@@ -278,9 +322,11 @@ impl BlobStore {
             if self.read_refs(&id)? == 0 {
                 fs::remove_file(&path)?;
                 let _ = fs::remove_file(self.refs_path(&id));
+                let _ = fs::remove_file(self.outboard_path(&id));
                 removed.push(id);
             }
         }
+        let _ = self.sweep_sidecars();
         Ok(removed)
     }
 }
@@ -300,6 +346,29 @@ fn walk(root: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
         }
     }
     Ok(files)
+}
+
+#[cfg(test)]
+mod sidecar_tests {
+    use super::*;
+
+    #[test]
+    fn proofs_beside_no_blob_and_stale_temporaries_are_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::open(dir.path()).unwrap();
+        let kept = store.put(b"kept").unwrap();
+        std::fs::write(store.outboard_path(&kept), b"proofs").unwrap();
+        let gone = BlobId::for_bytes(b"gone");
+        std::fs::create_dir_all(store.file_path(&gone).parent().unwrap()).unwrap();
+        std::fs::write(store.outboard_path(&gone), b"orphan").unwrap();
+        let fresh_tmp = store.outboard_path(&kept).with_extension("obao.1.1.tmp");
+        std::fs::write(&fresh_tmp, b"writing").unwrap();
+        assert!(STALE_TEMP > std::time::Duration::from_secs(3 * 3600));
+        assert_eq!(store.sweep_sidecars().unwrap(), 1);
+        assert!(store.outboard_path(&kept).exists());
+        assert!(!store.outboard_path(&gone).exists());
+        assert!(fresh_tmp.exists(), "a write under way is left alone");
+    }
 }
 
 #[cfg(test)]

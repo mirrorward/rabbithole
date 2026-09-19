@@ -90,6 +90,10 @@ pub struct S2sState {
     /// of the grant each was opened with (one at a time per grant), with the
     /// account that grant names.
     sessions: Mutex<HashMap<[u8; 16], Option<i64>>>,
+    /// Proved ranges of sent files served since this burrow started: what
+    /// tells a file carried by its ranges from one carried by a plain
+    /// stream.
+    pub ranges_served: AtomicU64,
 }
 
 /// What a burrow derives, from its signing seed, the key it hides the
@@ -787,6 +791,246 @@ struct Pull {
     hold: Mutex<Option<Box<dyn Connection>>>,
 }
 
+/// How fetching one file from the source's proved ranges went.
+#[derive(Debug, PartialEq, Eq)]
+enum Proven {
+    /// The whole file, verified; and whether any of it came from seeders.
+    Fetched {
+        from_seeders: bool,
+    },
+    /// The source predates proved ranges.
+    Old,
+    /// The source no longer has the file (or it changed).
+    Gone,
+    /// The grant no longer holds there.
+    Refused,
+    /// Pulls were switched off here, or the person's account closed.
+    Stopped,
+    Cancelled,
+    /// It could not be written here.
+    Local,
+    /// It did not come through (the source went quiet or away).
+    Failed,
+    /// The source was still making the file's proofs, or had its ranges
+    /// queued behind others, when what the seeders did not give had to come
+    /// from it.
+    Busy,
+    /// This file cannot be sent as proved ranges there (it does not match
+    /// its proofs). Others in the same send still can.
+    Unprovable,
+    /// No seeders to take units from beside the source: nothing to mix, so
+    /// the file comes the plain way, and the source makes no proofs for it.
+    Alone,
+}
+
+/// The sending burrow as one source of a file's units: proved ranges on a
+/// stream of the link (a [`fp::PullStreamAsk::Range`] each, [`SOURCE_LANES`]
+/// at once), which the fetch checks against the root like a seeder's.
+/// Remembers the last refusal, so the fetch can tell a source that predates
+/// the question from one that refused.
+struct SourceLink {
+    link: Arc<dyn BulkStreams>,
+    grant: Vec<u8>,
+    item: u32,
+    size: u64,
+    label: String,
+    status: Arc<std::sync::atomic::AtomicU8>,
+    /// How long a source still making the file's proofs is waited for.
+    busy_until: tokio::time::Instant,
+}
+
+/// How soon a source still making a file's proofs is asked again: at first,
+/// and at most.
+const BUSY_RETRY: Duration = Duration::from_millis(250);
+const BUSY_RETRY_MAX: Duration = Duration::from_secs(2);
+
+impl SourceLink {
+    /// One ask for a range: its Bao stream, or `None` while the source is
+    /// still making the file's proofs.
+    async fn ask(
+        &self,
+        offset: u64,
+        len: u64,
+    ) -> Result<Option<Vec<u8>>, rabbithole_swarm::PeerError> {
+        use rabbithole_swarm::PeerError;
+        let quiet = || PeerError::Refused(rabbithole_swarm::peer::STATUS_BAD_REQUEST);
+        let ask = postcard::to_allocvec(&fp::PullStreamAsk::Range {
+            grant: self.grant.clone(),
+            item: self.item,
+            offset,
+            len,
+        })
+        .map_err(|_| quiet())?;
+        let (mut send, mut recv) = tokio::time::timeout(STREAM_IDLE, self.link.open())
+            .await
+            .map_err(|_| quiet())?
+            .map_err(|_| quiet())?;
+        tokio::time::timeout(STREAM_IDLE, async {
+            write_framed(&mut send, &[]).await?;
+            write_framed(&mut send, &ask).await
+        })
+        .await
+        .map_err(|_| quiet())?
+        .map_err(|_| quiet())?;
+        let _ = send.shutdown().await;
+        // The source paces one file's asks together, so the answer may wait
+        // on the other lanes' full-sized ones at the slowest rate a source
+        // may keep.
+        let wait = STREAM_IDLE
+            + Duration::from_secs(SOURCE_LANES as u64 * fp::MAX_PROVED_RANGE / MIN_RATE);
+        let mut status = [0u8; 1];
+        tokio::time::timeout(wait, recv.read_exact(&mut status))
+            .await
+            .map_err(|_| quiet())?
+            .map_err(|_| quiet())?;
+        match status[0] {
+            stream_status::OK => {}
+            stream_status::BUSY => return Ok(None),
+            stream_status::UNPROVABLE => {
+                self.status
+                    .store(stream_status::UNPROVABLE, Ordering::Relaxed);
+                return Err(PeerError::Refused(rabbithole_swarm::peer::STATUS_NOT_FOUND));
+            }
+            other => {
+                self.status.store(other, Ordering::Relaxed);
+                return Err(PeerError::Refused(rabbithole_swarm::peer::STATUS_NOT_FOUND));
+            }
+        }
+        let most = rabbithole_swarm::stream_limit(len.min(self.size.saturating_sub(offset)));
+        read_framed_idle(&mut recv, most as usize)
+            .await
+            .map(Some)
+            .ok_or_else(quiet)
+    }
+}
+
+#[async_trait::async_trait]
+impl rabbithole_swarm::RangeSource for SourceLink {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    async fn have(&self) -> Result<Option<rabbithole_swarm::HaveMap>, rabbithole_swarm::PeerError> {
+        // The source holds the whole file.
+        Ok(None)
+    }
+
+    async fn bao(
+        &self,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<rabbithole_swarm::BaoPiece>, rabbithole_swarm::PeerError> {
+        let len = len.min(fp::MAX_PROVED_RANGE);
+        // A source making the file's proofs (it started when first asked)
+        // is asked again, a little later each time, for as long as making
+        // them should take; meanwhile the seeders carry on.
+        let mut pause = BUSY_RETRY;
+        let stream = loop {
+            match self.ask(offset, len).await? {
+                Some(stream) => break stream,
+                None if tokio::time::Instant::now() + pause < self.busy_until => {
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(BUSY_RETRY_MAX);
+                }
+                None => {
+                    self.status.store(stream_status::BUSY, Ordering::Relaxed);
+                    return Err(rabbithole_swarm::PeerError::Refused(
+                        rabbithole_swarm::peer::STATUS_NOT_FOUND,
+                    ));
+                }
+            }
+        };
+        Ok(vec![rabbithole_swarm::BaoPiece {
+            offset,
+            len,
+            size: self.size,
+            stream,
+        }])
+    }
+
+    fn lanes(&self) -> usize {
+        SOURCE_LANES
+    }
+}
+
+/// A frame, written with a limit on silence rather than on the whole: a
+/// slow link that keeps taking bytes is waited for, a silent one is not.
+/// (A proved range is about a megabyte; a plain stream writes in pieces for
+/// the same reason.)
+async fn write_framed_idle(send: &mut BulkSend, bytes: &[u8]) -> bool {
+    let len = match u32::try_from(bytes.len()) {
+        Ok(len) => len,
+        Err(_) => return false,
+    };
+    if !write_timed(send, &len.to_be_bytes()).await {
+        return false;
+    }
+    for piece in bytes.chunks(CHUNK) {
+        if !write_timed(send, piece).await {
+            return false;
+        }
+    }
+    true
+}
+
+/// A frame, read with a limit on silence rather than on the whole: a slow
+/// link that keeps sending is waited for, a silent one is not. `None` when
+/// it does not come whole, or is over `max`.
+async fn read_framed_idle(recv: &mut BulkRecv, max: usize) -> Option<Vec<u8>> {
+    let mut len = [0u8; 4];
+    tokio::time::timeout(STREAM_IDLE, recv.read_exact(&mut len))
+        .await
+        .ok()?
+        .ok()?;
+    let len = u32::from_be_bytes(len) as usize;
+    if len > max {
+        return None;
+    }
+    let mut frame = vec![0u8; len];
+    let mut got = 0;
+    while got < len {
+        match tokio::time::timeout(STREAM_IDLE, recv.read(&mut frame[got..])).await {
+            Ok(Ok(n)) if n > 0 => got += n,
+            _ => return None,
+        }
+    }
+    Some(frame)
+}
+
+/// The longest a proved range is held back for pacing: what a destination
+/// waits for one ([`SourceLink::ask`]) less the time the answer itself may
+/// take. Past that it is told to ask again, rather than held on a stream
+/// nobody is waiting on any more.
+const PACE_MAX: Duration =
+    Duration::from_secs(SOURCE_LANES as u64 * fp::MAX_PROVED_RANGE / MIN_RATE);
+
+/// How long to hold a proved range of a file being sent before it goes out,
+/// so the asks for one file, however many at once, keep together to the
+/// rate one download may take (`rate` bytes a second; 0 is no limit).
+/// `None` when they are queued further out than the asker will wait: it is
+/// told to ask again, and nothing is reserved for an answer never sent.
+fn range_pace(grant: &[u8], item: u32, rate: u64, bytes: usize) -> Option<Duration> {
+    static NEXT: std::sync::OnceLock<Mutex<HashMap<[u8; 32], Instant>>> =
+        std::sync::OnceLock::new();
+    if rate == 0 || bytes == 0 {
+        return Some(Duration::ZERO);
+    }
+    let mut key = blake3::Hasher::new();
+    key.update(grant);
+    key.update(&item.to_le_bytes());
+    let key = *key.finalize().as_bytes();
+    let now = Instant::now();
+    let mut next = NEXT.get_or_init(Default::default).lock();
+    next.retain(|_, at| *at > now);
+    let from = next.get(&key).copied().unwrap_or(now);
+    let until = from + Duration::from_secs_f64(bytes as f64 / rate as f64);
+    if until.saturating_duration_since(now) > PACE_MAX {
+        return None;
+    }
+    next.insert(key, until);
+    Some(until - now)
+}
+
 /// What one send has spent on the source's swarm.
 #[derive(Default)]
 struct SwarmBudget {
@@ -801,6 +1045,11 @@ struct SwarmBudget {
 
 /// Most seeders one send dials, whatever the source names.
 const MAX_SEND_SEEDERS: usize = 32;
+/// Proved ranges asked of the sending burrow at once, for one file.
+const SOURCE_LANES: usize = 4;
+/// The slowest a burrow makes a file's proofs, for how long a source still
+/// making them is waited for.
+const PROOF_RATE: u64 = 64 * 1024 * 1024;
 /// The largest file fetched from the swarm: past it, the swarm's resume
 /// record (an entry per megabyte, rewritten as it goes) grows too big to
 /// keep rewriting, and the source sends it.
@@ -1075,6 +1324,117 @@ impl Pull {
         }
     }
 
+    /// Fetch one file from the source's proved ranges, together with its
+    /// seeders when both burrows allow the swarm: each unit from whichever
+    /// holds it, every one checked against the root as it lands, into
+    /// `dest`. Anything but [`Proven::Fetched`] leaves nothing behind.
+    async fn fetch_proved(
+        &self,
+        link: &Arc<dyn BulkStreams>,
+        index: usize,
+        item: &fp::PullItem,
+        dest: &Path,
+        budget: &mut SwarmBudget,
+        progress: &mut impl FnMut(u64),
+    ) -> Proven {
+        let status = Arc::new(std::sync::atomic::AtomicU8::new(stream_status::OK));
+        let source_label = format!("{} (the sending burrow)", self.source_name);
+        // Several asks in flight at once (its lanes), so a range at a time is
+        // not one round trip at a time.
+        let mut sources: Vec<Arc<dyn rabbithole_swarm::RangeSource>> = vec![Arc::new(SourceLink {
+            link: link.clone(),
+            grant: self.grant_bytes.clone(),
+            item: index as u32,
+            size: item.size,
+            label: source_label.clone(),
+            status: status.clone(),
+            busy_until: tokio::time::Instant::now()
+                + 2 * STREAM_IDLE
+                + Duration::from_secs(item.size / PROOF_RATE),
+        })];
+        let (wanted, allow_private) = {
+            let config = self.shared.config.read();
+            (config.s2s_swarm, config.s2s_private_addresses)
+        };
+        if wanted && !budget.off && (SWARM_MIN_BYTES..=SWARM_MAX_BYTES).contains(&item.size) {
+            match self
+                .until_cancelled(ask_sources(link.as_ref(), &self.grant_bytes, index as u32))
+                .await
+            {
+                Some(Ok(offer))
+                    if offer.expires_unix.saturating_sub(now_unix()) >= MIN_TOKEN_LIFE_SECS =>
+                {
+                    for peer in budget.usable(&offer.sources, allow_private).sources {
+                        sources.push(Arc::new(rabbithole_swarm::PeerSource {
+                            endpoint: peer.endpoint,
+                            cert_fp: peer.cert_fp,
+                            token: offer.token.clone(),
+                            root: item.root,
+                        }));
+                    }
+                }
+                Some(Ok(_)) | Some(Err(Some(stream_status::GONE))) => {}
+                Some(Err(_)) => budget.off = true,
+                None => return Proven::Cancelled,
+            }
+        }
+        if sources.len() == 1 {
+            return Proven::Alone;
+        }
+        let _ = tokio::fs::create_dir_all(dest.parent().unwrap_or(Path::new("."))).await;
+        let (tx, mut units) = tokio::sync::mpsc::unbounded_channel();
+        let mut fetch = Box::pin(rabbithole_swarm::fetch_swarm_from(
+            &sources,
+            item.root,
+            item.size,
+            dest,
+            Some(tx),
+            None,
+        ));
+        let deadline = tokio::time::sleep(STREAM_IDLE + Duration::from_secs(item.size / MIN_RATE));
+        tokio::pin!(deadline);
+        let mut watch = tokio::time::interval(Duration::from_millis(250));
+        let ended = loop {
+            tokio::select! {
+                result = &mut fetch => break Some(result),
+                Some(unit) = units.recv() => {
+                    progress((unit.done_units * rabbithole_swarm::UNIT_SIZE).min(item.size));
+                }
+                _ = &mut deadline => break None,
+                _ = watch.tick() => {
+                    if self.cancel.load(Ordering::Relaxed) {
+                        drop(fetch);
+                        remove_swarm_partial(dest).await;
+                        return Proven::Cancelled;
+                    }
+                }
+            }
+        };
+        // Dropping the fetch stops its workers.
+        drop(fetch);
+        let outcome = match ended {
+            Some(Ok(report)) => {
+                let from_seeders = report
+                    .per_source
+                    .iter()
+                    .any(|(label, units)| *label != source_label && *units > 0);
+                return Proven::Fetched { from_seeders };
+            }
+            Some(Err(rabbithole_swarm::PeerError::Io(_))) => Proven::Local,
+            _ => match status.load(Ordering::Relaxed) {
+                stream_status::BAD => Proven::Old,
+                stream_status::BUSY => Proven::Busy,
+                stream_status::UNPROVABLE => Proven::Unprovable,
+                stream_status::GONE => Proven::Gone,
+                stream_status::DENIED | stream_status::OFF => Proven::Refused,
+                _ if !self.still_wanted().await => Proven::Stopped,
+                _ => Proven::Failed,
+            },
+        };
+        remove_swarm_partial(dest).await;
+        outcome
+    }
+
     /// The end of a swarm attempt that did not give the file: what it left
     /// is removed. [`Swarm::Failed`] if peers were tried, else skipped.
     async fn gave_up(&self, dest: &Path, tried: bool) -> Swarm {
@@ -1148,6 +1508,8 @@ impl Pull {
         let mut tops: HashMap<String, String> = HashMap::new();
         let mut last_push = Instant::now();
         let mut swarm = SwarmBudget::default();
+        // The source predates proved ranges: plain streams for this send.
+        let mut plain = false;
         for (index, item) in self.grant.grant.items.iter().enumerate() {
             if self.cancel.load(Ordering::Relaxed) {
                 return (tally, Some(pull_reason::CANCELLED), landed);
@@ -1192,25 +1554,75 @@ impl Pull {
             // source alone, so peers that do not answer cost one try, not one
             // per file.
             let swarm_staging = self.swarm_staging(index);
-            let from_swarm = self
-                .fetch_from_swarm(
-                    link.as_ref(),
-                    index,
-                    item,
-                    &swarm_staging,
-                    &mut swarm,
-                    &mut progress,
-                )
-                .await;
-            if from_swarm == Swarm::Stopped {
-                return (tally, Some(pull_reason::STOPPED), landed);
+            // A source that sends proved ranges is one source among its
+            // seeders: every unit comes from whichever holds it, and each is
+            // checked against the root as it lands, whoever sent it.
+            let mut proved = None;
+            let mut seeders_tried = false;
+            // An empty file, or one too big for the swarm's bookkeeping, goes
+            // the plain way.
+            if !plain && (1..=SWARM_MAX_BYTES).contains(&item.size) {
+                match self
+                    .fetch_proved(
+                        &link,
+                        index,
+                        item,
+                        &swarm_staging,
+                        &mut swarm,
+                        &mut progress,
+                    )
+                    .await
+                {
+                    Proven::Fetched { from_seeders } => proved = Some(from_seeders),
+                    // It predates proved ranges, or could not make proofs in
+                    // time: the plain way, for the rest (its seeders were
+                    // just tried, not again for this file).
+                    Proven::Old | Proven::Busy => {
+                        plain = true;
+                        seeders_tried = true;
+                    }
+                    // No seeders, or this one file cannot be proved there:
+                    // the plain way, from the source alone.
+                    Proven::Alone | Proven::Unprovable => seeders_tried = true,
+                    Proven::Gone => {
+                        tally.missing += 1;
+                        continue;
+                    }
+                    Proven::Refused => return (tally, Some(pull_reason::SOURCE_REFUSED), landed),
+                    Proven::Stopped => return (tally, Some(pull_reason::STOPPED), landed),
+                    Proven::Cancelled => return (tally, Some(pull_reason::CANCELLED), landed),
+                    Proven::Local => return (tally, Some(pull_reason::INTERNAL), landed),
+                    // It did not come through, seeders and all: the plain
+                    // way.
+                    Proven::Failed => seeders_tried = true,
+                }
             }
-            let from_swarm = from_swarm == Swarm::Fetched;
+            let from_swarm = match proved {
+                Some(from_seeders) => from_seeders,
+                None if seeders_tried => false,
+                None => {
+                    let tried = self
+                        .fetch_from_swarm(
+                            link.as_ref(),
+                            index,
+                            item,
+                            &swarm_staging,
+                            &mut swarm,
+                            &mut progress,
+                        )
+                        .await;
+                    if tried == Swarm::Stopped {
+                        return (tally, Some(pull_reason::STOPPED), landed);
+                    }
+                    tried == Swarm::Fetched
+                }
+            };
             // Cancelled while the swarm had it: not on to the source.
-            if !from_swarm && self.cancel.load(Ordering::Relaxed) {
+            if proved.is_none() && !from_swarm && self.cancel.load(Ordering::Relaxed) {
                 return (tally, Some(pull_reason::CANCELLED), landed);
             }
-            let staging = if from_swarm {
+            let whole = proved.is_some() || from_swarm;
+            let staging = if whole {
                 swarm_staging
             } else {
                 self.staging(index)
@@ -1218,7 +1630,7 @@ impl Pull {
             // A generous deadline: the idle timeout, plus the file at the
             // slowest rate a source may keep.
             let deadline = STREAM_IDLE + Duration::from_secs(item.size / MIN_RATE);
-            let fetched = if from_swarm {
+            let fetched = if whole {
                 Ok(())
             } else {
                 tokio::time::timeout(
@@ -1747,16 +2159,55 @@ async fn answer_ask(
                 let serve_until = SignedPullGrant::from_bytes(&grant)
                     .map(|g| g.grant.expires_unix.saturating_add(SERVE_GRACE_SECS))
                     .map_err(|_| stream_status::BAD)?;
-                swarm_offer(shared, peer_key, &item, serve_until)
+                let offer = swarm_offer(shared, peer_key, &item, serve_until)?;
+                postcard::to_allocvec(&offer).map_err(|_| stream_status::BAD)
+            }
+            // A range with its proof: this burrow as one of the sources the
+            // destination takes units from, each checked like a seeder's.
+            Ok(fp::PullStreamAsk::Range {
+                grant,
+                item: index,
+                offset,
+                len,
+            }) => {
+                let (item, _) = granted_item(shared, peer_key, direct, &grant, index).await?;
+                if len == 0 || len > fp::MAX_PROVED_RANGE || offset >= item.size {
+                    return Err(stream_status::BAD);
+                }
+                use crate::proved::Unproved;
+                let stream =
+                    match crate::proved::proved_range(shared, item.root, item.size, offset, len)
+                        .await
+                    {
+                        Ok(stream) => stream,
+                        // Its proofs are being made (the first ask started
+                        // that): asked again shortly, holding nothing here.
+                        Err(Unproved::Building) => return Err(stream_status::BUSY),
+                        Err(Unproved::NotHere) => return Err(stream_status::GONE),
+                        // It does not prove out: the destination takes this
+                        // file as a plain stream, checked whole, instead.
+                        Err(Unproved::Failed) => return Err(stream_status::UNPROVABLE),
+                    };
+                // Held to the rate of one download, counting what goes out,
+                // however many of this file's ranges are asked at once; one
+                // queued further out than the asker waits is told to ask
+                // again instead of holding a stream that long.
+                let rate = shared.config.read().transfer_rate_bytes_per_sec;
+                let Some(pace) = range_pace(&grant, index, rate, stream.len()) else {
+                    return Err(stream_status::BUSY);
+                };
+                tokio::time::sleep(pace).await;
+                shared.s2s.ranges_served.fetch_add(1, Ordering::Relaxed);
+                Ok(stream)
             }
             Err(_) => Err(stream_status::BAD),
         }
     }
     .await;
-    match answer.and_then(|offer| postcard::to_allocvec(&offer).map_err(|_| stream_status::BAD)) {
+    match answer {
         Ok(bytes) => {
             if write_timed(&mut send, &[stream_status::OK]).await {
-                let _ = tokio::time::timeout(STREAM_IDLE, write_framed(&mut send, &bytes)).await;
+                write_framed_idle(&mut send, &bytes).await;
             }
         }
         Err(status) => {

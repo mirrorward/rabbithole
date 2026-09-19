@@ -203,18 +203,41 @@ async fn a_sent_file_comes_from_the_sources_swarm_and_falls_back_to_the_source()
         accepted.pull_id
     };
 
-    // Both ends allow it: the pieces come from Carol and Dave.
+    let ranges_served = || {
+        source
+            .shared
+            .s2s
+            .ranges_served
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+
+    // Both ends allow it: the pieces come from Carol and Dave, with the
+    // source itself as one more source. Held to a trickle here, so the
+    // seeders surely carry some of it.
+    source
+        .shared
+        .config
+        .set_key("transfer_rate_bytes_per_sec", "262144")
+        .unwrap();
     let pull = send("tape.bin").await;
+    source
+        .shared
+        .config
+        .set_key("transfer_rate_bytes_per_sec", "0")
+        .unwrap();
     assert_eq!(from_swarm(&dest, pull).await, 1, "fetched from the swarm");
 
-    // The source does not share its swarm: the source sends it all.
+    // The source does not share its swarm: with nobody to mix with, the
+    // source sends it all as one plain stream, checked whole.
     source
         .shared
         .config
         .set_key("s2s_swarm_sources", "false")
         .unwrap();
+    let before = ranges_served();
     let pull = send("tape (2).bin").await;
     assert_eq!(from_swarm(&dest, pull).await, 0);
+    assert_eq!(ranges_served(), before, "no proved ranges without seeders");
     source
         .shared
         .config
@@ -231,8 +254,19 @@ async fn a_sent_file_comes_from_the_sources_swarm_and_falls_back_to_the_source()
     // swarm gives nothing, and the source sends the file instead.
     carol_peer.stop();
     dave_peer.stop();
+    let before = ranges_served();
     let pull = send("tape (4).bin").await;
     assert_eq!(from_swarm(&dest, pull).await, 0);
+    // It came as proved ranges from the source (every unit of it), which
+    // keeps the file's proofs beside it for that.
+    assert!(
+        ranges_served() >= before + 4,
+        "the burrow's own ranges carried it: {} to {}",
+        before,
+        ranges_served()
+    );
+    let blob = rabbithole_blobs::BlobId(root);
+    assert!(source.shared.blobs.outboard_path(&blob).exists());
 
     // Nothing of a swarm attempt is left in the staging folder.
     let staging = dest.shared.config.read().data_dir.join("transfers");

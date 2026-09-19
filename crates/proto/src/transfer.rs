@@ -12,7 +12,8 @@
 //! the swarm in Wave 5; against the authenticated origin server, whole-file
 //! root verification is the W4.2 guarantee.
 //!
-//! Types 20-42 (filelib owns 1-19; blob owns 100+).
+//! Types 20-42, and 43/44 for proved ranges (filelib owns 1-19 and 27-39;
+//! blob owns 100+).
 
 use serde::{Deserialize, Serialize};
 
@@ -399,4 +400,68 @@ mod tests {
         let back: BulkPreamble = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(back, p);
     }
+}
+
+/// Most bytes one [`ProvedRangeRequest`] may ask for: half a swarm unit, so
+/// the Bao stream that answers it (the bytes and their proof) fits well
+/// under the 1 MiB frame cap.
+pub const PROVED_RANGE_MAX: u32 = 512 * 1024;
+
+/// Ask for a byte range of a download ticket's file **with its proof**: the
+/// Bao stream for it, which the client checks block by block against the
+/// file's root before it keeps a byte. What makes the burrow one of the
+/// sources a swarm fetch takes units from. `len` is at most
+/// [`PROVED_RANGE_MAX`]. → [`ProvedRange`]; `Unavailable` while the file's
+/// proofs are being made (ask again shortly), `NotFound` when it does not
+/// prove out. A burrow from before this answers `Unsupported`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvedRangeRequest {
+    pub transfer_id: u64,
+    pub offset: u64,
+    pub len: u32,
+}
+
+impl ProvedRangeRequest {
+    pub fn new(transfer_id: u64, offset: u64, len: u32) -> Self {
+        Self {
+            transfer_id,
+            offset,
+            len,
+        }
+    }
+}
+
+impl Message for ProvedRangeRequest {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 43;
+}
+
+/// A range with its proof: the Bao stream for `[offset, offset + len)` of a
+/// `size`-byte file, at 16 KiB blocks.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvedRange {
+    pub transfer_id: u64,
+    pub offset: u64,
+    pub len: u32,
+    pub size: u64,
+    pub stream: Vec<u8>,
+}
+
+impl ProvedRange {
+    pub fn new(transfer_id: u64, offset: u64, len: u32, size: u64, stream: Vec<u8>) -> Self {
+        Self {
+            transfer_id,
+            offset,
+            len,
+            size,
+            stream,
+        }
+    }
+}
+
+impl Message for ProvedRange {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 44;
 }

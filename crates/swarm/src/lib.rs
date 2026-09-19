@@ -26,10 +26,12 @@ pub use link::{
 };
 pub use manifest::{Manifest, ManifestError, ManifestFile, CHUNK_SIZE};
 pub use peer::{
-    fetch_file, fetch_have, fetch_range, fetch_range_proved, proofs_path, HaveMap, PeerAsk,
-    PeerError, PeerServer, Proved, SeedStore, Sharing, HAVE_UNIT, STATUS_NOT_HELD,
+    decode_proved, encode_proved, fetch_file, fetch_have, fetch_proved, fetch_range,
+    fetch_range_proved, proofs_path, stream_limit, write_outboard, BaoPiece, HaveMap, PeerAsk,
+    PeerError, PeerServer, PeerSource, Proved, RangeSource, SeedStore, Sharing, HAVE_UNIT,
+    STATUS_NOT_HELD,
 };
 pub use scheduler::{
-    fetch_swarm, fetch_swarm_resumable, fetch_swarm_resumable_with_progress, fetch_swarm_sharing,
-    FetchReport, ProgressSink, SourcePeer, UnitDone, UNIT_SIZE,
+    fetch_swarm, fetch_swarm_from, fetch_swarm_resumable, fetch_swarm_resumable_with_progress,
+    fetch_swarm_sharing, FetchReport, ProgressSink, SourcePeer, UnitDone, UNIT_SIZE,
 };

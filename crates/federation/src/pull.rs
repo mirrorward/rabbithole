@@ -402,7 +402,27 @@ pub enum PullStreamAsk {
     /// the status a [`PullStreamRequest`] for that item would get
     /// ([`stream_status::OFF`] too when the source does not share its swarm).
     Sources { grant: Vec<u8>, item: u32 },
+    /// `[offset, offset + len)` of one granted file **with its proof**: the
+    /// Bao stream for it, at 16 KiB blocks, which the destination checks
+    /// against the file's root before it keeps a byte. Answered with
+    /// [`stream_status::OK`] and one frame holding the stream (at most
+    /// [`MAX_PROVED_RANGE`] bytes of file), or the status a
+    /// [`PullStreamRequest`] for that item would get; [`stream_status::BUSY`]
+    /// while the file's proofs are being made (ask again shortly), and
+    /// [`stream_status::BAD`] when it does not prove out. A source from
+    /// before this answers [`stream_status::BAD`] too, and the destination
+    /// takes the file as a plain stream instead.
+    Range {
+        grant: Vec<u8>,
+        item: u32,
+        offset: u64,
+        len: u64,
+    },
 }
+
+/// Most bytes of a file one [`PullStreamAsk::Range`] may ask for: one swarm
+/// unit.
+pub const MAX_PROVED_RANGE: u64 = 1024 * 1024;
 
 /// A swarm peer holding a granted file: where it listens, as `host:port`,
 /// and its certificate's fingerprint, which the fetcher pins.
@@ -440,7 +460,18 @@ pub mod stream_status {
     pub const OFF: u8 = 3;
     /// The request itself was malformed.
     pub const BAD: u8 = 4;
+    /// Not ready yet: the file's proofs are being made, or its ranges are
+    /// queued behind others at this burrow's rate limit. Ask again shortly.
+    pub const BUSY: u8 = 5;
+    /// The file cannot be sent as proved ranges (it does not match its
+    /// proofs): this file comes as a plain stream, checked whole. Others in
+    /// the same send still come as ranges.
+    pub const UNPROVABLE: u8 = 6;
 }
+
+// Both statuses are only ever sent for a
+// [`PullStreamAsk::Range`](super::PullStreamAsk::Range), which only a
+// burrow that knows them asks.
 
 #[cfg(test)]
 mod tests {

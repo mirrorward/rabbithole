@@ -542,6 +542,55 @@ pub async fn handle(
         return Ok(true);
     }
 
+    // ---- A range with its proof (the burrow as a swarm source) ------------
+    if let Some(Ok(req)) = frame.decode::<pt::ProvedRangeRequest>() {
+        let outcome: Result<([u8; 32], u64), ErrorCode> = {
+            let map = shared.transfers.inner.lock();
+            match map.get(&req.transfer_id) {
+                None => Err(ErrorCode::NotFound),
+                Some(t) if t.account_id != ctx.account_id || t.direction != pt::DIR_DOWNLOAD => {
+                    Err(ErrorCode::Forbidden)
+                }
+                Some(t) => match t.blob_id {
+                    Some(b) => Ok((b, t.size)),
+                    None => Err(ErrorCode::NotFound),
+                },
+            }
+        };
+        let (blob_id, size) = match outcome {
+            Ok(v) => v,
+            Err(code) => fail!(code),
+        };
+        if req.len == 0 || req.len > pt::PROVED_RANGE_MAX || req.offset >= size {
+            fail!(ErrorCode::BadRequest);
+        }
+        // Its proofs are made in the background the first time: asked for
+        // again shortly, nothing waits on them here.
+        let stream =
+            match crate::proved::proved_range(shared, blob_id, size, req.offset, req.len as u64)
+                .await
+            {
+                Ok(stream) => stream,
+                Err(crate::proved::Unproved::Building) => fail!(ErrorCode::Unavailable),
+                Err(_) => fail!(ErrorCode::NotFound),
+            };
+        let sent = stream.len();
+        reply!(&pt::ProvedRange::new(
+            req.transfer_id,
+            req.offset,
+            req.len,
+            size,
+            stream
+        ));
+        // Held to the same rate as any download, counting what went out (the
+        // blocks and their proofs, however little was asked for); the ticket
+        // stays open (a swarm fetch asks for the ranges it needs, in any
+        // order), and closes with TransferAbort or the session.
+        let rate = shared.config.read().transfer_rate_bytes_per_sec;
+        throttle_after(rate, sent).await;
+        return Ok(true);
+    }
+
     // ---- Upload a chunk --------------------------------------------------
     if let Some(Ok(req)) = frame.decode::<pt::FileChunkPut>() {
         let outcome: Result<(PathBuf, u64), ErrorCode> = {

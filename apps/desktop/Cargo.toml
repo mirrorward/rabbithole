@@ -1,7 +1,7 @@
 [package]
 name = "rabbithole-desktop"
 description = "RabbitHole — Tauri v2 desktop + mobile shell wrapping the ui-web Leptos SPA"
-version = "0.229.0"
+version = "0.230.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["RabbitHole contributors"]
@@ -33,6 +33,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+async-trait = "0.1"
 # image-png: `Image::from_bytes` (the About panel icon) refuses PNGs without it.
 tauri = { version = "2", features = ["image-png"] }
 serde = { version = "1", features = ["derive"] }

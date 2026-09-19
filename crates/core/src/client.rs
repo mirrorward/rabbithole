@@ -1104,6 +1104,41 @@ impl Client {
         Ok((*hasher.finalize().as_bytes(), total))
     }
 
+    /// Open a download ticket for a file, without fetching it: for asking
+    /// the burrow for proved ranges of it ([`Client::proved_range`]) as one
+    /// source of a swarm fetch. Close it with [`Client::close_transfer`].
+    pub async fn download_ticket(
+        &mut self,
+        node_id: i64,
+    ) -> Result<rabbithole_proto::transfer::TransferTicket, ClientError> {
+        self.request(&rabbithole_proto::transfer::TransferOpen::download(node_id))
+            .await
+    }
+
+    /// A range of a download ticket's file with its proof: the Bao stream,
+    /// which the caller checks against the file's root before keeping a
+    /// byte (`rabbithole_swarm::decode_proved`). At most
+    /// `rabbithole_proto::transfer::PROVED_RANGE_MAX` bytes.
+    pub async fn proved_range(
+        &mut self,
+        transfer_id: u64,
+        offset: u64,
+        len: u32,
+    ) -> Result<rabbithole_proto::transfer::ProvedRange, ClientError> {
+        self.request(&rabbithole_proto::transfer::ProvedRangeRequest::new(
+            transfer_id,
+            offset,
+            len,
+        ))
+        .await
+    }
+
+    /// Close a transfer ticket that will not be used any more.
+    pub async fn close_transfer(&mut self, transfer_id: u64) -> Result<(), ClientError> {
+        self.request_ack(&rabbithole_proto::transfer::TransferAbort::new(transfer_id))
+            .await
+    }
+
     /// Download a file node to `dest`, resuming from any partial already
     /// present. Verifies the finished file's blake3 root against the ticket
     /// before returning the byte count. Works over any transport (the ranged

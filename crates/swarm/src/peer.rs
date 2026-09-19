@@ -892,6 +892,34 @@ pub async fn fetch_range_proved(
     offset: u64,
     len: u64,
 ) -> Result<Proved, PeerError> {
+    let piece = fetch_bao(endpoint, cert_fp, token, root, offset, len).await?;
+    let (size, stream) = (piece.size, piece.stream);
+    tokio::task::spawn_blocking(move || decode_proved(root, size, offset, len, &stream))
+        .await
+        .map_err(|e| PeerError::Verify(e.to_string()))?
+}
+
+/// A range as a source sends it: the Bao stream for `[offset, offset +
+/// len)` of a file the source says is `size` bytes. Nothing in it is taken
+/// on trust: [`decode_proved`] checks every block and parent against the
+/// root (and so the size too, which the root commits to).
+#[derive(Debug, Clone)]
+pub struct BaoPiece {
+    pub offset: u64,
+    pub len: u64,
+    pub size: u64,
+    pub stream: Vec<u8>,
+}
+
+/// Ask a peer for one range, unverified: its Bao stream as sent.
+async fn fetch_bao(
+    endpoint: &str,
+    cert_fp: [u8; 32],
+    token: &[u8],
+    root: [u8; 32],
+    offset: u64,
+    len: u64,
+) -> Result<BaoPiece, PeerError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     if len == 0 || len > PEER_REQUEST_MAX {
@@ -924,22 +952,15 @@ pub async fn fetch_range_proved(
     if header.status != STATUS_OK {
         return Err(PeerError::Refused(header.status));
     }
-    // An honest peer asked for a range inside the file says the file goes
-    // past it; one that says it ends before claims to have nothing, and is
-    // not taken at its word (nothing it sent could be verified).
     if header.size <= offset {
         return Err(PeerError::Verify(
             "peer claims the file ends before the range".into(),
         ));
     }
-    let len = len.min(header.size - offset);
+    let limit = stream_limit(len.min(header.size - offset));
     // Bound the body read: a peer that sent a valid header then stalls mid-stream
     // must fail (freeing the worker + the scheduler's join/progress-drain) rather
-    // than park here until the QUIC idle timeout — or forever. And bound its
-    // size: a Bao stream for `len` bytes is the covered 16 KiB blocks (one
-    // more at each end for alignment) and their 64-byte parent hashes, so a
-    // peer sending more than twice that is lying, and the rest is never read.
-    let limit = 2 * len + 64 * 1024;
+    // than park here until the QUIC idle timeout — or forever.
     let mut stream = Vec::new();
     match tokio::time::timeout(
         PEER_READ_TIMEOUT,
@@ -953,33 +974,238 @@ pub async fn fetch_range_proved(
         Err(_) => return Err(PeerError::Refused(STATUS_BAD_REQUEST)),
     }
     drop(conn);
+    Ok(BaoPiece {
+        offset,
+        len,
+        size: header.size,
+        stream,
+    })
+}
 
-    // Verify the Bao stream against the root; only verified leaves land.
-    let size = header.size;
-    tokio::task::spawn_blocking(move || {
-        let tree = BaoTree::new(size, PEER_BLOCK);
-        let ranges = block_ranges(offset, len);
-        let mut recorder = Recorder {
+/// The most a Bao stream for `len` bytes can take: the covered 16 KiB
+/// blocks (one more at each end for alignment) and their 64-byte parent
+/// hashes come to well under twice that. A source sending more is lying,
+/// and the rest is never read.
+pub fn stream_limit(len: u64) -> u64 {
+    2 * len + 64 * 1024
+}
+
+/// Check a range's Bao stream against the root: every block and every
+/// parent on the way up, for a file of `size` bytes (which the root commits
+/// to). Returns exactly the range's bytes, clamped to the file's end, with
+/// the proof that came with them. Anything that does not verify is an
+/// error, and none of it is returned.
+pub fn decode_proved(
+    root: [u8; 32],
+    size: u64,
+    offset: u64,
+    len: u64,
+    stream: &[u8],
+) -> Result<Proved, PeerError> {
+    // An honest source asked for a range inside the file says the file goes
+    // past it; one that says it ends before claims to have nothing, and is
+    // not taken at its word (nothing it sent could be verified).
+    if size <= offset {
+        return Err(PeerError::Verify(
+            "the source claims the file ends before the range".into(),
+        ));
+    }
+    let len = len.min(size - offset);
+    if len == 0 || stream.len() as u64 > stream_limit(len) {
+        return Err(PeerError::Verify(
+            "a stream no range of this size makes".into(),
+        ));
+    }
+    let tree = BaoTree::new(size, PEER_BLOCK);
+    let ranges = block_ranges(offset, len);
+    let mut recorder = Recorder {
+        tree,
+        root: bao_blake3::Hash::from(root),
+        parents: Vec::new(),
+    };
+    let base = (offset / PEER_BLOCK_BYTES) * PEER_BLOCK_BYTES;
+    let mut target = OffsetBuf {
+        base,
+        buf: Vec::new(),
+    };
+    decode_ranges(stream, &ranges, &mut target, &mut recorder)
+        .map_err(|e| PeerError::Verify(e.to_string()))?;
+    let start = (offset - base) as usize;
+    let end = start + len as usize;
+    if target.buf.len() < end {
+        return Err(PeerError::Verify("short verified stream".into()));
+    }
+    Ok(Proved {
+        bytes: target.buf[start..end].to_vec(),
+        parents: recorder.parents,
+    })
+}
+
+/// Encode `[offset, offset + len)` of a whole file at `data` (`size`
+/// bytes) as a Bao stream, from its pre-order outboard file `proofs`,
+/// every block and parent checked against `root` on the way out. What a
+/// burrow sends when it serves a range of a file it stores.
+pub fn encode_proved(
+    data: &Path,
+    proofs: &Path,
+    root: [u8; 32],
+    size: u64,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>, PeerError> {
+    if len == 0 || offset >= size {
+        return Err(PeerError::BadRequest);
+    }
+    let len = len.min(size - offset);
+    let file = std::fs::File::open(data)?;
+    let outboard = PreOrderOutboard {
+        root: bao_blake3::Hash::from(root),
+        tree: BaoTree::new(size, PEER_BLOCK),
+        data: std::fs::File::open(proofs)?,
+    };
+    let mut out = Vec::new();
+    encode_ranges_validated(&file, &outboard, &block_ranges(offset, len), &mut out)
+        .map_err(|e| PeerError::Verify(e.to_string()))?;
+    Ok(out)
+}
+
+/// Compute the pre-order outboard (every proof) of the file at `data`,
+/// streamed, check it hashes to `root`, and write it to `out` (atomically:
+/// a temporary file renamed into place). What a burrow keeps beside a file
+/// it serves ranges of.
+pub fn write_outboard(data: &Path, root: [u8; 32], out: &Path) -> Result<(), PeerError> {
+    let file = std::fs::File::open(data)?;
+    let size = file.metadata()?.len();
+    let tree = BaoTree::new(size, PEER_BLOCK);
+    // A name of its own, so two writers never share a half-written file;
+    // written as it is computed, never held whole in memory.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut tmp = out.as_os_str().to_owned();
+    tmp.push(format!(".{}.{n}.tmp", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    let written = (|| -> Result<(), PeerError> {
+        let target = std::fs::File::create(&tmp)?;
+        target.set_len(tree.outboard_size())?;
+        let mut outboard = PreOrderOutboard {
+            root: bao_blake3::Hash::from([0; 32]),
             tree,
-            root: bao_blake3::Hash::from(root),
+            data: target,
+        };
+        let hashed = bao_tree::io::sync::outboard(
+            std::io::BufReader::with_capacity(256 * 1024, file),
+            tree,
+            &mut outboard,
+        )?;
+        if *hashed.as_bytes() != root {
+            return Err(PeerError::RootMismatch);
+        }
+        std::fs::rename(&tmp, out)?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// Anyone a fetch can take units from: a peer on the peer wire, a burrow
+/// serving a file it stores, the burrow a file is sent from. A source only
+/// hands over Bao streams; the fetch checks every one against the root
+/// itself ([`decode_proved`]), so no source is trusted with the checking.
+#[async_trait::async_trait]
+pub trait RangeSource: Send + Sync {
+    /// What reports call it: an endpoint, "the burrow".
+    fn label(&self) -> String;
+
+    /// Which units it holds. `Ok(None)`: the whole file.
+    async fn have(&self) -> Result<Option<HaveMap>, PeerError>;
+
+    /// `[offset, offset + len)` as Bao streams: one piece, or several that
+    /// cover the range in order (a source whose messages are smaller than a
+    /// unit sends it in parts).
+    async fn bao(&self, offset: u64, len: u64) -> Result<Vec<BaoPiece>, PeerError>;
+
+    /// How many units it may be asked for at once. The fetch never asks it
+    /// for one unit twice at a time, so the extra lanes carry more of the
+    /// file without duplicating onto the same link.
+    fn lanes(&self) -> usize {
+        1
+    }
+}
+
+/// A peer on the peer wire, under a capability for one root.
+pub struct PeerSource {
+    pub endpoint: String,
+    pub cert_fp: [u8; 32],
+    pub token: Vec<u8>,
+    pub root: [u8; 32],
+}
+
+#[async_trait::async_trait]
+impl RangeSource for PeerSource {
+    fn label(&self) -> String {
+        self.endpoint.clone()
+    }
+
+    async fn have(&self) -> Result<Option<HaveMap>, PeerError> {
+        fetch_have(&self.endpoint, self.cert_fp, &self.token, self.root).await
+    }
+
+    async fn bao(&self, offset: u64, len: u64) -> Result<Vec<BaoPiece>, PeerError> {
+        Ok(vec![
+            fetch_bao(
+                &self.endpoint,
+                self.cert_fp,
+                &self.token,
+                self.root,
+                offset,
+                len,
+            )
+            .await?,
+        ])
+    }
+}
+
+/// Take `[offset, offset + len)` from `source`, checked: each piece it
+/// sends is verified against `root` and must follow the one before, and
+/// together they must make the range (clamped to the file's end). The
+/// bytes and their proofs.
+pub async fn fetch_proved(
+    source: &dyn RangeSource,
+    root: [u8; 32],
+    offset: u64,
+    len: u64,
+) -> Result<Proved, PeerError> {
+    let pieces = source.bao(offset, len).await?;
+    tokio::task::spawn_blocking(move || {
+        let mut out = Proved {
+            bytes: Vec::new(),
             parents: Vec::new(),
         };
-        let base = (offset / PEER_BLOCK_BYTES) * PEER_BLOCK_BYTES;
-        let mut target = OffsetBuf {
-            base,
-            buf: Vec::new(),
-        };
-        decode_ranges(stream.as_slice(), &ranges, &mut target, &mut recorder)
-            .map_err(|e| PeerError::Verify(e.to_string()))?;
-        let start = (offset - base) as usize;
-        let end = start + len as usize;
-        if target.buf.len() < end {
-            return Err(PeerError::Verify("short verified stream".into()));
+        let mut at = offset;
+        let mut size = None;
+        for piece in pieces {
+            // One file size throughout, and pieces in order with no gap.
+            if piece.offset != at || *size.get_or_insert(piece.size) != piece.size {
+                return Err(PeerError::Verify(
+                    "pieces that do not make the range".into(),
+                ));
+            }
+            let proved = decode_proved(root, piece.size, piece.offset, piece.len, &piece.stream)?;
+            at += proved.bytes.len() as u64;
+            out.bytes.extend_from_slice(&proved.bytes);
+            out.parents.extend(proved.parents);
         }
-        Ok(Proved {
-            bytes: target.buf[start..end].to_vec(),
-            parents: recorder.parents,
-        })
+        let Some(size) = size else {
+            return Err(PeerError::Verify("no pieces".into()));
+        };
+        if at != offset + len.min(size.saturating_sub(offset)) {
+            return Err(PeerError::Verify(
+                "pieces that do not make the range".into(),
+            ));
+        }
+        Ok(out)
     })
     .await
     .map_err(|e| PeerError::Verify(e.to_string()))?
@@ -1165,6 +1391,119 @@ mod tests {
         assert!(seeds
             .add_partial(root, body.len() as u64, &whole, &proofs_path(&whole), [0])
             .is_none());
+    }
+
+    /// A source that sends whatever pieces it is given.
+    struct Fake(Vec<BaoPiece>);
+
+    #[async_trait::async_trait]
+    impl RangeSource for Fake {
+        fn label(&self) -> String {
+            "fake".into()
+        }
+        async fn have(&self) -> Result<Option<HaveMap>, PeerError> {
+            Ok(None)
+        }
+        async fn bao(&self, _offset: u64, _len: u64) -> Result<Vec<BaoPiece>, PeerError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Whoever the source, the fetch checks what it sends: every piece
+    /// against the root, in order, making up the range. Anything else is
+    /// refused, and none of it is kept.
+    #[tokio::test]
+    async fn nothing_a_source_sends_is_kept_unless_it_proves_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = payload(2 * 1024 * 1024 + 300);
+        let root = root_of(&body);
+        let size = body.len() as u64;
+        let data = dir.path().join("f.bin");
+        std::fs::write(&data, &body).unwrap();
+        let proofs = dir.path().join("f.bin.obao");
+        write_outboard(&data, root, &proofs).unwrap();
+        // Another file's id is not this file's proofs.
+        assert!(matches!(
+            write_outboard(&data, [1; 32], &dir.path().join("x.obao")),
+            Err(PeerError::RootMismatch)
+        ));
+        let half = 512 * 1024;
+        let piece = |offset: u64, len: u64| BaoPiece {
+            offset,
+            len,
+            size,
+            stream: encode_proved(&data, &proofs, root, size, offset, len).unwrap(),
+        };
+
+        // One piece, and two halves: both make the unit.
+        let one = fetch_proved(&Fake(vec![piece(0, 2 * half)]), root, 0, 2 * half)
+            .await
+            .unwrap();
+        assert_eq!(one.bytes, body[..2 * half as usize]);
+        let two = fetch_proved(
+            &Fake(vec![piece(0, half), piece(half, half)]),
+            root,
+            0,
+            2 * half,
+        )
+        .await
+        .unwrap();
+        assert_eq!(two.bytes, one.bytes);
+        // The file's short last range.
+        let tail = fetch_proved(&Fake(vec![piece(2 << 20, 1 << 20)]), root, 2 << 20, 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(tail.bytes, body[2 << 20..]);
+
+        // A byte changed on the way: refused.
+        let mut bad = piece(0, half);
+        let at = bad.stream.len() / 2;
+        bad.stream[at] ^= 1;
+        assert!(fetch_proved(&Fake(vec![bad]), root, 0, half).await.is_err());
+        // Out of order, with a gap, short, or claiming another size: refused.
+        for pieces in [
+            vec![piece(half, half), piece(0, half)],
+            vec![piece(0, half), piece(half + 16 * 1024, half)],
+            vec![piece(0, half)],
+            // (A size in the same last kilobyte builds the same tree, and
+            // its bytes are the file's; one that changes the tree fails.)
+            vec![BaoPiece {
+                size: size / 2,
+                ..piece(0, 2 * half)
+            }],
+            vec![],
+        ] {
+            assert!(
+                fetch_proved(&Fake(pieces), root, 0, 2 * half)
+                    .await
+                    .is_err(),
+                "must be refused"
+            );
+        }
+        // Proofs of another file: refused.
+        let other = payload(2 * 1024 * 1024 + 301);
+        let other_path = dir.path().join("o.bin");
+        std::fs::write(&other_path, &other).unwrap();
+        let other_proofs = dir.path().join("o.obao");
+        let other_root = root_of(&other);
+        write_outboard(&other_path, other_root, &other_proofs).unwrap();
+        let foreign = BaoPiece {
+            offset: 0,
+            len: half,
+            size: other.len() as u64,
+            stream: encode_proved(
+                &other_path,
+                &other_proofs,
+                other_root,
+                other.len() as u64,
+                0,
+                half,
+            )
+            .unwrap(),
+        };
+        assert!(fetch_proved(&Fake(vec![foreign]), root, 0, half)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

@@ -12,10 +12,114 @@ use rabbithole_proto::swarm::SourceList;
 use std::sync::Arc;
 
 use rabbithole_proto::swarm::AdvertEntry;
+use rabbithole_swarm::peer::PeerError;
 use rabbithole_swarm::{
-    fetch_swarm_resumable_with_progress, fetch_swarm_sharing, FetchReport, SeedStore, SourcePeer,
-    UNIT_SIZE,
+    fetch_swarm_from, BaoPiece, FetchReport, HaveMap, PeerSource, RangeSource, SeedStore,
+    SourcePeer, UNIT_SIZE,
 };
+
+/// How long the burrow may take over one proved range before it is let go
+/// as a source for this download.
+const ORIGIN_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How soon a burrow still making a file's proofs is asked again: at first,
+/// and at most.
+const ORIGIN_BUSY_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+const ORIGIN_BUSY_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(2);
+/// The slowest a burrow makes a file's proofs, for how long it is waited
+/// for (a minute, and the file at that rate).
+const ORIGIN_PROOF_RATE: u64 = 64 * 1024 * 1024;
+
+/// Whether a burrow's software sends proved ranges (0.230 on). One that
+/// does not is never asked, so a download it could not serve opens and
+/// counts nothing there.
+fn serves_proved_ranges(version: &str) -> bool {
+    let mut parts = version.split('.').map(|p| p.parse::<u64>().ok());
+    match (parts.next().flatten(), parts.next().flatten()) {
+        (Some(major), Some(minor)) => (major, minor) >= (0, 230),
+        _ => false,
+    }
+}
+
+/// The burrow as one of a swarm fetch's sources: it holds the whole file and
+/// sends each range with its proof (`ProvedRange`), which the fetch checks
+/// against the root like any peer's. Its asks go through the download's own
+/// session, one at a time, answered by the loop that drives the download. It
+/// takes units like any other source (work-stealing), so it carries what the
+/// peers do not hold and whatever it is quicker to.
+struct Origin {
+    asks: tokio::sync::mpsc::Sender<OriginAsk>,
+}
+
+/// What the burrow said to one ask.
+enum OriginAnswer {
+    Range(rabbithole_proto::transfer::ProvedRange),
+    /// It is making the file's proofs: ask again shortly.
+    Busy,
+    /// Not from it, for this download.
+    No,
+}
+
+struct OriginAsk {
+    offset: u64,
+    len: u32,
+    reply: tokio::sync::oneshot::Sender<OriginAnswer>,
+}
+
+#[async_trait::async_trait]
+impl RangeSource for Origin {
+    fn label(&self) -> String {
+        ORIGIN_SOURCE.to_string()
+    }
+
+    async fn have(&self) -> Result<Option<HaveMap>, PeerError> {
+        Ok(None)
+    }
+
+    async fn bao(&self, offset: u64, len: u64) -> Result<Vec<BaoPiece>, PeerError> {
+        // Its messages are smaller than a unit: the range comes in parts.
+        let step = rabbithole_proto::transfer::PROVED_RANGE_MAX as u64;
+        let mut pieces = Vec::new();
+        let mut at = offset;
+        let refused = || PeerError::Refused(rabbithole_swarm::peer::STATUS_BAD_REQUEST);
+        while at < offset + len {
+            let part = (offset + len - at).min(step);
+            // A burrow making the file's proofs (it started when first
+            // asked) is asked again, a little later each time; meanwhile the
+            // peers carry on. The loop that drives the download decides when
+            // it has waited long enough, and says so with `No`.
+            let mut pause = ORIGIN_BUSY_RETRY;
+            let range = loop {
+                let (reply, answer) = tokio::sync::oneshot::channel();
+                let ask = OriginAsk {
+                    offset: at,
+                    len: part as u32,
+                    reply,
+                };
+                self.asks.send(ask).await.map_err(|_| refused())?;
+                match answer.await {
+                    Ok(OriginAnswer::Range(range)) => break range,
+                    Ok(OriginAnswer::Busy) => {
+                        tokio::time::sleep(pause).await;
+                        pause = (pause * 2).min(ORIGIN_BUSY_RETRY_MAX);
+                    }
+                    _ => return Err(refused()),
+                }
+            };
+            pieces.push(BaoPiece {
+                offset: at,
+                len: part,
+                size: range.size,
+                stream: range.stream,
+            });
+            // The last part of the file is shorter than asked for.
+            if at + part >= range.size {
+                break;
+            }
+            at += part;
+        }
+        Ok(pieces)
+    }
+}
 
 /// How a download shares what lands as it goes (the person opted in to
 /// seeding): the store it serves from, this machine's own endpoint (never a
@@ -196,6 +300,11 @@ fn size_from_list(list: &SourceList) -> u64 {
 ///
 /// `size` is the caller's known size (from the file node's blob metadata); `0`
 /// means "derive it from the source list".
+///
+/// With `origin` (the file's node on the burrow, when the burrow holds it),
+/// the burrow is one of the sources too, unit by unit beside the peers:
+/// whatever they do not hold comes from it, each unit proved like theirs.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_swarm_download(
     client: &mut Client,
     root: [u8; 32],
@@ -203,6 +312,7 @@ pub async fn run_swarm_download(
     dest: &Path,
     max_sources: usize,
     share: Option<ShareAs>,
+    origin: Option<i64>,
     mut emit: impl FnMut(SwarmEvent),
 ) -> Result<FetchReport, SwarmError> {
     // Partial seeds too: this fetch asks each source which part it holds.
@@ -230,36 +340,139 @@ pub async fn run_swarm_download(
         });
     }
     let ticket = client.swarm_ticket(root).await?;
+    let mut all: Vec<Arc<dyn RangeSource>> = sources
+        .iter()
+        .map(|p| {
+            Arc::new(PeerSource {
+                endpoint: p.endpoint.clone(),
+                cert_fp: p.cert_fp,
+                token: ticket.token.clone(),
+                root,
+            }) as Arc<dyn RangeSource>
+        })
+        .collect();
+    // The burrow joins when it holds the file, sends proved ranges, and the
+    // person has not asked for peers only.
+    let (asks_tx, mut asks) = tokio::sync::mpsc::channel::<OriginAsk>(2);
+    let origin = origin
+        .filter(|_| list.server_has && serves_proved_ranges(&client.server.server_version));
+    if origin.is_some() {
+        all.push(Arc::new(Origin { asks: asks_tx }));
+    } else {
+        drop(asks_tx);
+    }
+    // How long a burrow making the file's proofs is waited for: a minute,
+    // and the file read at the slowest rate a burrow makes them. Past that
+    // it is let go, and the peers carry the download.
+    let origin_busy_until = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(60 + size / ORIGIN_PROOF_RATE);
+    // Opened when the burrow is first asked for a range, so a download it
+    // never serves opens (and counts) nothing there, and closed as soon as
+    // it is let go.
+    let mut origin_ticket: Option<rabbithole_proto::transfer::TransferTicket> = None;
+    let mut origin_gone = false;
     let total_units = size.div_ceil(UNIT_SIZE);
     emit(SwarmEvent::Opened {
         total_units,
-        source_count: sources.len(),
+        source_count: all.len(),
     });
 
     // Run the fetch on its own task and drain live progress. The channel closes
     // (recv -> None) when the fetch drops the last sender, i.e. when it finishes.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (sources, token, dest_owned) = (sources.clone(), ticket.token.clone(), dest.to_path_buf());
+    let dest_owned = dest.to_path_buf();
     // The advert for what lands goes out with the first verified unit, and
     // again before the burrow's grant lapses, for as long as units land.
     let advert = share.as_ref().map(|s| (s.entry.clone(), s.ttl_secs));
     let mut advertised: Option<(std::time::Instant, u64)> = None;
     let seeds = share.map(|s| s.seeds);
+    // Opted in: every unit that lands is offered on at once, with its
+    // proof, and the whole file when it is done.
     let fetch = tokio::spawn(async move {
-        match seeds {
-            // Opted in: every unit that lands is offered on at once, with
-            // its proof, and the whole file when it is done.
-            Some(seeds) => {
-                fetch_swarm_sharing(&sources, &token, root, size, &dest_owned, Some(tx), seeds)
-                    .await
-            }
-            None => {
-                fetch_swarm_resumable_with_progress(&sources, &token, root, size, &dest_owned, tx)
-                    .await
-            }
-        }
+        fetch_swarm_from(&all, root, size, &dest_owned, Some(tx), seeds).await
     });
-    while let Some(u) = rx.recv().await {
+    loop {
+        let u = tokio::select! {
+            // The fetch's end first: an ask still queued behind it has no
+            // one waiting for it.
+            biased;
+            unit = rx.recv() => match unit {
+                Some(u) => u,
+                None => break,
+            },
+            Some(ask) = asks.recv() => {
+                let mut reply = ask.reply;
+                if reply.is_closed() {
+                    continue;
+                }
+                if origin_ticket.is_none() && !origin_gone {
+                    if let Some(node_id) = origin {
+                        // Bounded like an ask: a burrow that has gone quiet
+                        // must not hold up the peers' download.
+                        origin_ticket = tokio::time::timeout(
+                            ORIGIN_ASK_TIMEOUT,
+                            client.download_ticket(node_id),
+                        )
+                        .await
+                        .ok()
+                        .and_then(Result::ok);
+                    }
+                    origin_gone = origin_ticket.is_none();
+                }
+                let answer = match &origin_ticket {
+                    Some(ticket) => {
+                        // Progress keeps flowing while the burrow answers,
+                        // and a burrow that does not answer in time is let go.
+                        let request = client.proved_range(ticket.transfer_id, ask.offset, ask.len);
+                        tokio::pin!(request);
+                        let deadline = tokio::time::sleep(ORIGIN_ASK_TIMEOUT);
+                        tokio::pin!(deadline);
+                        loop {
+                            tokio::select! {
+                                answer = &mut request => break Some(match answer {
+                                    Ok(range) => OriginAnswer::Range(range),
+                                    // Still making the file's proofs: asked
+                                    // again, until it has had long enough.
+                                    Err(ClientError::Refused(rabbithole_proto::ErrorCode::Unavailable))
+                                        if tokio::time::Instant::now() < origin_busy_until =>
+                                    {
+                                        OriginAnswer::Busy
+                                    }
+                                    Err(_) => OriginAnswer::No,
+                                }),
+                                _ = &mut deadline => break Some(OriginAnswer::No),
+                                // The fetch no longer wants it.
+                                _ = reply.closed() => break None,
+                                Some(u) = rx.recv() => emit(SwarmEvent::Chunk {
+                                    endpoint: u.endpoint,
+                                    offset: u.offset,
+                                    done_units: u.done_units,
+                                    total_units: u.total_units,
+                                }),
+                            }
+                        }
+                    }
+                    None => Some(OriginAnswer::No),
+                };
+                // The fetch hears first, then the burrow is let go: its
+                // ticket closes now, not when the peers finish.
+                let let_go = matches!(answer, Some(OriginAnswer::No));
+                if let Some(answer) = answer {
+                    let _ = reply.send(answer);
+                }
+                if let_go {
+                    origin_gone = true;
+                    if let Some(ticket) = origin_ticket.take() {
+                        let _ = tokio::time::timeout(
+                            ORIGIN_ASK_TIMEOUT,
+                            client.close_transfer(ticket.transfer_id),
+                        )
+                        .await;
+                    }
+                }
+                continue;
+            }
+        };
         if let Some((entry, ttl)) = &advert {
             let due = advertised.is_none_or(|(at, after)| at.elapsed().as_secs() >= after);
             if due {
@@ -284,6 +497,13 @@ pub async fn run_swarm_download(
             done_units: u.done_units,
             total_units: u.total_units,
         });
+    }
+    if let Some(ticket) = &origin_ticket {
+        let _ = tokio::time::timeout(
+            ORIGIN_ASK_TIMEOUT,
+            client.close_transfer(ticket.transfer_id),
+        )
+        .await;
     }
     let report = fetch
         .await
@@ -353,7 +573,22 @@ pub async fn run_download_sharing(
     let seeds = share.as_ref().map(|s| s.seeds.clone());
     match choose_route(mode, peers, server_has, node_id.is_some())? {
         Route::Swarm => {
-            match run_swarm_download(client, root, size, dest, max_sources, share, &mut emit).await
+            // Unless the person asked for peers only, the burrow is a source
+            // alongside them.
+            let origin = (mode == SourceMode::Auto && server_has)
+                .then_some(node_id)
+                .flatten();
+            match run_swarm_download(
+                client,
+                root,
+                size,
+                dest,
+                max_sources,
+                share,
+                origin,
+                &mut emit,
+            )
+            .await
             {
                 Ok(_) => Ok(Route::Swarm),
                 // The peers could not give the whole file (gone, or holding
@@ -474,6 +709,17 @@ async fn run_origin_download(
 mod tests {
     use super::*;
     use rabbithole_proto::swarm::{SourceInfo, SourceList};
+
+    #[test]
+    fn only_a_burrow_that_sends_proved_ranges_is_asked_for_them() {
+        assert!(serves_proved_ranges("0.230.0"));
+        assert!(serves_proved_ranges("0.231.4-dev"));
+        assert!(serves_proved_ranges("1.0.0"));
+        assert!(!serves_proved_ranges("0.229.0"));
+        assert!(!serves_proved_ranges("0.99.9"));
+        assert!(!serves_proved_ranges(""));
+        assert!(!serves_proved_ranges("custom"));
+    }
 
     #[test]
     fn a_download_fails_for_want_of_sources_only_when_it_must() {

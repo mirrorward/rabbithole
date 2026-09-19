@@ -394,3 +394,106 @@ async fn a_pull_session_opens_only_for_the_key_the_grant_names() {
     source.shutdown().await;
     dest.shutdown().await;
 }
+
+/// A folder with an empty file and a full one arrives whole: the empty file
+/// the plain way (there is nothing to prove), the full one as proved ranges
+/// from the source, each checked against its root.
+#[tokio::test]
+async fn a_folder_with_an_empty_file_in_it_arrives_whole() {
+    let work = tempfile::tempdir().unwrap();
+    let source = start(&work.path().join("source"), "Source").await;
+    let dest = start(&work.path().join("dest"), "Dest").await;
+    let dest_key = dest.shared.server_key;
+    let files = &source.shared.files;
+    files.create_area("music", "Music", "").await.unwrap();
+    let folder = files.mkdir("music", None, "tapes", false).await.unwrap();
+    let empty = source.shared.blobs.put(&[]).unwrap();
+    files
+        .add_file(
+            "music",
+            Some("tapes"),
+            "empty.txt",
+            &empty.0,
+            0,
+            "text/plain",
+            "",
+            "",
+            "x@y",
+            1,
+        )
+        .await
+        .unwrap();
+    let body: Vec<u8> = (0..2 * 1024 * 1024 + 9).map(|i| (i % 239) as u8).collect();
+    let full = source.shared.blobs.put(&body).unwrap();
+    files
+        .add_file(
+            "music",
+            Some("tapes"),
+            "full.bin",
+            &full.0,
+            body.len() as i64,
+            "application/octet-stream",
+            "",
+            "",
+            "x@y",
+            1,
+        )
+        .await
+        .unwrap();
+    dest.shared
+        .files
+        .create_area("inbox", "Inbox", "")
+        .await
+        .unwrap();
+
+    // Recreating a folder takes the right to make folders at the
+    // destination: an operator there.
+    dest.shared
+        .auth
+        .create_account("boss", PW, Role::Admin)
+        .await
+        .unwrap();
+    let mut alice_s = login(&source, "alice").await;
+    let mut alice_d = login(&dest, "boss").await;
+    let issued: PullGrantIssued = alice_s
+        .request(&PullGrantAsk::new(dest_key, vec![folder.id], "127.0.0.1"))
+        .await
+        .unwrap();
+    let accepted: RemotePullAccepted = alice_d
+        .request(&RemotePull::new(issued.grant, "inbox", None))
+        .await
+        .unwrap();
+    let done = until_done(&mut alice_d, accepted.pull_id).await;
+    assert_eq!(
+        (done.state, done.files_done),
+        (pull_state::DONE, 2),
+        "{done:?}"
+    );
+    let landed = &dest.shared.files;
+    let e = landed
+        .node_by_path("inbox", "tapes/empty.txt")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(e.size, 0);
+    let f = landed
+        .node_by_path("inbox", "tapes/full.bin")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(f.blob_id, Some(full.0));
+    // No seeders to mix with: the full one came the plain way, checked
+    // whole, and the source made no proofs for it and served no ranges.
+    assert!(!source.shared.blobs.outboard_path(&full).exists());
+    assert_eq!(
+        source
+            .shared
+            .s2s
+            .ranges_served
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+
+    source.shutdown().await;
+    dest.shutdown().await;
+}

@@ -581,6 +581,9 @@ fn authorize_authenticated_peer(
     Ok(peers.set_connected_if_approved_origin(key, origin, name, Some(remote.to_string())))
 }
 
+/// A peer's pull streams served at once on one federation session.
+const PULL_STREAMS_PER_LINK: usize = 16;
+
 /// The post-welcome session loop, shared by both the listener (`serve_peer`)
 /// and the dialer (`hold_dialer`). It drives board-event flood-fill —
 /// announcing our board interest, offering/pulling/delivering signed events —
@@ -607,14 +610,18 @@ async fn run_peer_session(
     let pull_server = conn.bulk().map(|bulk| {
         let shared = shared.clone();
         tokio::spawn(async move {
+            // At most so many of the peer's pull streams served at once; the
+            // rest wait their turn.
+            let limit = Arc::new(tokio::sync::Semaphore::new(PULL_STREAMS_PER_LINK));
             while let Ok((send, recv)) = bulk.accept().await {
-                tokio::spawn(crate::s2s::serve_pull_stream(
-                    shared.clone(),
-                    peer_key,
-                    None,
-                    send,
-                    recv,
-                ));
+                let Ok(permit) = limit.clone().acquire_owned().await else {
+                    break;
+                };
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    crate::s2s::serve_pull_stream(shared, peer_key, None, send, recv).await;
+                    drop(permit);
+                });
             }
         })
     });

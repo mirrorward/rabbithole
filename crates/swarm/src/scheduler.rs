@@ -33,8 +33,8 @@ use bao_tree::io::outboard::PreOrderOutboard;
 use serde::{Deserialize, Serialize};
 
 use crate::peer::{
-    fetch_have, fetch_range_proved, open_proofs, proofs_path, proven_ranges, HaveMap, PeerError,
-    SeedStore, Sharing, HAVE_UNIT, PEER_REQUEST_MAX, STATUS_DENIED, STATUS_NOT_FOUND,
+    fetch_proved, open_proofs, proofs_path, proven_ranges, HaveMap, PeerError, PeerSource,
+    RangeSource, SeedStore, Sharing, HAVE_UNIT, PEER_REQUEST_MAX, STATUS_DENIED, STATUS_NOT_FOUND,
     STATUS_NOT_HELD,
 };
 
@@ -113,6 +113,9 @@ fn load_rhstate(path: &Path, root: &[u8; 32], size: u64) -> Option<RhState> {
 struct WorkState {
     pending: Vec<(u64, u64)>,
     in_flight: HashSet<u64>,
+    /// Which source is fetching which unit right now (offset, source), so a
+    /// source with several lanes is never asked for one unit twice at once.
+    working: HashSet<(u64, usize)>,
     /// Units verified-and-written (offsets) — endgame duplicates check this
     /// so both copies don't double-count.
     done: HashSet<u64>,
@@ -210,8 +213,7 @@ pub async fn fetch_swarm(
     dest: &Path,
 ) -> Result<FetchReport, PeerError> {
     fetch_swarm_inner(
-        sources,
-        token,
+        &peers(sources, token, root),
         root,
         size,
         dest,
@@ -220,6 +222,21 @@ pub async fn fetch_swarm(
         None,
     )
     .await
+}
+
+/// Peers on the peer wire as sources, under one capability for `root`.
+fn peers(sources: &[SourcePeer], token: &[u8], root: [u8; 32]) -> Vec<Arc<dyn RangeSource>> {
+    sources
+        .iter()
+        .map(|p| {
+            Arc::new(PeerSource {
+                endpoint: p.endpoint.clone(),
+                cert_fp: p.cert_fp,
+                token: token.to_vec(),
+                root,
+            }) as Arc<dyn RangeSource>
+        })
+        .collect()
 }
 
 /// [`fetch_swarm`], but interruption-proof: completed units are recorded in
@@ -234,7 +251,7 @@ pub async fn fetch_swarm_resumable(
     size: u64,
     dest: &Path,
 ) -> Result<FetchReport, PeerError> {
-    resumable(sources, token, root, size, dest, None, None).await
+    resumable(&peers(sources, token, root), root, size, dest, None, None).await
 }
 
 /// [`fetch_swarm_resumable`] plus a live [`UnitDone`] stream on `progress` —
@@ -247,7 +264,15 @@ pub async fn fetch_swarm_resumable_with_progress(
     dest: &Path,
     progress: ProgressSink,
 ) -> Result<FetchReport, PeerError> {
-    resumable(sources, token, root, size, dest, Some(progress), None).await
+    resumable(
+        &peers(sources, token, root),
+        root,
+        size,
+        dest,
+        Some(progress),
+        None,
+    )
+    .await
 }
 
 /// [`fetch_swarm_resumable`], sharing as it goes: from the start `seeds`
@@ -264,7 +289,31 @@ pub async fn fetch_swarm_sharing(
     progress: Option<ProgressSink>,
     seeds: Arc<SeedStore>,
 ) -> Result<FetchReport, PeerError> {
-    resumable(sources, token, root, size, dest, progress, Some(seeds)).await
+    resumable(
+        &peers(sources, token, root),
+        root,
+        size,
+        dest,
+        progress,
+        Some(seeds),
+    )
+    .await
+}
+
+/// A resumable fetch from any sources: peers on the peer wire, a burrow
+/// serving a file it stores, the burrow a file is sent from, together,
+/// each unit taken from one that holds it and checked against the root
+/// whoever sent it. Shares as it goes through `seeds`, if given (see
+/// [`fetch_swarm_sharing`]).
+pub async fn fetch_swarm_from(
+    sources: &[Arc<dyn RangeSource>],
+    root: [u8; 32],
+    size: u64,
+    dest: &Path,
+    progress: Option<ProgressSink>,
+    seeds: Option<Arc<SeedStore>>,
+) -> Result<FetchReport, PeerError> {
+    resumable(sources, root, size, dest, progress, seeds).await
 }
 
 /// Stops sharing a fetch's part when the fetch ends without the whole file
@@ -283,14 +332,24 @@ impl Drop for PartialGuard {
 }
 
 async fn resumable(
-    sources: &[SourcePeer],
-    token: &[u8],
+    sources: &[Arc<dyn RangeSource>],
     root: [u8; 32],
     size: u64,
     dest: &Path,
     progress: Option<ProgressSink>,
     seeds: Option<Arc<SeedStore>>,
 ) -> Result<FetchReport, PeerError> {
+    // An empty file has nothing to fetch: it is the empty file, if that is
+    // what the root says.
+    if size == 0 {
+        if root != *blake3::hash(&[]).as_bytes() {
+            return Err(PeerError::Verify(
+                "an empty file with a root that is not".into(),
+            ));
+        }
+        std::fs::File::create(dest)?;
+        return Ok(FetchReport::default());
+    }
     let state_path = rhstate_path(dest);
     let proofs_at = proofs_path(dest);
     let done: HashSet<u64> = load_rhstate(&state_path, &root, size)
@@ -329,7 +388,6 @@ async fn resumable(
     };
     let report = fetch_swarm_inner(
         sources,
-        token,
         root,
         size,
         dest,
@@ -414,8 +472,7 @@ impl Drop for Workers {
 
 #[allow(clippy::too_many_arguments)]
 async fn fetch_swarm_inner(
-    sources: &[SourcePeer],
-    token: &[u8],
+    sources: &[Arc<dyn RangeSource>],
     root: [u8; 32],
     size: u64,
     dest: &Path,
@@ -456,9 +513,11 @@ async fn fetch_swarm_inner(
         offset += UNIT_SIZE;
     }
     pending.reverse();
+    let units_left = pending.len().max(1);
     let state = Arc::new(Mutex::new(WorkState {
         pending,
         in_flight: HashSet::new(),
+        working: HashSet::new(),
         done,
         persist_to: state_path.map(|p| (p, root, size)),
         stopped: false,
@@ -477,28 +536,29 @@ async fn fetch_swarm_inner(
         handles: Vec::new(),
         state: state.clone(),
     };
+    // A worker per lane of each source (never more than there are units).
     for (index, source) in sources.iter().enumerate() {
-        let source = source.clone();
-        let state = state.clone();
-        let token = token.to_vec();
-        let dest = dest.to_path_buf();
-        let progress = progress.clone();
-        let complete = complete.clone();
-        workers.handles.push(tokio::spawn(async move {
-            worker(
-                index,
-                source,
-                state,
-                token,
-                root,
-                size,
-                dest,
-                progress,
-                total_units,
-                complete,
-            )
-            .await
-        }));
+        for _ in 0..source.lanes().clamp(1, units_left) {
+            let source = source.clone();
+            let state = state.clone();
+            let dest = dest.to_path_buf();
+            let progress = progress.clone();
+            let complete = complete.clone();
+            workers.handles.push(tokio::spawn(async move {
+                worker(
+                    index,
+                    source,
+                    state,
+                    root,
+                    size,
+                    dest,
+                    progress,
+                    total_units,
+                    complete,
+                )
+                .await
+            }));
+        }
     }
     drop(progress);
 
@@ -521,7 +581,7 @@ async fn fetch_swarm_inner(
     let per_source = sources
         .iter()
         .zip(&state.served)
-        .map(|(s, units)| (s.endpoint.clone(), *units))
+        .map(|(s, units)| (s.label(), *units))
         .collect();
     if !state.pending.is_empty() || !state.in_flight.is_empty() {
         return Err(PeerError::Verify(format!(
@@ -581,12 +641,20 @@ enum Next {
     },
     /// Units remain, but none this source holds.
     Wait,
+    /// What is left that this source holds is being fetched by another of
+    /// its lanes: wait for that to land or come back.
+    Sibling,
     Done,
 }
 
-/// The next pending unit this source holds, in order; else a unit in flight
-/// elsewhere that it holds (endgame); else wait or finish.
-fn next_unit(s: &mut WorkState, holds: &Holds, size: u64) -> Next {
+/// How often a lane whose source is already fetching all that is left looks
+/// again.
+const SIBLING_WAIT: Duration = Duration::from_millis(200);
+
+/// The next pending unit source `index` holds, in order; else a unit in
+/// flight elsewhere that it holds (endgame); else wait or finish. Never a
+/// unit the same source is fetching already, on another lane.
+fn next_unit(s: &mut WorkState, holds: &Holds, size: u64, index: usize) -> Next {
     let mut i = s.pending.len();
     while i > 0 {
         i -= 1;
@@ -595,9 +663,10 @@ fn next_unit(s: &mut WorkState, holds: &Holds, size: u64) -> Next {
             s.pending.remove(i);
             continue;
         }
-        if holds.covers(off, len) {
+        if holds.covers(off, len) && !s.working.contains(&(off, index)) {
             s.pending.remove(i);
             s.in_flight.insert(off);
+            s.working.insert((off, index));
             return Next::Unit {
                 off,
                 len,
@@ -605,12 +674,21 @@ fn next_unit(s: &mut WorkState, holds: &Holds, size: u64) -> Next {
             };
         }
     }
-    let straggler = s
-        .in_flight
-        .iter()
-        .copied()
-        .find(|&off| !s.done.contains(&off) && holds.covers(off, (size - off).min(UNIT_SIZE)));
+    let mut sibling = false;
+    let mut straggler = None;
+    for &off in &s.in_flight {
+        if s.done.contains(&off) || !holds.covers(off, (size - off).min(UNIT_SIZE)) {
+            continue;
+        }
+        if s.working.contains(&(off, index)) {
+            sibling = true;
+        } else {
+            straggler = Some(off);
+            break;
+        }
+    }
     if let Some(off) = straggler {
+        s.working.insert((off, index));
         // Every unit is UNIT_SIZE but maybe the last; the peer clamps.
         return Next::Unit {
             off,
@@ -620,14 +698,29 @@ fn next_unit(s: &mut WorkState, holds: &Holds, size: u64) -> Next {
     }
     if s.pending.is_empty() && s.in_flight.is_empty() {
         Next::Done
+    } else if sibling
+        || s.pending
+            .iter()
+            .any(|&(off, _)| s.working.contains(&(off, index)))
+    {
+        Next::Sibling
     } else {
         Next::Wait
     }
 }
 
 /// Hand unit `off` back for another source to fetch (unless it is done, or
-/// this was an endgame copy the original holder still has).
-fn give_back(s: &mut WorkState, off: u64, len: u64, endgame: bool, complete: &tokio::sync::Notify) {
+/// this was an endgame copy the original holder still has). Source `index`
+/// is no longer fetching it, so its other lanes may take it on.
+fn give_back(
+    s: &mut WorkState,
+    off: u64,
+    len: u64,
+    index: usize,
+    endgame: bool,
+    complete: &tokio::sync::Notify,
+) {
+    s.working.remove(&(off, index));
     if s.done.contains(&off) {
         s.settle(off, complete);
     } else if !endgame {
@@ -642,9 +735,8 @@ fn give_back(s: &mut WorkState, off: u64, len: u64, endgame: bool, complete: &to
 #[allow(clippy::too_many_arguments)]
 async fn worker(
     index: usize,
-    source: SourcePeer,
+    source: Arc<dyn RangeSource>,
     state: Arc<Mutex<WorkState>>,
-    token: Vec<u8>,
     root: [u8; 32],
     size: u64,
     dest: std::path::PathBuf,
@@ -657,16 +749,16 @@ async fn worker(
     {
         let s = state.lock().expect("not poisoned");
         if s.stopped || (s.pending.is_empty() && s.in_flight.is_empty()) {
-            return (source.endpoint, 0);
+            return (source.label(), 0);
         }
     }
-    let ask = || fetch_have(&source.endpoint, source.cert_fp, &token, root);
-    let mut holds = match ask().await {
+    let label = source.label();
+    let mut holds = match source.have().await {
         Ok(Some(map)) => Holds::Map(map),
         Ok(None) => Holds::All,
         // No capability for it here, or it has none of this file: not a
         // source at all.
-        Err(PeerError::Refused(STATUS_DENIED | STATUS_NOT_FOUND)) => return (source.endpoint, 0),
+        Err(PeerError::Refused(STATUS_DENIED | STATUS_NOT_FOUND)) => return (label, 0),
         // Unreachable, or unclear: the first unit will tell.
         Err(_) => Holds::All,
     };
@@ -678,11 +770,15 @@ async fn worker(
             if s.stopped {
                 break;
             }
-            next_unit(&mut s, &holds, size)
+            next_unit(&mut s, &holds, size, index)
         };
         let (off, len, endgame) = match next {
             Next::Done => break,
             Next::Unit { off, len, endgame } => (off, len, endgame),
+            Next::Sibling => {
+                tokio::time::sleep(SIBLING_WAIT).await;
+                continue;
+            }
             Next::Wait => {
                 // A partial seed may have more by now: ask again, a while
                 // later, and let it go after a minute without anything new.
@@ -691,7 +787,7 @@ async fn worker(
                     break;
                 }
                 tokio::time::sleep(HAVE_REFRESH).await;
-                match ask().await {
+                match source.have().await {
                     Ok(Some(map)) => holds = Holds::Map(map),
                     // A known partial seed that did not answer this time
                     // keeps its last map (it is not taken to hold it all).
@@ -704,12 +800,15 @@ async fn worker(
 
         // What this unit must come to: every unit is whole but the last.
         let want = (size - off).min(UNIT_SIZE);
-        match fetch_range_proved(&source.endpoint, source.cert_fp, &token, root, off, len).await {
+        match fetch_proved(source.as_ref(), root, off, len).await {
             // A verified answer of another length is still not this unit:
             // the peer is serving some other size, and is retired below.
             Ok(proved) if proved.bytes.len() as u64 == want => {
                 let write: Result<bool, std::io::Error> = (|| {
                     let mut s = state.lock().expect("not poisoned");
+                    // Under the same lock as the write, so no other lane of
+                    // this source can take the unit it just fetched.
+                    s.working.remove(&(off, index));
                     if s.stopped {
                         return Err(std::io::Error::other("the fetch was dropped"));
                     }
@@ -735,7 +834,7 @@ async fn worker(
                     // `done_units` is a consistent snapshot.
                     if let Some(tx) = progress.as_ref() {
                         let _ = tx.send(UnitDone {
-                            endpoint: source.endpoint.clone(),
+                            endpoint: label.clone(),
                             offset: off,
                             done_units: s.done.len() as u64,
                             total_units,
@@ -757,7 +856,7 @@ async fn worker(
                         if !s.stopped && s.local.is_none() {
                             s.local = Some(e);
                         }
-                        give_back(&mut s, off, len, endgame, &complete);
+                        give_back(&mut s, off, len, index, endgame, &complete);
                         break;
                     }
                 }
@@ -771,6 +870,7 @@ async fn worker(
                     &mut state.lock().expect("not poisoned"),
                     off,
                     len,
+                    index,
                     endgame,
                     &complete,
                 );
@@ -785,6 +885,7 @@ async fn worker(
                     &mut state.lock().expect("not poisoned"),
                     off,
                     len,
+                    index,
                     endgame,
                     &complete,
                 );
@@ -792,7 +893,7 @@ async fn worker(
             }
         }
     }
-    (source.endpoint, completed)
+    (label, completed)
 }
 
 #[cfg(test)]
@@ -1320,5 +1421,134 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// A source serving a file from disk with several lanes, counting the
+    /// asks for each unit and the most at once. Its first ask fails when
+    /// told to.
+    struct Laned {
+        data: PathBuf,
+        proofs: PathBuf,
+        root: [u8; 32],
+        size: u64,
+        lanes: usize,
+        fail_first: std::sync::atomic::AtomicBool,
+        asks: Mutex<std::collections::HashMap<u64, u32>>,
+        now: std::sync::atomic::AtomicUsize,
+        most: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Laned {
+        fn new(dir: &Path, body: &[u8], lanes: usize) -> Self {
+            let data = dir.join("laned.bin");
+            let proofs = dir.join("laned.obao");
+            std::fs::write(&data, body).unwrap();
+            let root = *blake3::hash(body).as_bytes();
+            crate::peer::write_outboard(&data, root, &proofs).unwrap();
+            Laned {
+                data,
+                proofs,
+                root,
+                size: body.len() as u64,
+                lanes,
+                fail_first: false.into(),
+                asks: Mutex::new(Default::default()),
+                now: 0.into(),
+                most: 0.into(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RangeSource for Laned {
+        fn label(&self) -> String {
+            "laned".into()
+        }
+
+        async fn have(&self) -> Result<Option<HaveMap>, PeerError> {
+            Ok(None)
+        }
+
+        async fn bao(&self, offset: u64, len: u64) -> Result<Vec<crate::BaoPiece>, PeerError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            *self.asks.lock().unwrap().entry(offset).or_default() += 1;
+            let now = self.now.fetch_add(1, SeqCst) + 1;
+            self.most.fetch_max(now, SeqCst);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            self.now.fetch_sub(1, SeqCst);
+            if self.fail_first.swap(false, SeqCst) {
+                return Err(PeerError::Refused(crate::peer::STATUS_BAD_REQUEST));
+            }
+            let stream = crate::peer::encode_proved(
+                &self.data,
+                &self.proofs,
+                self.root,
+                self.size,
+                offset,
+                len,
+            )?;
+            Ok(vec![crate::BaoPiece {
+                offset,
+                len,
+                size: self.size,
+                stream,
+            }])
+        }
+
+        fn lanes(&self) -> usize {
+            self.lanes
+        }
+    }
+
+    #[tokio::test]
+    async fn a_source_with_lanes_is_never_asked_for_one_unit_twice_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        // One unit: one ask, however many lanes (no endgame copies onto the
+        // same source).
+        let small = payload(700_000);
+        let one = Arc::new(Laned::new(dir.path(), &small, 4));
+        let dest = dir.path().join("one.out");
+        let sources: Vec<Arc<dyn RangeSource>> = vec![one.clone()];
+        fetch_swarm_from(&sources, one.root, one.size, &dest, None, None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), small);
+        assert_eq!(one.asks.lock().unwrap().values().sum::<u32>(), 1);
+
+        // Three units over four lanes: each asked once, at once.
+        let sub = dir.path().join("three");
+        std::fs::create_dir(&sub).unwrap();
+        let body = payload(2 * UNIT_SIZE as usize + 5);
+        let three = Arc::new(Laned::new(&sub, &body, 4));
+        let dest = dir.path().join("three.out");
+        let sources: Vec<Arc<dyn RangeSource>> = vec![three.clone()];
+        fetch_swarm_from(&sources, three.root, three.size, &dest, None, None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        let asks = three.asks.lock().unwrap().clone();
+        assert_eq!(asks.len(), 3);
+        assert!(asks.values().all(|&n| n == 1), "{asks:?}");
+        assert_eq!(three.most.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_lane_that_fails_leaves_its_unit_to_the_sources_other_lanes() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = payload(UNIT_SIZE as usize + 77);
+        let source = Arc::new(Laned::new(dir.path(), &body, 2));
+        source
+            .fail_first
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let dest = dir.path().join("out");
+        let sources: Vec<Arc<dyn RangeSource>> = vec![source.clone()];
+        let report = fetch_swarm_from(&sources, source.root, source.size, &dest, None, None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert_eq!(report.per_source, vec![("laned".to_string(), 2)]);
+        // The failed lane's unit went to the other lane: that unit asked
+        // for twice, one after the other, three asks in all.
+        assert_eq!(source.asks.lock().unwrap().values().sum::<u32>(), 3);
     }
 }

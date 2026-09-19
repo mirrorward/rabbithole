@@ -83,8 +83,11 @@ async fn a_download_shared_by_one_person_serves_the_next() {
     assert_eq!(std::fs::read(&bobs_copy).unwrap(), body, "and it is the same file, verified");
     match events.last() {
         Some(SwarmEvent::Done { per_source, .. }) => {
-            assert_eq!(per_source.len(), 1, "one source: Alice");
-            assert_ne!(per_source[0].0, "the burrow");
+            // Two sources: Alice, and the burrow beside her (it sends
+            // proved ranges too); every unit came from one of them.
+            assert_eq!(per_source.len(), 2, "Alice and the burrow: {per_source:?}");
+            assert!(per_source.iter().any(|(l, _)| l == "the burrow"));
+            assert_eq!(per_source.iter().map(|(_, n)| n).sum::<u64>(), 4);
         }
         other => panic!("expected Done, got {other:?}"),
     }
@@ -169,12 +172,21 @@ async fn a_download_shares_as_it_goes_and_the_burrow_steps_in_when_peers_cannot(
     }
 
     // Bob drops off too. Both adverts still stand, but no peer answers: the
-    // burrow sends the file instead, and it is still the file asked for.
+    // burrow, one of the sources all along, sends every unit, each proved,
+    // and it is still the file asked for.
     bob_seeder.stop(None).await;
     let again = work.path().join("again.zip");
-    let route = run_download(&mut carol, &want, &again, |_| {}).await.unwrap();
-    assert_eq!(route, Route::Origin, "the burrow stepped in");
+    let mut events = Vec::new();
+    let route = run_download(&mut carol, &want, &again, |e| events.push(e)).await.unwrap();
+    assert_eq!(route, Route::Swarm);
     assert_eq!(std::fs::read(&again).unwrap(), body);
+    match events.last() {
+        Some(SwarmEvent::Done { per_source, .. }) => {
+            let burrows: u64 = per_source.iter().filter(|(l, _)| l == "the burrow").map(|(_, n)| n).sum();
+            assert_eq!(burrows, 4, "the burrow stepped in: {per_source:?}");
+        }
+        other => panic!("expected Done, got {other:?}"),
+    }
 
     burrow.shutdown().await;
 }
@@ -229,5 +241,66 @@ async fn sharing_a_download_nobody_else_has_goes_straight_to_the_burrow() {
     assert!(run_download_sharing(&mut dana, &want, &work.path().join("x.bin"), Some(share), |_| {}).await.is_err());
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
 
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_burrow_fills_what_the_peers_do_not_hold_unit_by_unit() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(ServerConfig {
+        name: "Mixed Warren".into(),
+        quic_addr: "127.0.0.1:0".parse().unwrap(),
+        ws_addr: "127.0.0.1:0".parse().unwrap(),
+        data_dir: work.path().join("srv"),
+        ..ServerConfig::default()
+    })
+    .await
+    .unwrap();
+    for who in ["admin", "alice", "bob"] {
+        burrow.shared.auth.create_account(who, "pw-pw-pw", Role::Admin).await.unwrap();
+    }
+    let body = payload(4 * 1024 * 1024 + 55); // five units
+    let src = work.path().join("mix.bin");
+    std::fs::write(&src, &body).unwrap();
+    let mut admin = login(&burrow, "admin").await;
+    admin.area_create("warez", "Warez", "").await.unwrap();
+    let node = admin.transfer_upload("warez", None, "mix.bin", &src, "application/octet-stream", "").await.unwrap();
+    let root = *blake3::hash(&body).as_bytes();
+    let size = body.len() as u64;
+
+    // Alice holds only the first two units so far, with their proofs, and
+    // offers them.
+    let mut alice = login(&burrow, "alice").await;
+    let hers = work.path().join("alice.bin");
+    std::fs::write(&hers, &body).unwrap();
+    let proofs = rabbithole_swarm::proofs_path(&hers);
+    rabbithole_swarm::write_outboard(&hers, root, &proofs).unwrap();
+    let seeds = std::sync::Arc::new(rabbithole_swarm::SeedStore::new());
+    seeds.add_partial(root, size, &hers, &proofs, [0, 1]).unwrap();
+    let peer = rabbithole_swarm::PeerServer::start("127.0.0.1:0".parse().unwrap(), alice.server.server_key, seeds)
+        .await
+        .unwrap();
+    alice.swarm_contact(peer.addr.port(), peer.fingerprint.0).await.unwrap();
+    let entry = rabbithole_proto::swarm::AdvertEntry::new(root, size, "mix.bin", "application/octet-stream");
+    alice.swarm_advertise_partial(vec![entry], 0).await.unwrap().unwrap();
+
+    // Bob downloads: from Alice what she holds, and from the burrow the rest,
+    // every unit proved against the root.
+    let mut bob = login(&burrow, "bob").await;
+    let dest = work.path().join("bob.bin");
+    let want = Wanted { root, size, node_id: Some(node.id), max_sources: 4, mode: SourceMode::Auto };
+    let mut events = Vec::new();
+    let route = run_download(&mut bob, &want, &dest, |e| events.push(e)).await.unwrap();
+    assert_eq!(route, Route::Swarm, "peers and the burrow together");
+    assert_eq!(std::fs::read(&dest).unwrap(), body);
+    match events.last() {
+        Some(SwarmEvent::Done { per_source, .. }) => {
+            let burrows: u64 = per_source.iter().filter(|(l, _)| l == "the burrow").map(|(_, n)| n).sum();
+            let total: u64 = per_source.iter().map(|(_, n)| n).sum();
+            assert_eq!(total, 5, "{per_source:?}");
+            assert!(burrows >= 3, "the burrow sent what Alice lacks: {per_source:?}");
+        }
+        other => panic!("expected Done, got {other:?}"),
+    }
     burrow.shutdown().await;
 }
