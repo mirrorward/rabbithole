@@ -1,0 +1,7 @@
+# On a Mac, `cargo run` starts the app from inside a real .app bundle, and so do
+# `cargo tauri dev` and `just desktop`, which run it the same way. Without a
+# bundle macOS has no icon or name for the process: the Dock, Force Quit and
+# Activity Monitor all show the generic "exec" tile. See the script for the
+# rest. Tests and benches pass straight through it.
+[target.'cfg(target_os = "macos")']
+runner = "../../scripts/macos-dev-app.sh"

@@ -474,7 +474,7 @@ body{overflow:hidden}\
 .rh-about{min-height:100%;display:flex;flex-direction:column;align-items:center;text-align:center;padding:2rem var(--rh-space-5) var(--rh-space-4);background:var(--rh-bg);color:var(--rh-text);overflow-y:auto}\
 /* Deliberate vertical rhythm: the mark, then the name, then what it is, then\
    what was built -- each a step apart rather than one crowded stack. */\
-.rh-about-mark{color:var(--rh-accent);line-height:0;margin:0 0 1.15rem}\
+.rh-about-logo{display:block;width:7rem;height:7rem;margin:0 0 .55rem;filter:drop-shadow(0 .5rem .9rem color-mix(in srgb,#000 26%,transparent))}\
 .rh-about-name{margin:0 0 .45rem;font-size:1.65rem;font-weight:700;letter-spacing:-.02em}\
 .rh-about-tagline{margin:0 0 .85rem;color:var(--rh-muted);font-size:var(--rh-font-sm)}\
 .rh-about-version{margin:0 0 1.9rem;display:inline-flex;align-items:center;gap:.45rem;font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);color:var(--rh-muted)}\
@@ -485,7 +485,8 @@ body{overflow:hidden}\
 .rh-about-link{color:var(--rh-muted);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--rh-muted) 40%,transparent)}\
 .rh-about-link:hover{color:var(--rh-accent);border-bottom-color:var(--rh-accent)}\
 .rh-about-points{list-style:none;margin:0 0 var(--rh-space-4);padding:0;display:flex;flex-direction:column;gap:var(--rh-space-2);text-align:left;width:100%;max-width:22rem}\
-.rh-about-points li{display:flex;flex-direction:column;gap:.15rem;padding-left:.7rem;border-left:2px solid color-mix(in srgb,var(--rh-accent) 40%,transparent)}\
+.rh-about-points li{display:flex;flex-direction:column;gap:.15rem;padding-top:var(--rh-space-2);border-top:1px solid color-mix(in srgb,var(--rh-text) 9%,transparent)}\
+.rh-about-points li:first-child{padding-top:0;border-top:0}\
 .rh-about-point-k{font-weight:650;font-size:var(--rh-font-sm)}\
 .rh-about-point-v{color:var(--rh-muted);font-size:var(--rh-font-sm);line-height:1.45}\
 .rh-about-foot{margin-top:auto;padding-top:var(--rh-space-3);display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;justify-content:center;color:var(--rh-muted);font-size:var(--rh-font-xs)}\

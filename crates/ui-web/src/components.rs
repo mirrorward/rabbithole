@@ -293,7 +293,17 @@ pub fn About() -> impl IntoView {
     let sha_copy = sha.clone();
     view! {
         <main class="rh-about" id=a11y::MAIN_ID tabindex="-1">
-            <div class="rh-about-mark" inner_html=crate::icons::about_mark()></div>
+            // The logo itself, the one the Dock and the connect window wear:
+            // an About window is where an app shows its face, and a drawn
+            // stand-in in the accent colour was a different face.
+            <img
+                class="rh-about-logo"
+                src="/logo.png"
+                alt=""
+                width="112"
+                height="112"
+                draggable="false"
+            />
             <h1 class="rh-about-name" id=a11y::VIEW_TITLE_ID tabindex="-1">"RabbitHole"</h1>
             <p class="rh-about-tagline">"A warren client \u{2014} many burrows, one you."</p>
             <p class="rh-about-version">

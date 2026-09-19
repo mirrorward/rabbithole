@@ -83,6 +83,10 @@ pub fn run() {
 ## Run / verify
 
 - Desktop dev: `cd apps/desktop && cargo tauri dev` (spawns `trunk serve`, opens the window on the SPA).
+  On a Mac the dev binary runs from inside a real `.app` (`scripts/macos-dev-app.sh`, wired in as cargo's
+  runner in `apps/desktop/.cargo/config.toml`), so the Dock, Force Quit and Activity Monitor show the app's
+  icon and name. A bare binary has no bundle and gets the generic "exec" tile everywhere but its own window.
+  `RH_NO_DEV_BUNDLE=1` runs it bare.
 - Desktop bundle: `cargo tauri build` (runs `trunk build`, bundles `dist`). Verified: produces a 25 MB
   arm64 `RabbitHole.app` that embeds the live wasm SPA via `generate_context!`.
 - iOS: `cargo tauri ios init` (done — `gen/apple`), then `cargo tauri ios build --debug --target aarch64-sim`.

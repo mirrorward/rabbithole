@@ -119,6 +119,13 @@ where headless-verifiable, tested:
   About RabbitHole (icon + description) and Settings… on Cmd-, routed into the SPA;
   Edit/Window rebuilt so copy/paste survives; the Dock/Command-Tab icon is a proper
   rounded macOS icon (`scripts/build-macos-icns.sh`).
+- **The logo, everywhere the system shows the app** (0.215.0) — a Mac dev run is a real
+  `.app` now (`scripts/macos-dev-app.sh`, wired in as cargo's runner in
+  `apps/desktop/.cargo/config.toml`), so Activity Monitor, Force Quit and every other
+  process list show the logo instead of the generic "exec" tile; the Windows `.ico`,
+  the Linux PNGs and the iOS/Android sets were still a placeholder and are rebuilt from
+  the brand masters (`scripts/build-app-icons.sh`); the About window shows the logo
+  itself, not a drawn stand-in.
 - **Settings + demo warren + chrome cleanup** — a Settings page (trackers, default
   `tracker.rabbit.direct`), two named demo burrows behind a dev-only `demo` feature
   (news on connect, distinct rosters), Leave a burrow, header trimmed to the burrow's

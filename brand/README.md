@@ -17,6 +17,10 @@ RabbitHole.
 The web app PWA icons in `crates/ui-web/assets/` are rendered from
 `rabbithole-logo.svg`.
 
+The desktop and mobile app icons in `apps/desktop/icons/` are built from these masters:
+`scripts/build-macos-icns.sh` draws the Mac icon (squircle plus the system margin), and
+`scripts/build-app-icons.sh` builds the Windows, Linux, iOS and Android sets.
+
 ## Archive
 
 The previous RabbitHole app icon is preserved in `archive/`:
