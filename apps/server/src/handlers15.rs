@@ -79,7 +79,7 @@ fn password_is_acceptable(password: &str) -> bool {
     (MIN_PASSWORD_CHARS..=MAX_PASSWORD_CHARS).contains(&password.chars().count())
 }
 
-fn audit(shared: &Arc<Shared>, actor: &str, action: &str, detail: String) {
+pub(crate) fn audit(shared: &Arc<Shared>, actor: &str, action: &str, detail: String) {
     let pool = shared.pool.clone();
     let actor = actor.to_string();
     let action = action.to_string();

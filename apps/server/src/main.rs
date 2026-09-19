@@ -207,6 +207,7 @@ async fn ctl_client(config: ServerConfig, cmd: &str, args: &[String]) -> Result<
         ("fed-search", terms) if !terms.is_empty() => {
             json!({"cmd": "fed-search", "terms": terms.join(" ")})
         }
+        ("backup", []) => json!({"cmd": "backup"}),
         ("backup", [dest]) => json!({"cmd": "backup", "dest": dest}),
         ("backup-verify", [dir]) => json!({"cmd": "backup-verify", "path": dir}),
         // Always refused by the server with the offline procedure.

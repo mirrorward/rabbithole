@@ -45,6 +45,31 @@ operation (`AccountSet`, `AccountCreate`, `AccountPasswordSet`,
 Before 0.218.0 `AccountSet` had no ordering at all (an account admin could make
 anyone, themselves included, a superuser) and `ClassSet` no capability check.
 
+## Federation peers and backups (admin console, slice 7): types 47..60
+
+What `ctl` could do from the burrow's own machine, now over the wire with the
+same rules and the same audit trail. Everything here requires `CONFIG_ADMIN`;
+the backup messages also require the **Admin role**, because a snapshot is the
+whole burrow (identity keys included) and removing one is for good, so
+`CONFIG_ADMIN` handed out through a class is not enough on its own.
+
+| type | name | direction | requires | payload |
+|------|------|-----------|----------|---------|
+| 47/48 | PeerListRequest → PeerList | Request/Reply | CONFIG_ADMIN | `peers: [PeerEntry]` by key: `key` (32 bytes), `name`, `origin?`, `addr?`, `state` (0 pending, 1 disconnected, 2 connected), `approved`, `configured` (listed under `federation_peers`: dialled at start, approved by that listing, not revocable here) |
+| 49 | PeerApprove | Request | CONFIG_ADMIN | `key`, `origin?` → empty ack. Binds the key to the origin durably (`federation/approved_peers.json`); with no origin, the one the peer announced while pending. `BadRequest` when no origin is known, when it is not a valid server name, or when the key is already bound to another origin |
+| 50 | PeerRevoke | Request | CONFIG_ADMIN | `key` → empty ack. A live session is closed and the peer drops back to pending. `NotFound` for an unknown key; `BadRequest` for a configured dial target |
+| 51/52 | OriginListRequest → OriginList | Request/Reply | CONFIG_ADMIN | `origins: [{origin, key, trust}]`, `trust` 0 proven on a direct approved session, 1 pinned by an operator |
+| 53 | OriginPin | Request | CONFIG_ADMIN | `origin`, `key` → empty ack. `BadRequest` for a bad name, an origin already bound to a different key, a key already bound to another origin, or a full registry. Pinning the same binding again is fine |
+| 54/55 | BackupListRequest → BackupList | Request/Reply | CONFIG_ADMIN + Admin | `dir` (the resolved `backup_dir`), `snapshots: [BackupEntry]` oldest first: `name`, `created_at` (RFC 3339), `version`, `files`, `total_bytes`, read from each snapshot's `MANIFEST.json` |
+| 56/57 | BackupCreate → BackupMade | Request/Reply | CONFIG_ADMIN + Admin | — → `snapshot: BackupEntry`. The same snapshot `ctl backup` makes, into `backup_dir` |
+| 58/59 | BackupVerify → BackupVerified | Request/Reply | CONFIG_ADMIN + Admin | `name` → `name`, `ok`, `detail` (`ok`, or the first thing wrong), `files`, `total_bytes`. Every file against its manifest hash, then the database against `PRAGMA integrity_check`. A snapshot that fails is a reply, not an error. `NotFound` for a name that is not a snapshot in the folder |
+| 60 | BackupDelete | Request | CONFIG_ADMIN + Admin | `name` → empty ack. Only a directory named `snapshot-…` holding a manifest is removed; anything else in the folder is left alone (`NotFound`) |
+
+Restore stays offline (`burrow restore <snapshot> --data-dir <dir>` with the
+burrow stopped): a running burrow cannot swap its own database out.
+Audit actions: `peer-approve`, `peer-revoke`, `origin-pin`, `backup`,
+`backup-delete`, under the operator's login.
+
 ## Theme bundle application (Wave 8): types 41..44
 
 | type | name | direction | requires | payload |

@@ -106,6 +106,10 @@ pub enum Pane {
     Areas,
     /// Broadcast and kick.
     Moderation,
+    /// Federation peers and trusted origins.
+    Peers,
+    /// Snapshots.
+    Backups,
     /// The theme editor.
     Appearance,
     /// Every setting this client has no words for.
@@ -210,6 +214,16 @@ pub const SECTIONS: &[Section] = &[
                          directory description when that is empty.",
                     ),
                 ],
+            },
+            Group {
+                title: "Backups",
+                blurb: "",
+                items: &[item(
+                    "backup_dir",
+                    "Snapshot folder",
+                    "Where a snapshot made from Backups is written. A relative path is inside \
+                     the data folder.",
+                )],
             },
         ],
     },
@@ -969,6 +983,23 @@ pub const SECTIONS: &[Section] = &[
         blurb: "The theme this burrow offers the people in it.",
         area: Area::Manage,
         pane: Pane::Appearance,
+        groups: &[],
+    },
+    Section {
+        id: "peers",
+        title: "Peers",
+        blurb: "The burrows this one talks to: who has asked to peer, who is approved, and \
+                whose keys are trusted.",
+        area: Area::Manage,
+        pane: Pane::Peers,
+        groups: &[],
+    },
+    Section {
+        id: "backups",
+        title: "Backups",
+        blurb: "Snapshots of everything here, made and checked from where you sit.",
+        area: Area::Manage,
+        pane: Pane::Backups,
         groups: &[],
     },
     Section {

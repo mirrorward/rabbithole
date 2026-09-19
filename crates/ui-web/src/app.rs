@@ -161,6 +161,8 @@ pub struct AppState {
     /// The Moderation pane's queue, deny list and audit log
     /// ([`crate::admin_moderation`]).
     pub moderation: RwSignal<crate::admin_moderation::ModerationState>,
+    /// The Peers and Backups panes' lists ([`crate::admin_federation`]).
+    pub federation: RwSignal<crate::admin_federation::FederationState>,
     /// The Syndication & Gateways panel model, folded from paired config
     /// get/set replies ([`crate::syndication_admin`]).
     pub syndication: RwSignal<SynAdminState>,
@@ -260,6 +262,7 @@ impl AppState {
             admin_settings_owner: create_rw_signal(None),
             people: create_rw_signal(Default::default()),
             moderation: create_rw_signal(Default::default()),
+            federation: create_rw_signal(Default::default()),
             syndication: create_rw_signal(SynAdminState::default()),
             palette_open: create_rw_signal(false),
             switcher_open: create_rw_signal(false),
@@ -1271,6 +1274,8 @@ impl AppState {
             ConfirmIntent::DeleteArea(slug) => self.delete_area(&slug),
             ConfirmIntent::DeleteNode(id, name) => self.delete_node(id, &name),
             ConfirmIntent::KickSession(id, _) => self.kick_session(id),
+            ConfirmIntent::RevokePeer(key) => self.revoke_peer(key),
+            ConfirmIntent::DeleteBackup(name) => self.delete_backup(&name),
         }
     }
 
@@ -2344,6 +2349,9 @@ impl AppState {
                 "*audit",
                 "*kick",
                 "*broadcast",
+                "*peer",
+                "*origin",
+                "*backup",
             ]
             .iter()
             .any(|p| t.starts_with(p))
@@ -2363,6 +2371,19 @@ impl AppState {
                     }
                     AdminEvent::DenyHashesListed(list) => m.deny = list.clone(),
                     AdminEvent::AuditListed(list) => m.audit = list.clone(),
+                    _ => {}
+                }
+            }
+        });
+        self.federation.update(|f| {
+            for event in events {
+                match event {
+                    AdminEvent::PeersListed(list) => f.peers = list.clone(),
+                    AdminEvent::OriginsListed(list) => f.origins = list.clone(),
+                    AdminEvent::BackupsListed(dir, list) => {
+                        f.listed_backups(dir.clone(), list.clone())
+                    }
+                    AdminEvent::BackupChecked(result) => f.checked(result.clone()),
                     _ => {}
                 }
             }
@@ -2396,6 +2417,9 @@ impl AppState {
             crate::admin_people::Reload::Reports => app.load_reports(None),
             crate::admin_people::Reload::DenyHashes => app.load_deny_hashes(),
             crate::admin_people::Reload::Sessions => app.refresh_who(),
+            crate::admin_people::Reload::Peers => app.load_peers(),
+            crate::admin_people::Reload::Origins => app.load_origins(),
+            crate::admin_people::Reload::Backups => app.load_backups(),
             crate::admin_people::Reload::Areas => app.load_areas(),
             crate::admin_people::Reload::Folder => {
                 app.focused().files.update(|f| f.selected = None);
@@ -2541,6 +2565,63 @@ impl AppState {
     /// The audit log's newest lines.
     pub fn load_audit(&self) {
         self.dispatch_people(AdminCommand::ListAudit { limit: 200 });
+    }
+
+    /// The burrows this one has met over federation.
+    pub fn load_peers(&self) {
+        self.dispatch_people(AdminCommand::ListPeers);
+    }
+
+    /// Approve a peer, bound to `origin` or to the one it announced.
+    pub fn approve_peer(&self, key: [u8; 32], origin: Option<String>) {
+        self.dispatch_people(AdminCommand::ApprovePeer {
+            key,
+            origin: origin
+                .map(|o| o.trim().to_string())
+                .filter(|o| !o.is_empty()),
+        });
+    }
+
+    /// Withdraw a peer's approval; its session closes.
+    pub fn revoke_peer(&self, key: [u8; 32]) {
+        self.dispatch_people(AdminCommand::RevokePeer { key });
+    }
+
+    /// The origins whose signing keys are believed.
+    pub fn load_origins(&self) {
+        self.dispatch_people(AdminCommand::ListOrigins);
+    }
+
+    /// Pin an origin's key by hand.
+    pub fn pin_origin(&self, origin: &str, key: [u8; 32]) {
+        self.dispatch_people(AdminCommand::PinOrigin {
+            origin: origin.trim().to_string(),
+            key,
+        });
+    }
+
+    /// The snapshots in the backup folder.
+    pub fn load_backups(&self) {
+        self.dispatch_people(AdminCommand::ListBackups);
+    }
+
+    /// Make a snapshot now.
+    pub fn make_backup(&self) {
+        self.dispatch_people(AdminCommand::MakeBackup);
+    }
+
+    /// Check a snapshot against its manifest and the database's own check.
+    pub fn verify_backup(&self, name: &str) {
+        self.dispatch_people(AdminCommand::VerifyBackup {
+            name: name.to_string(),
+        });
+    }
+
+    /// Remove a snapshot.
+    pub fn delete_backup(&self, name: &str) {
+        self.dispatch_people(AdminCommand::DeleteBackup {
+            name: name.to_string(),
+        });
     }
 
     /// Disconnect a session, and hear how it went.
@@ -3112,6 +3193,10 @@ pub enum ConfirmIntent {
     DeleteNode(i64, String),
     /// Disconnect a session (by id); the name is for the question.
     KickSession(u64, String),
+    /// Withdraw a federation peer's approval (by key).
+    RevokePeer([u8; 32]),
+    /// Remove a snapshot (by name).
+    DeleteBackup(String),
 }
 
 /// A question put to the person before something irreversible.
@@ -3164,6 +3249,30 @@ impl ConfirmAsk {
     }
 
     /// "Remove the Music area?"
+    /// "Revoke grove.example?"
+    pub fn revoke_peer(key: [u8; 32], title: &str) -> Self {
+        ConfirmAsk {
+            title: format!("Revoke {title}?"),
+            body: "Its session with this burrow is closed now, and it waits for approval again \
+                   before anything more is exchanged. Posts already received stay."
+                .to_string(),
+            action: "Revoke".to_string(),
+            intent: ConfirmIntent::RevokePeer(key),
+        }
+    }
+
+    /// "Remove snapshot-20260918-224103?"
+    pub fn delete_backup(name: &str) -> Self {
+        ConfirmAsk {
+            title: format!("Remove {name}?"),
+            body: "The snapshot is deleted from the backup folder. The burrow itself is not \
+                   touched. This cannot be undone."
+                .to_string(),
+            action: "Remove".to_string(),
+            intent: ConfirmIntent::DeleteBackup(name.to_string()),
+        }
+    }
+
     pub fn delete_area(slug: &str, title: &str) -> Self {
         ConfirmAsk {
             title: format!("Remove the {title} area?"),

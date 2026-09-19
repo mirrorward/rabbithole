@@ -1544,6 +1544,102 @@ pub fn load_approved(data_dir: &Path) -> Vec<ApprovedPeer> {
     approved
 }
 
+// ---------------------------------------------------------------------------
+// Operator approval, shared by `ctl` and the admin console.
+// ---------------------------------------------------------------------------
+
+/// Why an operator's peer approval or revocation was refused.
+#[derive(Debug)]
+pub enum PeerRefusal {
+    /// No origin was given, and the peer never announced one.
+    OriginUnknown,
+    /// The origin is not a valid federation server name.
+    OriginInvalid,
+    /// The key is already bound to a different origin.
+    OriginAlias(String),
+    /// The peer is a `federation_peers` dial target, approved by that listing.
+    Configured,
+    /// The approval file could not be written; nothing changed.
+    Persist(anyhow::Error),
+}
+
+impl std::fmt::Display for PeerRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PeerRefusal::OriginUnknown => f.write_str(
+                "peer origin is unknown; let it complete a pending handshake or pass origin explicitly",
+            ),
+            PeerRefusal::OriginInvalid => {
+                f.write_str("origin must be a valid lowercase federation server name")
+            }
+            PeerRefusal::OriginAlias(existing) => write!(
+                f,
+                "peer key is already associated with origin {existing}; refusing an origin alias"
+            ),
+            PeerRefusal::Configured => f.write_str(
+                "peer is an implicitly approved federation_peers dial target; remove it from configuration and restart before revoking it",
+            ),
+            PeerRefusal::Persist(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for PeerRefusal {}
+
+/// Whether `key` or `origin` is listed under `federation_peers`: dialled at
+/// start and approved by that listing, so not revocable by hand.
+pub fn is_configured_peer(shared: &Shared, key: &[u8; 32], origin: Option<&str>) -> bool {
+    shared.config.read().federation_peers.iter().any(|peer| {
+        hex_key(&peer.key) == Some(*key)
+            || (origin.is_some() && origin == Some(peer.origin.as_str()))
+    })
+}
+
+/// Approve `key` for federation, bound to `origin` (or to the origin the
+/// peer announced while pending). The binding is written to disk before it
+/// is reported, and undone when the write fails. Returns the origin bound
+/// and whether the peer was already known.
+pub fn approve_peer(
+    shared: &Shared,
+    key: [u8; 32],
+    origin: Option<String>,
+) -> std::result::Result<(String, bool), PeerRefusal> {
+    let origin = origin
+        .map(|o| o.trim().to_string())
+        .filter(|o| !o.is_empty())
+        .or_else(|| shared.peers.get(&key).and_then(|peer| peer.origin))
+        .ok_or(PeerRefusal::OriginUnknown)?;
+    if !is_valid_server_name(&origin) {
+        return Err(PeerRefusal::OriginInvalid);
+    }
+    if let Some(existing) = shared.peers.get(&key).and_then(|peer| peer.origin) {
+        if existing != origin {
+            return Err(PeerRefusal::OriginAlias(existing));
+        }
+    }
+    let was_approved = shared.peers.is_approved_origin(&key, &origin);
+    let existed = shared.peers.approve_origin(&key, origin.clone());
+    if let Err(error) = persist_approved(shared) {
+        if !was_approved {
+            shared.peers.revoke(&key);
+        }
+        return Err(PeerRefusal::Persist(error));
+    }
+    Ok((origin, existed))
+}
+
+/// Withdraw approval of `key`; a live session with it is closed and it drops
+/// back to pending. Returns whether the peer was known.
+pub fn revoke_peer(shared: &Shared, key: [u8; 32]) -> std::result::Result<bool, PeerRefusal> {
+    let known_origin = shared.peers.get(&key).and_then(|peer| peer.origin);
+    if is_configured_peer(shared, &key, known_origin.as_deref()) {
+        return Err(PeerRefusal::Configured);
+    }
+    let existed = shared.peers.revoke(&key);
+    persist_approved(shared).map_err(PeerRefusal::Persist)?;
+    Ok(existed)
+}
+
 /// Persist the registry's current approved origin-key tuples to disk.
 pub fn persist_approved(shared: &Shared) -> Result<()> {
     let data_dir = shared.config.read().data_dir;

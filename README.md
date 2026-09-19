@@ -12,7 +12,7 @@ browsers, telnet BBS clients, newsreaders, offline mail readers, and (yes) real
 classic Hotline clients. Servers federate over **Tunnels** and are discoverable
 through **Looking Glass** directories.
 
-**Status: 0.221.0 — waves 0–14 largely landed.** The native server and its
+**Status: 0.222.0 — waves 0–14 largely landed.** The native server and its
 surfaces are feature-complete for a public flagship; remaining work is 1.0
 hardening (E2EE wiring, cross-server flood-fill, GUI/mobile shells) and the
 post-1.0 Reticulum mesh. See [`TODO.md`](TODO.md) for the exact per-wave state.
@@ -33,7 +33,7 @@ recovery codes, multiple personas per account, and an ACL evaluator (roles +
 classes + capability bitmask, nearest-ancestor / deny-wins) governing every
 surface.
 
-| Subsystem | State at 0.221.0 |
+| Subsystem | State at 0.222.0 |
 |---|---|
 | **Accounts & identity** | Ed25519 identity keys, Argon2id passwords, hashed session tokens + resume, TOTP + recovery codes, key enrollment, registration gating (open/invite/closed) |
 | **Personas & presence** | Multiple personas per account, profiles/.plan/avatars+banners, buddy lists, presence states (away/idle/invisible), member directory + locate |
@@ -47,7 +47,7 @@ surface.
 | **Federation (Tunnels)** | S2S QUIC endpoint, nonce-bound Ed25519 handshake + admin approval, signed file catalogs with pull fan-out + blake3 dedupe **shipped**; flood-fill, redaction propagation, and `persona@server` attestation are model-only crates awaiting the S2S service wiring |
 | **Moderation** | Report queues, quarantine-for-review, blake3 hash-deny lists, audit trail; enforced on native RHP file/board/DM paths |
 | **Rate limiting** | Token buckets across six classes (conn/auth/msg/post/transfer/legacy), per-IP + per-account, live-tunable, on by default |
-| **Backups** | Consistent snapshot (`ctl backup`), verify, and **offline** `burrow restore` (stop → restore → start), migration notes in module docs |
+| **Backups** | Consistent snapshot (`ctl backup`, or the console's Backups pane into `backup_dir`), verify, and **offline** `burrow restore` (stop → restore → start), migration notes in module docs |
 | **E2EE** | Crypto core complete (`rabbithole-e2ee`: Double Ratchet, X3DH-lite, sealed sender, sender-key groups); per-thread DM/room wiring is pending *(model-only)* |
 
 **Clients & tooling**

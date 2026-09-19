@@ -81,10 +81,13 @@
 pub mod a11y;
 pub mod admin;
 pub mod admin_areas_view;
+pub mod admin_backups_view;
 pub mod admin_boards_view;
 pub mod admin_catalog;
+pub mod admin_federation;
 pub mod admin_moderation;
 pub mod admin_moderation_view;
+pub mod admin_peers_view;
 pub mod admin_people;
 pub mod admin_people_view;
 pub mod admin_settings;

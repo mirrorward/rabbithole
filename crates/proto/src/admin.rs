@@ -767,6 +767,390 @@ impl Message for AuditList {
 }
 
 // ---------------------------------------------------------------------------
+// Federation peers and backups (admin console, slice 7): types 47..60.
+// ---------------------------------------------------------------------------
+
+/// A federation peer's lifecycle, as [`PeerEntry::state`] carries it.
+pub mod peer_state {
+    /// It authenticated once and waits for an operator; no session.
+    pub const PENDING: u8 = 0;
+    /// Approved, with no live session right now.
+    pub const DISCONNECTED: u8 = 1;
+    /// Approved and talking.
+    pub const CONNECTED: u8 = 2;
+}
+
+/// Why an origin's signing key is believed, as [`OriginEntry::trust`]
+/// carries it.
+pub mod origin_trust {
+    /// Proven on a direct, approved peering session.
+    pub const DIRECT_PEER: u8 = 0;
+    /// An operator pinned it by hand.
+    pub const OPERATOR: u8 = 1;
+}
+
+/// The burrows this one has met over federation, approved or waiting.
+/// → [`PeerList`]. Requires `CONFIG_ADMIN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerListRequest;
+
+impl Message for PeerListRequest {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 47;
+}
+
+/// One federation peer.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerEntry {
+    /// Its Ed25519 server identity: what an operator approves or revokes.
+    pub key: [u8; 32],
+    /// The name it announced, if any.
+    pub name: String,
+    /// The federation origin bound to the key: announced while pending,
+    /// immutable once approved.
+    pub origin: Option<String>,
+    /// Where it last connected from.
+    pub addr: Option<String>,
+    /// One of [`peer_state`].
+    pub state: u8,
+    /// Whether an operator has approved peering with this key.
+    pub approved: bool,
+    /// Listed under `federation_peers` in the configuration: dialled at
+    /// start, approved by that listing, and not revocable from here.
+    pub configured: bool,
+}
+
+impl PeerEntry {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        key: [u8; 32],
+        name: impl Into<String>,
+        origin: Option<String>,
+        addr: Option<String>,
+        state: u8,
+        approved: bool,
+        configured: bool,
+    ) -> Self {
+        Self {
+            key,
+            name: name.into(),
+            origin,
+            addr,
+            state,
+            approved,
+            configured,
+        }
+    }
+}
+
+/// Reply to [`PeerListRequest`], sorted by key.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerList {
+    pub peers: Vec<PeerEntry>,
+}
+
+impl PeerList {
+    pub fn new(peers: Vec<PeerEntry>) -> Self {
+        Self { peers }
+    }
+}
+
+impl Message for PeerList {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 48;
+}
+
+/// Approve a peer: bind its key to an origin, durably. `origin` may be left
+/// out when the peer announced one while pending. → empty ack. Requires
+/// `CONFIG_ADMIN`. `BadRequest` when no origin is known, when it is not a
+/// valid server name, or when the key is already bound to another origin.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerApprove {
+    pub key: [u8; 32],
+    pub origin: Option<String>,
+}
+
+impl PeerApprove {
+    pub fn new(key: [u8; 32], origin: Option<String>) -> Self {
+        Self { key, origin }
+    }
+}
+
+impl Message for PeerApprove {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 49;
+}
+
+/// Withdraw approval; a live session with the peer is closed and it drops
+/// back to pending. → empty ack. Requires `CONFIG_ADMIN`. `BadRequest` for a
+/// peer listed under `federation_peers`: take it out of the configuration
+/// instead.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerRevoke {
+    pub key: [u8; 32],
+}
+
+impl PeerRevoke {
+    pub fn new(key: [u8; 32]) -> Self {
+        Self { key }
+    }
+}
+
+impl Message for PeerRevoke {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 50;
+}
+
+/// The origins whose signing keys this burrow believes, for posts that
+/// arrive relayed. → [`OriginList`]. Requires `CONFIG_ADMIN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OriginListRequest;
+
+impl Message for OriginListRequest {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 51;
+}
+
+/// One trusted origin: a federation server name and the key it signs with.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OriginEntry {
+    pub origin: String,
+    pub key: [u8; 32],
+    /// One of [`origin_trust`].
+    pub trust: u8,
+}
+
+impl OriginEntry {
+    pub fn new(origin: impl Into<String>, key: [u8; 32], trust: u8) -> Self {
+        Self {
+            origin: origin.into(),
+            key,
+            trust,
+        }
+    }
+}
+
+/// Reply to [`OriginListRequest`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OriginList {
+    pub origins: Vec<OriginEntry>,
+}
+
+impl OriginList {
+    pub fn new(origins: Vec<OriginEntry>) -> Self {
+        Self { origins }
+    }
+}
+
+impl Message for OriginList {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 52;
+}
+
+/// Pin an origin's signing key by hand, from a key obtained elsewhere.
+/// → empty ack. Requires `CONFIG_ADMIN`. `BadRequest` for an origin that is
+/// not a valid server name, or one already bound to a different key.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OriginPin {
+    pub origin: String,
+    pub key: [u8; 32],
+}
+
+impl OriginPin {
+    pub fn new(origin: impl Into<String>, key: [u8; 32]) -> Self {
+        Self {
+            origin: origin.into(),
+            key,
+        }
+    }
+}
+
+impl Message for OriginPin {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 53;
+}
+
+/// The snapshots in the burrow's backup folder. → [`BackupList`]. Requires
+/// `CONFIG_ADMIN` and the Admin role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupListRequest;
+
+impl Message for BackupListRequest {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 54;
+}
+
+/// One snapshot, as its manifest describes it.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupEntry {
+    /// The snapshot's directory name (`snapshot-20260918-224103`).
+    pub name: String,
+    /// When it was made, RFC 3339 UTC.
+    pub created_at: String,
+    /// The burrow version that wrote it.
+    pub version: String,
+    /// How many files it holds, the database included.
+    pub files: u64,
+    pub total_bytes: u64,
+}
+
+impl BackupEntry {
+    pub fn new(
+        name: impl Into<String>,
+        created_at: impl Into<String>,
+        version: impl Into<String>,
+        files: u64,
+        total_bytes: u64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            created_at: created_at.into(),
+            version: version.into(),
+            files,
+            total_bytes,
+        }
+    }
+}
+
+/// Reply to [`BackupListRequest`]: where snapshots go, and the ones there,
+/// oldest first.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupList {
+    /// The folder, as the burrow resolves it.
+    pub dir: String,
+    pub snapshots: Vec<BackupEntry>,
+}
+
+impl BackupList {
+    pub fn new(dir: impl Into<String>, snapshots: Vec<BackupEntry>) -> Self {
+        Self {
+            dir: dir.into(),
+            snapshots,
+        }
+    }
+}
+
+impl Message for BackupList {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 55;
+}
+
+/// Make a snapshot now, into the burrow's backup folder. → [`BackupMade`].
+/// Requires `CONFIG_ADMIN` and the Admin role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupCreate;
+
+impl Message for BackupCreate {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 56;
+}
+
+/// Reply to [`BackupCreate`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupMade {
+    pub snapshot: BackupEntry,
+}
+
+impl BackupMade {
+    pub fn new(snapshot: BackupEntry) -> Self {
+        Self { snapshot }
+    }
+}
+
+impl Message for BackupMade {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 57;
+}
+
+/// Check a snapshot: every file against its manifest hash, and the database
+/// against SQLite's own integrity check. → [`BackupVerified`]. Requires
+/// `CONFIG_ADMIN` and the Admin role. `NotFound` for a name that is not a
+/// snapshot in the backup folder.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupVerify {
+    pub name: String,
+}
+
+impl BackupVerify {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl Message for BackupVerify {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 58;
+}
+
+/// Reply to [`BackupVerify`]. A snapshot that fails is a reply, not an
+/// error: `ok` is false and `detail` says what was wrong.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupVerified {
+    pub name: String,
+    pub ok: bool,
+    /// What was found: the integrity check's word on success, the first
+    /// mismatch otherwise.
+    pub detail: String,
+    pub files: u64,
+    pub total_bytes: u64,
+}
+
+impl BackupVerified {
+    pub fn new(
+        name: impl Into<String>,
+        ok: bool,
+        detail: impl Into<String>,
+        files: u64,
+        total_bytes: u64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            ok,
+            detail: detail.into(),
+            files,
+            total_bytes,
+        }
+    }
+}
+
+impl Message for BackupVerified {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 59;
+}
+
+/// Remove a snapshot from the backup folder. → empty ack. Requires
+/// `CONFIG_ADMIN` and the Admin role. `NotFound` for a name that is not a
+/// snapshot there.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupDelete {
+    pub name: String,
+}
+
+impl BackupDelete {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl Message for BackupDelete {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 60;
+}
+
+// ---------------------------------------------------------------------------
 // Moderation suite (Wave 13): types 30..40 of the ADMIN family.
 // ---------------------------------------------------------------------------
 

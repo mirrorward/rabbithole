@@ -278,6 +278,9 @@ pub struct ServerConfig {
     /// login, rebuilt on every `qwk` build). Relative paths resolve under
     /// `data_dir`.
     pub qwk_spool_dir: PathBuf,
+    /// Where a snapshot made from the console (or by `ctl backup` with no
+    /// destination) is written. Relative paths resolve under `data_dir`.
+    pub backup_dir: PathBuf,
     /// Poll the configured `syndication_feeds` and post fresh items to their
     /// mapped boards (Wave 10). Off by default.
     pub syndication_enabled: bool,
@@ -512,6 +515,7 @@ impl Default for ServerConfig {
             ftn_areas: std::collections::HashMap::new(),
             qwk_enabled: false,
             qwk_spool_dir: PathBuf::from("qwk"),
+            backup_dir: PathBuf::from("backups"),
             syndication_enabled: false,
             syndication_feeds: std::collections::HashMap::new(),
             syndication_poll_secs: 1800,
@@ -750,6 +754,7 @@ impl ServerConfig {
             "ftn_outbound_dir" => self.ftn_outbound_dir.display().to_string(),
             "qwk_enabled" => self.qwk_enabled.to_string(),
             "qwk_spool_dir" => self.qwk_spool_dir.display().to_string(),
+            "backup_dir" => self.backup_dir.display().to_string(),
             "syndication_enabled" => self.syndication_enabled.to_string(),
             "syndication_poll_secs" => self.syndication_poll_secs.to_string(),
             "federation_enabled" => self.federation_enabled.to_string(),
@@ -1123,6 +1128,16 @@ impl ServerConfig {
                 self.qwk_spool_dir = PathBuf::from(value);
                 Ok(true)
             }
+            "backup_dir" => {
+                if value.trim().is_empty() {
+                    return Err(ConfigError::BadValue {
+                        key: key.into(),
+                        detail: "the backup folder cannot be empty".into(),
+                    });
+                }
+                self.backup_dir = PathBuf::from(value.trim());
+                Ok(true)
+            }
             "syndication_enabled" => {
                 self.syndication_enabled = parse_bool(key, value)?;
                 Ok(true)
@@ -1368,6 +1383,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "ftn_outbound_dir",
     "qwk_enabled",
     "qwk_spool_dir",
+    "backup_dir",
     "syndication_enabled",
     "syndication_poll_secs",
     "federation_enabled",
@@ -2058,6 +2074,21 @@ mod tests {
         assert_eq!(loaded.telnet_min_role, "user");
         assert_eq!(loaded.files_http_base, "http://h:1");
         assert_eq!(loaded.finger_min_role, "guest");
+    }
+
+    #[test]
+    fn the_backup_folder_is_a_live_setting_that_is_never_empty() {
+        let live = LiveConfig::new(ServerConfig::default());
+        assert_eq!(live.get_key("backup_dir").unwrap(), "backups");
+        assert!(
+            live.set_key("backup_dir", "/var/backups/burrow").unwrap(),
+            "applies live: the next snapshot goes there"
+        );
+        assert_eq!(live.get_key("backup_dir").unwrap(), "/var/backups/burrow");
+        assert!(matches!(
+            live.set_key("backup_dir", "  "),
+            Err(ConfigError::BadValue { .. })
+        ));
     }
 
     #[test]

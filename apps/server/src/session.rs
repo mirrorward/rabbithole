@@ -615,6 +615,9 @@ async fn handle_request(
     if crate::handlers15::handle(conn, frame, shared, ctx).await? {
         return Ok(());
     }
+    if crate::handlers16::handle(conn, frame, shared, ctx).await? {
+        return Ok(());
+    }
 
     // Anything else: tolerated, answered, never fatal.
     conn.send(Frame::error_reply(frame, ErrorCode::Unsupported))

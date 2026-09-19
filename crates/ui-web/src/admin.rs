@@ -83,7 +83,12 @@ impl AdminState {
             | AdminEvent::InvitesListed(_)
             | AdminEvent::ReportsListed(..)
             | AdminEvent::DenyHashesListed(_)
-            | AdminEvent::AuditListed(_) => {}
+            | AdminEvent::AuditListed(_)
+            | AdminEvent::PeersListed(_)
+            | AdminEvent::OriginsListed(_)
+            | AdminEvent::BackupsListed(..)
+            | AdminEvent::BackupMade(_)
+            | AdminEvent::BackupChecked(_) => {}
             AdminEvent::ConfigApplied { applied_live } => {
                 self.status = if *applied_live {
                     "Config saved and applied live.".to_string()

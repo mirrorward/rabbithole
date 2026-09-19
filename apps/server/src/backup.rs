@@ -320,6 +320,127 @@ fn copy_and_manifest(data_dir: &Path, snap: &Path) -> Result<SnapshotOutcome> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// The burrow's own backup folder, as the console and `ctl backup` (with no
+// destination) use it.
+// ---------------------------------------------------------------------------
+
+/// Where snapshots go when nobody names a destination: `backup_dir`, under
+/// the data directory when it is relative.
+pub fn backups_dir(config: &rabbithole_server_core::ServerConfig) -> PathBuf {
+    crate::resolve_dir(&config.data_dir, &config.backup_dir)
+}
+
+/// What a snapshot's manifest says about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotInfo {
+    /// The directory name (`snapshot-20260918-224103`).
+    pub name: String,
+    pub created_at: String,
+    pub workspace_version: String,
+    pub files: u64,
+    pub total_bytes: u64,
+}
+
+/// A directory name as this module writes them: `snapshot-`, then digits and
+/// dashes. Anything else in the backup folder is not ours to list or remove.
+pub fn snapshot_name_is_acceptable(name: &str) -> bool {
+    name.len() <= 64
+        && name.strip_prefix("snapshot-").is_some_and(|rest| {
+            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+        })
+}
+
+/// One snapshot's manifest summary, or `None` when `name` is not a readable
+/// snapshot in `dir`.
+pub fn snapshot_info(dir: &Path, name: &str) -> Option<SnapshotInfo> {
+    if !snapshot_name_is_acceptable(name) {
+        return None;
+    }
+    let raw = fs::read_to_string(dir.join(name).join(MANIFEST_NAME)).ok()?;
+    let manifest: Manifest = serde_json::from_str(&raw).ok()?;
+    Some(SnapshotInfo {
+        name: name.to_string(),
+        created_at: manifest.created_at.clone(),
+        workspace_version: manifest.workspace_version.clone(),
+        files: manifest.files.len() as u64,
+        total_bytes: manifest.total_bytes(),
+    })
+}
+
+/// The snapshots in `dir`, oldest first. A folder that does not exist yet
+/// holds none.
+pub fn list_snapshots(dir: &Path) -> Vec<SnapshotInfo> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<SnapshotInfo> = entries
+        .flatten()
+        .filter_map(|entry| snapshot_info(dir, entry.file_name().to_str()?))
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Remove the snapshot `name` from `dir`. Only a directory named like a
+/// snapshot and holding a manifest is removed: the folder may hold other
+/// things of the operator's. Returns whether there was one to remove.
+pub fn delete_snapshot(dir: &Path, name: &str) -> Result<bool> {
+    if !snapshot_name_is_acceptable(name) {
+        return Ok(false);
+    }
+    let path = dir.join(name);
+    if !path.join(MANIFEST_NAME).is_file() {
+        return Ok(false);
+    }
+    fs::remove_dir_all(&path).with_context(|| format!("removing snapshot {}", path.display()))?;
+    Ok(true)
+}
+
+/// What a full check of a snapshot found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckOutcome {
+    pub ok: bool,
+    /// `ok` when everything checks out, otherwise the first thing wrong.
+    pub detail: String,
+    pub files: u64,
+    pub total_bytes: u64,
+}
+
+/// Check a snapshot fully: every file against its manifest hash, then the
+/// database against SQLite's integrity check. A snapshot that fails is an
+/// outcome, not an error; `Err` means the check itself could not run.
+pub async fn check_snapshot(snapshot: PathBuf) -> Result<CheckOutcome> {
+    let verified = tokio::task::spawn_blocking({
+        let dir = snapshot.clone();
+        move || verify_snapshot(&dir)
+    })
+    .await?;
+    let manifest = match verified {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return Ok(CheckOutcome {
+                ok: false,
+                detail: format!("{error:#}"),
+                files: 0,
+                total_bytes: 0,
+            })
+        }
+    };
+    let integrity = rabbithole_store_server::integrity_check(&snapshot.join("burrow.db")).await?;
+    let ok = integrity == "ok";
+    Ok(CheckOutcome {
+        ok,
+        detail: if ok {
+            "ok".to_string()
+        } else {
+            format!("database integrity check: {integrity}")
+        },
+        files: manifest.files.len() as u64,
+        total_bytes: manifest.total_bytes(),
+    })
+}
+
 /// Allocate `dest/snapshot-<utc-stamp>[-n]`, claiming it atomically with
 /// `create_dir` so two backups in the same second cannot collide.
 fn timestamped_subdir(dest: &Path) -> Result<PathBuf> {
@@ -419,6 +540,63 @@ mod tests {
         assert!(safe_rel_path("/etc/passwd").is_err());
         assert!(safe_rel_path("../outside").is_err());
         assert!(safe_rel_path("blobs/../../outside").is_err());
+    }
+
+    #[test]
+    fn only_our_own_snapshot_directories_are_listed_or_removed() {
+        assert!(snapshot_name_is_acceptable("snapshot-20260918-224103"));
+        assert!(snapshot_name_is_acceptable("snapshot-20260918-224103-1"));
+        assert!(!snapshot_name_is_acceptable("snapshot-"));
+        assert!(!snapshot_name_is_acceptable("snapshot-../identity"));
+        assert!(!snapshot_name_is_acceptable("burrow.db"));
+        assert!(!snapshot_name_is_acceptable("../snapshot-1"));
+
+        let dir = tempfile::tempdir().unwrap();
+        assert!(list_snapshots(dir.path()).is_empty());
+        let write = |name: &str, with_manifest: bool| {
+            let d = dir.path().join(name);
+            fs::create_dir_all(&d).unwrap();
+            if with_manifest {
+                let manifest = Manifest {
+                    version: MANIFEST_VERSION,
+                    created_at: "2026-09-18T22:41:03Z".into(),
+                    workspace_version: "0.222.0".into(),
+                    files: vec![ManifestFile {
+                        path: "burrow.db".into(),
+                        size: 4096,
+                        blake3: "00".repeat(32),
+                    }],
+                };
+                fs::write(
+                    d.join(MANIFEST_NAME),
+                    serde_json::to_vec(&manifest).unwrap(),
+                )
+                .unwrap();
+            }
+        };
+        write("snapshot-20260918-224103", true);
+        write("snapshot-20260917-090000", true);
+        write("snapshot-20260919-000000", false);
+        write("notes", true);
+        let listed = list_snapshots(dir.path());
+        assert_eq!(
+            listed.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["snapshot-20260917-090000", "snapshot-20260918-224103"],
+            "oldest first, a manifest-less folder and a stranger skipped"
+        );
+        assert_eq!(listed[1].files, 1);
+        assert_eq!(listed[1].total_bytes, 4096);
+        assert_eq!(listed[1].workspace_version, "0.222.0");
+
+        assert!(!delete_snapshot(dir.path(), "notes").unwrap());
+        assert!(
+            dir.path().join("notes").is_dir(),
+            "a stranger is left alone"
+        );
+        assert!(!delete_snapshot(dir.path(), "snapshot-20260919-000000").unwrap());
+        assert!(delete_snapshot(dir.path(), "snapshot-20260917-090000").unwrap());
+        assert!(!dir.path().join("snapshot-20260917-090000").exists());
+        assert_eq!(list_snapshots(dir.path()).len(), 1);
     }
 
     #[test]

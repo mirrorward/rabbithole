@@ -311,6 +311,12 @@ pub enum Reload {
     DenyHashes,
     /// The sessions on the burrow.
     Sessions,
+    /// The federation peers.
+    Peers,
+    /// The trusted origins.
+    Origins,
+    /// The snapshots.
+    Backups,
 }
 
 /// The pane's state beyond the lists [`crate::admin::AdminState`] holds.
@@ -349,6 +355,10 @@ impl PeopleState {
             match event {
                 AdminEvent::InvitesListed(invites) => self.invites = invites.clone(),
                 AdminEvent::InviteCreated(_) => reload = Reload::Invites,
+                AdminEvent::BackupMade(snapshot) => {
+                    self.notice = Some((true, format!("Made the snapshot {}.", snapshot.name)));
+                    reload = Reload::Backups;
+                }
                 AdminEvent::Ack(_) => {
                     let (text, then) = succeeded(kind, subject);
                     if kind == "account-create" {
@@ -370,6 +380,9 @@ impl PeopleState {
                         "report-resolve" => Reload::Reports,
                         "deny-remove" => Reload::DenyHashes,
                         "kick" => Reload::Sessions,
+                        "peer-approve" | "peer-revoke" => Reload::Peers,
+                        "origin-pin" => Reload::Origins,
+                        "backup-delete" | "backup-verify" => Reload::Backups,
                         "account-set" | "account-password" | "account-totp" => Reload::Accounts,
                         _ => Reload::Nothing,
                     };
@@ -419,6 +432,16 @@ fn succeeded(kind: &str, subject: &str) -> (String, Reload) {
         ),
         "kick" => ("Disconnected them.".to_string(), Reload::Sessions),
         "broadcast" => ("Sent to everyone connected.".to_string(), Reload::Nothing),
+        "peer-approve" => (
+            "Approved. It can connect from now on.".to_string(),
+            Reload::Peers,
+        ),
+        "peer-revoke" => (
+            "Revoked. Its session is closed, and it waits for approval again.".to_string(),
+            Reload::Peers,
+        ),
+        "origin-pin" => (format!("Pinned {subject}."), Reload::Origins),
+        "backup-delete" => (format!("Removed {subject}."), Reload::Backups),
         _ => (String::new(), Reload::Nothing),
     }
 }
@@ -453,6 +476,25 @@ fn refused(kind: &str, subject: &str, detail: &str) -> String {
         "deny-add" if code("AlreadyExists") => "That hash is already denied.".to_string(),
         "deny-remove" if code("NotFound") => "That hash was not denied.".to_string(),
         "kick" if code("NotFound") => "They had already gone.".to_string(),
+        "peer-approve" if code("BadRequest") => "A peer needs an origin: a lowercase server \
+             name, and the one it announced if it announced one."
+            .to_string(),
+        "peer-revoke" if code("BadRequest") => "That peer is listed in burrow.toml. Take it \
+             out of the configuration and restart to stop dialling it."
+            .to_string(),
+        "peer-revoke" if code("NotFound") => "That peer is not known any more.".to_string(),
+        "origin-pin" if code("BadRequest") => "An origin is a lowercase server name, and can \
+             be pinned to one key only."
+            .to_string(),
+        "peer-approve" | "peer-revoke" | "origin-pin" if code("Forbidden") => {
+            "You are not allowed to manage federation here.".to_string()
+        }
+        "backup-make" | "backup-verify" | "backup-delete" | "backups" if code("Forbidden") => {
+            "Only an admin can make, check or remove snapshots.".to_string()
+        }
+        "backup-verify" | "backup-delete" if code("NotFound") => {
+            format!("{subject} is not in the backup folder any more.")
+        }
         "kick" if code("Forbidden") => {
             "You can only disconnect people below your own role, and not one who cannot be \
              kicked."

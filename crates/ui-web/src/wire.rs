@@ -75,12 +75,15 @@ use std::rc::Rc;
 use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::admin::{
     AccountCreate, AccountEntry, AccountList, AccountListRequest, AccountPasswordSet, AccountSet,
-    AccountTotpReset, AuditEntry, AuditList, AuditListRequest, Broadcast, ClassEntry, ClassList,
-    ClassListRequest, ClassSet, ConfigApplied, ConfigDescribeRequest, ConfigDescription, ConfigGet,
-    ConfigKeyInfo, ConfigSet, ConfigValue, DenyHashAdd, DenyHashEntry, DenyHashList,
-    DenyHashListRequest, DenyHashRemove, GatewayStatsReply, GatewayStatsRequest, InviteCode,
-    InviteCreate, InviteEntry, InviteList, InviteListRequest, InviteRevoke, Kick, ReportEntry,
-    ReportList, ReportListRequest, ReportResolve, SurfaceInfo, SurfaceStatus, SurfaceStatusRequest,
+    AccountTotpReset, AuditEntry, AuditList, AuditListRequest, BackupCreate, BackupDelete,
+    BackupEntry, BackupList, BackupListRequest, BackupMade, BackupVerified, BackupVerify,
+    Broadcast, ClassEntry, ClassList, ClassListRequest, ClassSet, ConfigApplied,
+    ConfigDescribeRequest, ConfigDescription, ConfigGet, ConfigKeyInfo, ConfigSet, ConfigValue,
+    DenyHashAdd, DenyHashEntry, DenyHashList, DenyHashListRequest, DenyHashRemove,
+    GatewayStatsReply, GatewayStatsRequest, InviteCode, InviteCreate, InviteEntry, InviteList,
+    InviteListRequest, InviteRevoke, Kick, OriginEntry, OriginList, OriginListRequest, OriginPin,
+    PeerApprove, PeerEntry, PeerList, PeerListRequest, PeerRevoke, ReportEntry, ReportList,
+    ReportListRequest, ReportResolve, SurfaceInfo, SurfaceStatus, SurfaceStatusRequest,
     ThemeBundleInfo, ThemeBundleSet,
 };
 use rabbithole_proto::board::{
@@ -1391,6 +1394,27 @@ pub enum AdminCommand {
         /// How many.
         limit: u32,
     },
+    /// The burrows this one has met over federation. → [`PeerList`].
+    ListPeers,
+    /// Approve a peer, bound to `origin` or to the one it announced. → empty ack.
+    ApprovePeer {
+        key: [u8; 32],
+        origin: Option<String>,
+    },
+    /// Withdraw a peer's approval. → empty ack.
+    RevokePeer { key: [u8; 32] },
+    /// The origins whose signing keys are believed. → [`OriginList`].
+    ListOrigins,
+    /// Pin an origin's key by hand. → empty ack.
+    PinOrigin { origin: String, key: [u8; 32] },
+    /// The snapshots in the backup folder. → [`BackupList`].
+    ListBackups,
+    /// Make a snapshot now. → [`BackupMade`].
+    MakeBackup,
+    /// Check a snapshot against its manifest. → [`BackupVerified`].
+    VerifyBackup { name: String },
+    /// Remove a snapshot. → empty ack.
+    DeleteBackup { name: String },
     /// Make a file area. → `AreaReply`.
     CreateArea {
         /// Its address.
@@ -1485,6 +1509,16 @@ pub enum AdminEvent {
     DenyHashesListed(Vec<DenyHashEntry>),
     /// The audit log arrived, oldest first.
     AuditListed(Vec<AuditEntry>),
+    /// The federation peers, by key.
+    PeersListed(Vec<PeerEntry>),
+    /// The origins whose keys are believed.
+    OriginsListed(Vec<OriginEntry>),
+    /// The backup folder, and the snapshots in it.
+    BackupsListed(String, Vec<BackupEntry>),
+    /// A snapshot was made.
+    BackupMade(BackupEntry),
+    /// A snapshot was checked.
+    BackupChecked(BackupVerified),
     /// A config value was read.
     ConfigLoaded {
         /// Config key.
@@ -1564,6 +1598,15 @@ impl AdminCommand {
                 format!("*deny-remove:{}", hex::encode(hash))
             }
             AdminCommand::ListAudit { .. } => "*audit".to_string(),
+            AdminCommand::ListPeers => "*peers".to_string(),
+            AdminCommand::ApprovePeer { key, .. } => format!("*peer-approve:{}", hex::encode(key)),
+            AdminCommand::RevokePeer { key } => format!("*peer-revoke:{}", hex::encode(key)),
+            AdminCommand::ListOrigins => "*origins".to_string(),
+            AdminCommand::PinOrigin { origin, .. } => format!("*origin-pin:{origin}"),
+            AdminCommand::ListBackups => "*backups".to_string(),
+            AdminCommand::MakeBackup => "*backup-make".to_string(),
+            AdminCommand::VerifyBackup { name } => format!("*backup-verify:{name}"),
+            AdminCommand::DeleteBackup { name } => format!("*backup-delete:{name}"),
             AdminCommand::Kick { session_id } => format!("*kick:{session_id}"),
             AdminCommand::Broadcast { .. } => "*broadcast".to_string(),
             AdminCommand::CreateArea { slug, .. } => format!("*area-create:{slug}"),
@@ -1667,6 +1710,23 @@ pub fn admin_command_to_frame(
         }
         AdminCommand::RemoveDenyHash { hash } => Frame::request(id, &DenyHashRemove::new(*hash))?,
         AdminCommand::ListAudit { limit } => Frame::request(id, &AuditListRequest::new(*limit))?,
+        AdminCommand::ListPeers => Frame::request(id, &PeerListRequest)?,
+        AdminCommand::ApprovePeer { key, origin } => {
+            Frame::request(id, &PeerApprove::new(*key, origin.clone()))?
+        }
+        AdminCommand::RevokePeer { key } => Frame::request(id, &PeerRevoke::new(*key))?,
+        AdminCommand::ListOrigins => Frame::request(id, &OriginListRequest)?,
+        AdminCommand::PinOrigin { origin, key } => {
+            Frame::request(id, &OriginPin::new(origin.clone(), *key))?
+        }
+        AdminCommand::ListBackups => Frame::request(id, &BackupListRequest)?,
+        AdminCommand::MakeBackup => Frame::request(id, &BackupCreate)?,
+        AdminCommand::VerifyBackup { name } => {
+            Frame::request(id, &BackupVerify::new(name.clone()))?
+        }
+        AdminCommand::DeleteBackup { name } => {
+            Frame::request(id, &BackupDelete::new(name.clone()))?
+        }
         AdminCommand::CreateArea {
             slug,
             title,
@@ -1747,6 +1807,21 @@ pub fn frame_to_admin_events(frame: &Frame) -> Vec<AdminEvent> {
     }
     if let Some(Ok(m)) = frame.decode::<AuditList>() {
         return vec![AdminEvent::AuditListed(m.entries)];
+    }
+    if let Some(Ok(m)) = frame.decode::<PeerList>() {
+        return vec![AdminEvent::PeersListed(m.peers)];
+    }
+    if let Some(Ok(m)) = frame.decode::<OriginList>() {
+        return vec![AdminEvent::OriginsListed(m.origins)];
+    }
+    if let Some(Ok(m)) = frame.decode::<BackupList>() {
+        return vec![AdminEvent::BackupsListed(m.dir, m.snapshots)];
+    }
+    if let Some(Ok(m)) = frame.decode::<BackupMade>() {
+        return vec![AdminEvent::BackupMade(m.snapshot)];
+    }
+    if let Some(Ok(m)) = frame.decode::<BackupVerified>() {
+        return vec![AdminEvent::BackupChecked(m)];
     }
     if let Some(Ok(m)) = frame.decode::<ConfigValue>() {
         return vec![AdminEvent::ConfigLoaded {

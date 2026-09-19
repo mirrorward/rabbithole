@@ -17,9 +17,11 @@
 
 use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::admin::{
-    report_action, report_state, subject_kind, AccountEntry, AccountList, AuditEntry, AuditList,
-    ClassEntry, ClassList, ConfigApplied, ConfigValue, DenyHashEntry, DenyHashList, FeedStat,
-    GatewayStat, GatewayStatsReply, InviteCode, ReportEntry, ReportList, ThemeBundleInfo,
+    origin_trust, peer_state, report_action, report_state, subject_kind, AccountEntry, AccountList,
+    AuditEntry, AuditList, BackupEntry, BackupList, BackupMade, BackupVerified, ClassEntry,
+    ClassList, ConfigApplied, ConfigValue, DenyHashEntry, DenyHashList, FeedStat, GatewayStat,
+    GatewayStatsReply, InviteCode, OriginEntry, OriginList, PeerEntry, PeerList, ReportEntry,
+    ReportList, ThemeBundleInfo,
 };
 use rabbithole_proto::filelib::{
     AreaList, FileAdded, FileAreaView, FileContent, FileNodeView, NodeList, NodeReply,
@@ -109,6 +111,9 @@ pub struct MockClient {
     admin_reports: Vec<ReportEntry>,
     admin_deny: Vec<DenyHashEntry>,
     admin_audit: Vec<AuditEntry>,
+    admin_peers: Vec<PeerEntry>,
+    admin_origins: Vec<OriginEntry>,
+    admin_backups: Vec<BackupEntry>,
     admin_config: Vec<(String, String)>,
     /// Seeded RADIO now-playing frames, served through
     /// [`MockClient::radio_routes`] so the Radio view renders in dev without a
@@ -264,6 +269,9 @@ impl MockClient {
             admin_reports: Self::seeded_reports(),
             admin_deny: Vec::new(),
             admin_audit: Self::seeded_audit(),
+            admin_peers: Self::seeded_peers(),
+            admin_origins: Self::seeded_origins(),
+            admin_backups: Self::seeded_backups(),
             admin_config: Self::seeded_config(),
             radio_frames: Self::seeded_radio_frames(),
             invite_seq: 0,
@@ -730,6 +738,64 @@ impl MockClient {
         ]
     }
 
+    fn seeded_peers() -> Vec<PeerEntry> {
+        vec![
+            PeerEntry::new(
+                [0x5a; 32],
+                "Grove",
+                Some("grove.example".into()),
+                Some("203.0.113.7:4655".into()),
+                peer_state::PENDING,
+                false,
+                false,
+            ),
+            PeerEntry::new(
+                [0x7e; 32],
+                "Marsh",
+                Some("marsh.example".into()),
+                Some("198.51.100.3:4655".into()),
+                peer_state::CONNECTED,
+                true,
+                true,
+            ),
+            PeerEntry::new(
+                [0x91; 32],
+                "",
+                Some("hollow.example".into()),
+                None,
+                peer_state::DISCONNECTED,
+                true,
+                false,
+            ),
+        ]
+    }
+
+    fn seeded_origins() -> Vec<OriginEntry> {
+        vec![
+            OriginEntry::new("marsh.example", [0x7e; 32], origin_trust::DIRECT_PEER),
+            OriginEntry::new("orchard.example", [0x33; 32], origin_trust::OPERATOR),
+        ]
+    }
+
+    fn seeded_backups() -> Vec<BackupEntry> {
+        vec![
+            BackupEntry::new(
+                "snapshot-20260911-031500",
+                "2026-09-11T03:15:00Z",
+                "0.219.0",
+                418,
+                1_286_400_000,
+            ),
+            BackupEntry::new(
+                "snapshot-20260918-031500",
+                "2026-09-18T03:15:00Z",
+                "0.221.0",
+                431,
+                1_309_100_000,
+            ),
+        ]
+    }
+
     fn seeded_config() -> Vec<(String, String)> {
         let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
         vec![
@@ -1071,6 +1137,115 @@ impl MockClient {
                     .cloned()
                     .collect(),
             )),
+            AdminCommand::ListPeers => admin_events(&PeerList::new(self.admin_peers.clone())),
+            AdminCommand::ApprovePeer { key, origin } => {
+                let acceptable = |o: &str| crate::admin_federation::origin_is_acceptable(o);
+                match self.admin_peers.iter_mut().find(|p| p.key == key) {
+                    Some(peer) => {
+                        let bound = origin.clone().or_else(|| peer.origin.clone());
+                        match bound {
+                            Some(o)
+                                if acceptable(&o)
+                                    && peer.origin.as_deref().is_none_or(|known| known == o) =>
+                            {
+                                peer.origin = Some(o);
+                                peer.approved = true;
+                                if peer.state == peer_state::PENDING {
+                                    peer.state = peer_state::DISCONNECTED;
+                                }
+                                vec![AdminEvent::Ack("Peer approved.".into())]
+                            }
+                            _ => vec![AdminEvent::Failed("server error: BadRequest".into())],
+                        }
+                    }
+                    None => match origin {
+                        Some(o) if acceptable(&o) => {
+                            self.admin_peers.push(PeerEntry::new(
+                                key,
+                                "",
+                                Some(o),
+                                None,
+                                peer_state::DISCONNECTED,
+                                true,
+                                false,
+                            ));
+                            vec![AdminEvent::Ack("Peer approved.".into())]
+                        }
+                        _ => vec![AdminEvent::Failed("server error: BadRequest".into())],
+                    },
+                }
+            }
+            AdminCommand::RevokePeer { key } => {
+                match self.admin_peers.iter_mut().find(|p| p.key == key) {
+                    Some(peer) if peer.configured => {
+                        vec![AdminEvent::Failed("server error: BadRequest".into())]
+                    }
+                    Some(peer) => {
+                        peer.approved = false;
+                        peer.state = peer_state::PENDING;
+                        vec![AdminEvent::Ack("Peer revoked.".into())]
+                    }
+                    None => vec![AdminEvent::Failed("server error: NotFound".into())],
+                }
+            }
+            AdminCommand::ListOrigins => admin_events(&OriginList::new(self.admin_origins.clone())),
+            AdminCommand::PinOrigin { origin, key } => {
+                let same = self
+                    .admin_origins
+                    .iter()
+                    .any(|o| o.origin == origin && o.key == key);
+                let clash = self
+                    .admin_origins
+                    .iter()
+                    .any(|o| (o.origin == origin) != (o.key == key));
+                if same {
+                    vec![AdminEvent::Ack("Origin pinned.".into())]
+                } else if clash || !crate::admin_federation::origin_is_acceptable(&origin) {
+                    vec![AdminEvent::Failed("server error: BadRequest".into())]
+                } else {
+                    self.admin_origins
+                        .push(OriginEntry::new(origin, key, origin_trust::OPERATOR));
+                    vec![AdminEvent::Ack("Origin pinned.".into())]
+                }
+            }
+            AdminCommand::ListBackups => admin_events(&BackupList::new(
+                "/srv/burrow/backups",
+                self.admin_backups.clone(),
+            )),
+            AdminCommand::MakeBackup => {
+                let (y, mo, d, h, mi, s) =
+                    crate::admin_federation::civil_utc(crate::clock::now_ms() / 1000);
+                let entry = BackupEntry::new(
+                    format!("snapshot-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}"),
+                    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z"),
+                    env!("CARGO_PKG_VERSION"),
+                    433,
+                    1_311_800_000,
+                );
+                self.admin_backups.push(entry.clone());
+                admin_events(&BackupMade::new(entry))
+            }
+            AdminCommand::VerifyBackup { name } => {
+                match self.admin_backups.iter().find(|b| b.name == name) {
+                    Some(b) => admin_events(&BackupVerified::new(
+                        name,
+                        true,
+                        "ok",
+                        b.files,
+                        b.total_bytes,
+                    )),
+                    None => vec![AdminEvent::Failed("server error: NotFound".into())],
+                }
+            }
+            AdminCommand::DeleteBackup { name } => {
+                let before = self.admin_backups.len();
+                self.admin_backups.retain(|b| b.name != name);
+                if self.admin_backups.len() < before {
+                    vec![AdminEvent::Ack("Snapshot removed.".into())]
+                } else {
+                    vec![AdminEvent::Failed("server error: NotFound".into())]
+                }
+            }
             AdminCommand::CreateArea {
                 slug,
                 title,
