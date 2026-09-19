@@ -75,10 +75,12 @@ use std::rc::Rc;
 use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::admin::{
     AccountCreate, AccountEntry, AccountList, AccountListRequest, AccountPasswordSet, AccountSet,
-    AccountTotpReset, Broadcast, ClassEntry, ClassList, ClassListRequest, ClassSet, ConfigApplied,
-    ConfigDescribeRequest, ConfigDescription, ConfigGet, ConfigKeyInfo, ConfigSet, ConfigValue,
-    GatewayStatsReply, GatewayStatsRequest, InviteCode, InviteCreate, InviteEntry, InviteList,
-    InviteListRequest, InviteRevoke, Kick, SurfaceInfo, SurfaceStatus, SurfaceStatusRequest,
+    AccountTotpReset, AuditEntry, AuditList, AuditListRequest, Broadcast, ClassEntry, ClassList,
+    ClassListRequest, ClassSet, ConfigApplied, ConfigDescribeRequest, ConfigDescription, ConfigGet,
+    ConfigKeyInfo, ConfigSet, ConfigValue, DenyHashAdd, DenyHashEntry, DenyHashList,
+    DenyHashListRequest, DenyHashRemove, GatewayStatsReply, GatewayStatsRequest, InviteCode,
+    InviteCreate, InviteEntry, InviteList, InviteListRequest, InviteRevoke, Kick, ReportEntry,
+    ReportList, ReportListRequest, ReportResolve, SurfaceInfo, SurfaceStatus, SurfaceStatusRequest,
     ThemeBundleInfo, ThemeBundleSet,
 };
 use rabbithole_proto::board::{
@@ -225,6 +227,27 @@ pub fn frame_to_who(frame: &Frame) -> Option<Vec<crate::state::Presence>> {
         });
     }
     Some(people)
+}
+
+/// Every session out of a `WhoList` reply, one row per connection: what a
+/// moderator kicks. (The roster, [`frame_to_who`], is people.)
+pub fn frame_to_sessions(frame: &Frame) -> Option<Vec<crate::state::SessionRow>> {
+    if frame.error.is_some() {
+        return None;
+    }
+    let list = frame.decode::<WhoList>()?.ok()?;
+    Some(
+        list.users
+            .into_iter()
+            .map(|u| crate::state::SessionRow {
+                session_id: u.session_id,
+                screen_name: u.screen_name,
+                role: u.role,
+                transport: u.transport,
+                connected_secs: u.connected_secs,
+            })
+            .collect(),
+    )
 }
 
 /// A live roster change decoded from a `UserJoined` / `UserLeft` push, so the
@@ -1335,6 +1358,39 @@ pub enum AdminCommand {
         /// Which board.
         slug: String,
     },
+    /// The report queue, for one state or all of them. → [`ReportList`].
+    ListReports {
+        /// A `report_state`, or every state.
+        state: Option<u8>,
+    },
+    /// Claim, resolve or dismiss a report. → empty ack.
+    ResolveReport {
+        /// Which report.
+        id: i64,
+        /// A `report_action`.
+        action: u8,
+        /// What was done about it.
+        note: String,
+    },
+    /// The hash-deny list. → [`DenyHashList`].
+    ListDenyHashes,
+    /// Refuse a file by its content hash, wherever it is uploaded. → empty ack.
+    AddDenyHash {
+        /// The blake3 content id.
+        hash: [u8; 32],
+        /// Why.
+        reason: String,
+    },
+    /// Allow a denied hash again. → empty ack.
+    RemoveDenyHash {
+        /// The blake3 content id.
+        hash: [u8; 32],
+    },
+    /// The audit log's newest lines. → [`AuditList`].
+    ListAudit {
+        /// How many.
+        limit: u32,
+    },
     /// Make a file area. → `AreaReply`.
     CreateArea {
         /// Its address.
@@ -1422,6 +1478,13 @@ pub enum AdminEvent {
     InviteCreated(InviteCode),
     /// The invitations were listed.
     InvitesListed(Vec<InviteEntry>),
+    /// The report queue arrived: the reports, and how many there are in all
+    /// under the same filter.
+    ReportsListed(Vec<ReportEntry>, u64),
+    /// The hash-deny list arrived.
+    DenyHashesListed(Vec<DenyHashEntry>),
+    /// The audit log arrived, oldest first.
+    AuditListed(Vec<AuditEntry>),
     /// A config value was read.
     ConfigLoaded {
         /// Config key.
@@ -1493,6 +1556,16 @@ impl AdminCommand {
             AdminCommand::UpdateBoard { slug, .. } => format!("*board-update:{slug}"),
             AdminCommand::DeleteBoard { slug } => format!("*board-delete:{slug}"),
             AdminCommand::DeletePost { id } => format!("*post-delete:{id}"),
+            AdminCommand::ListReports { .. } => "*reports".to_string(),
+            AdminCommand::ResolveReport { id, .. } => format!("*report-resolve:{id}"),
+            AdminCommand::ListDenyHashes => "*deny-list".to_string(),
+            AdminCommand::AddDenyHash { hash, .. } => format!("*deny-add:{}", hex::encode(hash)),
+            AdminCommand::RemoveDenyHash { hash } => {
+                format!("*deny-remove:{}", hex::encode(hash))
+            }
+            AdminCommand::ListAudit { .. } => "*audit".to_string(),
+            AdminCommand::Kick { session_id } => format!("*kick:{session_id}"),
+            AdminCommand::Broadcast { .. } => "*broadcast".to_string(),
             AdminCommand::CreateArea { slug, .. } => format!("*area-create:{slug}"),
             AdminCommand::UpdateArea { slug, .. } => format!("*area-update:{slug}"),
             AdminCommand::DeleteArea { slug } => format!("*area-delete:{slug}"),
@@ -1580,6 +1653,20 @@ pub fn admin_command_to_frame(
             &BoardUpdate::new(slug.clone(), title.clone(), description.clone(), None),
         )?,
         AdminCommand::DeleteBoard { slug } => Frame::request(id, &BoardDelete::new(slug.clone()))?,
+        AdminCommand::ListReports { state } => {
+            Frame::request(id, &ReportListRequest::new(*state, 0, 200))?
+        }
+        AdminCommand::ResolveReport {
+            id: report,
+            action,
+            note,
+        } => Frame::request(id, &ReportResolve::new(*report, *action, note.clone()))?,
+        AdminCommand::ListDenyHashes => Frame::request(id, &DenyHashListRequest)?,
+        AdminCommand::AddDenyHash { hash, reason } => {
+            Frame::request(id, &DenyHashAdd::new(*hash, reason.clone()))?
+        }
+        AdminCommand::RemoveDenyHash { hash } => Frame::request(id, &DenyHashRemove::new(*hash))?,
+        AdminCommand::ListAudit { limit } => Frame::request(id, &AuditListRequest::new(*limit))?,
         AdminCommand::CreateArea {
             slug,
             title,
@@ -1651,6 +1738,15 @@ pub fn frame_to_admin_events(frame: &Frame) -> Vec<AdminEvent> {
     }
     if let Some(Ok(m)) = frame.decode::<InviteList>() {
         return vec![AdminEvent::InvitesListed(m.invites)];
+    }
+    if let Some(Ok(m)) = frame.decode::<ReportList>() {
+        return vec![AdminEvent::ReportsListed(m.reports, m.total)];
+    }
+    if let Some(Ok(m)) = frame.decode::<DenyHashList>() {
+        return vec![AdminEvent::DenyHashesListed(m.entries)];
+    }
+    if let Some(Ok(m)) = frame.decode::<AuditList>() {
+        return vec![AdminEvent::AuditListed(m.entries)];
     }
     if let Some(Ok(m)) = frame.decode::<ConfigValue>() {
         return vec![AdminEvent::ConfigLoaded {

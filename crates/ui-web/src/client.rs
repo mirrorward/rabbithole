@@ -17,8 +17,9 @@
 
 use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::admin::{
-    AccountEntry, AccountList, ClassEntry, ClassList, ConfigApplied, ConfigValue, FeedStat,
-    GatewayStat, GatewayStatsReply, InviteCode, ThemeBundleInfo,
+    report_action, report_state, subject_kind, AccountEntry, AccountList, AuditEntry, AuditList,
+    ClassEntry, ClassList, ConfigApplied, ConfigValue, DenyHashEntry, DenyHashList, FeedStat,
+    GatewayStat, GatewayStatsReply, InviteCode, ReportEntry, ReportList, ThemeBundleInfo,
 };
 use rabbithole_proto::filelib::{
     AreaList, FileAdded, FileAreaView, FileContent, FileNodeView, NodeList, NodeReply,
@@ -105,6 +106,9 @@ pub struct MockClient {
     admin_classes: Vec<ClassEntry>,
     admin_accounts: Vec<AccountEntry>,
     admin_invites: Vec<rabbithole_proto::admin::InviteEntry>,
+    admin_reports: Vec<ReportEntry>,
+    admin_deny: Vec<DenyHashEntry>,
+    admin_audit: Vec<AuditEntry>,
     admin_config: Vec<(String, String)>,
     /// Seeded RADIO now-playing frames, served through
     /// [`MockClient::radio_routes`] so the Radio view renders in dev without a
@@ -257,6 +261,9 @@ impl MockClient {
             admin_classes: Self::seeded_classes(),
             admin_accounts: Self::seeded_accounts(),
             admin_invites: Self::seeded_invites(),
+            admin_reports: Self::seeded_reports(),
+            admin_deny: Vec::new(),
+            admin_audit: Self::seeded_audit(),
             admin_config: Self::seeded_config(),
             radio_frames: Self::seeded_radio_frames(),
             invite_seq: 0,
@@ -666,6 +673,63 @@ impl MockClient {
         ]
     }
 
+    fn seeded_reports() -> Vec<ReportEntry> {
+        let now = crate::clock::now_ms() / 1000;
+        vec![
+            ReportEntry::new(
+                7,
+                3,
+                subject_kind::POST,
+                vec![0xab; 32],
+                "Spam: the same crypto link in three threads.",
+                now - 3_600,
+                report_state::OPEN,
+                "",
+                None,
+                "",
+            ),
+            ReportEntry::new(
+                6,
+                5,
+                subject_kind::USER,
+                b"dormouse".to_vec(),
+                "Keeps waking people up in the lobby at 3am.",
+                now - 86_400,
+                report_state::REVIEWING,
+                "rabbit",
+                None,
+                "",
+            ),
+            ReportEntry::new(
+                5,
+                3,
+                subject_kind::FILE,
+                42i64.to_le_bytes().to_vec(),
+                "Not what the name says it is.",
+                now - 3 * 86_400,
+                report_state::RESOLVED,
+                "rabbit",
+                Some(now - 2 * 86_400),
+                "Quarantined and the uploader warned.",
+            ),
+        ]
+    }
+
+    fn seeded_audit() -> Vec<AuditEntry> {
+        let now = crate::clock::now_ms() / 1000;
+        vec![
+            AuditEntry::new(
+                now - 7_200,
+                "rabbit",
+                "config-set",
+                "motd=Welcome to the warren.",
+            ),
+            AuditEntry::new(now - 5_400, "rabbit", "invite-create", "WARREN-TEA-PARTY"),
+            AuditEntry::new(now - 3_000, "alice", "report-resolve", "#5 resolve"),
+            AuditEntry::new(now - 600, "rabbit", "kick", "session 12"),
+        ]
+    }
+
     fn seeded_config() -> Vec<(String, String)> {
         let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
         vec![
@@ -948,6 +1012,65 @@ impl MockClient {
                     vec![AdminEvent::Ack("Board removed.".into())]
                 }
             }
+            AdminCommand::ListReports { state } => {
+                let reports: Vec<ReportEntry> = self
+                    .admin_reports
+                    .iter()
+                    .filter(|r| state.is_none_or(|s| r.state == s))
+                    .cloned()
+                    .collect();
+                let total = reports.len() as u64;
+                admin_events(&ReportList::new(reports, total))
+            }
+            AdminCommand::ResolveReport { id, action, note } => {
+                match self.admin_reports.iter_mut().find(|r| r.id == id) {
+                    Some(r) => {
+                        r.state = match action {
+                            report_action::CLAIM => report_state::REVIEWING,
+                            report_action::RESOLVE => report_state::RESOLVED,
+                            _ => report_state::DISMISSED,
+                        };
+                        r.resolver = "rabbit".into();
+                        r.resolution = note;
+                        vec![AdminEvent::Ack("Report updated.".into())]
+                    }
+                    None => vec![AdminEvent::Failed("server error: NotFound".into())],
+                }
+            }
+            AdminCommand::ListDenyHashes => {
+                admin_events(&DenyHashList::new(self.admin_deny.clone()))
+            }
+            AdminCommand::AddDenyHash { hash, reason } => {
+                if self.admin_deny.iter().any(|d| d.hash == hash) {
+                    vec![AdminEvent::Failed("server error: AlreadyExists".into())]
+                } else {
+                    self.admin_deny.push(DenyHashEntry::new(
+                        hash,
+                        reason,
+                        "rabbit",
+                        crate::clock::now_ms() / 1000,
+                    ));
+                    vec![AdminEvent::Ack("Hash denied.".into())]
+                }
+            }
+            AdminCommand::RemoveDenyHash { hash } => {
+                let before = self.admin_deny.len();
+                self.admin_deny.retain(|d| d.hash != hash);
+                if self.admin_deny.len() < before {
+                    vec![AdminEvent::Ack("Hash allowed again.".into())]
+                } else {
+                    vec![AdminEvent::Failed("server error: NotFound".into())]
+                }
+            }
+            AdminCommand::ListAudit { limit } => admin_events(&AuditList::new(
+                self.admin_audit
+                    .iter()
+                    .rev()
+                    .take(limit as usize)
+                    .rev()
+                    .cloned()
+                    .collect(),
+            )),
             AdminCommand::CreateArea {
                 slug,
                 title,

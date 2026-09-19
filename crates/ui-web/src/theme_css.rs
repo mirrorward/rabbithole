@@ -1097,6 +1097,27 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 .rh-newfolder .rh-input{flex:1 1 12rem;min-width:0;padding:.35rem .6rem;font-size:var(--rh-font-sm)}\
 .rh-node-manage{display:flex;flex-direction:column;gap:var(--rh-space-2);margin-top:var(--rh-space-4);padding-top:var(--rh-space-3);border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
 .rh-node-manage>.rh-btn{align-self:flex-start}\
+.rh-adm-tabs{display:flex;flex-wrap:wrap;gap:.25rem;margin:0 0 var(--rh-space-2)}\
+.rh-adm-tab{appearance:none;border:1px solid transparent;background:none;padding:.3rem .7rem;font:inherit;font-size:var(--rh-font-sm);font-weight:500;color:var(--rh-muted);border-radius:var(--rh-radius-full);cursor:pointer;transition:background-color .12s ease,color .12s ease}\
+.rh-adm-tab:hover{color:var(--rh-text);background:color-mix(in srgb,var(--rh-text) 6%,transparent)}\
+.rh-adm-tab[aria-selected=true]{color:var(--rh-accent);background:color-mix(in srgb,var(--rh-accent) 12%,transparent);font-weight:600}\
+.rh-adm-report{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--rh-space-2) var(--rh-space-4);padding:.7rem var(--rh-space-4);font-size:var(--rh-font-sm)}\
+.rh-adm-report+.rh-adm-report,.rh-adm-session+.rh-adm-session,.rh-adm-deny+.rh-adm-deny,.rh-adm-audit-line+.rh-adm-audit-line{border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
+.rh-adm-report-line{margin:0;font-weight:600}\
+.rh-adm-report-meta{margin:.15rem 0 0;color:var(--rh-muted);font-size:var(--rh-font-xs)}\
+.rh-adm-report-actions{display:flex;flex-wrap:wrap;gap:var(--rh-space-2);align-items:center;justify-content:flex-end}\
+.rh-adm-report-note{grid-column:1/-1;display:flex;gap:var(--rh-space-2)}\
+.rh-adm-report-note .rh-input{flex:1;min-width:0;padding:.35rem .6rem;font-size:var(--rh-font-sm)}\
+.rh-adm-session{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr) auto;align-items:center;gap:var(--rh-space-3);padding:.55rem var(--rh-space-4);font-size:var(--rh-font-sm)}\
+.rh-adm-session-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+.rh-adm-session-meta{color:var(--rh-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+.rh-adm-deny{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:var(--rh-space-3);padding:.55rem var(--rh-space-4);font-size:var(--rh-font-sm)}\
+.rh-adm-deny-why{color:var(--rh-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+.rh-adm-audit{max-height:24rem;overflow-y:auto}\
+.rh-adm-audit-line{display:grid;grid-template-columns:7rem minmax(0,1fr);gap:var(--rh-space-3);padding:.4rem var(--rh-space-4);font-size:var(--rh-font-sm)}\
+.rh-adm-audit-when{color:var(--rh-muted);font-variant-numeric:tabular-nums;white-space:nowrap}\
+.rh-adm-broadcast{display:flex;gap:var(--rh-space-2);align-items:flex-start}\
+.rh-adm-broadcast .rh-input{flex:1;min-width:0;resize:vertical;min-height:3.2rem}\
 .rh-adm-board-line{grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) 6rem 1rem}\
 .rh-adm-mono{font-family:var(--rh-font-mono);font-size:var(--rh-font-xs)}\
 .rh-adm-wide{grid-column:1/-1}\

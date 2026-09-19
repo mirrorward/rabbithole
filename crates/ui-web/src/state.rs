@@ -215,6 +215,22 @@ pub struct Presence {
     pub key: Option<String>,
 }
 
+/// One connection to the burrow, as a moderator sees it: the roster collapses
+/// a person's sessions into one row, but a session is what gets kicked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRow {
+    /// The burrow's id for this connection.
+    pub session_id: u64,
+    /// Who it is.
+    pub screen_name: String,
+    /// Their `Role` ordinal.
+    pub role: u8,
+    /// How they are connected: websocket, quic, telnet, hotline, …
+    pub transport: String,
+    /// How long they have been connected, in seconds.
+    pub connected_secs: u64,
+}
+
 /// One person in the aggregated cross-server **People** view — the same screen
 /// name seen across every connected burrow, coalesced into one row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,6 +345,8 @@ pub struct UiState {
     pub messages: Vec<ChatLine>,
     /// Users currently present in the room, with their presence state.
     pub who: Vec<Presence>,
+    /// Every session on the burrow, for the moderation pane.
+    pub sessions: Vec<SessionRow>,
     /// The board tree.
     pub boards: Vec<Board>,
     /// Every node of the board tree, for the admin console.

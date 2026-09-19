@@ -89,6 +89,9 @@ pub type PresenceSink = Rc<dyn Fn(PresenceDelta)>;
 /// A sink the transport pushes the board list into (from a decoded
 /// [`BoardList`](rabbithole_proto::board::BoardList) reply).
 pub type BoardSink = Rc<dyn Fn(Vec<crate::state::Board>)>;
+/// Receives every session on the burrow (the roster before it is collapsed
+/// to people).
+pub type SessionsSink = Rc<dyn Fn(Vec<crate::state::SessionRow>)>;
 /// Receives the whole board tree (categories included), for the console.
 pub type BoardTreeSink = Rc<dyn Fn(Vec<crate::state::BoardNode>)>;
 /// A sink the transport pushes a board's thread list into.
@@ -137,6 +140,7 @@ struct Inner {
     pending_admin: RefCell<std::collections::HashMap<RequestId, Option<String>>>,
     notice_sink: Option<NoticeSink>,
     who_sink: Option<WhoSink>,
+    sessions_sink: Option<SessionsSink>,
     front_page_sink: Option<FrontPageSink>,
     presence_sink: Option<PresenceSink>,
     board_sink: Option<BoardSink>,
@@ -310,6 +314,7 @@ impl WsClient {
                 pending_admin: RefCell::new(std::collections::HashMap::new()),
                 notice_sink: None,
                 who_sink: None,
+                sessions_sink: None,
                 front_page_sink: None,
                 presence_sink: None,
                 board_sink: None,
@@ -424,6 +429,11 @@ impl WsClient {
     /// board list, unfiltered).
     pub fn on_board_tree(&mut self, sink: BoardTreeSink) {
         self.inner.borrow_mut().board_tree_sink = Some(sink);
+    }
+
+    /// Register the sink for every session (what a moderator kicks).
+    pub fn on_sessions(&mut self, sink: SessionsSink) {
+        self.inner.borrow_mut().sessions_sink = Some(sink);
     }
 
     /// Register the board-list sink. The most recent registration wins.
@@ -801,6 +811,11 @@ impl WsClient {
                         }
                         if let Some(widgets) = wire::frame_to_front_page(&frame) {
                             b.emit_front_page(widgets);
+                        }
+                        if let Some(sessions) = wire::frame_to_sessions(&frame) {
+                            if let Some(sink) = &b.sessions_sink {
+                                sink(sessions);
+                            }
                         }
                         if let Some(roster) = wire::frame_to_who(&frame) {
                             b.emit_who(roster);

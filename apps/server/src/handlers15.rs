@@ -207,6 +207,23 @@ pub async fn handle(
         return Ok(true);
     }
 
+    if let Some(Ok(req)) = frame.decode::<padm::AuditListRequest>() {
+        // The bit has been granted to admins since the permission wave and
+        // checked by nothing: the log was reachable from the command line only.
+        if !ctx.allows(shared, "admin", Caps::AUDIT_READ) {
+            fail!(ErrorCode::Forbidden)
+        }
+        let entries = AuditRepo(&shared.pool)
+            .recent(i64::from(req.limit.clamp(1, 500)))
+            .await?
+            .into_iter()
+            .map(|r| padm::AuditEntry::new(r.at, r.actor, r.action, r.detail))
+            .collect();
+        conn.send(Frame::reply_to(frame, &padm::AuditList::new(entries))?)
+            .await?;
+        return Ok(true);
+    }
+
     if let Some(Ok(req)) = frame.decode::<padm::InviteRevoke>() {
         account_admins_only!();
         if !InvitesRepo(&shared.pool).revoke(&req.code).await? {

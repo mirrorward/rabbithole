@@ -699,6 +699,73 @@ impl Message for InviteRevoke {
     const MESSAGE_TYPE: u16 = 24;
 }
 
+/// Read the audit log: what operators and moderators did here, newest last.
+/// → [`AuditList`]. Requires `AUDIT_READ`. `limit` is clamped to 500.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditListRequest {
+    pub limit: u32,
+}
+
+impl AuditListRequest {
+    pub fn new(limit: u32) -> Self {
+        Self { limit }
+    }
+}
+
+impl Message for AuditListRequest {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 25;
+}
+
+/// One line of the audit log.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditEntry {
+    /// Unix seconds.
+    pub at: i64,
+    /// Who did it: a login, or `ctl` for the burrow's command line.
+    pub actor: String,
+    /// What was done (`config-set`, `account-create`, `kick`, …).
+    pub action: String,
+    /// The particulars, in the action's own terms. Never a credential.
+    pub detail: String,
+}
+
+impl AuditEntry {
+    pub fn new(
+        at: i64,
+        actor: impl Into<String>,
+        action: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            at,
+            actor: actor.into(),
+            action: action.into(),
+            detail: detail.into(),
+        }
+    }
+}
+
+/// Reply to [`AuditListRequest`]: oldest first, the newest `limit` lines.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditList {
+    pub entries: Vec<AuditEntry>,
+}
+
+impl AuditList {
+    pub fn new(entries: Vec<AuditEntry>) -> Self {
+        Self { entries }
+    }
+}
+
+impl Message for AuditList {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 26;
+}
+
 // ---------------------------------------------------------------------------
 // Moderation suite (Wave 13): types 30..40 of the ADMIN family.
 // ---------------------------------------------------------------------------

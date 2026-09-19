@@ -5,8 +5,8 @@ use burrow::Burrow;
 use rabbithole_core::{Client, ClientError};
 use rabbithole_proto::admin::{
     AccountCreate, AccountList, AccountListRequest, AccountPasswordSet, AccountSet,
-    AccountTotpReset, ClassSet, InviteCode, InviteCreate, InviteList, InviteListRequest,
-    InviteRevoke,
+    AccountTotpReset, AuditList, AuditListRequest, ClassSet, InviteCode, InviteCreate, InviteList,
+    InviteListRequest, InviteRevoke,
 };
 use rabbithole_proto::ErrorCode;
 use rabbithole_server_core::{Caps, Role, ServerConfig};
@@ -430,6 +430,55 @@ async fn invitations_are_listed_and_an_unused_one_can_be_withdrawn() {
     let mut alice = login(&burrow, "alice").await;
     refused(
         alice.request::<_, InviteList>(&InviteListRequest).await,
+        ErrorCode::Forbidden,
+    );
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_audit_log_is_read_over_the_wire_by_those_allowed_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(dir.path()).await;
+    let mut ada = login(&burrow, "ada").await;
+    ada.request_ack(&AccountCreate::new(
+        "carol",
+        "carols-password",
+        Role::User as u8,
+    ))
+    .await
+    .unwrap();
+    ada.request_ack(&AccountCreate::new(
+        "dave",
+        "daves-password",
+        Role::User as u8,
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let log: AuditList = ada.request(&AuditListRequest::new(50)).await.unwrap();
+    let made = log
+        .entries
+        .iter()
+        .find(|e| e.action == "account-create" && e.detail.starts_with("carol"))
+        .expect("the creation is on record");
+    assert_eq!(made.actor, "ada");
+    assert!(made.at > 0);
+    assert!(log.entries.iter().all(|e| !e.detail.contains("password")));
+    // Oldest first, and a limit is a limit.
+    let two: AuditList = ada.request(&AuditListRequest::new(2)).await.unwrap();
+    assert_eq!(two.entries.len(), 2);
+    assert!(two.entries[0].at <= two.entries[1].at);
+
+    // Moderators hold AUDIT_READ by default: they act in this log.
+    let mut mo = login(&burrow, "mo").await;
+    let seen: AuditList = mo.request(&AuditListRequest::new(10)).await.unwrap();
+    assert!(!seen.entries.is_empty());
+    let mut alice = login(&burrow, "alice").await;
+    refused(
+        alice
+            .request::<_, AuditList>(&AuditListRequest::new(10))
+            .await,
         ErrorCode::Forbidden,
     );
     burrow.shutdown().await;

@@ -158,6 +158,9 @@ pub struct AppState {
     /// The People pane's invitations and the outcome of its last action
     /// ([`crate::admin_people`]).
     pub people: RwSignal<crate::admin_people::PeopleState>,
+    /// The Moderation pane's queue, deny list and audit log
+    /// ([`crate::admin_moderation`]).
+    pub moderation: RwSignal<crate::admin_moderation::ModerationState>,
     /// The Syndication & Gateways panel model, folded from paired config
     /// get/set replies ([`crate::syndication_admin`]).
     pub syndication: RwSignal<SynAdminState>,
@@ -256,6 +259,7 @@ impl AppState {
             admin_settings: create_rw_signal(Default::default()),
             admin_settings_owner: create_rw_signal(None),
             people: create_rw_signal(Default::default()),
+            moderation: create_rw_signal(Default::default()),
             syndication: create_rw_signal(SynAdminState::default()),
             palette_open: create_rw_signal(false),
             switcher_open: create_rw_signal(false),
@@ -843,6 +847,9 @@ impl AppState {
                     }
                 })
             }));
+            ws.on_sessions(std::rc::Rc::new(move |sessions| {
+                state.update(|s| s.sessions = sessions)
+            }));
             ws.on_boards(std::rc::Rc::new(move |boards| {
                 state.update(|s| s.set_boards(boards))
             }));
@@ -1263,6 +1270,7 @@ impl AppState {
             ConfirmIntent::DeletePost(id) => self.delete_post(&id),
             ConfirmIntent::DeleteArea(slug) => self.delete_area(&slug),
             ConfirmIntent::DeleteNode(id, name) => self.delete_node(id, &name),
+            ConfirmIntent::KickSession(id, _) => self.kick_session(id),
         }
     }
 
@@ -2331,6 +2339,11 @@ impl AppState {
                 "*area-",
                 "*folder-",
                 "*node-",
+                "*report",
+                "*deny-",
+                "*audit",
+                "*kick",
+                "*broadcast",
             ]
             .iter()
             .any(|p| t.starts_with(p))
@@ -2340,6 +2353,20 @@ impl AppState {
             return;
         }
         let tag = tag.unwrap_or_default().to_string();
+        // Listings land in the moderation model as they are.
+        self.moderation.update(|m| {
+            for event in events {
+                match event {
+                    AdminEvent::ReportsListed(reports, total) => {
+                        m.reports = reports.clone();
+                        m.total = *total;
+                    }
+                    AdminEvent::DenyHashesListed(list) => m.deny = list.clone(),
+                    AdminEvent::AuditListed(list) => m.audit = list.clone(),
+                    _ => {}
+                }
+            }
+        });
         let mut reload = crate::admin_people::Reload::Nothing;
         let mut said = None;
         self.people.update(|p| {
@@ -2366,6 +2393,9 @@ impl AppState {
             crate::admin_people::Reload::Classes => app.load_classes(),
             crate::admin_people::Reload::Invites => app.load_invites(),
             crate::admin_people::Reload::Boards => app.load_boards(),
+            crate::admin_people::Reload::Reports => app.load_reports(None),
+            crate::admin_people::Reload::DenyHashes => app.load_deny_hashes(),
+            crate::admin_people::Reload::Sessions => app.refresh_who(),
             crate::admin_people::Reload::Areas => app.load_areas(),
             crate::admin_people::Reload::Folder => {
                 app.focused().files.update(|f| f.selected = None);
@@ -2473,6 +2503,55 @@ impl AppState {
     pub fn revoke_invite(&self, code: &str) {
         self.dispatch_people(AdminCommand::RevokeInvite {
             code: code.to_string(),
+        });
+    }
+
+    /// The report queue, for one state or all of them.
+    pub fn load_reports(&self, state: Option<u8>) {
+        self.dispatch_people(AdminCommand::ListReports { state });
+    }
+
+    /// Claim, resolve or dismiss a report.
+    pub fn resolve_report(&self, id: i64, action: u8, note: &str) {
+        self.dispatch_people(AdminCommand::ResolveReport {
+            id,
+            action,
+            note: note.trim().to_string(),
+        });
+    }
+
+    /// The hash-deny list.
+    pub fn load_deny_hashes(&self) {
+        self.dispatch_people(AdminCommand::ListDenyHashes);
+    }
+
+    /// Refuse a file by its content hash, wherever it is uploaded.
+    pub fn add_deny_hash(&self, hash: [u8; 32], reason: &str) {
+        self.dispatch_people(AdminCommand::AddDenyHash {
+            hash,
+            reason: reason.trim().to_string(),
+        });
+    }
+
+    /// Allow a denied hash again.
+    pub fn remove_deny_hash(&self, hash: [u8; 32]) {
+        self.dispatch_people(AdminCommand::RemoveDenyHash { hash });
+    }
+
+    /// The audit log's newest lines.
+    pub fn load_audit(&self) {
+        self.dispatch_people(AdminCommand::ListAudit { limit: 200 });
+    }
+
+    /// Disconnect a session, and hear how it went.
+    pub fn kick_session(&self, session_id: u64) {
+        self.dispatch_people(AdminCommand::Kick { session_id });
+    }
+
+    /// Say something to everyone connected, and hear how it went.
+    pub fn broadcast_notice(&self, text: &str) {
+        self.dispatch_people(AdminCommand::Broadcast {
+            text: text.trim().to_string(),
         });
     }
 
@@ -3031,6 +3110,8 @@ pub enum ConfirmIntent {
     DeleteArea(String),
     /// Remove a file or folder: its id and its name.
     DeleteNode(i64, String),
+    /// Disconnect a session (by id); the name is for the question.
+    KickSession(u64, String),
 }
 
 /// A question put to the person before something irreversible.
@@ -3066,6 +3147,19 @@ impl ConfirmAsk {
                 .to_string(),
             action: "Remove two-factor".to_string(),
             intent: ConfirmIntent::ResetTotp(login.to_string()),
+        }
+    }
+
+    /// "Disconnect dormouse?"
+    pub fn kick(session_id: u64, who: &str, transport: &str) -> Self {
+        ConfirmAsk {
+            title: format!("Disconnect {who}?"),
+            body: format!(
+                "Their {transport} session is closed now. They can sign in again at once; to \
+                 keep them out, disable the account under People."
+            ),
+            action: "Disconnect".to_string(),
+            intent: ConfirmIntent::KickSession(session_id, who.to_string()),
         }
     }
 

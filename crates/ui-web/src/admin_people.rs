@@ -305,6 +305,12 @@ pub enum Reload {
     Areas,
     /// The folder that is open in Files.
     Folder,
+    /// The report queue.
+    Reports,
+    /// The hash-deny list.
+    DenyHashes,
+    /// The sessions on the burrow.
+    Sessions,
 }
 
 /// The pane's state beyond the lists [`crate::admin::AdminState`] holds.
@@ -361,6 +367,9 @@ impl PeopleState {
                         "board-update" | "board-delete" => Reload::Boards,
                         "area-update" | "area-delete" => Reload::Areas,
                         "node-delete" | "node-describe" => Reload::Folder,
+                        "report-resolve" => Reload::Reports,
+                        "deny-remove" => Reload::DenyHashes,
+                        "kick" => Reload::Sessions,
                         "account-set" | "account-password" | "account-totp" => Reload::Accounts,
                         _ => Reload::Nothing,
                     };
@@ -399,6 +408,17 @@ fn succeeded(kind: &str, subject: &str) -> (String, Reload) {
         "folder-create" => (format!("Made the folder {subject}."), Reload::Folder),
         "node-delete" => (format!("Removed {subject}."), Reload::Folder),
         "node-describe" => (format!("Saved {subject}."), Reload::Folder),
+        "report-resolve" => ("Noted.".to_string(), Reload::Reports),
+        "deny-add" => (
+            "That hash is refused everywhere now.".to_string(),
+            Reload::DenyHashes,
+        ),
+        "deny-remove" => (
+            "That hash is allowed again.".to_string(),
+            Reload::DenyHashes,
+        ),
+        "kick" => ("Disconnected them.".to_string(), Reload::Sessions),
+        "broadcast" => ("Sent to everyone connected.".to_string(), Reload::Nothing),
         _ => (String::new(), Reload::Nothing),
     }
 }
@@ -426,6 +446,19 @@ fn refused(kind: &str, subject: &str, detail: &str) -> String {
         "class-set" if code("Forbidden") => {
             "You cannot grant a capability you do not hold yourself.".to_string()
         }
+        "report-resolve" if code("NotFound") => "That report is gone.".to_string(),
+        "report-resolve" | "deny-add" | "deny-remove" if code("Forbidden") => {
+            "You are not allowed to moderate here.".to_string()
+        }
+        "deny-add" if code("AlreadyExists") => "That hash is already denied.".to_string(),
+        "deny-remove" if code("NotFound") => "That hash was not denied.".to_string(),
+        "kick" if code("NotFound") => "They had already gone.".to_string(),
+        "kick" if code("Forbidden") => {
+            "You can only disconnect people below your own role, and not one who cannot be \
+             kicked."
+                .to_string()
+        }
+        "broadcast" if code("Forbidden") => "You are not allowed to broadcast here.".to_string(),
         "area-create" if code("AlreadyExists") => {
             format!("There is already an area at {subject}.")
         }

@@ -957,7 +957,8 @@ pub const SECTIONS: &[Section] = &[
     Section {
         id: "moderation",
         title: "Moderation",
-        blurb: "Speak to everyone at once, and remove a session that should not be here.",
+        blurb: "What people reported, who is connected, what is refused, and what operators \
+                did.",
         area: Area::Manage,
         pane: Pane::Moderation,
         groups: &[],

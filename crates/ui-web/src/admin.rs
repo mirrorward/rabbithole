@@ -80,7 +80,10 @@ impl AdminState {
             // The described settings live in [`crate::admin_settings`].
             AdminEvent::ConfigDescribed(_)
             | AdminEvent::SurfacesReported(_)
-            | AdminEvent::InvitesListed(_) => {}
+            | AdminEvent::InvitesListed(_)
+            | AdminEvent::ReportsListed(..)
+            | AdminEvent::DenyHashesListed(_)
+            | AdminEvent::AuditListed(_) => {}
             AdminEvent::ConfigApplied { applied_live } => {
                 self.status = if *applied_live {
                     "Config saved and applied live.".to_string()

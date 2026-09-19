@@ -24,6 +24,7 @@ written to the audit log. Any authorized client is an admin console.
 | 21 | AccountTotpReset | Request | ACCOUNT_ADMIN | `login` → empty ack; `NotFound` when the account has no two-factor |
 | 22/23 | InviteListRequest → InviteList | Request/Reply | ACCOUNT_ADMIN | `invites: [InviteEntry]`, newest first: `code`, `created_by` (login), `expires_at` (unix seconds), `used_by` (login, when used) |
 | 24 | InviteRevoke | Request | ACCOUNT_ADMIN | `code` → empty ack; `NotFound` for an unknown code or one already used |
+| 25/26 | AuditListRequest → AuditList | Request/Reply | AUDIT_READ | `limit` (clamped to 500) → `entries: [AuditEntry]`, oldest first: `at` (unix seconds), `actor` (a login, or `ctl`), `action`, `detail`. Never a credential. The bit was granted to admins and moderators from the permission wave on and checked by nothing until now: the log was reachable from the command line only |
 
 Types 30..40 are the Wave 13 moderation suite (reports, quarantine,
 hash-deny list); see `rabbithole-proto::admin`.

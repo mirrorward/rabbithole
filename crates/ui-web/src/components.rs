@@ -5531,57 +5531,6 @@ fn ThemeEditorPreview(style: Signal<String>) -> impl IntoView {
     }
 }
 
-/// Moderation: broadcast a notice, kick a session, mint an invite.
-#[component]
-pub(crate) fn AdminModerationPanel() -> impl IntoView {
-    let app = expect_context::<AppState>();
-    let notice = create_rw_signal(String::new());
-    let session = create_rw_signal(String::new());
-
-    let send_notice = move |_| {
-        let text = notice.get();
-        if text.trim().is_empty() {
-            return;
-        }
-        app.broadcast(&text);
-        notice.set(String::new());
-    };
-    let do_kick = move |_| {
-        if let Ok(id) = session.get().trim().parse::<u64>() {
-            app.kick(id);
-            session.set(String::new());
-        }
-    };
-    let do_invite = move |_| app.create_invite(86_400);
-
-    view! {
-        <h2 class="rh-panel-title">"Moderation"</h2>
-        <div class="rh-toolbar">
-            <input
-                class="rh-input"
-                aria-label="Notice to broadcast"
-                placeholder="Broadcast a notice\u{2026}"
-                prop:value=move || notice.get()
-                on:input=move |ev| notice.set(event_target_value(&ev))
-            />
-            <button class="rh-btn small" on:click=send_notice>"Broadcast"</button>
-        </div>
-        <div class="rh-toolbar">
-            <input
-                class="rh-input"
-                aria-label="Session id to kick"
-                placeholder="Session id to kick\u{2026}"
-                prop:value=move || session.get()
-                on:input=move |ev| session.set(event_target_value(&ev))
-            />
-            <button class="rh-btn small" on:click=do_kick>"Kick"</button>
-        </div>
-        <div class="rh-toolbar">
-            <button class="rh-btn small" on:click=do_invite>"Create invite (24h)"</button>
-        </div>
-    }
-}
-
 /// The ANSI art gallery: renders a built-in sample to a canvas.
 #[component]
 pub fn ArtGallery() -> impl IntoView {
