@@ -381,3 +381,70 @@ fn two_tracks_make_one_stream_that_carries_on() {
         "each frame says its number counts samples"
     );
 }
+
+/// The number a frame carries stays inside six bytes of the coded shape.
+/// The seventh — the one with a lead byte of `0xFE` — is in the format, and
+/// libFLAC writes it and reads it, but libavcodec refuses any frame that
+/// carries one. A station whose count reached it would go silent for every
+/// player built on ffmpeg, and stay silent: an encoder never writes one,
+/// because it numbers frames rather than samples, but a mount that plays
+/// all night counts samples.
+#[test]
+fn a_mount_never_writes_a_number_ffmpeg_will_not_read() {
+    assert_eq!(flac::NUMBER_LIMIT, 1 << 31);
+    let frame = flac::frames(REFERENCE)[0];
+    let bytes = &REFERENCE[frame.offset..frame.offset + frame.len];
+    for sample in [
+        0u64,
+        127,
+        128,
+        1 << 20,
+        (1 << 31) - 1,
+        1 << 31,
+        (1 << 31) + 12_345,
+        1 << 35,
+        u64::MAX,
+    ] {
+        let again =
+            flac::renumber(bytes, frame.header, frame.number, sample).expect("written again");
+        assert!(
+            again[4] < 0xFE,
+            "sample {sample} wrote a lead byte of {:#04x}",
+            again[4]
+        );
+        // And it is still a frame: both checksums were written again over
+        // the number that actually went out, whatever it came out as.
+        let mut whole = flac::stream_headers(8_000, 1, 16);
+        let head = whole.len();
+        whole.extend_from_slice(&again);
+        let found = flac::frames(&whole);
+        assert_eq!(found.len(), 1, "sample {sample}: {found:?}");
+        assert_eq!(found[0].offset, head);
+        assert_eq!(found[0].samples, frame.samples);
+        assert_eq!(found[0].len, again.len());
+    }
+}
+
+/// A library sorts its tracks by what form of FLAC they are, and there can
+/// be thousands of them: what a file is has to be readable from its front,
+/// not from the whole of it.
+#[test]
+fn what_a_file_is_reads_from_its_first_few_dozen_bytes() {
+    const STEREO: &[u8] = include_bytes!("fixtures/reference-44k-stereo.flac");
+    let whole = flac::playable(REFERENCE).unwrap();
+    assert_eq!(
+        flac::form_of(&REFERENCE[..42]),
+        Some((whole.sample_rate, whole.channels, whole.bits_per_sample)),
+        "the first 42 bytes are the magic and STREAMINFO"
+    );
+    assert_eq!(flac::form_of(REFERENCE), Some((8_000, 1, 16)));
+    assert_eq!(flac::form_of(STEREO), Some((44_100, 2, 16)));
+    // Not enough of it yet, or not a FLAC file at all.
+    assert_eq!(flac::form_of(&REFERENCE[..41]), None);
+    assert_eq!(flac::form_of(b"fLaC"), None);
+    assert_eq!(flac::form_of(b"not audio at all"), None);
+    // An ID3 tag in front is skipped, as it is everywhere else.
+    let mut tagged = b"ID3\x04\x00\x00\x00\x00\x00\x0a0123456789".to_vec();
+    tagged.extend_from_slice(REFERENCE);
+    assert_eq!(flac::form_of(&tagged), Some((8_000, 1, 16)));
+}

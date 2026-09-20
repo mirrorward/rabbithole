@@ -1658,6 +1658,22 @@ pub fn spawn_program_pump(shared: Arc<Shared>, slug: String) -> JoinHandle<()> {
     tokio::spawn(program_pump(shared, slug))
 }
 
+/// Where a mount's sample count goes after a track: back to the start, once
+/// it has gone far enough that the next song might run past what a number
+/// can hold.
+///
+/// Between songs is the place to do it. A jump backwards in a stream with no
+/// length is something a decoder takes in its stride; one in the middle of a
+/// song is a click in the middle of a song. Half of what a number can hold
+/// is about six hours of playing at 44.1 kHz, and no track is that long.
+fn next_number(played: u64) -> u64 {
+    if played >= rabbithole_radio::flac::NUMBER_LIMIT / 2 {
+        0
+    } else {
+        played
+    }
+}
+
 /// Play a rotation: load the current track, send it at the speed it plays,
 /// move on when its audio ends. A station plays whether or not anyone is
 /// listening, so the clock runs regardless and only the sends are skipped.
@@ -1671,8 +1687,13 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
     // by two seconds a song.
     let mut clock: Option<(std::time::Instant, Duration)> = None;
     let mut unplayable = 0usize;
-    // What this station is sending, once a track has said so.
-    let mut sending: Option<Sound> = None;
+    // What this station is sending. The library already said, if it was
+    // able to look: a mount says what its stream is once, so which form of
+    // FLAC it is must not depend on which track came up first.
+    let mut sending: Option<Sound> = match shared.radio.expected_sound(&slug) {
+        Some(Sound::Flac(form)) if form != Form::default() => Some(Sound::Flac(form)),
+        _ => None,
+    };
     // How many samples this mount has sent. A FLAC stream numbers its
     // frames by it, so a decoder is never told to go back to the start of
     // a song it has already played.
@@ -1689,30 +1710,21 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
         };
         let blobs = shared.blobs.clone();
         let id = rabbithole_blobs::BlobId(track.source.0);
-        // Reading the file, working out what it is, and cutting it into
-        // sends all happen off the runtime: for a FLAC track that means
-        // checking a checksum over the whole file, which is not something
-        // to do on a thread that is also answering everybody else.
-        let from = played;
+        // Reading the file and working out what it is happen off the
+        // runtime: it is a disk read and a look at the headers, and this
+        // thread is also answering everybody else.
         let read = tokio::task::spawn_blocking(move || {
             let bytes = blobs.get(&id).ok()?;
             let kind = Sound::of(&bytes);
-            let cut = kind.map(|kind| kind.cut(bytes, from));
-            Some((kind, cut))
+            Some((bytes, kind))
         })
         .await
         .ok()
         .flatten();
-        let (had_bytes, kind, cuts) = match read {
-            Some((kind, cut)) => (true, kind, cut),
+        let (had_bytes, bytes, kind) = match read {
+            Some((bytes, kind)) => (true, Some(bytes), kind),
             None => (false, None, None),
         };
-        // A file can say what it is in its headers and hold no audio at
-        // all — a FLAC cut off after STREAMINFO, an upload that stopped.
-        // Sending the headers alone would take no time, so the rotation
-        // would spin through the whole station at once, saying nothing was
-        // wrong. A track with no time in it is a track that cannot play.
-        let cuts = cuts.filter(|cut: &Cut| cut.sends.iter().any(|b| b.micros > 0));
         // What this track is, and whether this mount can send it: a
         // listener's decoder is never handed a different kind of sound
         // part-way through, so a station sends one kind and says which
@@ -1722,6 +1734,25 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
             (Some(kind), Some(air)) if air.same_as(kind) => Some(kind),
             _ => None,
         };
+        // Cutting a track into sends is the expensive part — for FLAC a
+        // checksum over the whole file, and another to write it again — so
+        // it happens for a track this station is going to send, and not
+        // for one it is about to leave out. The mount is silent while this
+        // runs, and a station with a shelf of the wrong thing would
+        // otherwise be silent for as long as it took to read all of them.
+        let from = played;
+        let cuts = match (bytes, playable) {
+            (Some(bytes), Some(kind)) => tokio::task::spawn_blocking(move || kind.cut(bytes, from))
+                .await
+                .ok(),
+            _ => None,
+        };
+        // A file can say what it is in its headers and hold no audio at
+        // all — a FLAC cut off after STREAMINFO, an upload that stopped.
+        // Sending the headers alone would take no time, so the rotation
+        // would spin through the whole station at once, saying nothing was
+        // wrong. A track with no time in it is a track that cannot play.
+        let cuts = cuts.filter(|cut: &Cut| cut.sends.iter().any(|b| b.micros > 0));
         let (Some(kind), Some(cuts)) = (playable, cuts) else {
             // Nothing this station can send as it is: an unreadable file, a
             // format this burrow does not stream, or the wrong kind for a
@@ -1741,6 +1772,15 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
                 .left_out(&slug, &track.title, reason, unix_ms());
             shared.radio.advance(&slug, unix_ms());
             unplayable += 1;
+            // Reading a track and finding it cannot be sent takes time and
+            // sends nothing, and the clock keeps running. Once the station
+            // has fallen further behind its own clock than a listener's
+            // buffer is deep, the next thing it can play would go out in
+            // one burst to catch up: the clock starts again instead, from
+            // whatever anybody actually hears next.
+            if clock.is_some_and(|(started, sent)| started.elapsed() > sent + PUMP_LEAD) {
+                clock = None;
+            }
             if unplayable >= shared.radio.track_count(&slug).max(1) {
                 unplayable = 0;
                 tokio::time::sleep(Duration::from_secs(30)).await;
@@ -1782,7 +1822,7 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
         if shared.radio.set_lead(&slug, lead.clone()) && !lead.is_empty() {
             let _ = tx.send(lead);
         }
-        played += cuts.samples;
+        played = next_number(played + cuts.samples);
         *title_slot.lock() = shared.radio.now_playing(&slug);
         publish_now_playing(&shared, &slug, false);
 
@@ -2584,6 +2624,21 @@ mod tests {
         assert_eq!(tracks[0].title, "a.mp3");
         assert_eq!(tracks[0].artist, "The Lagomorphs");
         assert_eq!(tracks[0].source, BlobId([1u8; 32]));
+    }
+
+    #[test]
+    fn a_mounts_count_starts_again_between_songs_and_never_mid_song() {
+        let limit = rabbithole_radio::flac::NUMBER_LIMIT;
+        assert_eq!(next_number(0), 0);
+        assert_eq!(next_number(44_100), 44_100, "a minute in, it keeps going");
+        assert_eq!(next_number(limit / 2 - 1), limit / 2 - 1);
+        // Far enough that the next song might run past what a number can
+        // hold: it starts again here, between songs, rather than inside one.
+        assert_eq!(next_number(limit / 2), 0);
+        assert_eq!(next_number(limit), 0);
+        // And what is left is a number the coded shape can hold in six
+        // bytes, with room for a song of any length anybody has.
+        assert!(limit / 2 + 44_100 * 60 * 60 * 6 < limit);
     }
 
     #[test]

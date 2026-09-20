@@ -660,14 +660,15 @@ async fn install_radio_library(
         // Ogg, else FLAC. Counting would move a station's listeners onto a
         // different kind of sound the day somebody adds files, which is not
         // a thing a mount should do.
+        // Which form of FLAC that mount will send is settled here too, by
+        // what most of the library is, rather than by whichever track the
+        // rotation happens to read first: one voice memo at the top of a
+        // folder of albums would otherwise leave every album out.
+        let form = flac_form(shared, &split.flac).await;
         let mut kinds: Vec<(&str, radio::Sound, Vec<rabbithole_radio::Track>)> = vec![
             ("mp3", radio::Sound::Mpeg, split.mpeg),
             ("ogg", radio::Sound::Ogg(0), split.ogg),
-            (
-                "flac",
-                radio::Sound::Flac(radio::Form::default()),
-                split.flac,
-            ),
+            ("flac", radio::Sound::Flac(form), split.flac),
         ];
         kinds.retain(|(_, _, tracks)| !tracks.is_empty());
         // A mount the operator named for a kind — `jukebox.flac` — is that
@@ -746,6 +747,57 @@ async fn install_radio_library(
             tracing::info!(mount = %slug, area = %area, tracks = count, "radio library program installed");
             installed.insert(slug);
         }
+    }
+}
+
+/// What form of FLAC most of a rotation is: the rate, the channel count and
+/// the depth a mount will say once, at the head of its stream.
+///
+/// A FLAC file's STREAMINFO is its first metadata block, so this reads the
+/// front of each track rather than the track: a few dozen bytes each, at
+/// the one moment a station is installed. A library nobody can read, or one
+/// that is not FLAC after all, gives back the form nobody has looked up —
+/// and then the first track the pump reads settles it, as it did before.
+async fn flac_form(shared: &Arc<Shared>, tracks: &[rabbithole_radio::Track]) -> radio::Form {
+    if tracks.is_empty() {
+        return radio::Form::default();
+    }
+    let blobs = shared.blobs.clone();
+    let ids: Vec<rabbithole_blobs::BlobId> = tracks
+        .iter()
+        .map(|t| rabbithole_blobs::BlobId(t.source.0))
+        .collect();
+    let counted = tokio::task::spawn_blocking(move || {
+        let mut counted: std::collections::HashMap<(u32, u8, u8), usize> =
+            std::collections::HashMap::new();
+        for id in ids {
+            // The magic, the first block header and its body: 42 bytes,
+            // plus room for a tag somebody put in front of them.
+            let Ok(front) = blobs.read_range(&id, 0, 1 << 10) else {
+                continue;
+            };
+            if let Some(form) = rabbithole_radio::flac::form_of(&front) {
+                *counted.entry(form).or_default() += 1;
+            }
+        }
+        counted
+    })
+    .await
+    .unwrap_or_default();
+    // The most of any one form wins, and a tie goes to the one that sounds
+    // like more of the library: the highest rate, then the most channels,
+    // then the most bits. Deciding it the same way at every start matters
+    // more than which one wins.
+    let best = counted
+        .into_iter()
+        .max_by_key(|(form, count)| (*count, *form));
+    match best {
+        Some(((rate, channels, bits), _)) => radio::Form {
+            rate,
+            channels,
+            bits,
+        },
+        None => radio::Form::default(),
     }
 }
 

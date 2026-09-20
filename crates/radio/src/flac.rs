@@ -208,6 +208,31 @@ pub fn streaminfo(bytes: &[u8]) -> Option<Stream> {
     (info.sample_rate > 0).then_some(info)
 }
 
+/// What a stream is — its rate, its channel count, its depth — from the
+/// front of the file alone. STREAMINFO is always the first metadata block,
+/// so this needs the first few dozen bytes and not the file: a library can
+/// ask it of every track it holds without reading any of them.
+///
+/// `None` when what is there is not the front of a FLAC file, or when the
+/// first block has not arrived yet.
+pub fn form_of(front: &[u8]) -> Option<(u32, u8, u8)> {
+    let start = crate::mp3::id3v2_len(front);
+    if front.get(start..start + 4)? != b"fLaC" {
+        return None;
+    }
+    let header = front.get(start + 4..start + 8)?;
+    if header[0] & 0x7F != 0 {
+        return None; // STREAMINFO is the first block, or this is not one
+    }
+    let body = front.get(start + 8..start + 8 + 34)?;
+    let packed = body.get(10..14)?;
+    let rate =
+        (u32::from(packed[0]) << 12) | (u32::from(packed[1]) << 4) | (u32::from(packed[2]) >> 4);
+    let channels = ((packed[2] >> 1) & 0x07) + 1;
+    let bits = (((packed[2] & 0x01) << 4) | (packed[3] >> 4)) + 1;
+    (rate > 0).then_some((rate, channels, bits))
+}
+
 /// Whether this looks like a FLAC file a station could send: headers that
 /// parse *and* a frame that starts where they end. Headers alone are a file
 /// with nothing to play — an upload that stopped, a fetch cut short — and
@@ -515,20 +540,29 @@ pub fn renumber(frame: &[u8], header: usize, number: usize, sample: u64) -> Opti
     Some(out)
 }
 
+/// As far as a sample number is allowed to count before it starts again:
+/// six bytes of the coded shape, and never the seventh.
+///
+/// The seventh shape, the one whose lead byte is `0xFE`, is in the format,
+/// and libFLAC writes it and reads it. libavcodec refuses any frame that
+/// carries one — `val >= 0xFE` is an error in its decoder — so a station
+/// that counted that far would go silent for every player built on ffmpeg
+/// and stay silent. Real files never reach it, because an encoder numbers
+/// frames rather than samples; a mount that plays all night does.
+pub const NUMBER_LIMIT: u64 = 1 << 31;
+
 /// A frame or sample number, in the shape FLAC borrowed from UTF-8: one
-/// byte up to 127, and up to seven for the thirty-six bits a sample number
-/// can need.
+/// byte up to 127, and up to six for the count a mount keeps.
 fn write_number(out: &mut Vec<u8>, v: u64) {
-    const SHAPES: [(u64, u8, u32); 7] = [
+    const SHAPES: [(u64, u8, u32); 6] = [
         (1 << 7, 0x00, 0),
         (1 << 11, 0xC0, 1),
         (1 << 16, 0xE0, 2),
         (1 << 21, 0xF0, 3),
         (1 << 26, 0xF8, 4),
         (1 << 31, 0xFC, 5),
-        (1 << 36, 0xFE, 6),
     ];
-    let v = v % (1 << 36); // a stream this long has been on the air for weeks
+    let v = v % NUMBER_LIMIT;
     for (limit, lead, follow) in SHAPES {
         if v < limit {
             out.push(lead | (v >> (6 * follow)) as u8);

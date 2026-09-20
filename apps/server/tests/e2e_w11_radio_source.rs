@@ -385,6 +385,15 @@ async fn library_program_pulls_audio_from_file_area() {
     burrow.shutdown().await;
 }
 
+/// What the reference FLAC fixture is: 8 kHz, one channel, 16 bits. A
+/// library reads this from the front of each file when it is installed, so
+/// a mount says what its stream is before a note of it has played.
+const FLAC_FORM: burrow::radio::Form = burrow::radio::Form {
+    rate: 8_000,
+    channels: 1,
+    bits: 16,
+};
+
 /// Which kind of sound keeps the bare mount does not depend on how many of
 /// each a library happens to hold: adding files must not move a station's
 /// listeners onto a different kind. And a station the operator named
@@ -452,15 +461,14 @@ async fn the_bare_mount_keeps_its_kind_and_a_named_station_is_left_alone() {
     assert_eq!(burrow.shared.radio.track_count("jukebox"), 1);
     assert_eq!(burrow.shared.radio.track_count("jukebox.flac"), 3);
     // Each mount goes up as what it is about to send, so nobody who tuned
-    // in early is cut off when the first track is read. Which kind, that
-    // is: which FLAC is in the file, and no file has been read yet.
+    // in early is cut off when the first track is read.
     assert_eq!(
         burrow.shared.radio.expected_sound("jukebox"),
         Some(burrow::radio::Sound::Mpeg)
     );
     assert_eq!(
         burrow.shared.radio.expected_sound("jukebox.flac"),
-        Some(burrow::radio::Sound::Flac(Default::default()))
+        Some(burrow::radio::Sound::Flac(FLAC_FORM))
     );
     burrow.shutdown().await;
 
@@ -480,7 +488,7 @@ async fn the_bare_mount_keeps_its_kind_and_a_named_station_is_left_alone() {
     assert_eq!(burrow.shared.radio.track_count("jukebox.flac"), 3);
     assert_eq!(
         burrow.shared.radio.expected_sound("jukebox.flac"),
-        Some(burrow::radio::Sound::Flac(Default::default())),
+        Some(burrow::radio::Sound::Flac(FLAC_FORM)),
         "the name says FLAC, so the mount had better send FLAC"
     );
     burrow.shutdown().await;
@@ -577,8 +585,79 @@ async fn a_mount_goes_up_as_what_it_will_send_not_what_it_cannot_play() {
     );
     assert_eq!(
         burrow.shared.radio.expected_sound("jukebox"),
-        Some(burrow::radio::Sound::Flac(Default::default())),
+        Some(burrow::radio::Sound::Flac(FLAC_FORM)),
         "three FLACs and three files it cannot play is a FLAC station"
+    );
+    burrow.shutdown().await;
+}
+
+/// A station sends one form of FLAC, and which one is what most of its
+/// library is — not whichever file the rotation happens to read first. A
+/// voice memo at the top of a folder of albums would otherwise pin the
+/// mount to 8 kHz mono and leave every album out of it, for good.
+#[tokio::test]
+async fn a_stations_form_is_what_most_of_its_library_is() {
+    const MEMO: &[u8] =
+        include_bytes!("../../../crates/radio/tests/fixtures/reference-8k-mono.flac");
+    const ALBUM: &[u8] =
+        include_bytes!("../../../crates/radio/tests/fixtures/reference-44k-stereo.flac");
+
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("srv");
+    {
+        let burrow = Burrow::start(base_config(&data)).await.unwrap();
+        let files = &burrow.shared.files;
+        files.create_area("music", "Music", "").await.unwrap();
+        // The memo is first in the area, and first in the rotation.
+        let memo = burrow.shared.blobs.put(MEMO).unwrap();
+        files
+            .add_file(
+                "music",
+                None,
+                "a-memo.flac",
+                &memo.0,
+                MEMO.len() as i64,
+                "audio/flac",
+                "",
+                "",
+                "dj@h",
+                1,
+            )
+            .await
+            .unwrap();
+        let album = burrow.shared.blobs.put(ALBUM).unwrap();
+        for n in 0..3 {
+            files
+                .add_file(
+                    "music",
+                    None,
+                    &format!("b-album-{n}.flac"),
+                    &album.0,
+                    ALBUM.len() as i64,
+                    "audio/flac",
+                    "",
+                    "",
+                    "dj@h",
+                    1,
+                )
+                .await
+                .unwrap();
+        }
+        burrow.shutdown().await;
+    }
+
+    let mut cfg = base_config(&data);
+    cfg.radio_library_areas
+        .insert("jukebox".into(), "music".into());
+    let burrow = Burrow::start(cfg).await.unwrap();
+    assert_eq!(
+        burrow.shared.radio.expected_sound("jukebox"),
+        Some(burrow::radio::Sound::Flac(burrow::radio::Form {
+            rate: 44_100,
+            channels: 2,
+            bits: 16,
+        })),
+        "three albums against one memo: the albums are the station"
     );
     burrow.shutdown().await;
 }

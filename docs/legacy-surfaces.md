@@ -96,7 +96,10 @@ disables that class.
   FLAC player dead at the end of the first song. That one header fixes the
   rate, the channel count and the depth for the whole night, so a station
   sends one form of FLAC and a track of another is left out with a word
-  saying which form it is not. `radio_public_base`
+  saying which form it is not. Which form that is settled when the station
+  is installed, by what most of its area is — read from the front of each
+  file rather than the whole of it — so one odd file at the top of a folder
+  does not leave the rest of it out. `radio_public_base`
   names the public stream address when it is not this host on `radio_addr`'s
   port; clients are told it and never ask a person for it.
   The updinfo endpoints (`GET /admin/metadata`, `GET /admin.cgi`) ride the
