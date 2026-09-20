@@ -822,3 +822,82 @@ async fn a_library_of_both_kinds_plays_on_a_mount_each() {
 
     burrow.shutdown().await;
 }
+
+/// A library of FLAC files plays as a FLAC station: the listener is told it
+/// is `audio/flac` and hears the file, headers first. The file is the one
+/// the reference encoder wrote, so what arrives can be checked against it
+/// byte for byte.
+#[tokio::test]
+async fn a_library_of_flac_files_streams_as_a_flac_station() {
+    use rabbithole_core::Client;
+
+    const REFERENCE_FLAC: &[u8] =
+        include_bytes!("../../../crates/radio/tests/fixtures/reference-8k-mono.flac");
+
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path().join("srv");
+
+    {
+        let burrow = Burrow::start(test_config(&dir)).await.unwrap();
+        burrow
+            .shared
+            .auth
+            .create_account("dj", "spin-spin-spin", Role::Admin)
+            .await
+            .unwrap();
+        let mut dj = Client::connect(
+            &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
+            None,
+            None,
+            "e2e",
+            "0",
+        )
+        .await
+        .unwrap();
+        dj.auth_password("dj", "spin-spin-spin").await.unwrap();
+        dj.expect_welcome().await.unwrap();
+        dj.area_create("music", "Music", "").await.unwrap();
+        let src = work.path().join("tone.flac");
+        std::fs::write(&src, REFERENCE_FLAC).unwrap();
+        dj.transfer_upload("music", None, "tone.flac", &src, "audio/flac", "")
+            .await
+            .unwrap();
+        burrow.shutdown().await;
+    }
+
+    let mut config = test_config(&dir);
+    config
+        .radio_library_areas
+        .insert("lossless".into(), "music".into());
+    let burrow = Burrow::start(config).await.unwrap();
+    let radio = burrow.radio_addr.expect("radio enabled");
+
+    let mut listener = TcpStream::connect(radio).await.unwrap();
+    listener
+        .write_all(b"GET /lossless HTTP/1.0\r\n\r\n")
+        .await
+        .unwrap();
+    listener.flush().await.unwrap();
+    let (head, mut heard) = read_head(&mut listener).await;
+    assert!(
+        head.starts_with("ICY 200 OK"),
+        "a rotation streams: {head:?}"
+    );
+    assert!(
+        head.to_ascii_lowercase().contains("audio/flac"),
+        "a FLAC station says so: {head:?}"
+    );
+
+    // What arrives is the file itself, from its first byte: the magic and
+    // the headers a decoder needs before any audio.
+    let mut more = read_at_least(&mut listener, 64).await;
+    heard.append(&mut more);
+    assert!(heard.starts_with(b"fLaC"), "the stream's own header leads");
+    assert_eq!(
+        &heard[..heard.len().min(64)],
+        &REFERENCE_FLAC[..heard.len().min(64)],
+        "verbatim, as the encoder wrote it"
+    );
+
+    burrow.shutdown().await;
+}

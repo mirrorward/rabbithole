@@ -639,31 +639,49 @@ async fn install_radio_library(
                 Vec::new()
             }
         };
-        // A station sends one kind of sound, so a library holding both gets
-        // a mount for each: the MP3 files where they have always been, and
-        // the Ogg files beside them at `<mount>.ogg`. Nothing is left out
-        // for being the wrong kind, and a listener picks which to tune in
-        // to. A library of one kind is one mount, exactly as before.
-        let (mpeg, ogg, other) = radio::split_by_sound(&nodes);
+        // A station sends one kind of sound, so a library holding more than
+        // one kind gets a mount for each: the MP3 files where they have
+        // always been, the Ogg files at `<mount>.ogg`, the FLAC files at
+        // `<mount>.flac`. Nothing is left out for being the wrong kind, and
+        // a listener picks which to tune in to. A library of one kind is
+        // one mount, exactly as before.
+        let split = radio::split_by_sound(&nodes);
         let covers = radio::covers_from_nodes(&nodes);
-        let ogg_mount = format!("{mount}.ogg");
-        // Anything that is neither goes with the bare mount, which says so
-        // when it cannot play it.
-        let (bare, beside) = if mpeg.is_empty() && !ogg.is_empty() {
-            // No MP3 at all: the Ogg files are the station.
-            ((ogg, mount.clone(), format!("{mount} (library)")), None)
-        } else {
-            (
-                (
-                    mpeg.into_iter().chain(other).collect::<Vec<_>>(),
-                    mount.clone(),
-                    format!("{mount} (library)"),
-                ),
-                (!ogg.is_empty())
-                    .then(|| (ogg, ogg_mount.clone(), format!("{mount} (library, Ogg)"))),
-            )
-        };
-        for (tracks, slug, name) in std::iter::once(bare).chain(beside) {
+        // Whatever it holds most of keeps the bare mount, so a library that
+        // has always been MP3 stays where its listeners left it; the others
+        // sit beside it, named for what they are.
+        let mut kinds: Vec<(&str, Vec<rabbithole_radio::Track>)> = vec![
+            ("mp3", split.mpeg),
+            ("ogg", split.ogg),
+            ("flac", split.flac),
+        ];
+        kinds.retain(|(_, tracks)| !tracks.is_empty());
+        kinds.sort_by_key(|(ext, tracks)| (std::cmp::Reverse(tracks.len()), *ext));
+        let mut programs: Vec<(String, String, Vec<rabbithole_radio::Track>)> = Vec::new();
+        for (i, (ext, mut tracks)) in kinds.into_iter().enumerate() {
+            if i == 0 {
+                // Audio of a kind this burrow cannot send goes with the
+                // first mount, which says what it could not play.
+                tracks.extend(split.other.iter().cloned());
+                programs.push((mount.clone(), format!("{mount} (library)"), tracks));
+            } else {
+                programs.push((
+                    format!("{mount}.{ext}"),
+                    format!("{mount} (library, {})", ext.to_uppercase()),
+                    tracks,
+                ));
+            }
+        }
+        if programs.is_empty() {
+            // Nothing playable at all: the station still exists, so the
+            // console can say the area holds no music it can send.
+            programs.push((
+                mount.clone(),
+                format!("{mount} (library)"),
+                split.other.clone(),
+            ));
+        }
+        for (slug, name, tracks) in programs {
             let count = tracks.len();
             shared.radio.set_covers(&slug, covers.clone());
             shared.radio.install_program(&slug, &name, area, tracks);

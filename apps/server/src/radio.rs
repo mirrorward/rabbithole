@@ -341,13 +341,18 @@ impl Stations {
         // Whatever most of them are: a rotation is one kind of sound, and
         // the odd file out is left out with a word about it.
         let expected = {
-            let ogg = tracks
-                .iter()
-                .filter(|t| matches!(sound_of_name(&t.title, ""), Some(Sound::Ogg(_))))
-                .count();
-            match (track_count, ogg) {
-                (0, _) => None,
-                (total, ogg) if ogg * 2 > total => Some(Sound::Ogg(0)),
+            let of = |want: fn(&Sound) -> bool| {
+                tracks
+                    .iter()
+                    .filter(|t| sound_of_name(&t.title, "").as_ref().is_some_and(want))
+                    .count()
+            };
+            let ogg = of(|s| matches!(s, Sound::Ogg(_)));
+            let flac = of(|s| matches!(s, Sound::Flac));
+            match track_count {
+                0 => None,
+                total if ogg * 2 > total => Some(Sound::Ogg(0)),
+                total if flac * 2 > total => Some(Sound::Flac),
                 _ => Some(Sound::Mpeg),
             }
         };
@@ -1098,6 +1103,9 @@ pub fn sound_of_name(name: &str, mime: &str) -> Option<Sound> {
     if lower.ends_with(".mp3") || mime == "audio/mpeg" || mime == "audio/mp3" {
         return Some(Sound::Mpeg);
     }
+    if lower.ends_with(".flac") || mime == "audio/flac" || mime == "audio/x-flac" {
+        return Some(Sound::Flac);
+    }
     if [".ogg", ".oga", ".opus"].iter().any(|e| lower.ends_with(e))
         || mime == "audio/ogg"
         || mime == "audio/opus"
@@ -1114,19 +1122,31 @@ pub fn sound_of_name(name: &str, mime: &str) -> Option<Sound> {
 /// have a mount of its own: the MP3 files on one, the Ogg files on another,
 /// and nothing left out for being the wrong kind. Tracks that are neither
 /// stay where they are — the pump says what it could not play.
-pub fn split_by_sound(nodes: &[FileNodeRow]) -> (Vec<Track>, Vec<Track>, Vec<Track>) {
-    let (mut mpeg, mut ogg, mut other) = (Vec::new(), Vec::new(), Vec::new());
+pub fn split_by_sound(nodes: &[FileNodeRow]) -> Rotations {
+    let mut out = Rotations::default();
     for node in nodes {
         let Some(track) = track_from_node(node) else {
             continue;
         };
         match sound_of_name(&node.name, &node.mime) {
-            Some(Sound::Mpeg) => mpeg.push(track),
-            Some(Sound::Ogg(_)) => ogg.push(track),
-            None => other.push(track),
+            Some(Sound::Mpeg) => out.mpeg.push(track),
+            Some(Sound::Ogg(_)) => out.ogg.push(track),
+            Some(Sound::Flac) => out.flac.push(track),
+            None => out.other.push(track),
         }
     }
-    (mpeg, ogg, other)
+    out
+}
+
+/// A library's tracks, by the kind of sound they are.
+#[derive(Debug, Default)]
+pub struct Rotations {
+    pub mpeg: Vec<Track>,
+    pub ogg: Vec<Track>,
+    pub flac: Vec<Track>,
+    /// Audio this burrow cannot send as it is (an AAC file, say). They go
+    /// with the first mount, which says what it could not play.
+    pub other: Vec<Track>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1349,6 +1369,41 @@ pub fn ogg_batches(track: &[u8], rate: u32) -> Vec<Batch> {
     out
 }
 
+/// Cut a FLAC track into sends, as [`batches`] does for MPEG audio: whole
+/// frames only, contiguous bytes only, about a quarter second each. The
+/// metadata at the front (what the stream is, its tags, its cover) goes out
+/// ahead of the first frame, because a decoder needs it to play anything.
+pub fn flac_batches(track: &[u8]) -> Vec<Batch> {
+    use rabbithole_radio::flac;
+    let Some(info) = flac::streaminfo(track) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Batch> = Vec::new();
+    // The header blocks lead, worth no time of their own.
+    let mut open = (info.audio_at > 0).then_some(Batch {
+        bytes: 0..info.audio_at,
+        micros: 0,
+    });
+    for frame in flac::frames(track) {
+        let end = frame.offset + frame.len;
+        match open.as_mut() {
+            Some(b) if b.bytes.end == frame.offset && b.micros < PUMP_BATCH_MICROS => {
+                b.bytes.end = end;
+                b.micros += frame.micros();
+            }
+            _ => {
+                out.extend(open.take());
+                open = Some(Batch {
+                    bytes: frame.offset..end,
+                    micros: frame.micros(),
+                });
+            }
+        }
+    }
+    out.extend(open);
+    out
+}
+
 /// What a station is sending, and how a track of that kind is paced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sound {
@@ -1356,6 +1411,8 @@ pub enum Sound {
     Mpeg,
     /// Ogg (Opus or Vorbis), `audio/ogg`, paced by granule at this rate.
     Ogg(u32),
+    /// FLAC, `audio/flac`, paced by the samples each frame holds.
+    Flac,
 }
 
 impl Sound {
@@ -1364,6 +1421,7 @@ impl Sound {
         match self {
             Sound::Mpeg => "audio/mpeg",
             Sound::Ogg(_) => "audio/ogg",
+            Sound::Flac => "audio/flac",
         }
     }
 
@@ -1371,6 +1429,9 @@ impl Sound {
     pub fn of(track: &[u8]) -> Option<Sound> {
         if rabbithole_radio::mp3::looks_like_mp3(track) {
             return Some(Sound::Mpeg);
+        }
+        if rabbithole_radio::flac::looks_like_flac(track) {
+            return Some(Sound::Flac);
         }
         rabbithole_radio::ogg::codec(track).map(|(_, rate)| Sound::Ogg(rate))
     }
@@ -1380,6 +1441,7 @@ impl Sound {
         match self {
             Sound::Mpeg => batches(track),
             Sound::Ogg(rate) => ogg_batches(track, rate),
+            Sound::Flac => flac_batches(track),
         }
     }
 
@@ -1389,7 +1451,9 @@ impl Sound {
     pub fn same_as(self, other: Sound) -> bool {
         matches!(
             (self, other),
-            (Sound::Mpeg, Sound::Mpeg) | (Sound::Ogg(_), Sound::Ogg(_))
+            (Sound::Mpeg, Sound::Mpeg)
+                | (Sound::Ogg(_), Sound::Ogg(_))
+                | (Sound::Flac, Sound::Flac)
         )
     }
 }
@@ -1436,21 +1500,33 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
         };
         let blobs = shared.blobs.clone();
         let id = rabbithole_blobs::BlobId(track.source.0);
-        let audio = tokio::task::spawn_blocking(move || blobs.get(&id))
-            .await
-            .ok()
-            .and_then(Result::ok);
+        // Reading the file, working out what it is, and cutting it into
+        // sends all happen off the runtime: for a FLAC track that means
+        // checking a checksum over the whole file, which is not something
+        // to do on a thread that is also answering everybody else.
+        let read = tokio::task::spawn_blocking(move || {
+            let bytes = blobs.get(&id).ok()?;
+            let kind = Sound::of(&bytes);
+            let cuts = kind.map(|kind| kind.batches(&bytes));
+            Some((bytes, kind, cuts))
+        })
+        .await
+        .ok()
+        .flatten();
+        let (audio, kind, cuts) = match read {
+            Some((bytes, kind, cuts)) => (Some(bytes), kind, cuts),
+            None => (None, None, None),
+        };
         // What this track is, and whether this mount can send it: a
         // listener's decoder is never handed a different kind of sound
         // part-way through, so a station sends one kind and says which
         // tracks it had to leave out.
-        let kind = audio.as_deref().and_then(Sound::of);
         let playable = match (kind, sending) {
             (Some(kind), None) => Some(kind),
             (Some(kind), Some(air)) if air.same_as(kind) => Some(kind),
             _ => None,
         };
-        let (Some(audio), Some(kind)) = (audio, playable) else {
+        let (Some(audio), Some(kind), Some(cuts)) = (audio, playable, cuts) else {
             // Nothing this station can send as it is: an unreadable file, a
             // format this burrow does not stream, or the wrong kind for a
             // mount already on the air. Said out loud, once per track —
@@ -1495,7 +1571,7 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
 
         let (started, mut sent) = clock.unwrap_or((std::time::Instant::now(), Duration::ZERO));
         let mut interrupted = false;
-        for batch in kind.batches(&audio) {
+        for batch in cuts {
             if !shared.radio.owns_air(&slug, &tx) {
                 interrupted = true;
                 break;
@@ -1906,6 +1982,40 @@ mod tests {
         out
     }
 
+    /// The very file `rabbithole-radio`'s own test measures itself
+    /// against: written by the reference encoder, not by us.
+    const REFERENCE_FLAC: &[u8] =
+        include_bytes!("../../../crates/radio/tests/fixtures/reference-8k-mono.flac");
+
+    #[test]
+    fn a_flac_track_is_cut_into_sends_that_carry_its_headers_first() {
+        assert_eq!(Sound::of(REFERENCE_FLAC), Some(Sound::Flac));
+        let cut = Sound::Flac.batches(REFERENCE_FLAC);
+        assert_eq!(
+            cut.iter().map(|b| b.bytes.len()).sum::<usize>(),
+            REFERENCE_FLAC.len(),
+            "every byte goes out, the stream's headers included"
+        );
+        assert_eq!(cut[0].bytes.start, 0, "what the decoder needs leads");
+        assert_eq!(
+            cut.iter().map(|b| b.micros).sum::<u64>(),
+            120_000,
+            "0.12 s of tone, paced by the samples each frame holds"
+        );
+        // Whole frames only: no send ends inside one.
+        let starts: Vec<usize> = rabbithole_radio::flac::frames(REFERENCE_FLAC)
+            .iter()
+            .map(|f| f.offset)
+            .collect();
+        for batch in &cut {
+            assert!(
+                batch.bytes.end == REFERENCE_FLAC.len() || starts.contains(&batch.bytes.end),
+                "a send ends where a frame does: {:?}",
+                batch.bytes
+            );
+        }
+    }
+
     #[test]
     fn a_library_of_both_kinds_becomes_a_mount_of_each() {
         let nodes = vec![
@@ -1913,21 +2023,37 @@ mod tests {
             file_node(2, "two.opus", "audio/ogg", Some([2u8; 32])),
             file_node(3, "three.ogg", "application/octet-stream", Some([3u8; 32])),
             file_node(4, "four.flac", "audio/flac", Some([4u8; 32])),
+            file_node(6, "five.aac", "audio/aac", Some([6u8; 32])),
             file_node(5, "notes.txt", "text/plain", Some([5u8; 32])),
         ];
-        let (mpeg, ogg, other) = split_by_sound(&nodes);
-        assert_eq!(mpeg.len(), 1, "the MP3");
-        assert_eq!(ogg.len(), 2, "both Ogg files, by name as well as type");
-        assert_eq!(other.len(), 1, "the FLAC, which is neither");
+        let split = split_by_sound(&nodes);
+        assert_eq!(split.mpeg.len(), 1, "the MP3");
+        assert_eq!(
+            split.ogg.len(),
+            2,
+            "both Ogg files, by name as well as type"
+        );
+        assert_eq!(split.flac.len(), 1, "the FLAC");
+        assert_eq!(
+            split.other.len(),
+            1,
+            "the AAC, which it cannot send as it is"
+        );
         // Not audio at all never becomes a track in the first place.
-        assert_eq!(mpeg.len() + ogg.len() + other.len(), 4);
+        assert_eq!(split.mpeg.len() + split.ogg.len() + split.flac.len(), 4);
 
         // What the name says, without reading the file.
         assert_eq!(sound_of_name("a.mp3", ""), Some(Sound::Mpeg));
         assert_eq!(sound_of_name("a", "audio/mpeg"), Some(Sound::Mpeg));
         assert_eq!(sound_of_name("a.opus", ""), Some(Sound::Ogg(0)));
         assert_eq!(sound_of_name("a.OGG", ""), Some(Sound::Ogg(0)));
-        assert_eq!(sound_of_name("a.flac", "audio/flac"), None);
+        assert_eq!(sound_of_name("a.flac", ""), Some(Sound::Flac));
+        assert_eq!(sound_of_name("a", "audio/flac"), Some(Sound::Flac));
+        assert_eq!(
+            sound_of_name("a.aac", "audio/aac"),
+            None,
+            "not one it can send"
+        );
     }
 
     #[test]
@@ -1963,6 +2089,10 @@ mod tests {
         assert!(!Sound::Mpeg.same_as(Sound::Ogg(48_000)));
         assert_eq!(Sound::Mpeg.content_type(), "audio/mpeg");
         assert_eq!(Sound::Ogg(48_000).content_type(), "audio/ogg");
+        assert_eq!(Sound::Flac.content_type(), "audio/flac");
+        assert!(Sound::Flac.same_as(Sound::Flac));
+        assert!(!Sound::Flac.same_as(Sound::Mpeg));
+        assert!(!Sound::Flac.same_as(Sound::Ogg(0)));
         // And a file that is neither is not sent at all.
         assert_eq!(Sound::of(b"not audio at all"), None);
         assert_eq!(Sound::of(&mp3_frames(3)), Some(Sound::Mpeg));

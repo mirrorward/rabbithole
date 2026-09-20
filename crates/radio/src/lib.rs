@@ -35,6 +35,7 @@
 
 mod controller;
 mod error;
+pub mod flac;
 pub mod mp3;
 pub mod ogg;
 mod playlist;
