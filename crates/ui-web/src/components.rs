@@ -1241,7 +1241,7 @@ pub fn WelcomeSheet() -> impl IntoView {
         app.focused().state.update(|s| s.dismiss_welcome());
     };
     let accept = move |_| {
-        app.dispatch(rabbithole_core::api::Command::AcceptAgreement);
+        app.accept_agreement();
         app.focused().state.update(|s| s.dismiss_welcome());
     };
     view! {

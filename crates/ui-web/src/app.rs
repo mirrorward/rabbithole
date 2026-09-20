@@ -1359,6 +1359,22 @@ impl AppState {
         self.dispatch(rabbithole_core::api::Command::SendChat { room, text });
     }
 
+    /// Tell the burrow its agreement is accepted — over the live socket
+    /// when connected, else through the seeded mock seam. Until it is
+    /// told, it refuses everything the agreement gates, and asks again at
+    /// the next sign-in.
+    pub fn accept_agreement(&self) {
+        #[cfg(target_arch = "wasm32")]
+        if self.focused().live.get_untracked() {
+            use crate::wire::EventClient;
+            self.focused().ws.update_value(|c| {
+                c.dispatch(rabbithole_core::api::Command::AcceptAgreement);
+            });
+            return;
+        }
+        self.dispatch(rabbithole_core::api::Command::AcceptAgreement);
+    }
+
     /// Drive one command through the seam and fold its events into state.
     pub fn dispatch(&self, command: Command) {
         let state = self.focused().state;
