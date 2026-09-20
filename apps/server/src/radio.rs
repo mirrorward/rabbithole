@@ -156,6 +156,8 @@ pub struct Stations {
     history: Mutex<HashMap<String, StationHistory>>,
     /// Cover art per station: track title to the blob id of its image.
     covers: Mutex<HashMap<String, HashMap<String, [u8; 32]>>>,
+    /// What each station could not play, newest first, for its operator.
+    left_out: Mutex<HashMap<String, Vec<rabbithole_proto::radio::LeftOut>>>,
     /// The port the stream listener actually bound (0 = not listening), which
     /// is what gets advertised: the configured port may have been 0 ("any").
     listen_port: AtomicU16,
@@ -254,6 +256,7 @@ impl Stations {
             next_listener: AtomicU64::new(1),
             history: Mutex::new(HashMap::new()),
             covers: Mutex::new(HashMap::new()),
+            left_out: Mutex::new(HashMap::new()),
             listen_port: AtomicU16::new(0),
         }
     }
@@ -500,9 +503,28 @@ impl Stations {
         Some((tx, now_playing))
     }
 
+    /// Note that a station could not play a track, for its operator. The
+    /// last few per station, newest first: a rotation of the wrong kind
+    /// would otherwise be a silent station and a debug log.
+    pub fn left_out(&self, slug: &str, title: &str, reason: String, at_unix_ms: u64) {
+        let mut left = self.left_out.lock();
+        let list = left.entry(slug.to_string()).or_default();
+        list.retain(|l: &rabbithole_proto::radio::LeftOut| l.title != title);
+        list.insert(
+            0,
+            rabbithole_proto::radio::LeftOut::new(title, reason, at_unix_ms),
+        );
+        list.truncate(LEFT_OUT_REMEMBERED);
+    }
+
+    /// What a station has had to leave out, newest first.
+    pub fn left_out_for(&self, slug: &str) -> Vec<rabbithole_proto::radio::LeftOut> {
+        self.left_out.lock().get(slug).cloned().unwrap_or_default()
+    }
+
     /// What a rotation's mount is sending right now, if it is up and the
     /// rotation's own.
-    fn program_content_type(&self, slug: &str) -> Option<String> {
+    pub fn program_content_type(&self, slug: &str) -> Option<String> {
         self.mounts
             .lock()
             .get(slug)
@@ -598,6 +620,10 @@ fn split_song(song: &str) -> (String, String) {
         None => (String::new(), song.trim().to_string()),
     }
 }
+
+/// How many left-out tracks a station remembers for its operator. Enough to
+/// see the shape of the problem, few enough to be a list rather than a log.
+const LEFT_OUT_REMEMBERED: usize = 20;
 
 /// Normalizes a mount target (`/live` or `live`) to a bare slug (`live`).
 fn slug_of(mount: &str) -> &str {
@@ -1130,6 +1156,41 @@ pub fn station_listing(shared: &Arc<Shared>) -> Vec<rabbithole_proto::radio::Rad
         .collect()
 }
 
+/// Every station this burrow runs, as its operator needs to see it: what is
+/// on, who is listening, what it is sending, and what it could not play.
+/// Unlike [`station_listing`], this includes stations that are installed but
+/// silent — which is exactly when an operator comes looking.
+pub fn station_status(shared: &Arc<Shared>) -> Vec<rabbithole_proto::radio::RadioStationStatus> {
+    let areas = shared.config.read().radio_library_areas.clone();
+    let mut out = Vec::new();
+    for slug in shared.radio.program_slugs() {
+        let info = shared.radio.registry.get(&slug);
+        let now = shared.radio.now_playing(&slug);
+        let name = info
+            .as_ref()
+            .map(|i| i.display_name.clone())
+            .unwrap_or_else(|| slug.clone());
+        out.push(
+            rabbithole_proto::radio::RadioStationStatus::new(slug.clone(), name)
+                .of_area(
+                    areas.get(&slug).cloned().unwrap_or_default(),
+                    shared.radio.program_content_type(&slug).unwrap_or_default(),
+                )
+                .on_air(
+                    now.as_ref().map(|n| n.title.clone()).unwrap_or_default(),
+                    now.as_ref().map(|n| n.artist.clone()).unwrap_or_default(),
+                    info.as_ref().map(|i| i.listener_count as u32).unwrap_or(0),
+                    shared.radio.is_live(&slug),
+                )
+                .with_rotation(
+                    shared.radio.track_count(&slug) as u32,
+                    shared.radio.left_out_for(&slug),
+                ),
+        );
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Rotation playout: a library station that actually streams
 // ---------------------------------------------------------------------------
@@ -1322,12 +1383,17 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
             // format this burrow does not stream, or the wrong kind for a
             // mount already on the air. Said out loud, once per track —
             // silence with no reason is the worst way to find out.
-            tracing::warn!(
-                mount = %slug,
-                track = %track.title,
-                sending = ?sending,
-                "radio: track left out — not what this station is sending"
-            );
+            let reason = match (kind, sending) {
+                (None, _) => "not audio this burrow can stream".to_string(),
+                (Some(_), Some(air)) => {
+                    format!("not what this station is sending ({})", air.content_type())
+                }
+                (Some(_), None) => "could not be read".to_string(),
+            };
+            tracing::warn!(mount = %slug, track = %track.title, %reason, "radio: track left out");
+            shared
+                .radio
+                .left_out(&slug, &track.title, reason, unix_ms());
             shared.radio.advance(&slug, unix_ms());
             unplayable += 1;
             if unplayable >= shared.radio.track_count(&slug).max(1) {

@@ -283,3 +283,122 @@ mod tests {
         assert_eq!(frame.decode::<RadioOff>().unwrap().unwrap(), msg);
     }
 }
+
+/// Ask what each station is doing, for an operator: what is on, who is
+/// listening, and what the rotation could not play. Operators only
+/// (`CONFIG_ADMIN`); everyone else uses [`RadioStationsRequest`], which says
+/// what is on without the housekeeping. → [`RadioStatus`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RadioStatusRequest;
+
+impl Message for RadioStatusRequest {
+    const FAMILY: Family = Family::RADIO;
+    const MESSAGE_TYPE: u16 = 5;
+}
+
+/// One track a station could not play, and why. A rotation is a file area,
+/// and an area holds whatever was put in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct LeftOut {
+    pub title: String,
+    /// Said for a person: "not audio this burrow can stream", "not what this
+    /// station is sending (Ogg)".
+    pub reason: String,
+    pub at_unix_ms: u64,
+}
+
+impl LeftOut {
+    pub fn new(title: impl Into<String>, reason: impl Into<String>, at_unix_ms: u64) -> Self {
+        Self {
+            title: title.into(),
+            reason: reason.into(),
+            at_unix_ms,
+        }
+    }
+}
+
+/// One station, as its operator needs to see it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RadioStationStatus {
+    pub station: String,
+    pub name: String,
+    /// The file area its rotation comes from, when it is a library station.
+    pub area: String,
+    /// What it is sending: `audio/mpeg`, `audio/ogg`, or empty when it has
+    /// not started.
+    pub content_type: String,
+    pub title: String,
+    pub artist: String,
+    pub listeners: u32,
+    pub live: bool,
+    /// Tracks in the rotation, and how many of them it can play.
+    pub tracks: u32,
+    /// The most recent tracks it had to leave out, newest first.
+    pub left_out: Vec<LeftOut>,
+}
+
+impl RadioStationStatus {
+    pub fn new(station: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            station: station.into(),
+            name: name.into(),
+            area: String::new(),
+            content_type: String::new(),
+            title: String::new(),
+            artist: String::new(),
+            listeners: 0,
+            live: false,
+            tracks: 0,
+            left_out: Vec::new(),
+        }
+    }
+
+    /// Where its rotation comes from and what it is sending.
+    pub fn of_area(mut self, area: impl Into<String>, content_type: impl Into<String>) -> Self {
+        self.area = area.into();
+        self.content_type = content_type.into();
+        self
+    }
+
+    /// What is on, and who is hearing it.
+    pub fn on_air(
+        mut self,
+        title: impl Into<String>,
+        artist: impl Into<String>,
+        listeners: u32,
+        live: bool,
+    ) -> Self {
+        self.title = title.into();
+        self.artist = artist.into();
+        self.listeners = listeners;
+        self.live = live;
+        self
+    }
+
+    /// How big the rotation is, and what it could not play.
+    pub fn with_rotation(mut self, tracks: u32, left_out: Vec<LeftOut>) -> Self {
+        self.tracks = tracks;
+        self.left_out = left_out;
+        self
+    }
+}
+
+/// Reply: every station this burrow runs. Server → operator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RadioStatus {
+    pub stations: Vec<RadioStationStatus>,
+}
+
+impl RadioStatus {
+    pub fn new(stations: Vec<RadioStationStatus>) -> Self {
+        Self { stations }
+    }
+}
+
+impl Message for RadioStatus {
+    const FAMILY: Family = Family::RADIO;
+    const MESSAGE_TYPE: u16 = 6;
+}

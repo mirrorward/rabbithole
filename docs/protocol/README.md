@@ -40,7 +40,7 @@ newtype; unknown families decode and answer `Unsupported`):
 | 6 | SWARM | [`swarm.md`](swarm.md) | the Warren |
 | 7 | ADMIN | [`admin.md`](admin.md) | remote administration |
 | 8 | FEDERATION | [`federation.md`](federation.md) | **S2S-only** — dedicated QUIC endpoint, never on client connections |
-| 9 | RADIO | — | now-playing pushes: `RadioNowPlaying` (1), `RadioOff` (2); the station listing: `RadioStationsRequest` (3) → `RadioStations` (4), which carries where the audio is served (`stream_base` / `port`), each station's cover blob id, and its last ten tracks |
+| 9 | RADIO | — | now-playing pushes: `RadioNowPlaying` (1), `RadioOff` (2); the station listing: `RadioStationsRequest` (3) → `RadioStations` (4), which carries where the audio is served (`stream_base` / `port`), each station's cover blob id, and its last ten tracks; the operator's view: `RadioStatusRequest` (5) → `RadioStatus` (6), `CONFIG_ADMIN` only, which adds the silent stations, each one's file area, what it is sending (`audio/mpeg` / `audio/ogg`), how big its rotation is, and the last twenty tracks it could not play with the reason for each |
 | 10 | WISHING_WELL | [`wish.md`](wish.md) | requests |
 
 ## Ground rules

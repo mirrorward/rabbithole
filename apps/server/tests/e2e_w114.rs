@@ -604,3 +604,128 @@ async fn a_library_of_ogg_files_streams_as_an_ogg_station() {
 
     burrow.shutdown().await;
 }
+
+/// An operator can see what each station is doing, including the tracks its
+/// rotation could not play. Before this, a station that was silent because
+/// its music is the wrong kind looked exactly like one that was fine.
+#[tokio::test]
+async fn an_operator_sees_what_a_station_is_doing_and_what_it_left_out() {
+    use rabbithole_core::Client;
+    use rabbithole_proto::radio::{RadioStatus, RadioStatusRequest};
+    use rabbithole_proto::ErrorCode;
+
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path().join("srv");
+    let song = opus_of(2, 0x31);
+
+    {
+        let burrow = Burrow::start(test_config(&dir)).await.unwrap();
+        for (who, role) in [("boss", Role::Admin), ("listener", Role::User)] {
+            burrow
+                .shared
+                .auth
+                .create_account(who, "pw-pw-pw-pw", role)
+                .await
+                .unwrap();
+        }
+        let mut dj = Client::connect(
+            &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
+            None,
+            None,
+            "e2e",
+            "0",
+        )
+        .await
+        .unwrap();
+        dj.auth_password("boss", "pw-pw-pw-pw").await.unwrap();
+        dj.expect_welcome().await.unwrap();
+        dj.area_create("music", "Music", "").await.unwrap();
+        // One playable track, and one that is not audio at all.
+        for (name, bytes, mime) in [
+            ("one.opus", song.clone(), "audio/ogg"),
+            ("two.mp3", b"this is not an mp3".to_vec(), "audio/mpeg"),
+        ] {
+            let src = work.path().join(name);
+            std::fs::write(&src, &bytes).unwrap();
+            dj.transfer_upload("music", None, name, &src, mime, "")
+                .await
+                .unwrap();
+        }
+        burrow.shutdown().await;
+    }
+
+    let mut config = test_config(&dir);
+    config
+        .radio_library_areas
+        .insert("oggcast".into(), "music".into());
+    let burrow = Burrow::start(config).await.unwrap();
+
+    let mut boss = Client::connect(
+        &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
+        None,
+        None,
+        "e2e",
+        "0",
+    )
+    .await
+    .unwrap();
+    boss.auth_password("boss", "pw-pw-pw-pw").await.unwrap();
+    boss.expect_welcome().await.unwrap();
+
+    // Give the rotation a moment to reach the track it cannot play.
+    let mut status: RadioStatus = boss.request(&RadioStatusRequest).await.unwrap();
+    for _ in 0..40 {
+        if status
+            .stations
+            .first()
+            .is_some_and(|s| !s.left_out.is_empty())
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        status = boss.request(&RadioStatusRequest).await.unwrap();
+    }
+    let station = status.stations.first().expect("a station");
+    assert_eq!(station.station, "oggcast");
+    assert_eq!(station.area, "music", "where its music comes from");
+    assert_eq!(station.tracks, 2, "both files are in the rotation");
+    assert_eq!(
+        station.content_type, "audio/ogg",
+        "it settled on what it could play: {station:?}"
+    );
+    let left = station.left_out.first().expect("the one it cannot play");
+    assert_eq!(left.title, "two.mp3");
+    assert!(
+        left.reason.contains("not audio") || left.reason.contains("not what"),
+        "said for a person: {:?}",
+        left.reason
+    );
+
+    // It is the operator's view, not everybody's.
+    let mut listener = Client::connect(
+        &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
+        None,
+        None,
+        "e2e",
+        "0",
+    )
+    .await
+    .unwrap();
+    listener
+        .auth_password("listener", "pw-pw-pw-pw")
+        .await
+        .unwrap();
+    listener.expect_welcome().await.unwrap();
+    let refused = listener
+        .request::<_, RadioStatus>(&RadioStatusRequest)
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(rabbithole_core::ClientError::Refused(ErrorCode::Forbidden))
+        ),
+        "not for everyone: {refused:?}"
+    );
+
+    burrow.shutdown().await;
+}

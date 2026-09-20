@@ -38,5 +38,21 @@ pub async fn handle(
         conn.send(Frame::reply_to(frame, &listing(shared))?).await?;
         return Ok(true);
     }
+    // The operator's view: every station, including the silent ones, and
+    // what they could not play. Only for whoever runs the burrow — it says
+    // what is in a file area and how the rotation is faring.
+    if frame.decode::<pradio::RadioStatusRequest>().is_some() {
+        if !_ctx.allows(shared, "admin", rabbithole_server_core::Caps::CONFIG_ADMIN) {
+            conn.send(Frame::error_reply(
+                frame,
+                rabbithole_proto::ErrorCode::Forbidden,
+            ))
+            .await?;
+            return Ok(true);
+        }
+        let status = pradio::RadioStatus::new(crate::radio::station_status(shared));
+        conn.send(Frame::reply_to(frame, &status)?).await?;
+        return Ok(true);
+    }
     Ok(false)
 }
