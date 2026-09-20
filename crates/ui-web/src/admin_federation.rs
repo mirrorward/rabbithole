@@ -131,6 +131,8 @@ pub struct FederationState {
     pub backups: Vec<BackupEntry>,
     /// The latest check of each snapshot, by name.
     pub checks: Vec<BackupVerified>,
+    /// The burrow's stations, as the operator's pane shows them.
+    pub stations: Vec<rabbithole_proto::radio::RadioStationStatus>,
 }
 
 impl FederationState {

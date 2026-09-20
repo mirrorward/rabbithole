@@ -1238,6 +1238,23 @@ impl MockClient {
                     vec![AdminEvent::Ack("Origin pinned.".into())]
                 }
             }
+            // The demo burrow has one station, playing, with one track it
+            // could not use — so the pane can be seen without a burrow.
+            AdminCommand::ListStations => {
+                admin_events(&rabbithole_proto::radio::RadioStatus::new(vec![
+                    rabbithole_proto::radio::RadioStationStatus::new("jukebox", "The Jukebox")
+                        .of_area("music", "audio/mpeg")
+                        .on_air("Down the Hole", "The Lagomorphs", 3, false)
+                        .with_rotation(
+                            42,
+                            vec![rabbithole_proto::radio::LeftOut::new(
+                                "sleeve-notes.txt",
+                                "not audio this burrow can stream",
+                                crate::clock::now_ms().max(0) as u64,
+                            )],
+                        ),
+                ]))
+            }
             AdminCommand::ListBackups => admin_events(&BackupList::new(
                 "/srv/burrow/backups",
                 self.admin_backups.clone(),

@@ -112,6 +112,8 @@ pub enum Pane {
     Backups,
     /// The theme editor.
     Appearance,
+    /// Radio settings, then the stations themselves.
+    Radio,
     /// Every setting this client has no words for.
     Advanced,
 }
@@ -650,7 +652,7 @@ pub const SECTIONS: &[Section] = &[
         blurb: "The burrow\u{2019}s own streaming server: what listeners tune in to, and how a \
                 DJ goes live.",
         area: Area::Settings,
-        pane: Pane::Settings,
+        pane: Pane::Radio,
         groups: &[
             Group {
                 title: "Listening",

@@ -87,6 +87,7 @@ impl AdminState {
             | AdminEvent::PeersListed(_)
             | AdminEvent::OriginsListed(_)
             | AdminEvent::BackupsListed(..)
+            | AdminEvent::StationsListed(_)
             | AdminEvent::BackupMade(_)
             | AdminEvent::BackupChecked(_) => {}
             AdminEvent::ConfigApplied { applied_live } => {

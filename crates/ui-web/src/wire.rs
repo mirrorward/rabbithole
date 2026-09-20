@@ -1431,6 +1431,10 @@ pub enum AdminCommand {
     ListOrigins,
     /// Pin an origin's key by hand. → empty ack.
     PinOrigin { origin: String, key: [u8; 32] },
+    /// Every station this burrow runs, as its operator needs to see it:
+    /// what is on, what it is sending, and what its rotation could not
+    /// play. → [`RadioStatus`].
+    ListStations,
     /// The snapshots in the backup folder. → [`BackupList`].
     ListBackups,
     /// Make a snapshot now. → [`BackupMade`].
@@ -1554,6 +1558,8 @@ pub enum AdminEvent {
     OriginsListed(Vec<OriginEntry>),
     /// The backup folder, and the snapshots in it.
     BackupsListed(String, Vec<BackupEntry>),
+    /// The stations, with what each is doing and leaving out.
+    StationsListed(Vec<rabbithole_proto::radio::RadioStationStatus>),
     /// A snapshot was made.
     BackupMade(BackupEntry),
     /// A snapshot was checked.
@@ -1642,6 +1648,7 @@ impl AdminCommand {
             AdminCommand::RevokePeer { key } => format!("*peer-revoke:{}", hex::encode(key)),
             AdminCommand::ListOrigins => "*origins".to_string(),
             AdminCommand::PinOrigin { origin, .. } => format!("*origin-pin:{origin}"),
+            AdminCommand::ListStations => "*stations".to_string(),
             AdminCommand::ListBackups => "*backups".to_string(),
             AdminCommand::MakeBackup => "*backup-make".to_string(),
             AdminCommand::VerifyBackup { name } => format!("*backup-verify:{name}"),
@@ -1760,6 +1767,9 @@ pub fn admin_command_to_frame(
         AdminCommand::PinOrigin { origin, key } => {
             Frame::request(id, &OriginPin::new(origin.clone(), *key))?
         }
+        AdminCommand::ListStations => {
+            Frame::request(id, &rabbithole_proto::radio::RadioStatusRequest)?
+        }
         AdminCommand::ListBackups => Frame::request(id, &BackupListRequest)?,
         AdminCommand::MakeBackup => Frame::request(id, &BackupCreate)?,
         AdminCommand::VerifyBackup { name } => {
@@ -1863,6 +1873,9 @@ pub fn frame_to_admin_events(frame: &Frame) -> Vec<AdminEvent> {
     }
     if let Some(Ok(m)) = frame.decode::<BackupList>() {
         return vec![AdminEvent::BackupsListed(m.dir, m.snapshots)];
+    }
+    if let Some(Ok(m)) = frame.decode::<rabbithole_proto::radio::RadioStatus>() {
+        return vec![AdminEvent::StationsListed(m.stations)];
     }
     if let Some(Ok(m)) = frame.decode::<BackupMade>() {
         return vec![AdminEvent::BackupMade(m.snapshot)];
@@ -2094,6 +2107,43 @@ mod tests {
         let decoded = frame.decode::<ChatSend>().unwrap().unwrap();
         assert_eq!(decoded.room, "lobby");
         assert_eq!(decoded.text, "hi warren");
+    }
+
+    #[test]
+    fn asking_for_the_stations_goes_out_and_the_answer_comes_back() {
+        // The seam end to end: the console's command becomes the burrow's
+        // request, and the burrow's reply becomes the console's event.
+        let frame = admin_command_to_frame(&AdminCommand::ListStations, RequestId(4))
+            .unwrap()
+            .expect("asking produces a frame");
+        assert_eq!(frame.family, Family::RADIO);
+        assert!(frame
+            .decode::<rabbithole_proto::radio::RadioStatusRequest>()
+            .is_some());
+
+        let answer = rabbithole_proto::radio::RadioStatus::new(vec![
+            rabbithole_proto::radio::RadioStationStatus::new("jukebox", "The Jukebox")
+                .of_area("music", "audio/ogg")
+                .on_air("Down the Hole", "The Lagomorphs", 2, false)
+                .with_rotation(
+                    9,
+                    vec![rabbithole_proto::radio::LeftOut::new(
+                        "notes.txt",
+                        "not audio this burrow can stream",
+                        7,
+                    )],
+                ),
+        ]);
+        let reply = Frame::reply_to(&frame, &answer).unwrap();
+        match frame_to_admin_events(&reply).as_slice() {
+            [AdminEvent::StationsListed(stations)] => {
+                assert_eq!(stations.len(), 1);
+                assert_eq!(stations[0].station, "jukebox");
+                assert_eq!(stations[0].content_type, "audio/ogg");
+                assert_eq!(stations[0].left_out[0].title, "notes.txt");
+            }
+            other => panic!("expected the stations, got {other:?}"),
+        }
     }
 
     #[test]

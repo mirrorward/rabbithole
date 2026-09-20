@@ -2610,6 +2610,7 @@ impl AppState {
                         f.listed_backups(dir.clone(), list.clone())
                     }
                     AdminEvent::BackupChecked(result) => f.checked(result.clone()),
+                    AdminEvent::StationsListed(list) => f.stations = list.clone(),
                     _ => {}
                 }
             }
@@ -2829,6 +2830,11 @@ impl AppState {
     /// The snapshots in the backup folder.
     pub fn load_backups(&self) {
         self.dispatch_people(AdminCommand::ListBackups);
+    }
+
+    /// Ask what each station is doing, for the Radio pane.
+    pub fn load_stations(&self) {
+        self.dispatch_people(AdminCommand::ListStations);
     }
 
     /// Make a snapshot now.
