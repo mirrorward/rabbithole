@@ -29,6 +29,18 @@ pub const DESCRIBE: &str = "*describe";
 /// The same, for [`crate::wire::AdminCommand::GetSurfaceStatus`].
 pub const SURFACES: &str = "*surfaces";
 
+/// Whether a tagged admin reply belongs to this model.
+///
+/// A setting's tag is its own config key. Everything else a console sends
+/// is tagged with a leading `*` and is read by another model — People,
+/// Moderation, Federation — so anything starred is theirs, bar the two
+/// markers above, which are this model's own way of asking. Saying it this
+/// way round matters: a reply nobody claims lands here, where nothing reads
+/// it, and the pane that asked for it stays empty with no error anywhere.
+pub fn is_settings_tag(tag: &str) -> bool {
+    !tag.starts_with('*') || tag == DESCRIBE || tag == SURFACES
+}
+
 /// The shape of a setting, which decides its control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -535,6 +547,44 @@ pub fn humanize_secs(secs: u64) -> String {
         }
     }
     parts.join(" ")
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use crate::wire::AdminCommand;
+
+    /// Every reply has to reach the model that reads it. A config key is a
+    /// setting; everything starred belongs to somebody else — and the two
+    /// this model asks with are the only exceptions, named here so adding a
+    /// third is a decision rather than an accident.
+    #[test]
+    fn a_reply_reaches_the_model_that_reads_it() {
+        assert!(is_settings_tag("radio_enabled"), "a config key");
+        assert!(is_settings_tag(DESCRIBE));
+        assert!(is_settings_tag(SURFACES));
+
+        // Every listing a pane shows. None of these is a setting, and one
+        // of them (*stations) once landed here and left the Radio pane
+        // saying it had no stations while a station was on the air.
+        for command in [
+            AdminCommand::ListStations,
+            AdminCommand::ListPeers,
+            AdminCommand::ListOrigins,
+            AdminCommand::ListBackups,
+            AdminCommand::ListInvites,
+            AdminCommand::ListDenyHashes,
+            AdminCommand::ListAudit { limit: 10 },
+            AdminCommand::ListReports { state: None },
+            AdminCommand::MakeBackup,
+        ] {
+            let tag = command.tag().expect("a tagged command");
+            assert!(
+                !is_settings_tag(&tag),
+                "{tag} would land in the settings model, where nothing reads it"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

@@ -2560,28 +2560,7 @@ impl AppState {
     /// settings model for config keys and its two markers, the People model
     /// for account, class and invitation actions.
     pub fn fold_admin_reply(&self, tag: Option<&str>, events: &[AdminEvent]) {
-        let is_people = tag.is_some_and(|t| {
-            [
-                "*account-",
-                "*class-",
-                "*invite",
-                "*board-",
-                "*post-",
-                "*area-",
-                "*folder-",
-                "*node-",
-                "*report",
-                "*deny-",
-                "*audit",
-                "*kick",
-                "*broadcast",
-                "*peer",
-                "*origin",
-                "*backup",
-            ]
-            .iter()
-            .any(|p| t.starts_with(p))
-        });
+        let is_people = tag.is_some_and(|t| !crate::admin_settings::is_settings_tag(t));
         if !is_people {
             self.fold_settings_reply(tag, events);
             return;

@@ -48,40 +48,44 @@ pub fn StationsPanel() -> impl IntoView {
                     </p>
                 }
             >
-                <ul class="rh-adm-list">
+                <div class="rh-adm-rows">
                     {move || stations().into_iter().map(|s| {
                         let left = left_out_line(&s.left_out);
                         let tracks = s.left_out.clone();
                         view! {
-                            <li class="rh-adm-row">
-                                <div class="rh-adm-row-main">
-                                    <span class="rh-adm-row-title">{s.name.clone()}</span>
-                                    <span class="rh-adm-row-sub">{station_line(&s)}</span>
-                                    <span class="rh-adm-row-sub">{area_line(&s.area)}</span>
-                                </div>
-                                <div class="rh-adm-row-side">
-                                    <span class="rh-adm-pill">{listeners_line(s.listeners)}</span>
-                                    {s.live.then(|| view! {
-                                        <span class="rh-adm-pill warn">"DJ live"</span>
-                                    })}
+                            <div class="rh-adm-station">
+                                <div class="rh-adm-station-head">
+                                    <div class="rh-adm-station-who">
+                                        <span class="rh-adm-station-name">{s.name.clone()}</span>
+                                        <span>{station_line(&s)}</span>
+                                        <span class="rh-adm-station-meta">{area_line(&s.area)}</span>
+                                    </div>
+                                    <span class="rh-adm-station-state">
+                                        {listeners_line(s.listeners)}
+                                        {s.live.then(|| view! {
+                                            <span class="rh-badge">"DJ live"</span>
+                                        })}
+                                    </span>
                                 </div>
                                 {left.map(|line| view! {
-                                    <details class="rh-adm-detail">
+                                    <details class="rh-adm-station-left">
                                         <summary>{line}</summary>
-                                        <ul class="rh-adm-sublist">
+                                        <ul>
                                             {tracks.into_iter().map(|t| view! {
                                                 <li>
-                                                    <span class="rh-adm-row-title">{t.title}</span>
-                                                    <span class="rh-adm-row-sub">{t.reason}</span>
+                                                    <span class="rh-adm-station-track">
+                                                        {t.title}
+                                                    </span>
+                                                    <span class="rh-adm-station-why">{t.reason}</span>
                                                 </li>
                                             }).collect_view()}
                                         </ul>
                                     </details>
                                 })}
-                            </li>
+                            </div>
                         }
                     }).collect_view()}
-                </ul>
+                </div>
             </Show>
         </section>
     }
