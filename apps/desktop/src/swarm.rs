@@ -18,16 +18,30 @@ use rabbithole_swarm::{
     SourcePeer, UNIT_SIZE,
 };
 
-/// How long the burrow may take over one proved range before it is let go
-/// as a source for this download.
-const ORIGIN_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long a burrow may take over one proved range before it is let go as
+/// a source for this download.
+const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long a burrow's session is waited for when something else is using
+/// it (another download, an advert): past that the unit goes to somebody
+/// else and this burrow keeps its place.
+pub const SESSION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// How soon a burrow still making a file's proofs is asked again: at first,
 /// and at most.
-const ORIGIN_BUSY_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
-const ORIGIN_BUSY_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(2);
-/// The slowest a burrow makes a file's proofs, for how long it is waited
-/// for (a minute, and the file at that rate).
+const BUSY_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+const BUSY_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(2);
+/// The slowest a burrow makes a file's proofs, for how long the burrow a
+/// file is downloaded from is waited for (a minute, and the file at that
+/// rate). Another burrow, which is a bonus rather than the source, is given
+/// [`HELPER_BUSY_FOR`] and then left to catch up on its own.
 const ORIGIN_PROOF_RATE: u64 = 64 * 1024 * 1024;
+const HELPER_BUSY_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+/// The most other burrows one download asks. Each is a session doing one
+/// thing at a time, so a handful is plenty and a crowd is only noise.
+pub const OTHER_BURROWS_MAX: usize = 4;
+
+/// One burrow's native session, shared with whatever else the app is doing
+/// on that burrow (a download takes it for the length of one ask).
+pub type Session = Arc<tokio::sync::Mutex<Client>>;
 
 /// Whether a burrow's software sends proved ranges (0.230 on). One that
 /// does not is never asked, so a download it could not serve opens and
@@ -40,39 +54,148 @@ fn serves_proved_ranges(version: &str) -> bool {
     }
 }
 
-/// The burrow as one of a swarm fetch's sources: it holds the whole file and
-/// sends each range with its proof (`ProvedRange`), which the fetch checks
-/// against the root like any peer's. Its asks go through the download's own
-/// session, one at a time, answered by the loop that drives the download. It
-/// takes units like any other source (work-stealing), so it carries what the
-/// peers do not hold and whatever it is quicker to.
-struct Origin {
-    asks: tokio::sync::mpsc::Sender<OriginAsk>,
+/// Whether a burrow's software can say which of its files holds a content
+/// (0.232 on), which is what lets a download on one burrow take chunks from
+/// another.
+fn finds_by_content(version: &str) -> bool {
+    let mut parts = version.split('.').map(|p| p.parse::<u64>().ok());
+    match (parts.next().flatten(), parts.next().flatten()) {
+        (Some(major), Some(minor)) => (major, minor) >= (0, 232),
+        _ => false,
+    }
 }
 
-/// What the burrow said to one ask.
-enum OriginAnswer {
-    Range(rabbithole_proto::transfer::ProvedRange),
-    /// It is making the file's proofs: ask again shortly.
-    Busy,
-    /// Not from it, for this download.
-    No,
+/// A burrow as one of a fetch's sources: it holds the whole file and sends
+/// each range with its proof (`ProvedRange`), which the fetch checks against
+/// the root like any peer's. It takes units like any other source
+/// (work-stealing), so it carries what the peers do not hold and whatever it
+/// is quicker to.
+///
+/// Two kinds, told apart by [`BurrowSource::lent`]: **the burrow the file is
+/// being downloaded from**, and **another burrow the person is signed in to**
+/// that holds the same content and lets them download it there. What another
+/// burrow sends is never offered on to this one's swarm: it was lent to this
+/// person, not given to this burrow.
+pub struct BurrowSource {
+    label: String,
+    session: Session,
+    node_id: i64,
+    /// Opened when the burrow is first asked (the burrow of the download),
+    /// or when it answered for the content (another burrow), so a burrow
+    /// that serves nothing opens and counts nothing.
+    ticket: tokio::sync::Mutex<Option<rabbithole_proto::transfer::TransferTicket>>,
+    /// How long it is waited for while it makes the file's proofs.
+    busy_for: std::time::Duration,
+    lent: bool,
 }
 
-struct OriginAsk {
-    offset: u64,
-    len: u32,
-    reply: tokio::sync::oneshot::Sender<OriginAnswer>,
+impl BurrowSource {
+    /// The burrow the download is from: asked for ranges of `node_id`, its
+    /// ticket opened on the first ask.
+    pub fn origin(label: String, session: Session, node_id: i64, size: u64) -> Self {
+        BurrowSource {
+            label,
+            session,
+            node_id,
+            ticket: tokio::sync::Mutex::new(None),
+            busy_for: std::time::Duration::from_secs(60 + size / ORIGIN_PROOF_RATE),
+            lent: false,
+        }
+    }
+
+    /// Another burrow, which has already said it holds the content and given
+    /// a ticket for it.
+    pub fn helper(
+        label: String,
+        session: Session,
+        node_id: i64,
+        ticket: rabbithole_proto::transfer::TransferTicket,
+    ) -> Self {
+        BurrowSource {
+            label,
+            session,
+            node_id,
+            ticket: tokio::sync::Mutex::new(Some(ticket)),
+            busy_for: HELPER_BUSY_FOR,
+            lent: true,
+        }
+    }
+
+    /// Give back the ticket, if one was opened: a burrow does not hold a
+    /// transfer slot for a download that has finished with it.
+    pub async fn close(&self) {
+        let ticket = { self.ticket.lock().await.take() };
+        let Some(ticket) = ticket else { return };
+        if let Ok(mut client) = tokio::time::timeout(SESSION_WAIT, self.session.lock()).await {
+            let _ = tokio::time::timeout(ASK_TIMEOUT, client.close_transfer(ticket.transfer_id))
+                .await;
+        }
+    }
+
+    /// One ask. `Ok(None)`: not now — the burrow is making the file's
+    /// proofs, or its session is busy with something else. `Err`: it is out,
+    /// for this download.
+    async fn ask(
+        &self,
+        at: u64,
+        part: u32,
+    ) -> Result<Option<rabbithole_proto::transfer::ProvedRange>, PeerError> {
+        let gone = || PeerError::Refused(rabbithole_swarm::peer::STATUS_NOT_FOUND);
+        let answer = {
+            let Ok(mut client) = tokio::time::timeout(SESSION_WAIT, self.session.lock()).await
+            else {
+                return Ok(None);
+            };
+            let mut held = self.ticket.lock().await;
+            let id = match held.as_ref() {
+                Some(ticket) => ticket.transfer_id,
+                None => {
+                    let opened = tokio::time::timeout(
+                        ASK_TIMEOUT,
+                        client.download_ticket(self.node_id),
+                    )
+                    .await
+                    .ok()
+                    .and_then(Result::ok);
+                    match opened {
+                        Some(ticket) => {
+                            let id = ticket.transfer_id;
+                            *held = Some(ticket);
+                            id
+                        }
+                        None => return Err(gone()),
+                    }
+                }
+            };
+            drop(held);
+            tokio::time::timeout(ASK_TIMEOUT, client.proved_range(id, at, part)).await
+        };
+        match answer {
+            Ok(Ok(range)) => Ok(Some(range)),
+            // Still making the file's proofs: ask again shortly.
+            Ok(Err(ClientError::Refused(rabbithole_proto::ErrorCode::Unavailable))) => Ok(None),
+            // Anything else, and this burrow is done for this download: its
+            // ticket goes back now, not when the peers finish.
+            _ => {
+                self.close().await;
+                Err(gone())
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
-impl RangeSource for Origin {
+impl RangeSource for BurrowSource {
     fn label(&self) -> String {
-        ORIGIN_SOURCE.to_string()
+        self.label.clone()
     }
 
     async fn have(&self) -> Result<Option<HaveMap>, PeerError> {
         Ok(None)
+    }
+
+    fn shareable(&self) -> bool {
+        !self.lent
     }
 
     async fn bao(&self, offset: u64, len: u64) -> Result<Vec<BaoPiece>, PeerError> {
@@ -80,29 +203,23 @@ impl RangeSource for Origin {
         let step = rabbithole_proto::transfer::PROVED_RANGE_MAX as u64;
         let mut pieces = Vec::new();
         let mut at = offset;
-        let refused = || PeerError::Refused(rabbithole_swarm::peer::STATUS_BAD_REQUEST);
+        let deadline = tokio::time::Instant::now() + self.busy_for;
         while at < offset + len {
             let part = (offset + len - at).min(step);
-            // A burrow making the file's proofs (it started when first
-            // asked) is asked again, a little later each time; meanwhile the
-            // peers carry on. The loop that drives the download decides when
-            // it has waited long enough, and says so with `No`.
-            let mut pause = ORIGIN_BUSY_RETRY;
+            let mut pause = BUSY_RETRY;
             let range = loop {
-                let (reply, answer) = tokio::sync::oneshot::channel();
-                let ask = OriginAsk {
-                    offset: at,
-                    len: part as u32,
-                    reply,
-                };
-                self.asks.send(ask).await.map_err(|_| refused())?;
-                match answer.await {
-                    Ok(OriginAnswer::Range(range)) => break range,
-                    Ok(OriginAnswer::Busy) => {
+                match self.ask(at, part as u32).await? {
+                    Some(range) => break range,
+                    None if tokio::time::Instant::now() + pause < deadline => {
                         tokio::time::sleep(pause).await;
-                        pause = (pause * 2).min(ORIGIN_BUSY_RETRY_MAX);
+                        pause = (pause * 2).min(BUSY_RETRY_MAX);
                     }
-                    _ => return Err(refused()),
+                    // Not now, and waited long enough: somebody else takes
+                    // this unit and this burrow keeps its place, so a slow
+                    // burrow costs the download nothing but its turn.
+                    None => {
+                        return Err(PeerError::Refused(rabbithole_swarm::peer::STATUS_NOT_HELD))
+                    }
                 }
             };
             pieces.push(BaoPiece {
@@ -119,6 +236,49 @@ impl RangeSource for Origin {
         }
         Ok(pieces)
     }
+}
+
+/// A burrow the app is signed in to, as a possible source for a download
+/// running on another one.
+pub struct BurrowLink {
+    /// What the Transfers row calls it (its endpoint).
+    pub label: String,
+    pub session: Session,
+    /// Its identity key, so the same burrow reached two ways is one burrow.
+    pub server_key: [u8; 32],
+    /// The software it reports, so one too old to ask is not asked.
+    pub version: String,
+}
+
+/// Which of the app's other sessions a download may ask, by their place in
+/// `sessions` (`(endpoint, server_key, version)`): never the burrow the
+/// download is from, never the same burrow twice however it was reached,
+/// never one too old to answer, only when the person left the choice to the
+/// app, and never more than `max`. Pure, so the rule is tested rather than
+/// hoped for.
+pub fn other_burrows(
+    mode: SourceMode,
+    sessions: &[(String, [u8; 32], String)],
+    origin_endpoint: &str,
+    origin_key: [u8; 32],
+    max: usize,
+) -> Vec<usize> {
+    if mode != SourceMode::Auto {
+        return Vec::new();
+    }
+    let mut seen: Vec<[u8; 32]> = vec![origin_key];
+    let mut picked = Vec::new();
+    for (i, (endpoint, key, version)) in sessions.iter().enumerate() {
+        if picked.len() >= max {
+            break;
+        }
+        if endpoint == origin_endpoint || seen.contains(key) || !finds_by_content(version) {
+            continue;
+        }
+        seen.push(*key);
+        picked.push(i);
+    }
+    picked
 }
 
 /// How a download shares what lands as it goes (the person opted in to
@@ -155,8 +315,14 @@ pub enum SwarmEvent {
     },
     /// The fetch gave up, with the engine's own reason and how many sources
     /// were in play — the webview shows both, so a failed transfer can say
-    /// what went wrong instead of only that it did.
-    Failed { reason: String, sources_tried: usize },
+    /// what went wrong instead of only that it did. `retryable` is false
+    /// when trying again cannot help (nobody has the file at all), so the
+    /// row does not offer a Retry that is certain to fail.
+    Failed {
+        reason: String,
+        sources_tried: usize,
+        retryable: bool,
+    },
 }
 
 /// Why a swarm download couldn't proceed.
@@ -304,19 +470,32 @@ fn size_from_list(list: &SourceList) -> u64 {
 /// With `origin` (the file's node on the burrow, when the burrow holds it),
 /// the burrow is one of the sources too, unit by unit beside the peers:
 /// whatever they do not hold comes from it, each unit proved like theirs.
+/// `helpers` are other burrows that have already said they hold the content
+/// (see [`confirm_helpers`]); they take units the same way, and what they
+/// send is never offered back to this burrow's swarm.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_swarm_download(
-    client: &mut Client,
+    origin_session: &Session,
     root: [u8; 32],
     size: u64,
     dest: &Path,
     max_sources: usize,
     share: Option<ShareAs>,
     origin: Option<i64>,
+    helpers: Vec<Arc<BurrowSource>>,
     mut emit: impl FnMut(SwarmEvent),
 ) -> Result<FetchReport, SwarmError> {
     // Partial seeds too: this fetch asks each source which part it holds.
-    let list = client.swarm_find_all(root).await?;
+    let (list, ticket, serves_ranges) = {
+        let mut client = origin_session.lock().await;
+        let list = client.swarm_find_all(root).await?;
+        let ticket = client.swarm_ticket(root).await?;
+        (
+            list,
+            ticket,
+            serves_proved_ranges(&client.server.server_version),
+        )
+    };
     let mut sources = sources_except(&list, share.as_ref().map(|s| s.own));
     // The engine runs one worker per source, so the source count IS the
     // parallelism. Capped by the user's setting rather than hardcoded: on a
@@ -324,7 +503,7 @@ pub async fn run_swarm_download(
     if max_sources > 0 && sources.len() > max_sources {
         sources.truncate(max_sources);
     }
-    if sources.is_empty() {
+    if sources.is_empty() && helpers.is_empty() {
         return Err(SwarmError::NoPeerSources {
             server_has: list.server_has,
         });
@@ -339,7 +518,6 @@ pub async fn run_swarm_download(
             server_has: list.server_has,
         });
     }
-    let ticket = client.swarm_ticket(root).await?;
     let mut all: Vec<Arc<dyn RangeSource>> = sources
         .iter()
         .map(|p| {
@@ -353,24 +531,20 @@ pub async fn run_swarm_download(
         .collect();
     // The burrow joins when it holds the file, sends proved ranges, and the
     // person has not asked for peers only.
-    let (asks_tx, mut asks) = tokio::sync::mpsc::channel::<OriginAsk>(2);
-    let origin = origin
-        .filter(|_| list.server_has && serves_proved_ranges(&client.server.server_version));
-    if origin.is_some() {
-        all.push(Arc::new(Origin { asks: asks_tx }));
-    } else {
-        drop(asks_tx);
+    let mut burrows: Vec<Arc<BurrowSource>> = Vec::new();
+    if let Some(node_id) = origin.filter(|_| list.server_has && serves_ranges) {
+        // The burrow the download is from is "the burrow" in the Transfers
+        // row, as it has always been; another burrow is named, so the two
+        // are told apart.
+        burrows.push(Arc::new(BurrowSource::origin(
+            ORIGIN_SOURCE.to_string(),
+            origin_session.clone(),
+            node_id,
+            size,
+        )));
     }
-    // How long a burrow making the file's proofs is waited for: a minute,
-    // and the file read at the slowest rate a burrow makes them. Past that
-    // it is let go, and the peers carry the download.
-    let origin_busy_until = tokio::time::Instant::now()
-        + std::time::Duration::from_secs(60 + size / ORIGIN_PROOF_RATE);
-    // Opened when the burrow is first asked for a range, so a download it
-    // never serves opens (and counts) nothing there, and closed as soon as
-    // it is let go.
-    let mut origin_ticket: Option<rabbithole_proto::transfer::TransferTicket> = None;
-    let mut origin_gone = false;
+    burrows.extend(helpers);
+    all.extend(burrows.iter().map(|b| b.clone() as Arc<dyn RangeSource>));
     let total_units = size.div_ceil(UNIT_SIZE);
     emit(SwarmEvent::Opened {
         total_units,
@@ -387,107 +561,35 @@ pub async fn run_swarm_download(
     let mut advertised: Option<(std::time::Instant, u64)> = None;
     let seeds = share.map(|s| s.seeds);
     // Opted in: every unit that lands is offered on at once, with its
-    // proof, and the whole file when it is done.
+    // proof, and the whole file when it is done — unless another burrow
+    // carried part of it, which is not this one's to be given.
     let fetch = tokio::spawn(async move {
         fetch_swarm_from(&all, root, size, &dest_owned, Some(tx), seeds).await
     });
-    loop {
-        let u = tokio::select! {
-            // The fetch's end first: an ask still queued behind it has no
-            // one waiting for it.
-            biased;
-            unit = rx.recv() => match unit {
-                Some(u) => u,
-                None => break,
-            },
-            Some(ask) = asks.recv() => {
-                let mut reply = ask.reply;
-                if reply.is_closed() {
-                    continue;
-                }
-                if origin_ticket.is_none() && !origin_gone {
-                    if let Some(node_id) = origin {
-                        // Bounded like an ask: a burrow that has gone quiet
-                        // must not hold up the peers' download.
-                        origin_ticket = tokio::time::timeout(
-                            ORIGIN_ASK_TIMEOUT,
-                            client.download_ticket(node_id),
-                        )
-                        .await
-                        .ok()
-                        .and_then(Result::ok);
-                    }
-                    origin_gone = origin_ticket.is_none();
-                }
-                let answer = match &origin_ticket {
-                    Some(ticket) => {
-                        // Progress keeps flowing while the burrow answers,
-                        // and a burrow that does not answer in time is let go.
-                        let request = client.proved_range(ticket.transfer_id, ask.offset, ask.len);
-                        tokio::pin!(request);
-                        let deadline = tokio::time::sleep(ORIGIN_ASK_TIMEOUT);
-                        tokio::pin!(deadline);
-                        loop {
-                            tokio::select! {
-                                answer = &mut request => break Some(match answer {
-                                    Ok(range) => OriginAnswer::Range(range),
-                                    // Still making the file's proofs: asked
-                                    // again, until it has had long enough.
-                                    Err(ClientError::Refused(rabbithole_proto::ErrorCode::Unavailable))
-                                        if tokio::time::Instant::now() < origin_busy_until =>
-                                    {
-                                        OriginAnswer::Busy
-                                    }
-                                    Err(_) => OriginAnswer::No,
-                                }),
-                                _ = &mut deadline => break Some(OriginAnswer::No),
-                                // The fetch no longer wants it.
-                                _ = reply.closed() => break None,
-                                Some(u) = rx.recv() => emit(SwarmEvent::Chunk {
-                                    endpoint: u.endpoint,
-                                    offset: u.offset,
-                                    done_units: u.done_units,
-                                    total_units: u.total_units,
-                                }),
-                            }
-                        }
-                    }
-                    None => Some(OriginAnswer::No),
-                };
-                // The fetch hears first, then the burrow is let go: its
-                // ticket closes now, not when the peers finish.
-                let let_go = matches!(answer, Some(OriginAnswer::No));
-                if let Some(answer) = answer {
-                    let _ = reply.send(answer);
-                }
-                if let_go {
-                    origin_gone = true;
-                    if let Some(ticket) = origin_ticket.take() {
-                        let _ = tokio::time::timeout(
-                            ORIGIN_ASK_TIMEOUT,
-                            client.close_transfer(ticket.transfer_id),
-                        )
-                        .await;
-                    }
-                }
-                continue;
-            }
-        };
+    while let Some(u) = rx.recv().await {
         if let Some((entry, ttl)) = &advert {
             let due = advertised.is_none_or(|(at, after)| at.elapsed().as_secs() >= after);
             if due {
                 // Found by peers that can use part of a file; a burrow that
-                // predates that is not told until the file is whole.
-                let granted = client
-                    .swarm_advertise_partial(vec![entry.clone()], *ttl)
+                // predates that is not told until the file is whole. The
+                // session is shared with this download's own asks, so a
+                // turn that does not come is simply skipped.
+                let granted = match tokio::time::timeout(SESSION_WAIT, origin_session.lock()).await
+                {
+                    Ok(mut client) => tokio::time::timeout(
+                        ASK_TIMEOUT,
+                        client.swarm_advertise_partial(vec![entry.clone()], *ttl),
+                    )
                     .await
                     .ok()
+                    .and_then(Result::ok)
                     .flatten()
-                    .map(|ack| ack.ttl_secs)
-                    .unwrap_or(*ttl);
+                    .map(|ack| ack.ttl_secs),
+                    Err(_) => None,
+                };
                 advertised = Some((
                     std::time::Instant::now(),
-                    crate::seeding::reannounce_after(granted),
+                    crate::seeding::reannounce_after(granted.unwrap_or(*ttl)),
                 ));
             }
         }
@@ -498,12 +600,10 @@ pub async fn run_swarm_download(
             total_units: u.total_units,
         });
     }
-    if let Some(ticket) = &origin_ticket {
-        let _ = tokio::time::timeout(
-            ORIGIN_ASK_TIMEOUT,
-            client.close_transfer(ticket.transfer_id),
-        )
-        .await;
+    // Every burrow that was asked gives its ticket back, whatever became of
+    // the download.
+    for burrow in &burrows {
+        burrow.close().await;
     }
     let report = fetch
         .await
@@ -514,6 +614,38 @@ pub async fn run_swarm_download(
         per_source: report.per_source.clone(),
     });
     Ok(report)
+}
+
+/// Ask each of the app's other burrows whether it holds `root` and whether
+/// this person may download it there, and take a ticket from the ones that
+/// do. Only these join a download; a burrow that says nothing, says no, or
+/// is too old to be asked is simply not a source, and costs the download
+/// one bounded round trip.
+pub async fn confirm_helpers(links: &[BurrowLink], root: [u8; 32]) -> Vec<Arc<BurrowSource>> {
+    let mut helpers = Vec::new();
+    for link in links {
+        let Ok(mut client) = tokio::time::timeout(SESSION_WAIT, link.session.lock()).await else {
+            continue;
+        };
+        let found = tokio::time::timeout(ASK_TIMEOUT, client.file_by_content(root))
+            .await
+            .ok()
+            .and_then(Result::ok);
+        let Some(found) = found else { continue };
+        let ticket = tokio::time::timeout(ASK_TIMEOUT, client.download_ticket(found.node_id))
+            .await
+            .ok()
+            .and_then(Result::ok);
+        let Some(ticket) = ticket else { continue };
+        drop(client);
+        helpers.push(Arc::new(BurrowSource::helper(
+            link.label.clone(),
+            link.session.clone(),
+            found.node_id,
+            ticket,
+        )));
+    }
+    helpers
 }
 
 /// One download, as asked for.
@@ -530,6 +662,16 @@ pub struct Wanted {
     pub mode: SourceMode,
 }
 
+/// How a download went: which way it came, and whether what landed may be
+/// offered to the burrow's swarm. It may not when another burrow carried
+/// part of it: that content was lent to this person, not given to this
+/// burrow to hand on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Downloaded {
+    pub route: Route,
+    pub may_share: bool,
+}
+
 /// Download `root` the way the person asked: from peers, from the burrow, or
 /// (the default) from peers when there are any and the burrow when there are
 /// not. Before this, a download in the app failed outright whenever nobody
@@ -538,24 +680,27 @@ pub struct Wanted {
 /// `node_id` is the file's node on the origin; without it the origin cannot be
 /// asked, and the download is peers-only whatever was chosen.
 pub async fn run_download(
-    client: &mut Client,
+    session: &Session,
     want: &Wanted,
     dest: &Path,
     emit: impl FnMut(SwarmEvent),
-) -> Result<Route, SwarmError> {
-    run_download_sharing(client, want, dest, None, emit).await
+) -> Result<Downloaded, SwarmError> {
+    run_download_sharing(session, want, dest, None, &[], emit).await
 }
 
 /// [`run_download`], offering what lands to this burrow's swarm through
 /// `share` as it goes (the person opted in to seeding), not only once the
-/// file is whole.
+/// file is whole, and taking chunks from `others` — the app's other burrows
+/// — when they hold the same content and the person left the choice to the
+/// app.
 pub async fn run_download_sharing(
-    client: &mut Client,
+    session: &Session,
     want: &Wanted,
     dest: &Path,
     share: Option<ShareAs>,
+    others: &[BurrowLink],
     mut emit: impl FnMut(SwarmEvent),
-) -> Result<Route, SwarmError> {
+) -> Result<Downloaded, SwarmError> {
     let Wanted {
         root,
         size,
@@ -566,12 +711,30 @@ pub async fn run_download_sharing(
     let (peers, server_has) = if mode == SourceMode::OriginOnly {
         (0, true) // the origin is asked directly; it answers for itself
     } else {
-        let list = client.swarm_find_all(root).await?;
+        let list = session.lock().await.swarm_find_all(root).await?;
         let own = share.as_ref().map(|s| s.own);
         (sources_except(&list, own).len(), list.server_has)
     };
+    // Asked before the route is chosen, so a download that only the other
+    // burrows can carry still takes the swarm route, and the count the UI
+    // is told is of sources that have actually answered.
+    let helpers = if mode == SourceMode::OriginOnly {
+        Vec::new()
+    } else {
+        confirm_helpers(others, root).await
+    };
     let seeds = share.as_ref().map(|s| s.seeds.clone());
-    match choose_route(mode, peers, server_has, node_id.is_some())? {
+    let route = choose_route(mode, peers + helpers.len(), server_has, node_id.is_some());
+    let route = match route {
+        Ok(route) => route,
+        Err(e) => {
+            for helper in &helpers {
+                helper.close().await;
+            }
+            return Err(e);
+        }
+    };
+    match route {
         Route::Swarm => {
             // Unless the person asked for peers only, the burrow is a source
             // alongside them.
@@ -579,18 +742,22 @@ pub async fn run_download_sharing(
                 .then_some(node_id)
                 .flatten();
             match run_swarm_download(
-                client,
+                session,
                 root,
                 size,
                 dest,
                 max_sources,
                 share,
                 origin,
+                helpers,
                 &mut emit,
             )
             .await
             {
-                Ok(_) => Ok(Route::Swarm),
+                Ok(report) => Ok(Downloaded {
+                    route: Route::Swarm,
+                    may_share: !report.borrowed,
+                }),
                 // The peers could not give the whole file (gone, or holding
                 // only parts of it): by default the burrow sends it instead.
                 // Not when the trouble is on this machine (a full disk): the
@@ -602,22 +769,33 @@ pub async fn run_download_sharing(
                         && node_id.is_some() =>
                 {
                     let node_id = node_id.expect("checked");
+                    let mut client = session.lock().await;
                     // What was offered in part is no longer here to serve.
                     if seeds.as_ref().is_some_and(|s| !s.holds_whole(&root)) {
                         let _ = client.swarm_withdraw(vec![root]).await;
                     }
-                    run_origin_download(client, node_id, size, dest, &mut emit).await?;
+                    run_origin_download(&mut client, node_id, size, dest, &mut emit).await?;
                     check_origin_copy(dest, root)?;
-                    Ok(Route::Origin)
+                    Ok(Downloaded {
+                        route: Route::Origin,
+                        may_share: true,
+                    })
                 }
                 Err(e) => Err(e),
             }
         }
         Route::Origin => {
+            for helper in &helpers {
+                helper.close().await;
+            }
             let node_id = node_id.expect("choose_route requires a reachable origin");
-            run_origin_download(client, node_id, size, dest, &mut emit).await?;
+            let mut client = session.lock().await;
+            run_origin_download(&mut client, node_id, size, dest, &mut emit).await?;
             check_origin_copy(dest, root)?;
-            Ok(Route::Origin)
+            Ok(Downloaded {
+                route: Route::Origin,
+                may_share: true,
+            })
         }
     }
 }
@@ -824,6 +1002,46 @@ mod tests {
         assert_eq!(dv["kind"], "done");
         assert_eq!(dv["bytes"], 4_000_000);
         assert_eq!(dv["per_source"][0][1], 3);
+
+        // A failure says whether trying again could work, so the row does
+        // not offer a Retry that cannot help.
+        let failed = SwarmEvent::Failed {
+            reason: "nobody has this file right now, not even the burrow".into(),
+            sources_tried: 0,
+            retryable: false,
+        };
+        let fv = serde_json::to_value(&failed).unwrap();
+        assert_eq!(fv["kind"], "failed");
+        assert_eq!(fv["sources_tried"], 0);
+        assert_eq!(fv["retryable"], false);
+    }
+
+    #[test]
+    fn a_download_asks_the_other_burrows_that_can_answer_and_no_others() {
+        let key = |n: u8| [n; 32];
+        let here = key(1);
+        let sessions = vec![
+            ("ws://home".to_string(), here, "0.232.0".to_string()),
+            ("ws://other".to_string(), key(2), "0.232.0".to_string()),
+            // The same burrow, reached another way: one burrow, not two.
+            ("quic://other".to_string(), key(2), "0.232.0".to_string()),
+            ("ws://old".to_string(), key(3), "0.231.0".to_string()),
+            ("ws://new".to_string(), key(4), "1.0.0".to_string()),
+            ("ws://newer".to_string(), key(5), "0.240.1".to_string()),
+        ];
+        let pick = |mode, max| other_burrows(mode, &sessions, "ws://home", here, max);
+        // Not the burrow it is downloading from, not the same burrow twice,
+        // not one too old to be asked.
+        assert_eq!(pick(SourceMode::Auto, 8), vec![1, 4, 5]);
+        // Never more than it was told to.
+        assert_eq!(pick(SourceMode::Auto, 2), vec![1, 4]);
+        // The person chose where it comes from: no other burrow is asked.
+        assert!(pick(SourceMode::PeersOnly, 8).is_empty());
+        assert!(pick(SourceMode::OriginOnly, 8).is_empty());
+        // The burrow of the download, found by its key rather than the
+        // endpoint the app happens to have dialled.
+        let by_key = other_burrows(SourceMode::Auto, &sessions, "ws://nowhere", key(2), 8);
+        assert_eq!(by_key, vec![0, 4, 5]);
     }
 
     #[test]

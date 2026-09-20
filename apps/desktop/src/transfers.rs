@@ -22,7 +22,10 @@ use crate::downloads::sanitize_name;
 
 use rabbithole_core::Client;
 
-use crate::swarm::{run_download_sharing, SourceMode, SwarmEvent, Wanted};
+use crate::swarm::{
+    other_burrows, run_download_sharing, BurrowLink, SourceMode, SwarmEvent, Wanted,
+    OTHER_BURROWS_MAX, SESSION_WAIT,
+};
 
 /// App-managed state: the native RHP sessions, one per burrow.
 #[derive(Default)]
@@ -122,9 +125,66 @@ pub async fn connect_native(
     Ok(())
 }
 
-/// One burrow's native session, held on its own so the rest of the app is
-/// not blocked while a download uses it.
-type Session = Arc<Mutex<Client>>;
+pub use crate::swarm::Session;
+
+/// The other burrows a download may ask: every session the app holds but
+/// the one it is downloading from, deduped by the burrow's own key so one
+/// reached two ways is one burrow, and only those new enough to answer.
+/// The rule itself is [`crate::swarm::other_burrows`]; this only fetches
+/// what it needs from the live sessions.
+async fn other_links(
+    state: &TransfersManager,
+    origin_endpoint: &str,
+    origin: &Session,
+) -> Vec<BurrowLink> {
+    let sessions: Vec<(String, Session)> = {
+        let map = state.clients.lock().await;
+        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    };
+    let origin_key = match tokio::time::timeout(SESSION_WAIT, origin.lock()).await {
+        Ok(client) => client.server.server_key,
+        Err(_) => return Vec::new(),
+    };
+    let mut cards = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for (endpoint, session) in &sessions {
+        // A burrow busy with something else is not held up for this: it
+        // simply does not join this download.
+        let Ok(client) = tokio::time::timeout(SESSION_WAIT, session.lock()).await else {
+            continue;
+        };
+        cards.push((
+            endpoint.clone(),
+            client.server.server_key,
+            client.server.server_version.clone(),
+        ));
+        names.push(if client.server.server_name.is_empty() {
+            endpoint.clone()
+        } else {
+            client.server.server_name.clone()
+        });
+    }
+    let picked = other_burrows(
+        SourceMode::Auto,
+        &cards,
+        origin_endpoint,
+        origin_key,
+        OTHER_BURROWS_MAX,
+    );
+    picked
+        .into_iter()
+        .map(|i| BurrowLink {
+            label: names[i].clone(),
+            session: sessions
+                .iter()
+                .find(|(e, _)| *e == cards[i].0)
+                .map(|(_, s)| s.clone())
+                .expect("from the same list"),
+            server_key: cards[i].1,
+            version: cards[i].2.clone(),
+        })
+        .collect()
+}
 
 /// A `SwarmEvent` tagged with which transfer it belongs to — the `swarm://event`
 /// payload the ui-web Transfers manager routes by `transfer_id`.
@@ -172,8 +232,10 @@ pub async fn swarm_start_download(
         .get(&endpoint)
         .cloned()
         .ok_or("the app has no signed-in session to that burrow")?;
-    let mut guard = session.lock().await;
-    let client = &mut *guard;
+    // The other burrows this person is on, which may hold the same content
+    // and let them download it there: they are asked, and the ones that say
+    // yes carry units beside the peers.
+    let others = other_links(&state, &endpoint, &session).await;
     // A failure is reported to the webview as an event, not just returned:
     // the UI's transfer row is driven by the event stream, and an error that
     // only comes back through the invoke promise leaves that row saying
@@ -186,8 +248,9 @@ pub async fn swarm_start_download(
     // what lands is fetched from here while the rest is still coming.
     let seeding = downloads::load(&prefs_path(&app)?).seed;
     let share = if seeding && size > 0 && mode != SourceMode::OriginOnly {
+        let mut client = session.lock().await;
         let mut seeders = state.seeders.lock().await;
-        match seeders.entry(endpoint.clone()).or_default().begin(client, root, size, &name).await {
+        match seeders.entry(endpoint.clone()).or_default().begin(&mut client, root, size, &name).await {
             Ok(seeds) => Some(seeds),
             Err(e) => {
                 *state.seeding_note.lock().expect("not poisoned") = Some(e.to_string());
@@ -198,27 +261,33 @@ pub async fn swarm_start_download(
         None
     };
     let sharing = share.is_some();
-    let result = run_download_sharing(client, &want, &dest, share, move |event| {
+    let result = run_download_sharing(&session, &want, &dest, share, &others, move |event| {
         let _ = emit_app.emit("swarm://event", TransferEvent { transfer_id, event });
     })
     .await;
-    if result.is_err() && sharing {
+    // Nothing landed, or what landed is not this burrow's to be offered:
+    // take back what was offered in part.
+    if sharing && !matches!(result, Ok(done) if done.may_share) {
+        let mut client = session.lock().await;
         if let Some(seeder) = state.seeders.lock().await.get_mut(&endpoint) {
-            seeder.abandon(client, root).await;
+            seeder.abandon(&mut client, root).await;
         }
     }
     match result {
-        Ok(_) => {
+        Ok(done) => {
             // Opted in: what was just downloaded from this burrow is offered
             // to this burrow's swarm. A courtesy on top of the download, so a
             // failure to share is noted for Settings and never fails it.
             // Opted in now (it may have been switched on while this ran).
-            if seeding || downloads::load(&prefs_path(&app)?).seed {
+            // Never what another burrow carried: that was lent to this
+            // person, not given to this burrow.
+            if done.may_share && (seeding || downloads::load(&prefs_path(&app)?).seed) {
+                let mut client = session.lock().await;
                 let mut seeders = state.seeders.lock().await;
                 let shared = seeders
                     .entry(endpoint.clone())
                     .or_default()
-                    .share(client, root, size, &name, &dest)
+                    .share(&mut client, root, size, &name, &dest)
                     .await;
                 *state.seeding_note.lock().expect("not poisoned") = shared.err().map(|e| e.to_string());
             }
@@ -233,6 +302,10 @@ pub async fn swarm_start_download(
                     event: crate::swarm::SwarmEvent::Failed {
                         reason: reason.clone(),
                         sources_tried: 0,
+                        retryable: !matches!(
+                            e,
+                            crate::swarm::SwarmError::NoPeerSources { server_has: false }
+                        ),
                     },
                 },
             );

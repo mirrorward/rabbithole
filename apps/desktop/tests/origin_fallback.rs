@@ -11,14 +11,14 @@
 
 use burrow::Burrow;
 use rabbithole_core::Client;
-use rabbithole_desktop_lib::swarm::{run_download, Route, SourceMode, SwarmEvent, Wanted, ORIGIN_SOURCE};
+use rabbithole_desktop_lib::swarm::{run_download, Route, Session, SourceMode, SwarmEvent, Wanted, ORIGIN_SOURCE};
 use rabbithole_server_core::{Role, ServerConfig};
 
 fn payload(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
-async fn login(burrow: &Burrow, user: &str) -> Client {
+async fn login(burrow: &Burrow, user: &str) -> Session {
     let mut c = Client::connect(
         &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
         None,
@@ -30,7 +30,7 @@ async fn login(burrow: &Burrow, user: &str) -> Client {
     .unwrap();
     c.auth_password(user, "pw-pw-pw").await.unwrap();
     c.expect_welcome().await.unwrap();
-    c
+    std::sync::Arc::new(tokio::sync::Mutex::new(c))
 }
 
 #[tokio::test]
@@ -51,9 +51,9 @@ async fn with_nobody_seeding_the_file_comes_from_the_burrow() {
     let body = payload(2 * 1024 * 1024 + 4321);
     let src = work.path().join("big.bin");
     std::fs::write(&src, &body).unwrap();
-    let mut admin = login(&burrow, "admin").await;
-    admin.area_create("warez", "Warez", "").await.unwrap();
-    let node = admin
+    let admin = login(&burrow, "admin").await;
+    admin.lock().await.area_create("warez", "Warez", "").await.unwrap();
+    let node = admin.lock().await
         .transfer_upload("warez", None, "big.bin", &src, "application/octet-stream", "")
         .await
         .unwrap();
@@ -64,10 +64,10 @@ async fn with_nobody_seeding_the_file_comes_from_the_burrow() {
     // The default. Nobody is seeding; it must work anyway.
     let dest = work.path().join("got.bin");
     let mut events = Vec::new();
-    let route = run_download(&mut admin, &want(SourceMode::Auto), &dest, |e| events.push(e))
+    let route = run_download(&admin, &want(SourceMode::Auto), &dest, |e| events.push(e))
         .await
         .expect("no peers is not a failure");
-    assert_eq!(route, Route::Origin);
+    assert_eq!(route.route, Route::Origin);
     assert_eq!(std::fs::read(&dest).unwrap(), body, "the bytes are the file's");
     assert!(matches!(events.first(), Some(SwarmEvent::Opened { total_units: 3, source_count: 1 })), "{events:?}");
     let chunks = events.iter().filter(|e| matches!(e, SwarmEvent::Chunk { .. })).count();
@@ -81,7 +81,7 @@ async fn with_nobody_seeding_the_file_comes_from_the_burrow() {
     }
 
     // Peers only means it: with nobody seeding, this one does fail, and says why.
-    let refused = run_download(&mut admin, &want(SourceMode::PeersOnly), &work.path().join("no.bin"), |_| {})
+    let refused = run_download(&admin, &want(SourceMode::PeersOnly), &work.path().join("no.bin"), |_| {})
         .await
         .expect_err("peers only, and there are none");
     assert!(refused.to_string().contains("peers only"), "{refused}");
@@ -89,8 +89,8 @@ async fn with_nobody_seeding_the_file_comes_from_the_burrow() {
 
     // The burrow only, asked for outright.
     let direct = work.path().join("direct.bin");
-    let route = run_download(&mut admin, &want(SourceMode::OriginOnly), &direct, |_| {}).await.unwrap();
-    assert_eq!(route, Route::Origin);
+    let route = run_download(&admin, &want(SourceMode::OriginOnly), &direct, |_| {}).await.unwrap();
+    assert_eq!(route.route, Route::Origin);
     assert_eq!(std::fs::read(&direct).unwrap(), body);
 
     // A half-finished swarm attempt must not poison the origin's resume: its
@@ -99,7 +99,7 @@ async fn with_nobody_seeding_the_file_comes_from_the_burrow() {
     let tainted = work.path().join("tainted.bin");
     std::fs::write(&tainted, vec![0xAA; 1024 * 1024 + 7]).unwrap();
     std::fs::write(rabbithole_swarm::scheduler::rhstate_path(&tainted), b"stale").unwrap();
-    run_download(&mut admin, &want(SourceMode::Auto), &tainted, |_| {}).await.unwrap();
+    run_download(&admin, &want(SourceMode::Auto), &tainted, |_| {}).await.unwrap();
     assert_eq!(std::fs::read(&tainted).unwrap(), body, "started clean, verified whole");
 
     // A node id is only a number. Ask for one root while naming a node that
@@ -107,13 +107,13 @@ async fn with_nobody_seeding_the_file_comes_from_the_burrow() {
     let other = payload(4096);
     let other_src = work.path().join("other.bin");
     std::fs::write(&other_src, &other).unwrap();
-    let other_node = admin
+    let other_node = admin.lock().await
         .transfer_upload("warez", None, "other.bin", &other_src, "application/octet-stream", "")
         .await
         .unwrap();
     let wrong = work.path().join("wrong.bin");
     let mismatched = Wanted { root, size: body.len() as u64, node_id: Some(other_node.id), max_sources: 4, mode: SourceMode::OriginOnly };
-    let refused = run_download(&mut admin, &mismatched, &wrong, |_| {}).await.expect_err("wrong content");
+    let refused = run_download(&admin, &mismatched, &wrong, |_| {}).await.expect_err("wrong content");
     assert!(refused.to_string().contains("different file"), "{refused}");
     assert!(!wrong.exists(), "the wrong file is not left on disk");
 

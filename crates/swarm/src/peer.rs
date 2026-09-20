@@ -1132,6 +1132,14 @@ pub trait RangeSource: Send + Sync {
     fn lanes(&self) -> usize {
         1
     }
+
+    /// Whether what this source sends may be offered on to the swarm the
+    /// fetch is sharing into. False for a source from somewhere else: what
+    /// one burrow let this person have is not this person's to hand to
+    /// another.
+    fn shareable(&self) -> bool {
+        true
+    }
 }
 
 /// A peer on the peer wire, under a capability for one root.

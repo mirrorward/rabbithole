@@ -51,6 +51,10 @@ pub struct SourcePeer {
 pub struct FetchReport {
     pub bytes: u64,
     pub per_source: Vec<(String, u64)>,
+    /// A source that does not allow what it sends to be passed on carried
+    /// part of this file ([`RangeSource::shareable`]), so the file as a
+    /// whole is not offered on either.
+    pub borrowed: bool,
 }
 
 /// A live progress event: one verified work unit just landed. Emitted the
@@ -138,6 +142,8 @@ struct WorkState {
     /// A unit could not be written here (a full disk, a removed file): the
     /// fetch fails with this, not as if no source could serve.
     local: Option<std::io::Error>,
+    /// A source whose bytes may not be passed on carried a unit.
+    borrowed: bool,
 }
 
 /// What a fetch keeps as it goes: its resume record, the proofs of what
@@ -433,9 +439,10 @@ async fn resumable(
     }
     let _ = std::fs::remove_file(&state_path);
     // Whole and checked: seeded whole from here on, from the proofs already
-    // kept (no second pass over the file).
+    // kept (no second pass over the file) — unless part of it came from a
+    // source whose bytes are not this fetch's to pass on.
     if let Some(seeds) = &seeds {
-        if size > 0 {
+        if size > 0 && !report.borrowed {
             let _ = seeds.add_proved(root, size, dest, &proofs_at);
         }
     }
@@ -527,6 +534,7 @@ async fn fetch_swarm_inner(
         proofs: keep.proofs,
         sharing: keep.sharing,
         local: None,
+        borrowed: false,
     }));
     // Told by the worker that lands the last unit, so a worker still stuck
     // on a slow peer does not hold back a file that is already whole.
@@ -592,6 +600,7 @@ async fn fetch_swarm_inner(
     Ok(FetchReport {
         bytes: size,
         per_source,
+        borrowed: state.borrowed,
     })
 }
 
@@ -819,9 +828,12 @@ async fn worker(
                     f.seek(SeekFrom::Start(off))?;
                     f.write_all(&proved.bytes)?;
                     // Keep the proof, so the unit can be served on; shared
-                    // only once both the bytes and their proof are down.
+                    // only once both the bytes and their proof are down, and
+                    // never what another burrow lent this fetch.
                     let kept = s.proofs.as_mut().map(|proofs| proved.keep(proofs).is_ok());
-                    if kept == Some(true) {
+                    if !source.shareable() {
+                        s.borrowed = true;
+                    } else if kept == Some(true) {
                         if let Some(sharing) = &s.sharing {
                             sharing.mark(off / HAVE_UNIT);
                         }
@@ -1530,6 +1542,47 @@ mod tests {
         assert_eq!(asks.len(), 3);
         assert!(asks.values().all(|&n| n == 1), "{asks:?}");
         assert_eq!(three.most.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn what_a_lending_source_sends_is_never_offered_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = payload(UNIT_SIZE as usize + 40);
+        let lender = Arc::new(Laned::new(dir.path(), &body, 1));
+        struct Lending(Arc<Laned>);
+        #[async_trait::async_trait]
+        impl RangeSource for Lending {
+            fn label(&self) -> String {
+                "another burrow".into()
+            }
+            async fn have(&self) -> Result<Option<HaveMap>, PeerError> {
+                self.0.have().await
+            }
+            async fn bao(&self, offset: u64, len: u64) -> Result<Vec<crate::BaoPiece>, PeerError> {
+                self.0.bao(offset, len).await
+            }
+            fn shareable(&self) -> bool {
+                false
+            }
+        }
+        let seeds = Arc::new(SeedStore::default());
+        let dest = dir.path().join("borrowed.out");
+        let sources: Vec<Arc<dyn RangeSource>> = vec![Arc::new(Lending(lender.clone()))];
+        let report = fetch_swarm_from(
+            &sources,
+            lender.root,
+            lender.size,
+            &dest,
+            None,
+            Some(seeds.clone()),
+        )
+        .await
+        .unwrap();
+        // The file is here and whole, and it is nobody else's to be given.
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert!(report.borrowed);
+        assert!(!seeds.holds_whole(&lender.root));
+        assert!(seeds.have(&lender.root).is_none());
     }
 
     #[tokio::test]

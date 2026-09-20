@@ -138,6 +138,29 @@ engine, every source (a peer, a burrow) only hands over Bao streams
 for one unit); the fetch checks each piece against the root itself
 (`fetch_proved`), so no source is trusted with the checking.
 
+### Other burrows as sources (0.233)
+
+A download in the app can also take chunks from **the other burrows the
+person is signed in to**. Before the fetch starts, each is asked whether it
+holds the content and whether this person may download it there
+(`FileByContentRequest`, FILE 45/46, see [`file.md`](file.md)); the ones
+that say yes give a download ticket and join as sources, taking units like
+any peer, every one proved against the root. A burrow that says nothing, says
+no, or is too old to be asked is simply not a source, and costs the download
+one bounded round trip.
+
+Only when the person left the choice to the app ("Best available"), never
+the burrow the download is from, never the same burrow reached two ways (they
+are told apart by the burrow's own key, not by the address dialled), and at
+most four of them. Each burrow session does one thing at a time, so a source
+that is busy hands the unit back rather than holding it: what this buys is
+another place to get the file, not more speed from one.
+
+**What another burrow lends is never offered on.** A download that took any
+chunk from another burrow is not advertised to the burrow it came from, in
+part or whole (`RangeSource::shareable`): that content was lent to this
+person, not given to this burrow to hand around.
+
 ### Partial seeds (0.229)
 
 A peer need not hold a whole file to serve it. A fetch keeps the proof of

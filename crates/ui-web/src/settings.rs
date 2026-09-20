@@ -68,8 +68,11 @@ pub struct Settings {
 /// *Peers* are other people on the same burrow who hold the file and offered
 /// to share it; pulling from several at once is what makes a swarm fast, and
 /// it spares the burrow's own link. A swarm is one burrow's: a ticket the
-/// burrow signs is only honoured by its own peers, so "people on my other
-/// burrows" are not sources for a file here.
+/// burrow signs is only honoured by its own peers, so other people's
+/// machines on other burrows are not sources for a file here. The **other
+/// burrows** the app is signed in to are, when they hold the same content
+/// and this person may download it there (the shell asks them, and what
+/// they lend is never offered back to this burrow).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DownloadFrom {
@@ -111,7 +114,8 @@ impl DownloadFrom {
     pub fn explains(self) -> &'static str {
         match self {
             DownloadFrom::Auto => {
-                "From everyone sharing it here at once, or from the burrow itself when nobody is."
+                "From everyone sharing it here at once, from your other burrows that have it, \
+                 or from the burrow itself when nobody else does."
             }
             DownloadFrom::Peers => {
                 "Only from people sharing it here. If nobody is, the download waits for you to try again."
