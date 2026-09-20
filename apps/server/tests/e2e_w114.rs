@@ -675,24 +675,32 @@ async fn an_operator_sees_what_a_station_is_doing_and_what_it_left_out() {
     // Give the rotation a moment to reach the track it cannot play.
     let mut status: RadioStatus = boss.request(&RadioStatusRequest).await.unwrap();
     for _ in 0..40 {
-        if status
-            .stations
-            .first()
-            .is_some_and(|s| !s.left_out.is_empty())
-        {
+        if status.stations.iter().any(|s| !s.left_out.is_empty()) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         status = boss.request(&RadioStatusRequest).await.unwrap();
     }
-    let station = status.stations.first().expect("a station");
-    assert_eq!(station.station, "oggcast");
-    assert_eq!(station.area, "music", "where its music comes from");
-    assert_eq!(station.tracks, 2, "both files are in the rotation");
+    // A library of both kinds is a mount of each: the file named .mp3 on
+    // the bare mount, the Opus file beside it.
+    let by_slug = |slug: &str| {
+        status
+            .stations
+            .iter()
+            .find(|s| s.station == slug)
+            .unwrap_or_else(|| panic!("a station at {slug}: {:?}", status.stations))
+            .clone()
+    };
+    let ogg = by_slug("oggcast.ogg");
+    assert_eq!(ogg.area, "music", "where its music comes from");
+    assert_eq!(ogg.tracks, 1);
     assert_eq!(
-        station.content_type, "audio/ogg",
-        "it settled on what it could play: {station:?}"
+        ogg.content_type, "audio/ogg",
+        "it settled on what it could play: {ogg:?}"
     );
+    // The bare mount has the file that claims to be an MP3 and is not.
+    let station = by_slug("oggcast");
+    assert_eq!(station.tracks, 1);
     let left = station.left_out.first().expect("the one it cannot play");
     assert_eq!(left.title, "two.mp3");
     assert!(
@@ -726,6 +734,91 @@ async fn an_operator_sees_what_a_station_is_doing_and_what_it_left_out() {
         ),
         "not for everyone: {refused:?}"
     );
+
+    burrow.shutdown().await;
+}
+
+/// A library holding both kinds plays both: the MP3 files where they have
+/// always been, and the Ogg files beside them. Nothing is left out for
+/// being the wrong kind, and a listener picks which to tune in to.
+#[tokio::test]
+async fn a_library_of_both_kinds_plays_on_a_mount_each() {
+    use rabbithole_core::Client;
+
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path().join("srv");
+    let mp3 = mp3_of(115, 0x44);
+    let opus = opus_of(3, 0x77);
+
+    {
+        let burrow = Burrow::start(test_config(&dir)).await.unwrap();
+        burrow
+            .shared
+            .auth
+            .create_account("dj", "spin-spin-spin", Role::Admin)
+            .await
+            .unwrap();
+        let mut dj = Client::connect(
+            &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
+            None,
+            None,
+            "e2e",
+            "0",
+        )
+        .await
+        .unwrap();
+        dj.auth_password("dj", "spin-spin-spin").await.unwrap();
+        dj.expect_welcome().await.unwrap();
+        dj.area_create("music", "Music", "").await.unwrap();
+        for (name, bytes, mime) in [
+            ("one.mp3", &mp3, "audio/mpeg"),
+            ("two.opus", &opus, "audio/ogg"),
+        ] {
+            let src = work.path().join(name);
+            std::fs::write(&src, bytes).unwrap();
+            dj.transfer_upload("music", None, name, &src, mime, "")
+                .await
+                .unwrap();
+        }
+        burrow.shutdown().await;
+    }
+
+    let mut config = test_config(&dir);
+    config
+        .radio_library_areas
+        .insert("mixed".into(), "music".into());
+    let burrow = Burrow::start(config).await.unwrap();
+    let radio = burrow.radio_addr.expect("radio enabled");
+
+    // The bare mount is the MP3 one, as it has always been.
+    let mut plain = TcpStream::connect(radio).await.unwrap();
+    plain
+        .write_all(b"GET /mixed HTTP/1.0\r\n\r\n")
+        .await
+        .unwrap();
+    plain.flush().await.unwrap();
+    let (head, _heard) = read_head(&mut plain).await;
+    assert!(head.starts_with("ICY 200 OK"), "{head:?}");
+    assert!(
+        head.to_ascii_lowercase().contains("audio/mpeg"),
+        "the bare mount stays MP3: {head:?}"
+    );
+
+    // And the Ogg files are beside it, on their own mount, at the same time.
+    let mut ogg = TcpStream::connect(radio).await.unwrap();
+    ogg.write_all(b"GET /mixed.ogg HTTP/1.0\r\n\r\n")
+        .await
+        .unwrap();
+    ogg.flush().await.unwrap();
+    let (head, mut heard) = read_head(&mut ogg).await;
+    assert!(head.starts_with("ICY 200 OK"), "{head:?}");
+    assert!(
+        head.to_ascii_lowercase().contains("audio/ogg"),
+        "beside it, an Ogg mount: {head:?}"
+    );
+    let mut more = read_at_least(&mut ogg, 64).await;
+    heard.append(&mut more);
+    assert!(heard.starts_with(b"OggS"), "pages, from the first one");
 
     burrow.shutdown().await;
 }

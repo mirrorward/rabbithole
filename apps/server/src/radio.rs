@@ -226,6 +226,10 @@ struct Program {
     /// track's audio actually ends. Otherwise the timer driver advances it on
     /// a nominal duration and the station is now-playing only.
     pumped: bool,
+    /// What its tracks' names say they are, so the mount goes up as the
+    /// right kind rather than guessing and being remade under whoever is
+    /// already listening.
+    expected: Option<Sound>,
     /// How many tracks the rotation holds.
     tracks: usize,
 }
@@ -334,6 +338,19 @@ impl Stations {
     ) {
         let station = Station::new(slug, STATION_CAPACITY);
         let track_count = tracks.len();
+        // Whatever most of them are: a rotation is one kind of sound, and
+        // the odd file out is left out with a word about it.
+        let expected = {
+            let ogg = tracks
+                .iter()
+                .filter(|t| matches!(sound_of_name(&t.title, ""), Some(Sound::Ogg(_))))
+                .count();
+            match (track_count, ogg) {
+                (0, _) => None,
+                (total, ogg) if ogg * 2 > total => Some(Sound::Ogg(0)),
+                _ => Some(Sound::Mpeg),
+            }
+        };
         let playlist = Playlist::new(tracks, RotationMode::Sequential);
         let mut controller = StationController::new(station, playlist, description, AUTOMATION_DJ);
         // Start playout at the opening track so now-playing is live at once.
@@ -352,6 +369,7 @@ impl Stations {
                 live: None,
                 source_bytes: 0,
                 pumped: false,
+                expected,
                 tracks: track_count,
             },
         );
@@ -558,6 +576,12 @@ impl Stations {
             .lock()
             .get(slug)
             .is_some_and(|m| m.program_owned && m.tx.same_channel(tx))
+    }
+
+    /// What a station's tracks say it will be sending, before any of them
+    /// has been read.
+    pub fn expected_sound(&self, slug: &str) -> Option<Sound> {
+        self.programs.lock().get(slug).and_then(|p| p.expected)
     }
 
     /// Slugs of all installed library programs, sorted (deterministic).
@@ -1065,6 +1089,46 @@ pub fn tracks_from_nodes(nodes: &[FileNodeRow]) -> Vec<Track> {
     nodes.iter().filter_map(track_from_node).collect()
 }
 
+/// What kind of sound a file's name and type say it is, without reading it.
+/// A station is built from this; the pump checks the bytes themselves
+/// before sending any, and leaves out anything that disagrees.
+pub fn sound_of_name(name: &str, mime: &str) -> Option<Sound> {
+    let lower = name.to_ascii_lowercase();
+    let mime = mime.to_ascii_lowercase();
+    if lower.ends_with(".mp3") || mime == "audio/mpeg" || mime == "audio/mp3" {
+        return Some(Sound::Mpeg);
+    }
+    if [".ogg", ".oga", ".opus"].iter().any(|e| lower.ends_with(e))
+        || mime == "audio/ogg"
+        || mime == "audio/opus"
+        || mime == "application/ogg"
+    {
+        // The rate is read from the file itself when it plays; this only
+        // says which mount it belongs on.
+        return Some(Sound::Ogg(0));
+    }
+    None
+}
+
+/// Split a library's tracks by the kind of sound they are, so each kind can
+/// have a mount of its own: the MP3 files on one, the Ogg files on another,
+/// and nothing left out for being the wrong kind. Tracks that are neither
+/// stay where they are — the pump says what it could not play.
+pub fn split_by_sound(nodes: &[FileNodeRow]) -> (Vec<Track>, Vec<Track>, Vec<Track>) {
+    let (mut mpeg, mut ogg, mut other) = (Vec::new(), Vec::new(), Vec::new());
+    for node in nodes {
+        let Some(track) = track_from_node(node) else {
+            continue;
+        };
+        match sound_of_name(&node.name, &node.mime) {
+            Some(Sound::Mpeg) => mpeg.push(track),
+            Some(Sound::Ogg(_)) => ogg.push(track),
+            None => other.push(track),
+        }
+    }
+    (mpeg, ogg, other)
+}
+
 // ---------------------------------------------------------------------------
 // DJ live source ingest + now-playing plumbing
 // ---------------------------------------------------------------------------
@@ -1173,7 +1237,13 @@ pub fn station_status(shared: &Arc<Shared>) -> Vec<rabbithole_proto::radio::Radi
         out.push(
             rabbithole_proto::radio::RadioStationStatus::new(slug.clone(), name)
                 .of_area(
-                    areas.get(&slug).cloned().unwrap_or_default(),
+                    // A companion mount (`<slug>.ogg`) plays the same area
+                    // as the station it is beside.
+                    areas
+                        .get(&slug)
+                        .or_else(|| slug.rsplit_once('.').and_then(|(base, _)| areas.get(base)))
+                        .cloned()
+                        .unwrap_or_default(),
                     shared.radio.program_content_type(&slug).unwrap_or_default(),
                 )
                 .on_air(
@@ -1331,9 +1401,11 @@ pub fn spawn_program_pump(shared: Arc<Shared>, slug: String) -> JoinHandle<()> {
     // The station is on the air from this line, not from whenever the pump has
     // finished loading its first track: a listener who tuned in during that
     // moment was told 404 by a station that was about to play.
-    // The mount goes up as MPEG until the first track says otherwise; a
-    // station of Ogg files becomes an Ogg mount as it starts playing.
-    let _ = shared.radio.program_mount(&slug, Sound::Mpeg);
+    // The mount goes up as what this station's tracks say it is, so a
+    // listener who tunes in before the first track has been read is told
+    // the truth and is not cut off when it is.
+    let expected = shared.radio.expected_sound(&slug).unwrap_or(Sound::Mpeg);
+    let _ = shared.radio.program_mount(&slug, expected);
     tokio::spawn(program_pump(shared, slug))
 }
 
@@ -1832,6 +1904,30 @@ mod tests {
             out.extend(ogg_page(Some(tenth * 4_800), &[7u8; 120], false));
         }
         out
+    }
+
+    #[test]
+    fn a_library_of_both_kinds_becomes_a_mount_of_each() {
+        let nodes = vec![
+            file_node(1, "one.mp3", "audio/mpeg", Some([1u8; 32])),
+            file_node(2, "two.opus", "audio/ogg", Some([2u8; 32])),
+            file_node(3, "three.ogg", "application/octet-stream", Some([3u8; 32])),
+            file_node(4, "four.flac", "audio/flac", Some([4u8; 32])),
+            file_node(5, "notes.txt", "text/plain", Some([5u8; 32])),
+        ];
+        let (mpeg, ogg, other) = split_by_sound(&nodes);
+        assert_eq!(mpeg.len(), 1, "the MP3");
+        assert_eq!(ogg.len(), 2, "both Ogg files, by name as well as type");
+        assert_eq!(other.len(), 1, "the FLAC, which is neither");
+        // Not audio at all never becomes a track in the first place.
+        assert_eq!(mpeg.len() + ogg.len() + other.len(), 4);
+
+        // What the name says, without reading the file.
+        assert_eq!(sound_of_name("a.mp3", ""), Some(Sound::Mpeg));
+        assert_eq!(sound_of_name("a", "audio/mpeg"), Some(Sound::Mpeg));
+        assert_eq!(sound_of_name("a.opus", ""), Some(Sound::Ogg(0)));
+        assert_eq!(sound_of_name("a.OGG", ""), Some(Sound::Ogg(0)));
+        assert_eq!(sound_of_name("a.flac", "audio/flac"), None);
     }
 
     #[test]

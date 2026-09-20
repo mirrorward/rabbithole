@@ -356,9 +356,20 @@ async fn library_program_pulls_audio_from_file_area() {
         .insert("jukebox".into(), "music".into());
     let burrow = Burrow::start(cfg).await.unwrap();
 
+    // The area holds both kinds, so it is a mount of each: the MP3 file
+    // where it has always been, the Ogg file beside it.
     assert_eq!(
         burrow.shared.radio.program_slugs(),
-        vec!["jukebox".to_string()]
+        vec!["jukebox".to_string(), "jukebox.ogg".to_string()]
+    );
+    assert_eq!(
+        burrow
+            .shared
+            .radio
+            .now_playing("jukebox.ogg")
+            .expect("the Ogg mount plays too")
+            .title,
+        "track-b.ogg"
     );
     // Children sort by name; the first audio file leads (non-audio dropped).
     let np = burrow
