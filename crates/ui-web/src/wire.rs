@@ -742,6 +742,9 @@ pub fn command_to_frame(command: &Command, id: RequestId) -> Result<Option<Frame
         Command::SendChat { room, text } => {
             Frame::request(id, &ChatSend::new(room.clone(), text.clone()))?
         }
+        Command::AcceptAgreement => {
+            Frame::request(id, &rabbithole_proto::session::AgreementAccept)?
+        }
         // `Command` is `#[non_exhaustive]`: unknown commands have no framing.
         _ => return Ok(None),
     };
@@ -2091,6 +2094,22 @@ mod tests {
         let decoded = frame.decode::<ChatSend>().unwrap().unwrap();
         assert_eq!(decoded.room, "lobby");
         assert_eq!(decoded.text, "hi warren");
+    }
+
+    #[test]
+    fn accepting_the_agreement_is_sent_to_the_burrow() {
+        // The sheet's button has to reach the wire: dismissing it locally
+        // left the burrow refusing everything the agreement gates, and
+        // asking again at every reconnect.
+        let frame = command_to_frame(&Command::AcceptAgreement, RequestId(5))
+            .unwrap()
+            .expect("accepting produces a frame");
+        assert_eq!(frame.kind, FrameKind::Request);
+        assert_eq!(frame.family, Family::SESSION);
+        assert_eq!(frame.id, RequestId(5));
+        assert!(frame
+            .decode::<rabbithole_proto::session::AgreementAccept>()
+            .is_some());
     }
 
     #[test]

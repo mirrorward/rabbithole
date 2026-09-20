@@ -801,6 +801,9 @@ struct Active {
     screen_name: String,
     /// Current icon id.
     icon: u16,
+    /// The blake3 of the agreement this login was shown, when it was shown
+    /// one: what accepting records.
+    shown: Option<[u8; 32]>,
     /// Whether the agreement (if any) has been accepted.
     agreed: bool,
     /// Whether this surface marked the session away because the client set an
@@ -990,6 +993,7 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
         agreement
     };
     let agreed = agreement.is_empty();
+    let shown = (!agreement.is_empty()).then(|| *blake3::hash(agreement.as_bytes()).as_bytes());
     if !agreement.is_empty() {
         wr.write_all(
             &Transaction::request(
@@ -1031,6 +1035,7 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
         screen_name,
         icon,
         agreed,
+        shown,
         auto_away: false,
         peer_ip,
     };
@@ -1164,11 +1169,10 @@ async fn handle_txn(
 
         transaction::AGREED => {
             active.agreed = true;
-            // Remembered against the account, so the next login does not
-            // show it again until the wording changes.
-            let text = shared.config.read().agreement;
-            if !text.is_empty() {
-                let hash = *blake3::hash(text.as_bytes()).as_bytes();
+            // Remembered against the account, by the wording this login
+            // was shown, so the next one does not show it again until the
+            // wording changes.
+            if let Some(hash) = active.shown {
                 let _ = rabbithole_store_server::repo::AccountsRepo(&shared.pool)
                     .set_agreed(active.subject.account_id, &hash)
                     .await;

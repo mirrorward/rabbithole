@@ -244,11 +244,33 @@ async fn reoffer(app: AppHandle, endpoint: String, session: Session) {
     }
     let mut gone = Vec::new();
     for file in &mine {
+        // Switched off while this was working through the list: stop, and
+        // do not make a seeder for a burrow that is no longer sharing.
+        if !prefs_path(&app).map(|p| downloads::load(&p).seed).unwrap_or(false) {
+            return;
+        }
         let Some(root) = parse_root(&file.root).ok() else {
             gone.push(file.root.clone());
             continue;
         };
         let state = app.state::<TransfersManager>();
+        // Reading the file through to check it is still what was shared
+        // happens off the runtime and without holding anything: it is
+        // seconds of work per file, and nobody is waiting for it.
+        let store = {
+            let mut seeders = state.seeders.lock().await;
+            seeders.entry(endpoint.clone()).or_default().store()
+        };
+        let path = file.path.clone();
+        let read = tokio::task::spawn_blocking(move || store.add(root, &path))
+            .await
+            .map_err(|_| ())
+            .and_then(|r| r.map_err(|_| ()));
+        if read.is_err() {
+            gone.push(file.root.clone());
+            continue;
+        }
+        // Already in the store now, so this only advertises it.
         let mut client = session.lock().await;
         let mut seeders = state.seeders.lock().await;
         let offered = seeders
@@ -256,9 +278,14 @@ async fn reoffer(app: AppHandle, endpoint: String, session: Session) {
             .or_default()
             .share(&mut client, root, file.size, &file.name, &file.path)
             .await;
+        drop(seeders);
+        drop(client);
         if offered.is_err() {
             gone.push(file.root.clone());
         }
+        // A file at a time, and a breath between them: reading each one
+        // through is work nobody asked for right now.
+        tokio::task::yield_now().await;
     }
     if gone.is_empty() {
         return;
@@ -349,11 +376,16 @@ pub async fn swarm_start_download(
     // Registered before a byte moves, so Cancel works from the first moment
     // the row appears, and taken away however this ends.
     let stopper = Arc::new(Stopper::default());
-    state
-        .running
-        .lock()
-        .await
-        .insert(transfer_id, stopper.clone());
+    {
+        // One download of a file at a time: a second start would write the
+        // same file from two fetches, count two downloads, and leave the
+        // first with no stop switch of its own.
+        let mut running = state.running.lock().await;
+        if running.contains_key(&transfer_id) {
+            return Err("that download is already running".to_string());
+        }
+        running.insert(transfer_id, stopper.clone());
+    }
     // What the fetch said it had to work with, so a row that ends badly can
     // say whether it had three sources or none.
     let sources_tried = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -373,7 +405,17 @@ pub async fn swarm_start_download(
             _ = stopper.stopped() => Err(crate::swarm::SwarmError::Cancelled),
         }
     };
-    state.running.lock().await.remove(&transfer_id);
+    {
+        // Only this download's switch: a later start for the same transfer
+        // has its own, and must keep it.
+        let mut running = state.running.lock().await;
+        if running
+            .get(&transfer_id)
+            .is_some_and(|live| Arc::ptr_eq(live, &stopper))
+        {
+            running.remove(&transfer_id);
+        }
+    }
     // Nothing landed, or what landed is not this burrow's to be offered:
     // take back what was offered in part.
     if sharing && !matches!(result, Ok(done) if done.may_share) {
@@ -390,7 +432,9 @@ pub async fn swarm_start_download(
             // Opted in now (it may have been switched on while this ran).
             // Never what another burrow carried: that was lent to this
             // person, not given to this burrow.
-            if done.may_share && (seeding || downloads::load(&prefs_path(&app)?).seed) {
+            // As it is now, not as it was when this started: sharing
+            // switched off mid-download means this file is not offered.
+            if done.may_share && downloads::load(&prefs_path(&app)?).seed {
                 let mut client = session.lock().await;
                 let mut seeders = state.seeders.lock().await;
                 let shared = seeders

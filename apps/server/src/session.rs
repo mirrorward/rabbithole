@@ -39,6 +39,9 @@ pub struct SessionCtx {
     pub persona_id: i64,
     pub screen_name: String,
     pub agreed: bool,
+    /// The blake3 of the agreement this session was shown, when it was
+    /// shown one.
+    pub shown: Option<[u8; 32]>,
     pub is_guest: bool,
     /// The client's portable identity public key, present only when it PROVED
     /// possession via a valid `KeyProof` over the challenge nonce. A mere claim
@@ -62,8 +65,24 @@ impl SessionCtx {
     }
 
     pub fn allows(&self, shared: &Shared, resource: &str, needed: Caps) -> bool {
+        // Before the agreement is accepted, this burrow can be looked at
+        // but not joined in with: everything a capability gates beyond
+        // looking is refused, as the legacy surface has always done. One
+        // place, so a new kind of doing is gated by being new, not by
+        // somebody remembering to check.
+        if !self.agreed && !only_looking(needed) {
+            return false;
+        }
         shared.perms.allows(&self.subject(shared), resource, needed)
     }
+}
+
+/// Whether what is asked for is only looking: seeing a thing is there,
+/// reading what is public, listing files. Anything else — saying,
+/// posting, sending, uploading, downloading, sharing — is joining in.
+fn only_looking(needed: Caps) -> bool {
+    let looking = Caps::SEE | Caps::WHO | Caps::CHAT_READ | Caps::BOARD_READ | Caps::FILE_LIST;
+    needed.0 & !looking.0 == 0
 }
 
 /// The channel binder for key-auth on a connection: this server's TLS cert
@@ -329,6 +348,9 @@ pub async fn run_session(
         persona_id: authed.persona.id,
         screen_name: authed.persona.screen_name.clone(),
         agreed: agreement.is_none(),
+        // The wording this session was shown, so accepting records what
+        // they actually read rather than whatever the config says by then.
+        shown: agreement.as_ref().and(wording),
         is_guest: authed.token.is_none(),
         // Only a key that PROVED possession is surfaced — never the raw claim.
         pubkey: verified_pubkey,
@@ -479,12 +501,12 @@ async fn handle_request(
     }
     if frame.decode::<psess::AgreementAccept>().is_some() {
         ctx.agreed = true;
-        // Remembered against the account, by the wording they accepted, so
-        // the next session does not ask again. A guest has no account to
-        // remember it against, and is asked each time.
-        let text = shared.config.read().agreement;
-        if !ctx.is_guest && !text.is_empty() {
-            let hash = *blake3::hash(text.as_bytes()).as_bytes();
+        // Remembered against the account, by the wording they were shown,
+        // so the next session does not ask again — and so an operator who
+        // changes the wording while the sheet is open is not taken to have
+        // been agreed to. A guest has no account to remember it against,
+        // and is asked each time.
+        if let (false, Some(hash)) = (ctx.is_guest, ctx.shown) {
             let _ = AccountsRepo(&shared.pool)
                 .set_agreed(ctx.account_id, &hash)
                 .await;

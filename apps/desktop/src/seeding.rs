@@ -84,6 +84,13 @@ pub struct Seeder {
 }
 
 impl Seeder {
+    /// The store this burrow's offers are served from, for a caller that
+    /// wants to read a file into it off the async runtime (hashing a large
+    /// file takes seconds and must not be done on a runtime thread).
+    pub fn store(&self) -> Arc<SeedStore> {
+        self.seeds.clone()
+    }
+
     /// How many files are on offer, whole or still downloading (each once).
     pub fn files(&self) -> usize {
         let mut roots: Vec<[u8; 32]> = self

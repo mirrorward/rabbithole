@@ -183,7 +183,32 @@ async fn guests_disabled_and_agreement_gate() {
         "chat before accepting the agreement is refused"
     );
 
+    // It gates joining in, not only chat: a post is refused too, while
+    // looking around still works.
+    burrow
+        .shared
+        .boards
+        .create_board("general", "General", "", 2, None, 0)
+        .await
+        .unwrap();
+    let posted = h
+        .post(&rabbithole_proto::board::PostCreate::new(
+            "general",
+            "hello",
+            "before agreeing",
+        ))
+        .await;
+    assert!(posted.is_err(), "posting before agreeing is refused");
+    assert!(h.boards().await.is_ok(), "looking is not joining in");
+
     h.agreement_accept().await.unwrap();
+    h.post(&rabbithole_proto::board::PostCreate::new(
+        "general",
+        "hello",
+        "after agreeing",
+    ))
+    .await
+    .unwrap();
     h.chat_send("lobby", "tea time!").await.unwrap();
 
     // Accepting is remembered: coming back is not asked again, and chat

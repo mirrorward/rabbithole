@@ -89,6 +89,11 @@ pub enum Command {
     Resume { token: String },
     /// Send a line to the currently focused chat room.
     SendChat { room: String, text: String },
+    /// Accept the burrow's agreement, which it asked for in the welcome.
+    /// Until this is sent and acked, the burrow refuses anything the
+    /// agreement gates; once sent, it remembers, and does not ask again
+    /// unless the wording changes.
+    AcceptAgreement,
 }
 
 /// Something the core tells frontends happened.

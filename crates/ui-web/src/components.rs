@@ -1234,7 +1234,14 @@ pub fn WelcomeSheet() -> impl IntoView {
             .with(|s| s.welcome.clone())
             .filter(|w| w.agreement.is_some())
     };
+    // Closing the sheet is not accepting: the burrow is told only when the
+    // person says so, and until it is told it refuses what the agreement
+    // gates.
     let dismiss = move |_| {
+        app.focused().state.update(|s| s.dismiss_welcome());
+    };
+    let accept = move |_| {
+        app.dispatch(rabbithole_core::api::Command::AcceptAgreement);
         app.focused().state.update(|s| s.dismiss_welcome());
     };
     view! {
@@ -1265,7 +1272,10 @@ pub fn WelcomeSheet() -> impl IntoView {
                         })}
                         <p class="rh-welcome-body">{body}</p>
                         <div class="rh-welcome-actions">
-                            <button class="rh-btn" on:click=dismiss>
+                            <button
+                                class="rh-btn"
+                                on:click=move |ev| if has_agreement { accept(ev) } else { dismiss(ev) }
+                            >
                                 {if has_agreement { "Accept & enter" } else { "Got it" }}
                             </button>
                         </div>

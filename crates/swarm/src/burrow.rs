@@ -191,12 +191,12 @@ impl BurrowSource {
             Ok(Ok(range)) => Ok(Some(range)),
             // Still making the file's proofs: ask again shortly.
             Ok(Err(ClientError::Refused(rabbithole_proto::ErrorCode::Unavailable))) => Ok(None),
-            // Anything else, and this burrow is done for this download: its
-            // ticket goes back now, not when the peers finish.
-            _ => {
-                self.close().await;
-                Err(gone())
-            }
+            // Anything else, and this burrow is done sending ranges for
+            // this download. The ticket is left in the books rather than
+            // closed: the download may yet fall back to this burrow's own
+            // stream, and that is the same download, on the same ticket.
+            // Whoever finishes with it gives it back ([`Self::close`]).
+            _ => Err(gone()),
         }
     }
 }

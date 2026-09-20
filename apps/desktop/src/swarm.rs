@@ -43,6 +43,47 @@ pub fn other_burrows(
     other_burrows_rule(ask, sessions, origin_endpoint, origin_key, max)
 }
 
+/// A spawned fetch that stops when this is dropped. A `JoinHandle` on its
+/// own does not: dropping it lets the task run on, which for a download the
+/// person stopped means it carries on writing the file it was told to stop
+/// writing.
+struct FetchTask(
+    tokio::task::JoinHandle<Result<FetchReport, rabbithole_swarm::peer::PeerError>>,
+);
+
+impl Drop for FetchTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Gives back every ticket these burrows hold when it is dropped, however
+/// that happens — including a download dropped where it stands, which is
+/// what stopping one does. A burrow must not hold a transfer slot for a
+/// download that is over.
+struct TicketsBack(Vec<Arc<BurrowSource>>);
+
+impl Drop for TicketsBack {
+    fn drop(&mut self) {
+        let burrows: Vec<Arc<BurrowSource>> =
+            std::mem::take(&mut self.0).into_iter().collect();
+        if burrows.is_empty() {
+            return;
+        }
+        // Closing takes a session and a round trip, which a `Drop` cannot
+        // wait for: it goes on in its own task, bounded by its own
+        // timeouts. Outside a runtime (shutdown) there is nothing to do —
+        // the session is going with it.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                for burrow in burrows {
+                    burrow.close().await;
+                }
+            });
+        }
+    }
+}
+
 /// How a download shares what lands as it goes (the person opted in to
 /// seeding): the store it serves from, this machine's own endpoint (never a
 /// source for its own download), and the advert that goes out once the
@@ -347,6 +388,9 @@ async fn swarm_download(
     }
     burrows.extend(helpers.iter().cloned());
     all.extend(burrows.iter().map(|b| b.clone() as Arc<dyn RangeSource>));
+    // From here on every ticket goes back, whether this returns, fails, or
+    // is dropped where it stands because the person stopped the download.
+    let mut hold = TicketsBack(burrows.clone());
     let total_units = size.div_ceil(UNIT_SIZE);
     emit(SwarmEvent::Opened {
         total_units,
@@ -370,9 +414,9 @@ async fn swarm_download(
     // Opted in: every unit that lands is offered on at once, with its
     // proof, and the whole file when it is done — unless another burrow
     // carried part of it, which is not this one's to be given.
-    let fetch = tokio::spawn(async move {
+    let mut fetch = FetchTask(tokio::spawn(async move {
         fetch_swarm_from(&all, root, size, &dest_owned, Some(tx), seeds).await
-    });
+    }));
     while let Some(u) = rx.recv().await {
         if let Some((entry, ttl)) = &advert {
             let due = advertised.is_none_or(|(at, after)| at.elapsed().as_secs() >= after);
@@ -418,20 +462,20 @@ async fn swarm_download(
             total_units: u.total_units,
         });
     }
-    let report = fetch
+    let report = (&mut fetch.0)
         .await
         .map_err(|e| SwarmError::Fetch(rabbithole_swarm::peer::PeerError::Verify(e.to_string())))?
         .map_err(SwarmError::Fetch);
     // The burrow of the download gives its ticket back here — unless the
     // fetch failed and it is the one the file may yet come from, in which
-    // case the ticket is handed on rather than opened again. The other
-    // burrows are closed by the caller, whatever became of this.
+    // case the ticket is handed on rather than opened again.
     for burrow in &burrows {
         if report.is_err() && !burrow.lent() {
             *kept = burrow.take_ticket().await;
         }
         burrow.close().await;
     }
+    hold.0.clear();
     let report = report?;
     emit(SwarmEvent::Done {
         bytes: report.bytes,
@@ -518,6 +562,9 @@ pub async fn run_download_sharing(
     } else {
         Vec::new()
     };
+    // Their tickets go back however this download ends, including one
+    // dropped where it stands because the person stopped it.
+    let _helpers_back = TicketsBack(helpers.clone());
     let seeds = share.as_ref().map(|s| s.seeds.clone());
     let route = choose_route(mode, peers + helpers.len(), server_has, node_id.is_some());
     let route = match route {
@@ -586,11 +633,15 @@ pub async fn run_download_sharing(
                     // Not falling back: a ticket the attempt left behind is
                     // given back rather than held to the session's end.
                     if let Some(ticket) = kept.take() {
-                        let _ = tokio::time::timeout(
-                            ASK_TIMEOUT,
-                            session.lock().await.close_transfer(ticket.transfer_id),
-                        )
-                        .await;
+                        if let Ok(mut client) =
+                            tokio::time::timeout(SESSION_WAIT, session.lock()).await
+                        {
+                            let _ = tokio::time::timeout(
+                                ASK_TIMEOUT,
+                                client.close_transfer(ticket.transfer_id),
+                            )
+                            .await;
+                        }
                     }
                     Err(e)
                 }

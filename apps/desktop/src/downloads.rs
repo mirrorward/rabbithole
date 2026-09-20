@@ -171,13 +171,17 @@ pub fn load_shared(path: &Path) -> Vec<SharedFile> {
         .unwrap_or_default()
 }
 
-/// Write the list, creating its folder.
+/// Write the list, creating its folder. Written beside and renamed over,
+/// so a crash or a full disk leaves the old list rather than half of a new
+/// one — which would read back as "nothing was ever shared".
 pub fn store_shared(path: &Path, files: &[SharedFile]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let text = serde_json::to_string_pretty(files).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 /// Note that `entry` is on offer: the same content on the same burrow is

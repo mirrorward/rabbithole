@@ -1605,6 +1605,9 @@ impl UiClient for MockClient {
                     at_unix_ms: crate::clock::now_ms(),
                 }]
             }
+            // The demo burrow has no agreement to accept; saying so would
+            // be a red error for a button that did what it said.
+            Command::AcceptAgreement => Vec::new(),
             _ => vec![Event::CommandFailed {
                 detail: "unsupported command".to_string(),
             }],

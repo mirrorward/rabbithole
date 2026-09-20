@@ -591,3 +591,74 @@ async fn an_offer_outlives_the_app_unless_the_file_changed() {
 
     burrow.shutdown().await;
 }
+
+/// Stopping a download stops it: the fetch behind it is not left running,
+/// writing the file the person said to stop writing.
+#[tokio::test]
+async fn a_stopped_download_writes_nothing_more() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(ServerConfig {
+        name: "Halting Warren".into(),
+        quic_addr: "127.0.0.1:0".parse().unwrap(),
+        ws_addr: "127.0.0.1:0".parse().unwrap(),
+        data_dir: work.path().join("srv"),
+        ..ServerConfig::default()
+    })
+    .await
+    .unwrap();
+    for who in ["admin", "alice", "bob"] {
+        burrow.shared.auth.create_account(who, "pw-pw-pw", Role::Admin).await.unwrap();
+    }
+    let body = payload(8 * 1024 * 1024 + 13); // nine units
+    let src = work.path().join("long.bin");
+    std::fs::write(&src, &body).unwrap();
+    let root = *blake3::hash(&body).as_bytes();
+    let size = body.len() as u64;
+    let admin = login(&burrow, "admin").await;
+    admin.lock().await.area_create("warez", "Warez", "").await.unwrap();
+    let node = admin.lock().await
+        .transfer_upload("warez", None, "long.bin", &src, "application/octet-stream", "")
+        .await
+        .unwrap();
+
+    // Alice seeds it, so the download takes the swarm route (the one that
+    // runs its fetch on a task of its own).
+    let alice = login(&burrow, "alice").await;
+    let hers = work.path().join("alice.bin");
+    std::fs::write(&hers, &body).unwrap();
+    let seeds = std::sync::Arc::new(rabbithole_swarm::SeedStore::new());
+    seeds.add(root, &hers).unwrap();
+    let alice_key = alice.lock().await.server.server_key;
+    let peer = rabbithole_swarm::PeerServer::start("127.0.0.1:0".parse().unwrap(), alice_key, seeds)
+        .await
+        .unwrap();
+    alice.lock().await.swarm_contact(peer.addr.port(), peer.fingerprint.0).await.unwrap();
+    let entry = rabbithole_proto::swarm::AdvertEntry::new(root, size, "long.bin", "application/octet-stream");
+    alice.lock().await.swarm_advertise(vec![entry], 600).await.unwrap();
+    burrow.shared.config.set_key("transfer_rate_bytes_per_sec", "1048576").unwrap();
+
+    // Bob starts it and it is dropped part-way, as stopping one does.
+    let bob = login(&burrow, "bob").await;
+    let dest = work.path().join("bob.bin");
+    let want = Wanted { root, size, node_id: Some(node.id), max_sources: 4, mode: SourceMode::Auto };
+    let stopped = tokio::time::timeout(
+        std::time::Duration::from_millis(900),
+        run_download(&bob, &want, &dest, |_| {}),
+    )
+    .await;
+    assert!(stopped.is_err(), "it should still have been running");
+
+    // Nothing is written after that: what is on disk a moment later is
+    // what was on disk when it stopped.
+    let at_stop = std::fs::read(&dest).map(|b| blake3::hash(&b)).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let later = std::fs::read(&dest).map(|b| blake3::hash(&b)).unwrap();
+    assert_eq!(at_stop, later, "the fetch kept running after it was dropped");
+    assert!(
+        std::fs::metadata(&dest).unwrap().len() <= size,
+        "and it never grew past the file"
+    );
+
+    drop(peer);
+    burrow.shutdown().await;
+}
