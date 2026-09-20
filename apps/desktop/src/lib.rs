@@ -341,6 +341,7 @@ pub fn run() {
             transfers::native_available,
             transfers::connect_native,
             transfers::swarm_start_download,
+            transfers::swarm_cancel_download,
             transfers::save_file,
             transfers::download_prefs,
             transfers::choose_download_folder,

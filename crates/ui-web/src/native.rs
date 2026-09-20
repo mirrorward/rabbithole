@@ -79,6 +79,29 @@ pub fn connect_native(endpoint: &str, token: &str) {
     }
 }
 
+/// Invoke the native `swarm_cancel_download` command: stop a download the
+/// shell is running. Fire-and-forget — the row is marked by the failure
+/// event the shell sends back, like any other ending.
+pub fn cancel_swarm_download(transfer_id: u64) {
+    let Some(b) = bridge() else { return };
+    let Some(invoke) = method(&b, "invoke") else {
+        return;
+    };
+    let args = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &args,
+        &JsValue::from_str("transferId"),
+        &JsValue::from_f64(transfer_id as f64),
+    );
+    if let Ok(ret) = invoke.call2(&b, &JsValue::from_str("swarm_cancel_download"), &args) {
+        if let Ok(promise) = ret.dyn_into::<js_sys::Promise>() {
+            spawn_local(async move {
+                let _ = JsFuture::from(promise).await;
+            });
+        }
+    }
+}
+
 /// Invoke the native `swarm_start_download` command: fetch content `root_hex`
 /// (`size` bytes) named `name` from the swarm. Fire-and-forget — progress is
 /// delivered to the [`install_swarm_listener`] callback.

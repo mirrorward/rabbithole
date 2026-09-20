@@ -51,6 +51,35 @@ pub struct TransfersManager {
     /// The last reason sharing did not work, for the Settings screen. Sharing
     /// never fails a download, so this is the only place it is said.
     seeding_note: std::sync::Mutex<Option<String>>,
+    /// Downloads running now, by the transfer the webview knows them as, so
+    /// the person can stop one.
+    running: Mutex<std::collections::HashMap<u64, Arc<Stopper>>>,
+}
+
+/// A running download's stop switch: set once, and whoever is waiting on it
+/// gives up at the next moment it can.
+#[derive(Default)]
+pub struct Stopper {
+    stopped: std::sync::atomic::AtomicBool,
+    tell: tokio::sync::Notify,
+}
+
+impl Stopper {
+    fn stop(&self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.tell.notify_waiters();
+    }
+
+    /// Resolves once the download has been told to stop.
+    async fn stopped(&self) {
+        loop {
+            if self.stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            self.tell.notified().await;
+        }
+    }
 }
 
 /// Authoritative "am I running inside the native shell?" signal. The wasm SPA
@@ -261,10 +290,27 @@ pub async fn swarm_start_download(
         None
     };
     let sharing = share.is_some();
-    let result = run_download_sharing(&session, &want, &dest, share, &others, move |event| {
-        let _ = emit_app.emit("swarm://event", TransferEvent { transfer_id, event });
-    })
-    .await;
+    // Registered before a byte moves, so Cancel works from the first moment
+    // the row appears, and taken away however this ends.
+    let stopper = Arc::new(Stopper::default());
+    state
+        .running
+        .lock()
+        .await
+        .insert(transfer_id, stopper.clone());
+    let result = {
+        let fetch = run_download_sharing(&session, &want, &dest, share, &others, move |event| {
+            let _ = emit_app.emit("swarm://event", TransferEvent { transfer_id, event });
+        });
+        tokio::pin!(fetch);
+        // Dropping the fetch stops its workers where they are: what has been
+        // verified stays on disk for a retry, and nothing else is written.
+        tokio::select! {
+            done = &mut fetch => done,
+            _ = stopper.stopped() => Err(crate::swarm::SwarmError::Cancelled),
+        }
+    };
+    state.running.lock().await.remove(&transfer_id);
     // Nothing landed, or what landed is not this burrow's to be offered:
     // take back what was offered in part.
     if sharing && !matches!(result, Ok(done) if done.may_share) {
@@ -293,6 +339,22 @@ pub async fn swarm_start_download(
             }
             Ok(())
         }
+        // Stopped by the person: the row says so, and what was verified
+        // stays on disk for a retry. Not a failure to report back.
+        Err(crate::swarm::SwarmError::Cancelled) => {
+            let _ = app.emit(
+                "swarm://event",
+                TransferEvent {
+                    transfer_id,
+                    event: crate::swarm::SwarmEvent::Failed {
+                        reason: "Stopped.".to_string(),
+                        sources_tried: 0,
+                        retryable: true,
+                    },
+                },
+            );
+            Ok(())
+        }
         Err(e) => {
             let reason = e.to_string();
             let _ = app.emit(
@@ -311,6 +373,26 @@ pub async fn swarm_start_download(
             );
             Err(reason)
         }
+    }
+}
+
+/// Stop a download that is still going. Its row says so, and what has
+/// already been verified stays on disk, so starting it again picks up where
+/// it stopped rather than from the beginning.
+#[tauri::command]
+pub async fn swarm_cancel_download(
+    state: State<'_, TransfersManager>,
+    transfer_id: u64,
+) -> Result<bool, String> {
+    let stopper = state.running.lock().await.get(&transfer_id).cloned();
+    match stopper {
+        Some(stopper) => {
+            stopper.stop();
+            Ok(true)
+        }
+        // Already finished, or never ours: nothing to stop, and saying so is
+        // not an error.
+        None => Ok(false),
     }
 }
 

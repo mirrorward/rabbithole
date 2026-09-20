@@ -97,6 +97,8 @@ pub enum SwarmError {
     /// No peer advertises this content. `server_has` says whether the origin
     /// still holds it (so the caller can fall back to a single origin stream).
     NoPeerSources { server_has: bool },
+    /// The person stopped it.
+    Cancelled,
 }
 
 impl std::fmt::Display for SwarmError {
@@ -112,6 +114,7 @@ impl std::fmt::Display for SwarmError {
             SwarmError::NoPeerSources { server_has: false } => {
                 write!(f, "nobody has this file right now, not even the burrow")
             }
+            SwarmError::Cancelled => write!(f, "Stopped."),
         }
     }
 }

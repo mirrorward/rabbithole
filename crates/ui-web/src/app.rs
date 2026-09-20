@@ -2259,6 +2259,27 @@ impl AppState {
             let _ = (session, pull_id);
             return;
         }
+        // A download the shell is running is the shell's to stop: it drops
+        // the fetch, keeps what was verified, and says so on the row.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let native_download = crate::native::native_available()
+                && self.focused().files.with_untracked(|f| {
+                    f.transfers.iter().any(|t| {
+                        t.id == key
+                            && t.dir == crate::files::TransferDir::Download
+                            && matches!(
+                                t.status,
+                                crate::files::TransferStatus::Active
+                                    | crate::files::TransferStatus::Queued
+                            )
+                    })
+                });
+            if native_download {
+                crate::native::cancel_swarm_download(key);
+                return;
+            }
+        }
         self.sessions.with_untracked(|list| {
             for (_, session) in list {
                 session.files.update(|f| f.cancel_upload(key));

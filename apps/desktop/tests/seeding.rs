@@ -384,3 +384,64 @@ async fn another_burrow_the_person_is_on_carries_part_of_a_download() {
         burrow.shutdown().await;
     }
 }
+
+/// Stopping a download keeps what it had already verified: starting it
+/// again picks up from there rather than from the beginning.
+#[tokio::test]
+async fn a_stopped_download_keeps_what_it_verified() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(ServerConfig {
+        name: "Patient Warren".into(),
+        quic_addr: "127.0.0.1:0".parse().unwrap(),
+        ws_addr: "127.0.0.1:0".parse().unwrap(),
+        data_dir: work.path().join("srv"),
+        ..ServerConfig::default()
+    })
+    .await
+    .unwrap();
+    for who in ["admin", "alice"] {
+        burrow.shared.auth.create_account(who, "pw-pw-pw", Role::Admin).await.unwrap();
+    }
+    let body = payload(6 * 1024 * 1024 + 11); // seven units
+    let src = work.path().join("long.bin");
+    std::fs::write(&src, &body).unwrap();
+    let root = *blake3::hash(&body).as_bytes();
+    let size = body.len() as u64;
+    let admin = login(&burrow, "admin").await;
+    admin.lock().await.area_create("warez", "Warez", "").await.unwrap();
+    let node = admin.lock().await
+        .transfer_upload("warez", None, "long.bin", &src, "application/octet-stream", "")
+        .await
+        .unwrap();
+    // Slow enough that it cannot finish before it is stopped.
+    burrow.shared.config.set_key("transfer_rate_bytes_per_sec", "1048576").unwrap();
+
+    let alice = login(&burrow, "alice").await;
+    let dest = work.path().join("alice.bin");
+    let want = Wanted { root, size, node_id: Some(node.id), max_sources: 4, mode: SourceMode::Auto };
+    // Stopped part-way: the fetch is dropped where it stands.
+    let stopped = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        run_download(&alice, &want, &dest, |_| {}),
+    )
+    .await;
+    assert!(stopped.is_err(), "the download should still have been running");
+    // Nobody is seeding, so this one came from the burrow: what it had
+    // written is still there, and short of the whole file.
+    let held = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    assert!(held > 0, "the partial file is there");
+    assert!(held < size, "and it had not finished: {held} of {size}");
+
+    // Started again, it carries on from there and finishes — and the file
+    // is whole and right.
+    burrow.shared.config.set_key("transfer_rate_bytes_per_sec", "0").unwrap();
+    let done = run_download(&alice, &want, &dest, |_| {}).await.unwrap();
+    assert_eq!(done.route, Route::Origin);
+    assert_eq!(std::fs::read(&dest).unwrap(), body);
+    assert!(
+        !rabbithole_swarm::scheduler::rhstate_path(&dest).exists(),
+        "nothing is left behind once it is whole"
+    );
+
+    burrow.shutdown().await;
+}
