@@ -100,6 +100,7 @@ pub fn native_available() -> bool {
 /// same account without re-prompting for a password.
 #[tauri::command]
 pub async fn connect_native(
+    app: AppHandle,
     state: State<'_, TransfersManager>,
     endpoint: String,
     fingerprint: Option<String>,
@@ -144,12 +145,24 @@ pub async fn connect_native(
     let session: Session = Arc::new(Mutex::new(client));
     state.clients.lock().await.insert(endpoint.clone(), session.clone());
     // Adverts die with a session. A new one announces what is on offer.
-    let mut client = session.lock().await;
-    let mut seeders = state.seeders.lock().await;
-    if let Some(seeder) = seeders.get_mut(&endpoint) {
-        if let Err(why) = seeder.announce(&mut client).await {
-            *state.seeding_note.lock().expect("not poisoned") = Some(why.to_string());
+    {
+        let mut client = session.lock().await;
+        let mut seeders = state.seeders.lock().await;
+        if let Some(seeder) = seeders.get_mut(&endpoint) {
+            if let Err(why) = seeder.announce(&mut client).await {
+                *state.seeding_note.lock().expect("not poisoned") = Some(why.to_string());
+            }
         }
+    }
+    // What this machine was offering this burrow when the app last ran is
+    // offered again, in the background: each file is read to check it is
+    // still the file that was shared, which is not something a sign-in
+    // should wait for.
+    if downloads::load(&prefs_path(&app)?).seed {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            reoffer(app, endpoint, session).await;
+        });
     }
     Ok(())
 }
@@ -213,6 +226,48 @@ async fn other_links(
             version: cards[i].2.clone(),
         })
         .collect()
+}
+
+/// Offer this burrow again what was on offer to it when the app last ran.
+/// A file that has gone, moved, or changed since is quietly forgotten: the
+/// note said it was shared, the file says whether it still can be.
+async fn reoffer(app: AppHandle, endpoint: String, session: Session) {
+    let Ok(path) = shared_path(&app) else { return };
+    let known = downloads::load_shared(&path);
+    let mine: Vec<downloads::SharedFile> = known
+        .iter()
+        .filter(|f| f.burrow == endpoint)
+        .cloned()
+        .collect();
+    if mine.is_empty() {
+        return;
+    }
+    let mut gone = Vec::new();
+    for file in &mine {
+        let Some(root) = parse_root(&file.root).ok() else {
+            gone.push(file.root.clone());
+            continue;
+        };
+        let state = app.state::<TransfersManager>();
+        let mut client = session.lock().await;
+        let mut seeders = state.seeders.lock().await;
+        let offered = seeders
+            .entry(endpoint.clone())
+            .or_default()
+            .share(&mut client, root, file.size, &file.name, &file.path)
+            .await;
+        if offered.is_err() {
+            gone.push(file.root.clone());
+        }
+    }
+    if gone.is_empty() {
+        return;
+    }
+    // Written back once, so a file that cannot be offered any more is not
+    // read again at every sign-in.
+    let mut known = downloads::load_shared(&path);
+    known.retain(|f| !(f.burrow == endpoint && gone.contains(&f.root)));
+    let _ = downloads::store_shared(&path, &known);
 }
 
 /// A `SwarmEvent` tagged with which transfer it belongs to — the `swarm://event`
@@ -343,6 +398,18 @@ pub async fn swarm_start_download(
                     .or_default()
                     .share(&mut client, root, size, &name, &dest)
                     .await;
+                if shared.is_ok() {
+                    remember_shared(
+                        &app,
+                        downloads::SharedFile {
+                            burrow: endpoint.clone(),
+                            root: root_hex.clone(),
+                            size,
+                            name: name.clone(),
+                            path: dest.clone(),
+                        },
+                    );
+                }
                 *state.seeding_note.lock().expect("not poisoned") = shared.err().map(|e| e.to_string());
             }
             Ok(())
@@ -419,6 +486,25 @@ pub struct DownloadPrefsView {
     seeding_note: Option<String>,
     /// The system downloads folder, which is where a save panel opens.
     system_folder: String,
+}
+
+/// Where the note of what is on offer lives, beside the preferences.
+fn shared_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join("shared.json"))
+}
+
+/// Note that a file is on offer to a burrow, so the offer can be made again
+/// when the app runs next. Never fails a download: if the note cannot be
+/// written, the sharing simply does not outlive the app.
+fn remember_shared(app: &AppHandle, entry: downloads::SharedFile) {
+    let Ok(path) = shared_path(app) else { return };
+    let mut known = downloads::load_shared(&path);
+    downloads::remember(&mut known, entry);
+    let _ = downloads::store_shared(&path, &known);
 }
 
 fn prefs_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -521,6 +607,10 @@ pub async fn set_seeding(app: AppHandle, state: State<'_, TransfersManager>, on:
             seeder.stop(held.as_deref_mut()).await;
         }
         seeders.clear();
+        // Nothing is on offer, and nothing is offered again next time.
+        if let Ok(path) = shared_path(&app) {
+            let _ = downloads::store_shared(&path, &[]);
+        }
         *state.seeding_note.lock().expect("not poisoned") = None;
     }
     view_of(&app, &prefs)

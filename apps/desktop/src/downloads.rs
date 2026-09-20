@@ -144,6 +144,64 @@ pub fn load(path: &Path) -> DownloadPrefs {
         .unwrap_or_default()
 }
 
+/// One file this machine offers to a burrow's swarm, remembered so the
+/// offer survives closing the app. The bytes stay where the person put
+/// them; this is only the note that they were shared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedFile {
+    /// The burrow's endpoint, as the app dialled it.
+    pub burrow: String,
+    /// The content's blake3 root, in hex.
+    pub root: String,
+    pub size: u64,
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// The most files one burrow's offer is remembered for. Each costs a read
+/// of the file when the app starts again, so this is a lot, not a limit
+/// anyone should meet.
+pub const MOST_REMEMBERED: usize = 200;
+
+/// What was on offer when the app last ran.
+pub fn load_shared(path: &Path) -> Vec<SharedFile> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Write the list, creating its folder.
+pub fn store_shared(path: &Path, files: &[SharedFile]) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let text = serde_json::to_string_pretty(files).map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| e.to_string())
+}
+
+/// Note that `entry` is on offer: the same content on the same burrow is
+/// remembered once, newest last, and the oldest are forgotten past
+/// [`MOST_REMEMBERED`] per burrow.
+pub fn remember(known: &mut Vec<SharedFile>, entry: SharedFile) {
+    known.retain(|f| !(f.burrow == entry.burrow && f.root == entry.root));
+    let burrow = entry.burrow.clone();
+    known.push(entry);
+    let mut seen = 0;
+    let mut keep = Vec::with_capacity(known.len());
+    for f in known.iter().rev() {
+        if f.burrow == burrow {
+            seen += 1;
+            if seen > MOST_REMEMBERED {
+                continue;
+            }
+        }
+        keep.push(f.clone());
+    }
+    keep.reverse();
+    *known = keep;
+}
+
 /// Write the preferences file, creating its folder.
 pub fn store(path: &Path, prefs: &DownloadPrefs) -> Result<(), String> {
     if let Some(dir) = path.parent() {
@@ -156,6 +214,50 @@ pub fn store(path: &Path, prefs: &DownloadPrefs) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn offer(burrow: &str, root: &str) -> SharedFile {
+        SharedFile {
+            burrow: burrow.into(),
+            root: root.into(),
+            size: 10,
+            name: "f.bin".into(),
+            path: PathBuf::from("/tmp/f.bin"),
+        }
+    }
+
+    #[test]
+    fn what_is_on_offer_is_remembered_once_per_burrow_and_does_not_grow_forever() {
+        let mut known = Vec::new();
+        remember(&mut known, offer("ws://a", "aa"));
+        remember(&mut known, offer("ws://b", "aa"));
+        // The same content on the same burrow is one offer, not two.
+        remember(&mut known, offer("ws://a", "aa"));
+        assert_eq!(known.len(), 2);
+        assert_eq!(known.iter().filter(|f| f.burrow == "ws://a").count(), 1);
+
+        // Past the limit the oldest of that burrow's offers are forgotten,
+        // and another burrow's are left alone.
+        for i in 0..MOST_REMEMBERED + 5 {
+            remember(&mut known, offer("ws://a", &format!("root-{i}")));
+        }
+        assert_eq!(
+            known.iter().filter(|f| f.burrow == "ws://a").count(),
+            MOST_REMEMBERED
+        );
+        assert_eq!(known.iter().filter(|f| f.burrow == "ws://b").count(), 1);
+        assert!(known.iter().any(|f| f.root == format!("root-{}", MOST_REMEMBERED + 4)));
+        assert!(!known.iter().any(|f| f.root == "root-0"));
+    }
+
+    #[test]
+    fn the_offer_list_survives_a_round_trip_and_a_missing_file_is_nothing_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state").join("shared.json");
+        assert!(load_shared(&path).is_empty());
+        let known = vec![offer("ws://a", "aa"), offer("ws://b", "bb")];
+        store_shared(&path, &known).unwrap();
+        assert_eq!(load_shared(&path), known);
+    }
 
     #[test]
     fn with_no_folder_set_a_download_asks() {

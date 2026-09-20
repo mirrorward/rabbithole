@@ -518,3 +518,76 @@ async fn peers_only_asks_no_other_burrow() {
         burrow.shutdown().await;
     }
 }
+
+/// What this machine was offering a burrow is offered again when the app
+/// runs next — and a file that has changed since is quietly dropped rather
+/// than advertised as something it is not.
+#[tokio::test]
+async fn an_offer_outlives_the_app_unless_the_file_changed() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(ServerConfig {
+        name: "Patient Warren".into(),
+        quic_addr: "127.0.0.1:0".parse().unwrap(),
+        ws_addr: "127.0.0.1:0".parse().unwrap(),
+        data_dir: work.path().join("srv"),
+        ..ServerConfig::default()
+    })
+    .await
+    .unwrap();
+    for who in ["alice", "bob"] {
+        burrow.shared.auth.create_account(who, "pw-pw-pw", Role::Admin).await.unwrap();
+    }
+    let alice = login(&burrow, "alice").await;
+
+    // Two files she shared last time: one still as it was, one changed.
+    let kept = work.path().join("kept.bin");
+    let changed = work.path().join("changed.bin");
+    let body = payload(200_000);
+    std::fs::write(&kept, &body).unwrap();
+    std::fs::write(&changed, &body).unwrap();
+    let root = *blake3::hash(&body).as_bytes();
+    let notes = work.path().join("state").join("shared.json");
+    let offers: Vec<rabbithole_desktop_lib::downloads::SharedFile> = [("kept.bin", &kept), ("changed.bin", &changed)]
+        .iter()
+        .map(|(name, path)| rabbithole_desktop_lib::downloads::SharedFile {
+            burrow: "ws://here".into(),
+            root: root.iter().map(|b| format!("{b:02x}")).collect(),
+            size: body.len() as u64,
+            name: (*name).into(),
+            path: (*path).clone(),
+        })
+        .collect();
+    // One note per file: the same content twice would be one offer, so
+    // they are told apart by the burrow they were shared with.
+    let mut known = Vec::new();
+    rabbithole_desktop_lib::downloads::remember(&mut known, offers[0].clone());
+    let mut second = offers[1].clone();
+    second.burrow = "ws://elsewhere".into();
+    rabbithole_desktop_lib::downloads::remember(&mut known, second.clone());
+    rabbithole_desktop_lib::downloads::store_shared(&notes, &known).unwrap();
+    assert_eq!(rabbithole_desktop_lib::downloads::load_shared(&notes).len(), 2);
+
+    // The app starts again: the file that is still itself is offered, and
+    // the burrow lists this machine as a source for it.
+    let mut seeder = Seeder::default();
+    seeder
+        .share(&mut *alice.lock().await, root, body.len() as u64, "kept.bin", &kept)
+        .await
+        .unwrap();
+    assert_eq!(seeder.files(), 1);
+    // Seen by somebody else on the burrow (a session is never its own
+    // source), which is what offering it again is for.
+    let bob = login(&burrow, "bob").await;
+    let sources = bob.lock().await.swarm_find_all(root).await.unwrap();
+    assert!(sources.sources.iter().any(|s| s.endpoint.is_some()), "{sources:?}");
+
+    // The other file changed since it was shared: offering it is refused,
+    // rather than advertising content this machine does not have.
+    std::fs::write(&changed, payload(200_001)).unwrap();
+    let refused = seeder
+        .share(&mut *alice.lock().await, root, body.len() as u64, "changed.bin", &changed)
+        .await;
+    assert!(refused.is_err(), "a changed file is not still that content");
+
+    burrow.shutdown().await;
+}
