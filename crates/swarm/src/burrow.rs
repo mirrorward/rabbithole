@@ -128,6 +128,18 @@ impl BurrowSource {
         }
     }
 
+    /// Whether this is another burrow's, lending rather than giving.
+    pub fn lent(&self) -> bool {
+        self.lent
+    }
+
+    /// Take the ticket out without closing it, for a caller that will use
+    /// it for something else (the download falling back to this burrow's
+    /// own stream, which is one download, not two).
+    pub async fn take_ticket(&self) -> Option<rabbithole_proto::transfer::TransferTicket> {
+        self.ticket.lock().await.take()
+    }
+
     /// Give back the ticket, if one was opened: a burrow does not hold a
     /// transfer slot for a download that has finished with it.
     pub async fn close(&self) {

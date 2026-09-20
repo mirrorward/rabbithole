@@ -973,7 +973,22 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
     .await?;
 
     // Show the agreement if one is configured; the client answers AGREED (121).
+    // Somebody who already accepted this wording here is not shown it again
+    // (the native surface remembers it the same way).
     let agreement = shared.config.read().agreement;
+    let accepted_before = !agreement.is_empty()
+        && rabbithole_store_server::repo::AccountsRepo(&shared.pool)
+            .agreed_hash(authed.account.id)
+            .await
+            .ok()
+            .flatten()
+            .as_ref()
+            == Some(blake3::hash(agreement.as_bytes()).as_bytes());
+    let agreement = if accepted_before {
+        String::new()
+    } else {
+        agreement
+    };
     let agreed = agreement.is_empty();
     if !agreement.is_empty() {
         wr.write_all(
@@ -1149,6 +1164,15 @@ async fn handle_txn(
 
         transaction::AGREED => {
             active.agreed = true;
+            // Remembered against the account, so the next login does not
+            // show it again until the wording changes.
+            let text = shared.config.read().agreement;
+            if !text.is_empty() {
+                let hash = *blake3::hash(text.as_bytes()).as_bytes();
+                let _ = rabbithole_store_server::repo::AccountsRepo(&shared.pool)
+                    .set_agreed(active.subject.account_id, &hash)
+                    .await;
+            }
         }
 
         transaction::SET_CLIENT_USER_INFO => {

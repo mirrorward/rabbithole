@@ -566,3 +566,64 @@ async fn transfer_abort_is_bound_to_the_opening_session() {
 
     burrow.shutdown().await;
 }
+
+/// A download on a ticket already in hand is one download: the file's count
+/// moves once, and the ticket is the one that was opened, not another. This
+/// is what the app's fallback from a swarm fetch to the burrow's own stream
+/// uses, so falling back does not count the file twice.
+#[tokio::test]
+async fn a_download_on_a_ticket_already_open_is_counted_once() {
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(work.path())).await.unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("alice", "pw-pw-pw", Role::Admin)
+        .await
+        .unwrap();
+    let mut alice = login(&burrow, "alice").await;
+    alice.area_create("warez", "Warez", "").await.unwrap();
+    let body: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let src = work.path().join("tape.bin");
+    std::fs::write(&src, &body).unwrap();
+    let node = alice
+        .transfer_upload(
+            "warez",
+            None,
+            "tape.bin",
+            &src,
+            "application/octet-stream",
+            "",
+        )
+        .await
+        .unwrap();
+    let counted = async || {
+        burrow
+            .shared
+            .files
+            .node(node.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .downloads
+    };
+    assert_eq!(counted().await, 0);
+
+    // One ticket, opened once: the count moves there and nowhere else.
+    let ticket = alice.download_ticket(node.id).await.unwrap();
+    assert_eq!(counted().await, 1);
+    let dst = work.path().join("got.bin");
+    let n = alice.transfer_download_with(&ticket, &dst).await.unwrap();
+    assert_eq!(n, body.len() as u64);
+    assert_eq!(std::fs::read(&dst).unwrap(), body);
+    assert_eq!(counted().await, 1, "the same download, not another");
+    // The last chunk retires the ticket, so there is nothing left to close.
+    assert!(alice.close_transfer(ticket.transfer_id).await.is_err());
+
+    // Without one, a ticket is opened, and that is a second download.
+    let other = work.path().join("again.bin");
+    alice.transfer_download(node.id, &other).await.unwrap();
+    assert_eq!(counted().await, 2);
+
+    burrow.shutdown().await;
+}

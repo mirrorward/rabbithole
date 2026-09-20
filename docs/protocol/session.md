@@ -74,7 +74,13 @@ answers `TotpRequired`; a recovery code is accepted in the `totp` field.
    another attempt.
 3. On `AuthOk`, the server pushes `Welcome`. If `agreement` is non-null,
    the client must send `AgreementAccept` before participating (until
-   then, participating requests answer `Forbidden`).
+   then, participating requests answer `Forbidden`). **Accepting is
+   remembered** (0.238): the burrow stores the blake3 of the wording that
+   account accepted, and sends `agreement: null` to somebody who has
+   already accepted the wording in force — so a reconnect does not ask
+   again. Change the wording and everyone is asked once more. A guest has
+   no account to remember it against, and is asked each session. The
+   Hotline surface works the same way.
 4. Re-`Hello` or re-auth on an authenticated session is a `BadRequest`.
 
 ## Pull sessions

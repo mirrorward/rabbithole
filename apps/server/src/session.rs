@@ -25,6 +25,7 @@ use rabbithole_server_core::{
 };
 
 use crate::Shared;
+use rabbithole_store_server::repo::AccountsRepo;
 
 /// Mutable per-session state shared by all request handlers.
 pub struct SessionCtx {
@@ -295,6 +296,28 @@ pub async fn run_session(
     // ---- Active ---------------------------------------------------------
     let cfg = shared.config.read();
     let agreement = (!cfg.agreement.is_empty()).then(|| cfg.agreement.clone());
+    // Accepting is remembered: somebody who has already agreed to this
+    // wording is not asked again, at this reconnect or any other. Change
+    // the wording and everyone is asked once more, which is what an
+    // agreement is for. A guest has no account to remember it against.
+    let wording = agreement
+        .as_ref()
+        .map(|text| *blake3::hash(text.as_bytes()).as_bytes());
+    let agreement = match (&wording, authed.token.is_some()) {
+        (Some(hash), true) => {
+            let accepted = AccountsRepo(&shared.pool)
+                .agreed_hash(authed.account.id)
+                .await
+                .ok()
+                .flatten();
+            if accepted.as_ref() == Some(hash) {
+                None
+            } else {
+                agreement
+            }
+        }
+        _ => agreement,
+    };
     let mut ctx = SessionCtx {
         session_id,
         account_id: authed.account.id,
@@ -456,6 +479,16 @@ async fn handle_request(
     }
     if frame.decode::<psess::AgreementAccept>().is_some() {
         ctx.agreed = true;
+        // Remembered against the account, by the wording they accepted, so
+        // the next session does not ask again. A guest has no account to
+        // remember it against, and is asked each time.
+        let text = shared.config.read().agreement;
+        if !ctx.is_guest && !text.is_empty() {
+            let hash = *blake3::hash(text.as_bytes()).as_bytes();
+            let _ = AccountsRepo(&shared.pool)
+                .set_agreed(ctx.account_id, &hash)
+                .await;
+        }
         conn.send(Frame::ack(frame)).await?;
         return Ok(());
     }

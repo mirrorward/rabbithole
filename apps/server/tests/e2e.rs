@@ -186,6 +186,32 @@ async fn guests_disabled_and_agreement_gate() {
     h.agreement_accept().await.unwrap();
     h.chat_send("lobby", "tea time!").await.unwrap();
 
+    // Accepting is remembered: coming back is not asked again, and chat
+    // works from the first moment.
+    let mut again = quic_client(&burrow).await;
+    again.auth_password("mad-hatter", "tea-time").await.unwrap();
+    let welcome = again.expect_welcome().await.unwrap();
+    assert_eq!(welcome.agreement, None, "already agreed to this wording");
+    again.chat_send("lobby", "back again").await.unwrap();
+
+    // The operator changes the wording: everyone is asked once more.
+    burrow
+        .shared
+        .config
+        .set_key("agreement", "be excellent, and bring biscuits")
+        .unwrap();
+    let mut third = quic_client(&burrow).await;
+    third.auth_password("mad-hatter", "tea-time").await.unwrap();
+    let welcome = third.expect_welcome().await.unwrap();
+    assert_eq!(
+        welcome.agreement.as_deref(),
+        Some("be excellent, and bring biscuits"),
+        "new wording, new answer"
+    );
+    assert!(third.chat_send("lobby", "not yet").await.is_err());
+    third.agreement_accept().await.unwrap();
+    third.chat_send("lobby", "biscuits brought").await.unwrap();
+
     burrow.shutdown().await;
 }
 

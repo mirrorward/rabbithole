@@ -1161,10 +1161,23 @@ impl Client {
         node_id: i64,
         dest: &std::path::Path,
     ) -> Result<u64, ClientError> {
-        use std::io::{Seek, SeekFrom, Write};
         let ticket: rabbithole_proto::transfer::TransferTicket = self
             .request(&rabbithole_proto::transfer::TransferOpen::download(node_id))
             .await?;
+        self.transfer_download_with(&ticket, dest).await
+    }
+
+    /// [`Client::transfer_download`] with a ticket already in hand: what a
+    /// caller that opened one for something else (a swarm fetch that fell
+    /// back to the burrow) uses, so one file downloaded is one download
+    /// opened, counted and charged, not two.
+    pub async fn transfer_download_with(
+        &mut self,
+        ticket: &rabbithole_proto::transfer::TransferTicket,
+        dest: &std::path::Path,
+    ) -> Result<u64, ClientError> {
+        use std::io::{Seek, SeekFrom, Write};
+        let ticket = ticket.clone();
         let rate = self.rate_limit;
         // Resume from the existing partial (clamped to the real size).
         let mut have = std::fs::metadata(dest)

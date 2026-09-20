@@ -248,6 +248,9 @@ pub async fn run_swarm_download(
     share: Option<ShareAs>,
     origin: Option<i64>,
     helpers: Vec<Arc<BurrowSource>>,
+    // Where the burrow's own ticket is left when the fetch fails, so a
+    // fallback to its stream is the same download rather than another.
+    kept: &mut Option<rabbithole_proto::transfer::TransferTicket>,
     mut emit: impl FnMut(SwarmEvent),
 ) -> Result<FetchReport, SwarmError> {
     let outcome = swarm_download(
@@ -259,6 +262,7 @@ pub async fn run_swarm_download(
         share,
         origin,
         &helpers,
+        kept,
         &mut emit,
     )
     .await;
@@ -280,6 +284,7 @@ async fn swarm_download(
     share: Option<ShareAs>,
     origin: Option<i64>,
     helpers: &[Arc<BurrowSource>],
+    kept: &mut Option<rabbithole_proto::transfer::TransferTicket>,
     emit: &mut impl FnMut(SwarmEvent),
 ) -> Result<FetchReport, SwarmError> {
     // Partial seeds too: this fetch asks each source which part it holds.
@@ -413,15 +418,21 @@ async fn swarm_download(
             total_units: u.total_units,
         });
     }
-    // The burrow of the download gives its ticket back here; the others
-    // are closed by the caller, whatever became of this.
-    for burrow in &burrows {
-        burrow.close().await;
-    }
     let report = fetch
         .await
         .map_err(|e| SwarmError::Fetch(rabbithole_swarm::peer::PeerError::Verify(e.to_string())))?
-        .map_err(SwarmError::Fetch)?;
+        .map_err(SwarmError::Fetch);
+    // The burrow of the download gives its ticket back here — unless the
+    // fetch failed and it is the one the file may yet come from, in which
+    // case the ticket is handed on rather than opened again. The other
+    // burrows are closed by the caller, whatever became of this.
+    for burrow in &burrows {
+        if report.is_err() && !burrow.lent() {
+            *kept = burrow.take_ticket().await;
+        }
+        burrow.close().await;
+    }
+    let report = report?;
     emit(SwarmEvent::Done {
         bytes: report.bytes,
         per_source: report.per_source.clone(),
@@ -525,7 +536,8 @@ pub async fn run_download_sharing(
             let origin = (mode == SourceMode::Auto && server_has)
                 .then_some(node_id)
                 .flatten();
-            match run_swarm_download(
+            let mut kept: Option<rabbithole_proto::transfer::TransferTicket> = None;
+            let attempt = run_swarm_download(
                 session,
                 root,
                 size,
@@ -534,9 +546,11 @@ pub async fn run_download_sharing(
                 share,
                 origin,
                 helpers,
+                &mut kept,
                 &mut emit,
             )
-            .await
+            .await;
+            match attempt
             {
                 Ok(report) => Ok(Downloaded {
                     route: Route::Swarm,
@@ -558,14 +572,28 @@ pub async fn run_download_sharing(
                     if seeds.as_ref().is_some_and(|s| !s.holds_whole(&root)) {
                         let _ = client.swarm_withdraw(vec![root]).await;
                     }
-                    run_origin_download(&mut client, node_id, size, dest, &mut emit).await?;
+                    // On the ticket the swarm attempt already opened, when
+                    // it got that far: one file is one download.
+                    run_origin_download(&mut client, node_id, kept.take(), size, dest, &mut emit)
+                        .await?;
                     check_origin_copy(dest, root)?;
                     Ok(Downloaded {
                         route: Route::Origin,
                         may_share: true,
                     })
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    // Not falling back: a ticket the attempt left behind is
+                    // given back rather than held to the session's end.
+                    if let Some(ticket) = kept.take() {
+                        let _ = tokio::time::timeout(
+                            ASK_TIMEOUT,
+                            session.lock().await.close_transfer(ticket.transfer_id),
+                        )
+                        .await;
+                    }
+                    Err(e)
+                }
             }
         }
         Route::Origin => {
@@ -574,7 +602,7 @@ pub async fn run_download_sharing(
             }
             let node_id = node_id.expect("choose_route requires a reachable origin");
             let mut client = session.lock().await;
-            run_origin_download(&mut client, node_id, size, dest, &mut emit).await?;
+            run_origin_download(&mut client, node_id, None, size, dest, &mut emit).await?;
             check_origin_copy(dest, root)?;
             Ok(Downloaded {
                 route: Route::Origin,
@@ -610,6 +638,9 @@ fn check_origin_copy(dest: &Path, root: [u8; 32]) -> Result<(), SwarmError> {
 async fn run_origin_download(
     client: &mut Client,
     node_id: i64,
+    // A ticket the swarm attempt already opened for this very file, when
+    // there is one: the burrow counts and charges one download, not two.
+    open: Option<rabbithole_proto::transfer::TransferTicket>,
     size: u64,
     dest: &Path,
     emit: &mut impl FnMut(SwarmEvent),
@@ -645,7 +676,12 @@ async fn run_origin_download(
         }
     };
     let bytes = {
-        let transfer = client.transfer_download(node_id, dest);
+        let transfer = async {
+            match &open {
+                Some(ticket) => client.transfer_download_with(ticket, dest).await,
+                None => client.transfer_download(node_id, dest).await,
+            }
+        };
         tokio::pin!(transfer);
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(200));
         loop {

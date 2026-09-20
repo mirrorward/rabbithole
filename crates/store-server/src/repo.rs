@@ -78,6 +78,29 @@ impl AccountsRepo<'_> {
             .map(|r| row_to_account(&r)))
     }
 
+    /// Which agreement this person has accepted here (the blake3 of the
+    /// text they were shown), if any.
+    pub async fn agreed_hash(&self, id: i64) -> Result<Option<[u8; 32]>, StoreError> {
+        let row = sqlx::query("SELECT agreed_hash FROM accounts WHERE id = ?")
+            .bind(id)
+            .fetch_optional(self.0)
+            .await?;
+        Ok(row
+            .and_then(|r| r.get::<Option<Vec<u8>>, _>("agreed_hash"))
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok()))
+    }
+
+    /// Remember that they accepted this agreement, so they are not asked
+    /// again until its wording changes.
+    pub async fn set_agreed(&self, id: i64, hash: &[u8; 32]) -> Result<(), StoreError> {
+        sqlx::query("UPDATE accounts SET agreed_hash = ?, agreed_at = unixepoch() WHERE id = ?")
+            .bind(&hash[..])
+            .bind(id)
+            .execute(self.0)
+            .await?;
+        Ok(())
+    }
+
     pub async fn update_phc(&self, id: i64, phc: &str) -> Result<(), StoreError> {
         sqlx::query("UPDATE accounts SET phc = ? WHERE id = ?")
             .bind(phc)
