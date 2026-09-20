@@ -156,6 +156,11 @@ most four of them. Each burrow session does one thing at a time, so a source
 that is busy hands the unit back rather than holding it: what this buys is
 another place to get the file, not more speed from one.
 
+The command line does the same with the burrow it is signed in to:
+`rabbit swarm fetch` asks which of its files holds the content and takes
+units from it beside any peers, so a fetch with nobody seeding works rather
+than sending the person to `rabbit file get`.
+
 **What another burrow lends is never offered on.** A download that took any
 chunk from another burrow is not advertised to the burrow it came from, in
 part or whole (`RangeSource::shareable`): that content was lent to this

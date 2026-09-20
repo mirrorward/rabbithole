@@ -21,6 +21,15 @@ positioned-io.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+# A burrow as a source of proved ranges needs a session to ask over. Only
+# the clients that have one (the app, the CLI) turn this on; the server
+# builds the crate without it.
+rabbithole-core = { workspace = true, optional = true }
+rabbithole-proto = { workspace = true, optional = true }
+
+[features]
+default = []
+client = ["dep:rabbithole-core", "rabbithole-core/native", "dep:rabbithole-proto"]
 
 [dev-dependencies]
 tempfile.workspace = true

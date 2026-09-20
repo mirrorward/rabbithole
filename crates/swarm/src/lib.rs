@@ -11,12 +11,19 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "client")]
+pub mod burrow;
 pub mod cap;
 pub mod link;
 pub mod manifest;
 pub mod peer;
 pub mod scheduler;
 
+#[cfg(feature = "client")]
+pub use burrow::{
+    confirm_helpers, other_burrows, AskOthers, BurrowLink, BurrowSource, Session, ASK_TIMEOUT,
+    OTHER_BURROWS_MAX, SESSION_WAIT,
+};
 pub use cap::{
     token_allows, CapClaim, CapError, CapToken, S2sCapClaim, S2sCapToken, CAP_CONTEXT,
     S2S_CAP_CONTEXT,

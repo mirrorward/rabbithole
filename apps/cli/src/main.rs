@@ -990,7 +990,10 @@ fn parse_swarm_target(s: &str) -> Result<[u8; 32]> {
 /// The Warren: advertise local files, find sources, withdraw.
 async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
     use rabbithole_proto::swarm::AdvertEntry;
-    let (mut c, _) = reconnect().await?;
+    let (c, _) = reconnect().await?;
+    // The session lives behind a lock for this command: a swarm fetch takes
+    // it a range at a time, beside the peers.
+    let session: rabbithole_swarm::Session = std::sync::Arc::new(tokio::sync::Mutex::new(c));
     let result: Result<()> = async {
         match action {
             SwarmAction::Share {
@@ -1015,7 +1018,11 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
                     listed.push((hex::encode(root), name.clone(), size));
                     entries.push(AdvertEntry::new(root, size, name, mime));
                 }
-                let ack = c.swarm_advertise(entries.clone(), ttl).await?;
+                let ack = session
+                    .lock()
+                    .await
+                    .swarm_advertise(entries.clone(), ttl)
+                    .await?;
                 if json {
                     println!(
                         "{}",
@@ -1047,11 +1054,14 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
                     }
                     let server = rabbithole_swarm::PeerServer::start(
                         "0.0.0.0:0".parse().expect("valid addr"),
-                        c.server.server_key,
+                        session.lock().await.server.server_key,
                         seeds,
                     )
                     .await?;
-                    c.swarm_contact(server.addr.port(), server.fingerprint.0)
+                    session
+                        .lock()
+                        .await
+                        .swarm_contact(server.addr.port(), server.fingerprint.0)
                         .await?;
                     if !json {
                         eprintln!("seeding on port {} — Ctrl-C to stop", server.addr.port());
@@ -1062,7 +1072,7 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
                     loop {
                         tokio::select! {
                             _ = tokio::time::sleep(period) => {
-                                c.swarm_advertise(entries.clone(), ttl).await?;
+                                session.lock().await.swarm_advertise(entries.clone(), ttl).await?;
                             }
                             _ = tokio::signal::ctrl_c() => break,
                         }
@@ -1071,7 +1081,7 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
             }
             SwarmAction::Find { target } => {
                 let root = parse_swarm_target(&target)?;
-                let list = c.swarm_find(root).await?;
+                let list = session.lock().await.swarm_find(root).await?;
                 if json {
                     println!(
                         "{}",
@@ -1100,11 +1110,11 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
             SwarmAction::Fetch { target, out } => {
                 let root = parse_swarm_target(&target)?;
                 // Partial seeds too: the fetch asks each which part it holds.
-                let list = c.swarm_find_all(root).await?;
+                let list = session.lock().await.swarm_find_all(root).await?;
                 // Every source with a peer-wire endpoint joins the swarm
                 // fetch; work-stealing spreads units by real speed and a
                 // failing peer's units migrate to the others.
-                let sources: Vec<rabbithole_swarm::SourcePeer> = list
+                let peers: Vec<rabbithole_swarm::SourcePeer> = list
                     .sources
                     .iter()
                     .filter_map(|s| {
@@ -1114,7 +1124,18 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
                         })
                     })
                     .collect();
-                if sources.is_empty() {
+                // The burrow itself is one more source, unit by unit beside
+                // the peers, when it holds the file, may be asked for it,
+                // and is new enough to send ranges with their proofs.
+                let serves_ranges = rabbithole_swarm::burrow::serves_proved_ranges(
+                    &session.lock().await.server.server_version,
+                );
+                let filed = if list.server_has && serves_ranges {
+                    session.lock().await.file_by_content(root).await.ok()
+                } else {
+                    None
+                };
+                if peers.is_empty() && filed.is_none() {
                     if list.server_has {
                         bail!(
                             "no reachable peer serves {} — download it from the \
@@ -1124,16 +1145,47 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
                     }
                     bail!("no known sources for {}", hex::encode(root));
                 }
-                let size = list.sources.iter().map(|s| s.size).max().unwrap_or(0);
-                let ticket = c.swarm_ticket(root).await?;
-                let report = rabbithole_swarm::scheduler::fetch_swarm_resumable(
-                    &sources,
-                    &ticket.token,
-                    root,
-                    size,
-                    &out,
-                )
-                .await?;
+                let size = list
+                    .sources
+                    .iter()
+                    .map(|s| s.size)
+                    .chain(filed.iter().map(|f| f.size))
+                    .max()
+                    .unwrap_or(0);
+                let ticket = session.lock().await.swarm_ticket(root).await?;
+                let mut sources: Vec<std::sync::Arc<dyn rabbithole_swarm::RangeSource>> = peers
+                    .iter()
+                    .map(|p| {
+                        std::sync::Arc::new(rabbithole_swarm::PeerSource {
+                            endpoint: p.endpoint.clone(),
+                            cert_fp: p.cert_fp,
+                            token: ticket.token.clone(),
+                            root,
+                        })
+                            as std::sync::Arc<dyn rabbithole_swarm::RangeSource>
+                    })
+                    .collect();
+                // The session moves behind a lock for the fetch: the burrow
+                // source asks over it, one range at a time.
+                let burrow = filed.map(|f| {
+                    std::sync::Arc::new(rabbithole_swarm::BurrowSource::origin(
+                        "the burrow".to_string(),
+                        session.clone(),
+                        f.node_id,
+                        size,
+                    ))
+                });
+                if let Some(burrow) = &burrow {
+                    sources
+                        .push(burrow.clone() as std::sync::Arc<dyn rabbithole_swarm::RangeSource>);
+                }
+                let report =
+                    rabbithole_swarm::fetch_swarm_from(&sources, root, size, &out, None, None)
+                        .await;
+                if let Some(burrow) = &burrow {
+                    burrow.close().await;
+                }
+                let report = report?;
                 if json {
                     println!(
                         "{}",
@@ -1160,7 +1212,7 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
                     .map(|s| parse_swarm_target(s))
                     .collect::<Result<Vec<_>>>()?;
                 let all = roots.is_empty();
-                c.swarm_withdraw(roots).await?;
+                session.lock().await.swarm_withdraw(roots).await?;
                 if all {
                     println!("withdrew all advertisements");
                 } else {
@@ -1171,7 +1223,7 @@ async fn cmd_swarm(json: bool, action: SwarmAction) -> Result<()> {
         Ok(())
     }
     .await;
-    c.close().await;
+    session.lock().await.close().await;
     result
 }
 
