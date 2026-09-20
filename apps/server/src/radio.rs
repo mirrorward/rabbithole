@@ -463,7 +463,7 @@ impl Stations {
     /// The rotation's own mount: the existing one, or a fresh one. `None`
     /// while a DJ holds the slug. Returns the byte fan-out and the slot the
     /// listeners' stream titles are read from.
-    fn program_mount(&self, slug: &str) -> Option<(Fanout, TitleSlot)> {
+    fn program_mount(&self, slug: &str, sound: Sound) -> Option<(Fanout, TitleSlot)> {
         // The controller's own station record (name, description, what is on).
         let program = self
             .programs
@@ -492,12 +492,31 @@ impl Stations {
                     genre: program.description.clone(),
                     ..StationMeta::default()
                 },
-                content_type: "audio/mpeg".to_string(),
+                content_type: sound.content_type().to_string(),
                 now_playing: now_playing.clone(),
                 program_owned: true,
             },
         );
         Some((tx, now_playing))
+    }
+
+    /// What a rotation's mount is sending right now, if it is up and the
+    /// rotation's own.
+    fn program_content_type(&self, slug: &str) -> Option<String> {
+        self.mounts
+            .lock()
+            .get(slug)
+            .filter(|m| m.program_owned)
+            .map(|m| m.content_type.clone())
+    }
+
+    /// Take one rotation's mount down, so it can go back up sending
+    /// something else. A mount a DJ holds is theirs and is left alone.
+    fn retire_program_mount(&self, slug: &str) {
+        let mut mounts = self.mounts.lock();
+        if mounts.get(slug).is_some_and(|m| m.program_owned) {
+            mounts.remove(slug);
+        }
     }
 
     /// The stream listener went away: take every rotation off the air. A
@@ -1157,6 +1176,93 @@ pub fn batches(track: &[u8]) -> Vec<Batch> {
     out
 }
 
+/// Cut an Ogg track (Opus, Vorbis) into sends, the same way and for the same
+/// reasons as [`batches`]: whole pages only, contiguous bytes only, about a
+/// quarter second each. A page that completes no packet carries no time of
+/// its own; it goes out with the page that finishes what it started.
+pub fn ogg_batches(track: &[u8], rate: u32) -> Vec<Batch> {
+    use rabbithole_radio::ogg;
+    if rate == 0 {
+        return Vec::new();
+    }
+    let mut out: Vec<Batch> = Vec::new();
+    let mut open: Option<Batch> = None;
+    let mut played = 0u64; // samples the stream has reached
+    for page in ogg::pages(track) {
+        let end = page.offset + page.len;
+        // The headers, and any page that finishes no packet, are worth no
+        // time; a page that finishes one is worth the samples it added.
+        let micros = match page.granule {
+            Some(granule) if granule > played => {
+                let micros = (granule - played) * 1_000_000 / u64::from(rate);
+                played = granule;
+                micros
+            }
+            _ => 0,
+        };
+        match open.as_mut() {
+            Some(b) if b.bytes.end == page.offset && b.micros < PUMP_BATCH_MICROS => {
+                b.bytes.end = end;
+                b.micros += micros;
+            }
+            _ => {
+                out.extend(open.take());
+                open = Some(Batch {
+                    bytes: page.offset..end,
+                    micros,
+                });
+            }
+        }
+    }
+    out.extend(open);
+    out
+}
+
+/// What a station is sending, and how a track of that kind is paced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sound {
+    /// MPEG audio, `audio/mpeg`.
+    Mpeg,
+    /// Ogg (Opus or Vorbis), `audio/ogg`, paced by granule at this rate.
+    Ogg(u32),
+}
+
+impl Sound {
+    /// What an ICY listener is told this mount is.
+    pub fn content_type(self) -> &'static str {
+        match self {
+            Sound::Mpeg => "audio/mpeg",
+            Sound::Ogg(_) => "audio/ogg",
+        }
+    }
+
+    /// What this track is, if it is anything a station can send as it is.
+    pub fn of(track: &[u8]) -> Option<Sound> {
+        if rabbithole_radio::mp3::looks_like_mp3(track) {
+            return Some(Sound::Mpeg);
+        }
+        rabbithole_radio::ogg::codec(track).map(|(_, rate)| Sound::Ogg(rate))
+    }
+
+    /// The sends this track is cut into.
+    pub fn batches(self, track: &[u8]) -> Vec<Batch> {
+        match self {
+            Sound::Mpeg => batches(track),
+            Sound::Ogg(rate) => ogg_batches(track, rate),
+        }
+    }
+
+    /// Whether a mount sending `self` can send `other` next: only the same
+    /// kind of sound, because a listener's decoder is not told to start
+    /// again mid-stream.
+    pub fn same_as(self, other: Sound) -> bool {
+        matches!(
+            (self, other),
+            (Sound::Mpeg, Sound::Mpeg) | (Sound::Ogg(_), Sound::Ogg(_))
+        )
+    }
+}
+
 /// Start streaming a library station: one task that plays its rotation out
 /// loud, for as long as the burrow runs.
 pub fn spawn_program_pump(shared: Arc<Shared>, slug: String) -> JoinHandle<()> {
@@ -1164,7 +1270,9 @@ pub fn spawn_program_pump(shared: Arc<Shared>, slug: String) -> JoinHandle<()> {
     // The station is on the air from this line, not from whenever the pump has
     // finished loading its first track: a listener who tuned in during that
     // moment was told 404 by a station that was about to play.
-    let _ = shared.radio.program_mount(&slug);
+    // The mount goes up as MPEG until the first track says otherwise; a
+    // station of Ogg files becomes an Ogg mount as it starts playing.
+    let _ = shared.radio.program_mount(&slug, Sound::Mpeg);
     tokio::spawn(program_pump(shared, slug))
 }
 
@@ -1181,6 +1289,8 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
     // by two seconds a song.
     let mut clock: Option<(std::time::Instant, Duration)> = None;
     let mut unplayable = 0usize;
+    // What this station is sending, once a track has said so.
+    let mut sending: Option<Sound> = None;
     loop {
         if shared.radio.is_live(&slug) || shared.radio.dj_holds(&slug) {
             clock = None; // whoever comes back starts a fresh stream
@@ -1196,12 +1306,28 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
         let audio = tokio::task::spawn_blocking(move || blobs.get(&id))
             .await
             .ok()
-            .and_then(Result::ok)
-            .filter(|bytes| rabbithole_radio::mp3::looks_like_mp3(bytes));
-        let Some(audio) = audio else {
-            // Not MP3 (or unreadable): this pump cannot pace it. Skip it, and
-            // if the whole rotation is like that, stop spinning on it.
-            tracing::debug!(mount = %slug, track = %track.title, "radio: track is not streamable MP3; skipped");
+            .and_then(Result::ok);
+        // What this track is, and whether this mount can send it: a
+        // listener's decoder is never handed a different kind of sound
+        // part-way through, so a station sends one kind and says which
+        // tracks it had to leave out.
+        let kind = audio.as_deref().and_then(Sound::of);
+        let playable = match (kind, sending) {
+            (Some(kind), None) => Some(kind),
+            (Some(kind), Some(air)) if air.same_as(kind) => Some(kind),
+            _ => None,
+        };
+        let (Some(audio), Some(kind)) = (audio, playable) else {
+            // Nothing this station can send as it is: an unreadable file, a
+            // format this burrow does not stream, or the wrong kind for a
+            // mount already on the air. Said out loud, once per track —
+            // silence with no reason is the worst way to find out.
+            tracing::warn!(
+                mount = %slug,
+                track = %track.title,
+                sending = ?sending,
+                "radio: track left out — not what this station is sending"
+            );
             shared.radio.advance(&slug, unix_ms());
             unplayable += 1;
             if unplayable >= shared.radio.track_count(&slug).max(1) {
@@ -1211,7 +1337,19 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
             continue;
         };
         unplayable = 0;
-        let Some((tx, title_slot)) = shared.radio.program_mount(&slug) else {
+        // The first playable track settles what the mount is sending. The
+        // mount is only remade when it is up as something else: remaking it
+        // cuts whoever is listening, and a station of the kind the mount
+        // already went up as must not do that at every start.
+        if shared
+            .radio
+            .program_content_type(&slug)
+            .is_some_and(|sending| sending != kind.content_type())
+        {
+            shared.radio.retire_program_mount(&slug);
+        }
+        sending = Some(kind);
+        let Some((tx, title_slot)) = shared.radio.program_mount(&slug, kind) else {
             continue; // a DJ got there first; the top of the loop waits
         };
         *title_slot.lock() = shared.radio.now_playing(&slug);
@@ -1219,7 +1357,7 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
 
         let (started, mut sent) = clock.unwrap_or((std::time::Instant::now(), Duration::ZERO));
         let mut interrupted = false;
-        for batch in batches(&audio) {
+        for batch in kind.batches(&audio) {
             if !shared.radio.owns_air(&slug, &tx) {
                 interrupted = true;
                 break;
@@ -1592,6 +1730,82 @@ mod tests {
         out
     }
 
+    /// One Ogg page carrying `payload`, built the way the codec's own
+    /// tests do (the checksum is not read by anything here).
+    fn ogg_page(granule: Option<u64>, payload: &[u8], beginning: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"OggS");
+        out.push(0);
+        out.push(u8::from(beginning) << 1);
+        out.extend_from_slice(&granule.unwrap_or(u64::MAX).to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        let mut table = Vec::new();
+        let mut left = payload.len();
+        while left >= 255 {
+            table.push(255u8);
+            left -= 255;
+        }
+        table.push(left as u8);
+        out.push(table.len() as u8);
+        out.extend_from_slice(&table);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// `seconds` of Opus: the two header pages, then a page every tenth.
+    fn opus_track(seconds: u64) -> Vec<u8> {
+        let mut out = ogg_page(
+            Some(0),
+            b"OpusHead\x01\x02\x38\x01\x80\xbb\x00\x00\x00\x00\x00",
+            true,
+        );
+        out.extend(ogg_page(Some(0), b"OpusTags\x00\x00\x00\x00", false));
+        for tenth in 1..=seconds * 10 {
+            out.extend(ogg_page(Some(tenth * 4_800), &[7u8; 120], false));
+        }
+        out
+    }
+
+    #[test]
+    fn an_ogg_track_is_paced_by_what_its_pages_say_and_headers_cost_no_time() {
+        let track = opus_track(1);
+        assert_eq!(
+            Sound::of(&track),
+            Some(Sound::Ogg(48_000)),
+            "an Opus stream is Ogg at 48 kHz"
+        );
+        let cut = Sound::Ogg(48_000).batches(&track);
+        assert_eq!(
+            cut.iter().map(|b| b.micros).sum::<u64>(),
+            1_000_000,
+            "a second of pages is a second of sound"
+        );
+        assert_eq!(
+            cut.iter().map(|b| b.bytes.len()).sum::<usize>(),
+            track.len(),
+            "every byte goes out, whole pages only"
+        );
+        assert!(
+            (4..=5).contains(&cut.len()),
+            "about a quarter second each: {}",
+            cut.len()
+        );
+        assert_eq!(cut[0].bytes.start, 0, "the headers lead");
+
+        // A station sends one kind of sound: MPEG and Ogg are not
+        // interchangeable mid-stream.
+        assert!(Sound::Mpeg.same_as(Sound::Mpeg));
+        assert!(Sound::Ogg(48_000).same_as(Sound::Ogg(44_100)));
+        assert!(!Sound::Mpeg.same_as(Sound::Ogg(48_000)));
+        assert_eq!(Sound::Mpeg.content_type(), "audio/mpeg");
+        assert_eq!(Sound::Ogg(48_000).content_type(), "audio/ogg");
+        // And a file that is neither is not sent at all.
+        assert_eq!(Sound::of(b"not audio at all"), None);
+        assert_eq!(Sound::of(&mp3_frames(3)), Some(Sound::Mpeg));
+    }
+
     #[test]
     fn a_track_is_cut_into_whole_contiguous_quarter_second_sends() {
         // 43 frames is a little over a second: four full sends and a tail.
@@ -1635,12 +1849,14 @@ mod tests {
         radio.install_program("ambient", "Ambient", "slow", vec![track]);
         assert_eq!(radio.track_count("ambient"), 1);
         assert!(!radio.is_streaming("ambient"), "no pump, no audio");
-        let (tx, _) = radio.program_mount("ambient").expect("the air is free");
+        let (tx, _) = radio
+            .program_mount("ambient", Sound::Mpeg)
+            .expect("the air is free");
         assert!(radio.is_streaming("ambient"));
         assert!(radio.owns_air("ambient", &tx));
         assert!(!radio.dj_holds("ambient"));
         // Asking again is the same mount, not a second one.
-        let (again, _) = radio.program_mount("ambient").unwrap();
+        let (again, _) = radio.program_mount("ambient", Sound::Mpeg).unwrap();
         assert!(again.same_channel(&tx));
 
         // A DJ replaces it (what both source surfaces do under the lock).
@@ -1658,13 +1874,15 @@ mod tests {
         assert!(radio.dj_holds("ambient"));
         assert!(!radio.owns_air("ambient", &tx), "the pump must notice");
         assert!(
-            radio.program_mount("ambient").is_none(),
+            radio.program_mount("ambient", Sound::Mpeg).is_none(),
             "and must not barge back in"
         );
 
         // The DJ leaves; the rotation can have its air back.
         radio.mounts.lock().remove("ambient");
-        let (fresh, _) = radio.program_mount("ambient").expect("free again");
+        let (fresh, _) = radio
+            .program_mount("ambient", Sound::Mpeg)
+            .expect("free again");
         assert!(
             !fresh.same_channel(&tx),
             "a fresh stream for fresh listeners"

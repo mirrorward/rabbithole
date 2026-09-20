@@ -483,3 +483,124 @@ async fn unauthenticated_source_is_rejected_401() {
 
     burrow.shutdown().await;
 }
+
+/// One Ogg page carrying `payload`. Enough of the container for the station
+/// to pace it; the checksum is the listener's decoder's business.
+fn ogg_page(granule: u64, payload: &[u8], beginning: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"OggS");
+    out.push(0);
+    out.push(u8::from(beginning) << 1);
+    out.extend_from_slice(&granule.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    let mut table = Vec::new();
+    let mut left = payload.len();
+    while left >= 255 {
+        table.push(255u8);
+        left -= 255;
+    }
+    table.push(left as u8);
+    out.push(table.len() as u8);
+    out.extend_from_slice(&table);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// `seconds` of Opus: the identification and comment pages, then a page of
+/// audio every tenth of a second.
+fn opus_of(seconds: u64, tag: u8) -> Vec<u8> {
+    let mut out = ogg_page(
+        0,
+        b"OpusHead\x01\x02\x38\x01\x80\xbb\x00\x00\x00\x00\x00",
+        true,
+    );
+    out.extend(ogg_page(0, b"OpusTags\x00\x00\x00\x00", false));
+    for tenth in 1..=seconds * 10 {
+        out.extend(ogg_page(tenth * 4_800, &[tag; 120], false));
+    }
+    out
+}
+
+/// A library of Ogg files plays as an Ogg station: the listener is told it
+/// is `audio/ogg` and hears the pages themselves. Before this, a rotation
+/// of anything but MP3 was silently skipped and the station played nothing.
+#[tokio::test]
+async fn a_library_of_ogg_files_streams_as_an_ogg_station() {
+    use rabbithole_core::Client;
+
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path().join("srv");
+    let song = opus_of(3, 0x5A);
+
+    {
+        let burrow = Burrow::start(test_config(&dir)).await.unwrap();
+        burrow
+            .shared
+            .auth
+            .create_account("dj", "spin-spin-spin", Role::Admin)
+            .await
+            .unwrap();
+        let mut dj = Client::connect(
+            &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
+            None,
+            None,
+            "e2e",
+            "0",
+        )
+        .await
+        .unwrap();
+        dj.auth_password("dj", "spin-spin-spin").await.unwrap();
+        dj.expect_welcome().await.unwrap();
+        dj.area_create("music", "Music", "").await.unwrap();
+        let src = work.path().join("one.opus");
+        std::fs::write(&src, &song).unwrap();
+        dj.transfer_upload(
+            "music",
+            None,
+            "one.opus",
+            &src,
+            "audio/ogg",
+            "The Lagomorphs",
+        )
+        .await
+        .unwrap();
+        burrow.shutdown().await;
+    }
+
+    let mut config = test_config(&dir);
+    config
+        .radio_library_areas
+        .insert("oggcast".into(), "music".into());
+    let burrow = Burrow::start(config).await.unwrap();
+    let radio = burrow.radio_addr.expect("radio enabled");
+
+    let mut listener = TcpStream::connect(radio).await.unwrap();
+    listener
+        .write_all(b"GET /oggcast HTTP/1.0\r\n\r\n")
+        .await
+        .unwrap();
+    listener.flush().await.unwrap();
+    let (head, mut heard) = read_head(&mut listener).await;
+    assert!(
+        head.starts_with("ICY 200 OK"),
+        "a rotation streams: {head:?}"
+    );
+    assert!(
+        head.to_ascii_lowercase().contains("audio/ogg"),
+        "an Ogg station says so: {head:?}"
+    );
+
+    // What arrives is the file's own pages, from the top.
+    let mut more = read_at_least(&mut listener, 200).await;
+    heard.append(&mut more);
+    assert!(heard.starts_with(b"OggS"), "pages, from the first one");
+    assert!(
+        song.windows(heard.len().min(120))
+            .any(|w| w == &heard[..heard.len().min(120)]),
+        "the audio is the file's, verbatim"
+    );
+
+    burrow.shutdown().await;
+}

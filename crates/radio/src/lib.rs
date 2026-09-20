@@ -36,6 +36,7 @@
 mod controller;
 mod error;
 pub mod mp3;
+pub mod ogg;
 mod playlist;
 mod queue;
 mod registry;
