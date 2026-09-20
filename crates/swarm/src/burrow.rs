@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use rabbithole_core::{Client, ClientError};
 
-use crate::peer::{BaoPiece, HaveMap, PeerError, RangeSource};
+use crate::peer::{BaoPiece, HaveMap, PeerError, RangeSource, STATUS_BUSY, STATUS_NOT_FOUND};
 
 /// Whether a download may ask the person's other burrows at all: it does
 /// only when they left the choice of sources to the app.
@@ -147,7 +147,7 @@ impl BurrowSource {
         at: u64,
         part: u32,
     ) -> Result<Option<rabbithole_proto::transfer::ProvedRange>, PeerError> {
-        let gone = || PeerError::Refused(crate::peer::STATUS_NOT_FOUND);
+        let gone = || PeerError::Refused(STATUS_NOT_FOUND);
         let answer = {
             let Ok(mut client) = tokio::time::timeout(SESSION_WAIT, self.session.lock()).await
             else {
@@ -220,9 +220,10 @@ impl RangeSource for BurrowSource {
                         pause = (pause * 2).min(BUSY_RETRY_MAX);
                     }
                     // Not now, and waited long enough: somebody else takes
-                    // this unit and this burrow keeps its place, so a slow
-                    // burrow costs the download nothing but its turn.
-                    None => return Err(PeerError::Refused(crate::peer::STATUS_NOT_HELD)),
+                    // this unit and this burrow keeps its place, with
+                    // nothing assumed about what it holds, so a slow burrow
+                    // costs the download nothing but its turn.
+                    None => return Err(PeerError::Refused(STATUS_BUSY)),
                 }
             };
             pieces.push(BaoPiece {

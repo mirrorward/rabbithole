@@ -163,9 +163,15 @@ pub use crate::swarm::Session;
 /// what it needs from the live sessions.
 async fn other_links(
     state: &TransfersManager,
+    mode: SourceMode,
     origin_endpoint: &str,
     origin: &Session,
 ) -> Vec<BurrowLink> {
+    // The person may have said where a download comes from: then no other
+    // burrow is asked, and none is even told what is being looked for.
+    if mode != SourceMode::Auto {
+        return Vec::new();
+    }
     let sessions: Vec<(String, Session)> = {
         let map = state.clients.lock().await;
         map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
@@ -193,13 +199,7 @@ async fn other_links(
             client.server.server_name.clone()
         });
     }
-    let picked = other_burrows(
-        SourceMode::Auto,
-        &cards,
-        origin_endpoint,
-        origin_key,
-        OTHER_BURROWS_MAX,
-    );
+    let picked = other_burrows(mode, &cards, origin_endpoint, origin_key, OTHER_BURROWS_MAX);
     picked
         .into_iter()
         .map(|i| BurrowLink {
@@ -261,17 +261,18 @@ pub async fn swarm_start_download(
         .get(&endpoint)
         .cloned()
         .ok_or("the app has no signed-in session to that burrow")?;
+    // Peers when anyone has it, else the burrow itself, unless told
+    // otherwise — settled before anything is asked of anyone.
+    let mode = SourceMode::parse(mode.as_deref().unwrap_or("auto"));
     // The other burrows this person is on, which may hold the same content
     // and let them download it there: they are asked, and the ones that say
     // yes carry units beside the peers.
-    let others = other_links(&state, &endpoint, &session).await;
+    let others = other_links(&state, mode, &endpoint, &session).await;
     // A failure is reported to the webview as an event, not just returned:
     // the UI's transfer row is driven by the event stream, and an error that
     // only comes back through the invoke promise leaves that row saying
     // nothing about what happened.
     let emit_app = app.clone();
-    // Peers when anyone has it, else the burrow itself, unless told otherwise.
-    let mode = SourceMode::parse(mode.as_deref().unwrap_or("auto"));
     let want = Wanted { root, size, node_id, max_sources: max_sources as usize, mode };
     // Opted in, and the size is known: offer the file from the start, so
     // what lands is fetched from here while the rest is still coming.
@@ -298,8 +299,15 @@ pub async fn swarm_start_download(
         .lock()
         .await
         .insert(transfer_id, stopper.clone());
+    // What the fetch said it had to work with, so a row that ends badly can
+    // say whether it had three sources or none.
+    let sources_tried = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = sources_tried.clone();
     let result = {
         let fetch = run_download_sharing(&session, &want, &dest, share, &others, move |event| {
+            if let crate::swarm::SwarmEvent::Opened { source_count, .. } = &event {
+                counted.store(*source_count, std::sync::atomic::Ordering::Relaxed);
+            }
             let _ = emit_app.emit("swarm://event", TransferEvent { transfer_id, event });
         });
         tokio::pin!(fetch);
@@ -348,7 +356,7 @@ pub async fn swarm_start_download(
                     transfer_id,
                     event: crate::swarm::SwarmEvent::Failed {
                         reason: "Stopped.".to_string(),
-                        sources_tried: 0,
+                        sources_tried: sources_tried.load(std::sync::atomic::Ordering::Relaxed),
                         retryable: true,
                     },
                 },
@@ -363,7 +371,7 @@ pub async fn swarm_start_download(
                     transfer_id,
                     event: crate::swarm::SwarmEvent::Failed {
                         reason: reason.clone(),
-                        sources_tried: 0,
+                        sources_tried: sources_tried.load(std::sync::atomic::Ordering::Relaxed),
                         retryable: !matches!(
                             e,
                             crate::swarm::SwarmError::NoPeerSources { server_has: false }

@@ -34,8 +34,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::peer::{
     fetch_proved, open_proofs, proofs_path, proven_ranges, HaveMap, PeerError, PeerSource,
-    RangeSource, SeedStore, Sharing, HAVE_UNIT, PEER_REQUEST_MAX, STATUS_DENIED, STATUS_NOT_FOUND,
-    STATUS_NOT_HELD,
+    RangeSource, SeedStore, Sharing, HAVE_UNIT, PEER_REQUEST_MAX, STATUS_BUSY, STATUS_DENIED,
+    STATUS_NOT_FOUND, STATUS_NOT_HELD,
 };
 
 /// One fetchable source for a root (from a `SourceList` entry).
@@ -91,6 +91,10 @@ pub struct RhState {
     pub size: u64,
     /// Offsets of completed units.
     pub done: Vec<u64>,
+    /// Offsets of units a source lent rather than gave
+    /// ([`RangeSource::shareable`]): they are on disk and count as done,
+    /// but they are never offered on, this run or any that resumes it.
+    pub borrowed: Vec<u64>,
 }
 
 /// The conventional state-file path for a destination.
@@ -142,8 +146,8 @@ struct WorkState {
     /// A unit could not be written here (a full disk, a removed file): the
     /// fetch fails with this, not as if no source could serve.
     local: Option<std::io::Error>,
-    /// A source whose bytes may not be passed on carried a unit.
-    borrowed: bool,
+    /// Units a source lent rather than gave: never offered on.
+    borrowed: HashSet<u64>,
 }
 
 /// What a fetch keeps as it goes: its resume record, the proofs of what
@@ -193,6 +197,7 @@ impl WorkState {
             root: *root,
             size: *size,
             done: self.done.iter().copied().collect(),
+            borrowed: self.borrowed.iter().copied().collect(),
         };
         let bytes = postcard::to_allocvec(&state).expect("state serializes");
         let tmp = path.with_extension("rhstate.tmp");
@@ -223,6 +228,7 @@ pub async fn fetch_swarm(
         root,
         size,
         dest,
+        HashSet::new(),
         HashSet::new(),
         Keep::default(),
         None,
@@ -358,8 +364,13 @@ async fn resumable(
     }
     let state_path = rhstate_path(dest);
     let proofs_at = proofs_path(dest);
-    let done: HashSet<u64> = load_rhstate(&state_path, &root, size)
-        .map(|s| s.done.into_iter().collect())
+    let (done, borrowed): (HashSet<u64>, HashSet<u64>) = load_rhstate(&state_path, &root, size)
+        .map(|s| {
+            (
+                s.done.into_iter().collect(),
+                s.borrowed.into_iter().collect(),
+            )
+        })
         .unwrap_or_default();
     // The proof of each unit is kept beside the file, so what has landed
     // can be served on, before and after a resume.
@@ -378,6 +389,9 @@ async fn resumable(
             let proven = proven_ranges(proofs, size)?;
             let held: Vec<u64> = done
                 .iter()
+                // What another source lent stays lent across a resume: it
+                // is on disk, and it is still not this fetch's to pass on.
+                .filter(|off| !borrowed.contains(off))
                 .filter(|&&off| {
                     let end = off + (size - off).min(UNIT_SIZE);
                     proven.iter().any(|&(s, e)| s <= off && end <= e)
@@ -398,6 +412,7 @@ async fn resumable(
         size,
         dest,
         done,
+        borrowed,
         Keep {
             state_path: Some(state_path.clone()),
             proofs,
@@ -484,6 +499,7 @@ async fn fetch_swarm_inner(
     size: u64,
     dest: &Path,
     done: HashSet<u64>,
+    borrowed: HashSet<u64>,
     keep: Keep,
     progress: Option<ProgressSink>,
 ) -> Result<FetchReport, PeerError> {
@@ -534,7 +550,7 @@ async fn fetch_swarm_inner(
         proofs: keep.proofs,
         sharing: keep.sharing,
         local: None,
-        borrowed: false,
+        borrowed,
     }));
     // Told by the worker that lands the last unit, so a worker still stuck
     // on a slow peer does not hold back a file that is already whole.
@@ -600,7 +616,7 @@ async fn fetch_swarm_inner(
     Ok(FetchReport {
         bytes: size,
         per_source,
-        borrowed: state.borrowed,
+        borrowed: !state.borrowed.is_empty(),
     })
 }
 
@@ -832,7 +848,7 @@ async fn worker(
                     // never what another burrow lent this fetch.
                     let kept = s.proofs.as_mut().map(|proofs| proved.keep(proofs).is_ok());
                     if !source.shareable() {
-                        s.borrowed = true;
+                        s.borrowed.insert(off);
                     } else if kept == Some(true) {
                         if let Some(sharing) = &s.sharing {
                             sharing.mark(off / HAVE_UNIT);
@@ -872,6 +888,24 @@ async fn worker(
                         break;
                     }
                 }
+            }
+            // Not now: its session is busy, or it is not ready. Nothing is
+            // learned about what it holds, and it costs it no strike — the
+            // unit simply goes to whoever is free.
+            Err(PeerError::Refused(STATUS_BUSY)) => {
+                give_back(
+                    &mut state.lock().expect("not poisoned"),
+                    off,
+                    len,
+                    index,
+                    endgame,
+                    &complete,
+                );
+                let since = *idle_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= IDLE_LIMIT {
+                    break;
+                }
+                tokio::time::sleep(SIBLING_WAIT).await;
             }
             // It holds the file but not this unit (its map was behind, or
             // the unit would not prove out there): the unit goes to another
@@ -1204,6 +1238,7 @@ mod tests {
             root,
             size: body.len() as u64,
             done: vec![0, UNIT_SIZE, 2 * UNIT_SIZE],
+            borrowed: Vec::new(),
         };
         std::fs::write(rhstate_path(&dest), postcard::to_allocvec(&state).unwrap()).unwrap();
 
@@ -1283,6 +1318,7 @@ mod tests {
             root,
             size: body.len() as u64,
             done: vec![0, 2 * UNIT_SIZE],
+            borrowed: Vec::new(),
         };
         std::fs::write(rhstate_path(&dest), postcard::to_allocvec(&state).unwrap()).unwrap();
 
@@ -1325,6 +1361,7 @@ mod tests {
             root,
             size: body.len() as u64,
             done: vec![0],
+            borrowed: Vec::new(),
         };
         std::fs::write(rhstate_path(&dest), postcard::to_allocvec(&state).unwrap()).unwrap();
 
@@ -1363,6 +1400,7 @@ mod tests {
             root,
             size,
             done: vec![u64::MAX - 1, size, 7, 3 * UNIT_SIZE],
+            borrowed: Vec::new(),
         };
         std::fs::write(rhstate_path(&dest), postcard::to_allocvec(&state).unwrap()).unwrap();
         let seeds = Arc::new(SeedStore::new());
@@ -1401,6 +1439,7 @@ mod tests {
             root: [0xEE; 32],
             size: body.len() as u64,
             done: vec![0],
+            borrowed: Vec::new(),
         };
         std::fs::write(rhstate_path(&dest), postcard::to_allocvec(&state).unwrap()).unwrap();
 
@@ -1581,6 +1620,65 @@ mod tests {
         // The file is here and whole, and it is nobody else's to be given.
         assert_eq!(std::fs::read(&dest).unwrap(), body);
         assert!(report.borrowed);
+        assert!(!seeds.holds_whole(&lender.root));
+        assert!(seeds.have(&lender.root).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_resumed_fetch_still_does_not_offer_on_what_was_lent() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = payload(3 * UNIT_SIZE as usize + 9);
+        let lender = Arc::new(Laned::new(dir.path(), &body, 1));
+        struct Lending(Arc<Laned>, bool);
+        #[async_trait::async_trait]
+        impl RangeSource for Lending {
+            fn label(&self) -> String {
+                "another burrow".into()
+            }
+            async fn have(&self) -> Result<Option<HaveMap>, PeerError> {
+                self.0.have().await
+            }
+            async fn bao(&self, offset: u64, len: u64) -> Result<Vec<crate::BaoPiece>, PeerError> {
+                self.0.bao(offset, len).await
+            }
+            fn shareable(&self) -> bool {
+                self.1
+            }
+        }
+        let dest = dir.path().join("half.out");
+        // A lending source carries the first units, and the fetch is
+        // dropped before the file is whole.
+        {
+            let sources: Vec<Arc<dyn RangeSource>> = vec![Arc::new(Lending(lender.clone(), false))];
+            let fetch = fetch_swarm_from(&sources, lender.root, lender.size, &dest, None, None);
+            let _ = tokio::time::timeout(Duration::from_millis(60), fetch).await;
+        }
+        let record =
+            load_rhstate(&rhstate_path(&dest), &lender.root, lender.size).expect("a resume record");
+        assert!(!record.done.is_empty(), "something landed");
+        assert_eq!(
+            record.borrowed.len(),
+            record.done.len(),
+            "and all of it was lent: {record:?}"
+        );
+
+        // It finishes from a source that gives rather than lends, with
+        // sharing on: what was lent before is still not offered, and nor is
+        // the file as a whole.
+        let seeds = Arc::new(SeedStore::default());
+        let sources: Vec<Arc<dyn RangeSource>> = vec![Arc::new(Lending(lender.clone(), true))];
+        let report = fetch_swarm_from(
+            &sources,
+            lender.root,
+            lender.size,
+            &dest,
+            None,
+            Some(seeds.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert!(report.borrowed, "the lent units are remembered");
         assert!(!seeds.holds_whole(&lender.root));
         assert!(seeds.have(&lender.root).is_none());
     }

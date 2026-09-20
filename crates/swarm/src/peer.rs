@@ -74,6 +74,12 @@ pub const STATUS_BAD_REQUEST: u8 = 3;
 /// The peer holds part of the file, but not that range (yet): try it
 /// elsewhere, and this peer again later.
 pub const STATUS_NOT_HELD: u8 = 4;
+/// Not now: the source is busy with something else, or not ready. The unit
+/// goes to whoever is free and this source keeps its place, with nothing
+/// learned about what it holds. Never sent on the peer wire; a burrow
+/// source ([`crate::burrow`]) answers this when its session is taken or it
+/// is still making a file's proofs.
+pub const STATUS_BUSY: u8 = 5;
 
 /// The unit a [`HaveMap`] counts in, and the scheduler fetches in.
 pub const HAVE_UNIT: u64 = 1024 * 1024;

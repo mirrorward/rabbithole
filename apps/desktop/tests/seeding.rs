@@ -445,3 +445,76 @@ async fn a_stopped_download_keeps_what_it_verified() {
 
     burrow.shutdown().await;
 }
+
+/// Told to take a download from peers only, the app asks no other burrow —
+/// it does not even tell one what is being looked for — and the download
+/// fails as the setting promises rather than quietly coming from elsewhere.
+#[tokio::test]
+async fn peers_only_asks_no_other_burrow() {
+    let work = tempfile::tempdir().unwrap();
+    let mut burrows = Vec::new();
+    for (i, name) in ["Home Warren", "Other Warren"].iter().enumerate() {
+        let burrow = Burrow::start(ServerConfig {
+            name: (*name).into(),
+            quic_addr: "127.0.0.1:0".parse().unwrap(),
+            ws_addr: "127.0.0.1:0".parse().unwrap(),
+            data_dir: work.path().join(format!("srv{i}")),
+            ..ServerConfig::default()
+        })
+        .await
+        .unwrap();
+        for who in ["admin", "alice"] {
+            burrow.shared.auth.create_account(who, "pw-pw-pw", Role::Admin).await.unwrap();
+        }
+        burrows.push(burrow);
+    }
+    let body = payload(2 * 1024 * 1024 + 3);
+    let src = work.path().join("shared.bin");
+    std::fs::write(&src, &body).unwrap();
+    let root = *blake3::hash(&body).as_bytes();
+    let size = body.len() as u64;
+    let mut nodes = Vec::new();
+    for burrow in &burrows {
+        let admin = login(burrow, "admin").await;
+        admin.lock().await.area_create("warez", "Warez", "").await.unwrap();
+        let node = admin.lock().await
+            .transfer_upload("warez", None, "shared.bin", &src, "application/octet-stream", "")
+            .await
+            .unwrap();
+        nodes.push(node.id);
+    }
+
+    let home = login(&burrows[0], "alice").await;
+    let other = login(&burrows[1], "alice").await;
+    let link = rabbithole_desktop_lib::swarm::BurrowLink {
+        label: "Other Warren".into(),
+        session: other.clone(),
+        server_key: other.lock().await.server.server_key,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let dest = work.path().join("alice.bin");
+    let want = Wanted { root, size, node_id: Some(nodes[0]), max_sources: 4, mode: SourceMode::PeersOnly };
+    let refused = run_download_sharing(&home, &want, &dest, None, &[link], |_| {})
+        .await
+        .expect_err("nobody is sharing it here");
+    assert!(
+        refused.to_string().contains("peers only"),
+        "it failed for want of peers, not otherwise: {refused}"
+    );
+    assert!(!dest.exists(), "and nothing was fetched from anywhere");
+    // The other burrow was never asked for it: no ticket, no download
+    // counted against her there.
+    let counted = burrows[1]
+        .shared
+        .files
+        .node(nodes[1])
+        .await
+        .unwrap()
+        .unwrap()
+        .downloads;
+    assert_eq!(counted, 0, "the other burrow was not even asked");
+
+    for burrow in burrows {
+        burrow.shutdown().await;
+    }
+}

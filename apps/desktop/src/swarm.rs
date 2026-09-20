@@ -250,6 +250,38 @@ pub async fn run_swarm_download(
     helpers: Vec<Arc<BurrowSource>>,
     mut emit: impl FnMut(SwarmEvent),
 ) -> Result<FetchReport, SwarmError> {
+    let outcome = swarm_download(
+        origin_session,
+        root,
+        size,
+        dest,
+        max_sources,
+        share,
+        origin,
+        &helpers,
+        &mut emit,
+    )
+    .await;
+    // However this ended, every burrow that was asked gives its ticket
+    // back: none holds a transfer slot for a download that is over.
+    for helper in &helpers {
+        helper.close().await;
+    }
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn swarm_download(
+    origin_session: &Session,
+    root: [u8; 32],
+    size: u64,
+    dest: &Path,
+    max_sources: usize,
+    share: Option<ShareAs>,
+    origin: Option<i64>,
+    helpers: &[Arc<BurrowSource>],
+    emit: &mut impl FnMut(SwarmEvent),
+) -> Result<FetchReport, SwarmError> {
     // Partial seeds too: this fetch asks each source which part it holds.
     let (list, ticket, serves_ranges) = {
         let mut client = origin_session.lock().await;
@@ -308,7 +340,7 @@ pub async fn run_swarm_download(
             size,
         )));
     }
-    burrows.extend(helpers);
+    burrows.extend(helpers.iter().cloned());
     all.extend(burrows.iter().map(|b| b.clone() as Arc<dyn RangeSource>));
     let total_units = size.div_ceil(UNIT_SIZE);
     emit(SwarmEvent::Opened {
@@ -324,6 +356,11 @@ pub async fn run_swarm_download(
     // again before the burrow's grant lapses, for as long as units land.
     let advert = share.as_ref().map(|s| (s.entry.clone(), s.ttl_secs));
     let mut advertised: Option<(std::time::Instant, u64)> = None;
+    // Watched from here so the advert waits for a unit that is actually
+    // this burrow's to offer: what another burrow lent is kept but never
+    // marked, and advertising a file none of which can be served would only
+    // send peers away empty.
+    let offered = share.as_ref().map(|s| s.seeds.clone());
     let seeds = share.map(|s| s.seeds);
     // Opted in: every unit that lands is offered on at once, with its
     // proof, and the whole file when it is done — unless another burrow
@@ -334,28 +371,39 @@ pub async fn run_swarm_download(
     while let Some(u) = rx.recv().await {
         if let Some((entry, ttl)) = &advert {
             let due = advertised.is_none_or(|(at, after)| at.elapsed().as_secs() >= after);
-            if due {
+            let any_held = offered
+                .as_ref()
+                .and_then(|seeds| seeds.have(&root))
+                .is_some_and(|held| held.bits.iter().any(|byte| *byte != 0));
+            if due && any_held {
                 // Found by peers that can use part of a file; a burrow that
                 // predates that is not told until the file is whole. The
                 // session is shared with this download's own asks, so a
                 // turn that does not come is simply skipped.
-                let granted = match tokio::time::timeout(SESSION_WAIT, origin_session.lock()).await
-                {
+                // A turn that does not come, or a burrow that says nothing,
+                // is tried again with the next unit rather than taken for an
+                // answer: one missed moment must not end the sharing.
+                let told = match tokio::time::timeout(SESSION_WAIT, origin_session.lock()).await {
                     Ok(mut client) => tokio::time::timeout(
                         ASK_TIMEOUT,
                         client.swarm_advertise_partial(vec![entry.clone()], *ttl),
                     )
                     .await
                     .ok()
-                    .and_then(Result::ok)
-                    .flatten()
-                    .map(|ack| ack.ttl_secs),
+                    .and_then(Result::ok),
                     Err(_) => None,
                 };
-                advertised = Some((
-                    std::time::Instant::now(),
-                    crate::seeding::reannounce_after(granted.unwrap_or(*ttl)),
-                ));
+                if let Some(granted) = told {
+                    advertised = Some((
+                        std::time::Instant::now(),
+                        // A burrow that predates partial adverts answers
+                        // nothing and is not asked again until the file is
+                        // whole.
+                        crate::seeding::reannounce_after(
+                            granted.map(|ack| ack.ttl_secs).unwrap_or(*ttl),
+                        ),
+                    ));
+                }
             }
         }
         emit(SwarmEvent::Chunk {
@@ -365,8 +413,8 @@ pub async fn run_swarm_download(
             total_units: u.total_units,
         });
     }
-    // Every burrow that was asked gives its ticket back, whatever became of
-    // the download.
+    // The burrow of the download gives its ticket back here; the others
+    // are closed by the caller, whatever became of this.
     for burrow in &burrows {
         burrow.close().await;
     }
@@ -451,10 +499,13 @@ pub async fn run_download_sharing(
     // Asked before the route is chosen, so a download that only the other
     // burrows can carry still takes the swarm route, and the count the UI
     // is told is of sources that have actually answered.
-    let helpers = if mode == SourceMode::OriginOnly {
-        Vec::new()
-    } else {
+    // Only when the person left the choice of sources to the app: a
+    // download told where to come from asks no other burrow, and tells none
+    // what is being looked for.
+    let helpers = if mode == SourceMode::Auto {
         confirm_helpers(others, root).await
+    } else {
+        Vec::new()
     };
     let seeds = share.as_ref().map(|s| s.seeds.clone());
     let route = choose_route(mode, peers + helpers.len(), server_has, node_id.is_some());
