@@ -13,6 +13,7 @@ pub fn sound_label(content_type: &str) -> &'static str {
     match content_type {
         "audio/mpeg" => "MP3",
         "audio/ogg" => "Ogg",
+        "audio/flac" => "FLAC",
         "" => "nothing yet",
         _ => "something else",
     }
@@ -117,6 +118,16 @@ mod tests {
             "No file area: this station is a live mount only."
         );
         assert_eq!(listeners_line(0), "Nobody listening");
+
+        // A FLAC station says FLAC, not "something else".
+        let lossless = RadioStationStatus::new("lossless", "Lossless")
+            .of_area("music", "audio/flac")
+            .on_air("Burrow Song", "The Lagomorphs", 0, false)
+            .with_rotation(3, Vec::new());
+        assert_eq!(
+            station_line(&lossless),
+            "Playing \u{201c}Burrow Song\u{201d} by The Lagomorphs, from 3 tracks, as FLAC."
+        );
 
         // An Ogg station says Ogg, and one track is singular.
         let ogg = RadioStationStatus::new("oggcast", "Oggcast")

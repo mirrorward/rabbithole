@@ -100,10 +100,11 @@ async fn install_live_program(burrow: &Burrow) {
         .map(|(node, _rel)| node)
         .collect();
     let tracks = burrow::radio::tracks_from_nodes(&nodes);
+    let sound = burrow::radio::sound_of_tracks(&tracks);
     burrow
         .shared
         .radio
-        .install_program("live", "Live FM", "music", tracks);
+        .install_program("live", "Live FM", "music", tracks, sound);
 }
 
 #[tokio::test]
@@ -381,5 +382,202 @@ async fn library_program_pulls_audio_from_file_area() {
     assert_ne!(np.title, "readme.txt");
     assert!(!burrow.shared.radio.is_live("jukebox"));
 
+    burrow.shutdown().await;
+}
+
+/// Which kind of sound keeps the bare mount does not depend on how many of
+/// each a library happens to hold: adding files must not move a station's
+/// listeners onto a different kind. And a station the operator named
+/// themselves is not replaced by one derived from another library.
+#[tokio::test]
+async fn the_bare_mount_keeps_its_kind_and_a_named_station_is_left_alone() {
+    const REFERENCE_FLAC: &[u8] =
+        include_bytes!("../../../crates/radio/tests/fixtures/reference-8k-mono.flac");
+
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("srv");
+
+    // A library of one MP3 and three FLACs: the MP3 keeps the bare mount,
+    // outnumbered three to one.
+    {
+        let burrow = Burrow::start(base_config(&data)).await.unwrap();
+        let files = &burrow.shared.files;
+        files.create_area("music", "Music", "").await.unwrap();
+        let mp3 = burrow.shared.blobs.put(&[0xFFu8; 64]).unwrap();
+        let flac = burrow.shared.blobs.put(REFERENCE_FLAC).unwrap();
+        files
+            .add_file(
+                "music",
+                None,
+                "one.mp3",
+                &mp3.0,
+                64,
+                "audio/mpeg",
+                "",
+                "",
+                "dj@h",
+                1,
+            )
+            .await
+            .unwrap();
+        for n in 0..3 {
+            files
+                .add_file(
+                    "music",
+                    None,
+                    &format!("track-{n}.flac"),
+                    &flac.0,
+                    REFERENCE_FLAC.len() as i64,
+                    "audio/flac",
+                    "",
+                    "",
+                    "dj@h",
+                    1,
+                )
+                .await
+                .unwrap();
+        }
+        burrow.shutdown().await;
+    }
+
+    let mut cfg = base_config(&data);
+    cfg.radio_library_areas
+        .insert("jukebox".into(), "music".into());
+    let burrow = Burrow::start(cfg).await.unwrap();
+    assert_eq!(
+        burrow.shared.radio.program_slugs(),
+        vec!["jukebox".to_string(), "jukebox.flac".to_string()],
+        "the MP3 keeps the bare mount, outnumbered or not"
+    );
+    assert_eq!(burrow.shared.radio.track_count("jukebox"), 1);
+    assert_eq!(burrow.shared.radio.track_count("jukebox.flac"), 3);
+    // Each mount goes up as what it is about to send, so nobody who tuned
+    // in early is cut off when the first track is read.
+    assert_eq!(
+        burrow.shared.radio.expected_sound("jukebox"),
+        Some(burrow::radio::Sound::Mpeg)
+    );
+    assert_eq!(
+        burrow.shared.radio.expected_sound("jukebox.flac"),
+        Some(burrow::radio::Sound::Flac)
+    );
+    burrow.shutdown().await;
+
+    // An operator who names a mount for a kind gets that kind under that
+    // name: /jukebox.flac is the FLAC, and the MP3 moves to /jukebox.mp3
+    // rather than taking the name and leaving FLAC at jukebox.flac.flac.
+    let mut cfg = base_config(&data);
+    cfg.radio_library_areas
+        .insert("jukebox.flac".into(), "music".into());
+    let burrow = Burrow::start(cfg).await.unwrap();
+    let slugs = burrow.shared.radio.program_slugs();
+    assert_eq!(
+        slugs,
+        vec!["jukebox.flac".to_string(), "jukebox.mp3".to_string()],
+        "a mount named for a kind is that kind"
+    );
+    assert_eq!(burrow.shared.radio.track_count("jukebox.flac"), 3);
+    assert_eq!(
+        burrow.shared.radio.expected_sound("jukebox.flac"),
+        Some(burrow::radio::Sound::Flac),
+        "the name says FLAC, so the mount had better send FLAC"
+    );
+    burrow.shutdown().await;
+
+    // And a station the operator configured themselves is not replaced by
+    // one another library derived: theirs is the one on the air.
+    let mut cfg = base_config(&data);
+    cfg.radio_library_areas
+        .insert("jukebox".into(), "music".into());
+    cfg.radio_library_areas
+        .insert("jukebox.flac".into(), "music".into());
+    let burrow = Burrow::start(cfg).await.unwrap();
+    let slugs = burrow.shared.radio.program_slugs();
+    assert!(slugs.contains(&"jukebox.flac".to_string()));
+    assert_eq!(
+        burrow.shared.radio.track_count("jukebox"),
+        1,
+        "the bare mount is still the MP3 one: {slugs:?}"
+    );
+    assert_eq!(
+        burrow.shared.radio.track_count("jukebox.flac"),
+        3,
+        "the operator's own station, from its own area: {slugs:?}"
+    );
+
+    burrow.shutdown().await;
+}
+
+/// A mount goes up as the kind of sound its rotation will actually send,
+/// even when the area it came from holds just as many files this burrow
+/// cannot play at all. Getting that wrong puts the mount up as MP3 and cuts
+/// every listener a second later, when the first real track is read.
+#[tokio::test]
+async fn a_mount_goes_up_as_what_it_will_send_not_what_it_cannot_play() {
+    const REFERENCE_FLAC: &[u8] =
+        include_bytes!("../../../crates/radio/tests/fixtures/reference-8k-mono.flac");
+
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("srv");
+    {
+        let burrow = Burrow::start(base_config(&data)).await.unwrap();
+        let files = &burrow.shared.files;
+        files.create_area("music", "Music", "").await.unwrap();
+        let flac = burrow.shared.blobs.put(REFERENCE_FLAC).unwrap();
+        let wav = burrow.shared.blobs.put(&[0x00u8; 64]).unwrap();
+        for n in 0..3 {
+            files
+                .add_file(
+                    "music",
+                    None,
+                    &format!("track-{n}.flac"),
+                    &flac.0,
+                    REFERENCE_FLAC.len() as i64,
+                    "audio/flac",
+                    "",
+                    "",
+                    "dj@h",
+                    1,
+                )
+                .await
+                .unwrap();
+            files
+                .add_file(
+                    "music",
+                    None,
+                    &format!("rip-{n}.wav"),
+                    &wav.0,
+                    64,
+                    "audio/wav",
+                    "",
+                    "",
+                    "dj@h",
+                    1,
+                )
+                .await
+                .unwrap();
+        }
+        burrow.shutdown().await;
+    }
+
+    let mut cfg = base_config(&data);
+    cfg.radio_library_areas
+        .insert("jukebox".into(), "music".into());
+    let burrow = Burrow::start(cfg).await.unwrap();
+    assert_eq!(
+        burrow.shared.radio.program_slugs(),
+        vec!["jukebox".to_string()],
+        "one kind it can send, so one mount"
+    );
+    assert_eq!(
+        burrow.shared.radio.track_count("jukebox"),
+        6,
+        "the WAVs ride along so the console can say why they are silent"
+    );
+    assert_eq!(
+        burrow.shared.radio.expected_sound("jukebox"),
+        Some(burrow::radio::Sound::Flac),
+        "three FLACs and three files it cannot play is a FLAC station"
+    );
     burrow.shutdown().await;
 }

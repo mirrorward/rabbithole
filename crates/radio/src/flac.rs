@@ -203,9 +203,16 @@ pub fn streaminfo(bytes: &[u8]) -> Option<Stream> {
     (info.sample_rate > 0).then_some(info)
 }
 
-/// Whether this looks like a FLAC file a station could send.
+/// Whether this looks like a FLAC file a station could send: headers that
+/// parse *and* a frame that starts where they end. Headers alone are a file
+/// with nothing to play — an upload that stopped, a fetch cut short — and
+/// calling that playable gives a station a track it can send in no time at
+/// all, over and over, saying nothing about why.
 pub fn looks_like_flac(bytes: &[u8]) -> bool {
-    streaminfo(bytes).is_some()
+    let Some(info) = streaminfo(bytes) else {
+        return false;
+    };
+    header_at(bytes, info.audio_at, &info).is_some()
 }
 
 /// A frame header at `at`, if a whole and self-consistent one is there:
@@ -277,7 +284,12 @@ fn header_at(bytes: &[u8], at: usize, info: &Stream) -> Option<(u32, u32, usize)
     if crc8(bytes.get(at..p)?) != *bytes.get(p)? {
         return None;
     }
-    Some((block?, rate?, p + 1 - at))
+    // A frame that says it plays at no rate at all is not one: the shape
+    // is legal and the checksum can agree, but there is no such audio, and
+    // taking it at its word makes a frame that lasts no time — a whole
+    // track sent in one breath.
+    let (block, rate) = (block?, rate?);
+    (block > 0 && rate > 0).then_some((block, rate, p + 1 - at))
 }
 
 /// Every frame of the file, in order. A frame counts only when its header
@@ -308,22 +320,54 @@ pub fn frames(bytes: &[u8]) -> Vec<Frame> {
     out
 }
 
-/// Where the frame starting at `at` ends: the next place a frame begins and
-/// the CRC-16 before it matches, or the end of the file for the last one.
+/// Where the frame starting at `at` ends: the next place a frame begins, or
+/// the end of the audio for the last one.
 fn frame_end(bytes: &[u8], at: usize, after_header: usize, info: &Stream) -> Option<usize> {
+    // A frame is never longer than the encoder said its longest is, so the
+    // search stops there rather than following a false sync across the rest
+    // of the file. What the encoder said can still be wrong — a file cut
+    // together from two others keeps the first one's STREAMINFO, and its
+    // frames can be longer than that one ever wrote — so a search that
+    // comes up empty is tried again with the whole file as the bound. That
+    // is safe here because a frame only counts when both of the encoder's
+    // checksums agree.
+    let near = match info.max_frame {
+        0 => bytes.len(),
+        most => (at + most as usize + 2).min(bytes.len()),
+    };
+    let bounds = if near < bytes.len() {
+        [near, bytes.len()]
+    } else {
+        [near, near]
+    };
+    for limit in bounds {
+        if let Some(end) = next_frame(bytes, at, after_header, info, limit) {
+            return Some(end);
+        }
+    }
+    for limit in bounds {
+        if let Some(end) = audio_end(bytes, at, after_header, limit) {
+            return Some(end);
+        }
+    }
+    None
+}
+
+/// Where the next frame begins, looking no further than `limit`. Both of the
+/// encoder's checksums have to agree: the CRC-8 over the header found there,
+/// and the CRC-16 over the whole of the frame that would end there.
+fn next_frame(
+    bytes: &[u8],
+    at: usize,
+    after_header: usize,
+    info: &Stream,
+    limit: usize,
+) -> Option<usize> {
     // The running CRC covers `at .. covered`, two bytes behind the probe,
     // so each step costs one byte rather than the whole frame again.
     let mut covered = after_header.saturating_sub(2).max(at);
     let mut crc = crc16(bytes.get(at..covered)?);
     let mut probe = after_header;
-    // A frame is never longer than the encoder said its longest is, so a
-    // search that has gone past that is following a false sync, not a
-    // frame. Without that word from the encoder, the whole file is the
-    // bound.
-    let limit = match info.max_frame {
-        0 => bytes.len(),
-        most => (at + most as usize + 2).min(bytes.len()),
-    };
     while probe + 1 < limit {
         if bytes[probe] == 0xFF
             && bytes[probe + 1] & 0xFE == 0xF8
@@ -342,19 +386,46 @@ fn frame_end(bytes: &[u8], at: usize, after_header: usize, info: &Stream) -> Opt
             covered = probe - 2;
         }
     }
-    // The last frame: its CRC-16 is the last two bytes of the audio. An
-    // ID3v1 tag some taggers append after it is not audio and is not sent.
-    let tail = bytes.len().checked_sub(128);
-    for end in [Some(bytes.len()), tail].into_iter().flatten() {
-        if end > at + 6 && end <= bytes.len() {
-            let want = bytes.get(end - 2..end)?;
-            let want = u16::from(want[0]) << 8 | u16::from(want[1]);
-            if crc16(bytes.get(at..end - 2)?) == want {
-                return Some(end);
-            }
+    None
+}
+
+/// Where the file's audio ends, for the last frame of all: the CRC-16 the
+/// encoder wrote over that frame is its last two bytes.
+///
+/// A CRC that checks out is not proof on its own. The CRC-16 of a whole run
+/// of frames is the CRC of the last one, so *every* frame boundary agrees
+/// with this test, and one position in 65536 agrees by luck. So an end only
+/// counts when nothing follows it but the end of the file or a tag — and
+/// never past `limit`, or one over-long frame would swallow the rest of the
+/// file and be sent as if it were 90 milliseconds of music.
+fn audio_end(bytes: &[u8], at: usize, after_header: usize, limit: usize) -> Option<usize> {
+    let limit = limit.min(bytes.len());
+    let mut covered = after_header.saturating_sub(2).max(at);
+    let mut crc = crc16(bytes.get(at..covered)?);
+    let mut end = covered + 2;
+    while end <= limit {
+        crc = crc16_more(crc, bytes.get(covered..end - 2)?);
+        covered = end - 2;
+        let want = bytes.get(end - 2..end)?;
+        let want = u16::from(want[0]) << 8 | u16::from(want[1]);
+        if end > at + 6 && crc == want && tail_is_over(bytes.get(end..)?) {
+            return Some(end);
         }
+        end += 1;
     }
     None
+}
+
+/// Whether what follows a candidate last frame is the end of the file rather
+/// than more audio: nothing at all, one of the tags a tagger appends to a
+/// finished file, or the zeros some writers pad with.
+fn tail_is_over(tail: &[u8]) -> bool {
+    tail.is_empty()
+        || tail.starts_with(b"TAG")            // ID3v1, 128 bytes of it
+        || tail.starts_with(b"APETAGEX")       // APEv2, which foobar2000 writes
+        || tail.starts_with(b"LYRICSBEGIN")    // Lyrics3
+        || tail.starts_with(b"ID3")            // an ID3v2 tag written at the end
+        || tail.iter().all(|b| *b == 0)
 }
 
 /// How long the whole stream plays for, in microseconds, as STREAMINFO
@@ -382,6 +453,32 @@ mod tests {
         // Feeding it in two halves is the same as feeding it whole.
         let split = crc16_more(crc16(b"12345"), b"6789");
         assert_eq!(split, 0xFEE8);
+    }
+
+    #[test]
+    fn a_frame_that_says_it_plays_at_no_rate_is_not_a_frame() {
+        // Rate code 12 is "the next byte, in kHz". A byte of zero is a
+        // frame that plays at no rate at all: legal in shape, and its
+        // checksum can agree, but there is no such audio. Taken at its
+        // word it is a frame that lasts no time, and a whole track of them
+        // goes out in one breath at whatever speed the disk can manage.
+        let info = Stream {
+            sample_rate: 8_000,
+            channels: 1,
+            bits_per_sample: 16,
+            total_samples: 0,
+            max_frame: 0,
+            audio_at: 0,
+        };
+        // Sync, fixed block size, block code 1 (192 samples), rate code 12,
+        // one channel, 16 bits a sample, frame number 0, then the rate.
+        let header = |khz: u8| {
+            let mut h = vec![0xFF, 0xF8, 0x1C, 0x08, 0x00, khz];
+            h.push(crc8(&h));
+            h
+        };
+        assert_eq!(header_at(&header(8), 0, &info).map(|f| f.1), Some(8_000));
+        assert_eq!(header_at(&header(0), 0, &info), None, "0 kHz is not a rate");
     }
 
     #[test]

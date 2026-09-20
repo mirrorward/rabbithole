@@ -76,10 +76,20 @@ disables that class.
   `radio_library_areas` (mount slug → file-area slug, *TOML-only*) — each
   entry runs a playlist-automation station from that area's audio files; a
   live DJ source takes the mount over and rotation resumes when it leaves.
-  With `radio_enabled`, the rotation **streams**: MP3 tracks are sent at
-  playing speed, whole frames at a time, and the rotation advances when a
-  track's audio ends. Tracks that are not MP3 are skipped by the streamer
-  (it paces by MPEG frame headers and does not decode). `radio_public_base`
+  With `radio_enabled`, the rotation **streams**: tracks are sent at playing
+  speed, whole frames at a time, and the rotation advances when a track's
+  audio ends. MP3, Ogg (Opus or Vorbis) and FLAC all go out as they are,
+  paced by what the file itself says — nothing is decoded or transcoded.
+  A station sends one kind of sound, so an area holding several gets a
+  mount for each: the MP3 files on the mount as named, the others beside
+  them at `<mount>.ogg` and `<mount>.flac`, all playing at once. A mount
+  named for a kind — `jukebox.flac` — is that kind's mount, and the others
+  hang off the base of the name (`jukebox.mp3`); a mount slug already in
+  the config is never taken over by a derived one, and the mounts are
+  handed out in name order so they do not change from one start to the
+  next. Audio of a kind the burrow cannot send stays in the rotation and is
+  named, with the reason, in `RadioStatus` and the console's Stations
+  panel. `radio_public_base`
   names the public stream address when it is not this host on `radio_addr`'s
   port; clients are told it and never ask a person for it.
   The updinfo endpoints (`GET /admin/metadata`, `GET /admin.cgi`) ride the

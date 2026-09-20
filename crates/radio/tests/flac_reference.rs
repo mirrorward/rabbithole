@@ -198,3 +198,100 @@ fn a_thirty_two_bit_file_is_read_like_any_other() {
         "in the same places"
     );
 }
+
+/// STREAMINFO's "longest frame I wrote" bounds the search for the next
+/// frame, and a file can carry a number that is too small: `ffmpeg -c copy`
+/// cutting two files together keeps the first one's STREAMINFO, and the
+/// second one's frames can be longer than anything the first one held. The
+/// walk has to survive that without either giving up or — far worse —
+/// taking the whole rest of the file for one frame and sending it as if it
+/// were a fraction of a second of music.
+#[test]
+fn a_file_that_understates_its_longest_frame_is_still_walked() {
+    let truth = flac::frames(REFERENCE);
+    let longest = truth.iter().map(|f| f.len).max().unwrap();
+
+    // STREAMINFO's max-frame field: three bytes, after the 4-byte magic,
+    // the 4-byte block header, the two block sizes and the min-frame size.
+    const MAX_FRAME: usize = 8 + 2 + 2 + 3;
+    let rewrite = |most: usize| {
+        let mut bytes = REFERENCE.to_vec();
+        bytes[MAX_FRAME] = (most >> 16) as u8;
+        bytes[MAX_FRAME + 1] = (most >> 8) as u8;
+        bytes[MAX_FRAME + 2] = most as u8;
+        bytes
+    };
+    // The file says its longest frame is one byte shorter than it is.
+    let understated = rewrite(longest - 1);
+    let found = flac::frames(&understated);
+    assert_eq!(
+        found.iter().map(|f| (f.offset, f.len)).collect::<Vec<_>>(),
+        truth.iter().map(|f| (f.offset, f.len)).collect::<Vec<_>>(),
+        "every frame, at its own length, whatever STREAMINFO claims"
+    );
+    // And it says nothing at all, which the format allows.
+    let silent = rewrite(0);
+    assert_eq!(
+        flac::frames(&silent)
+            .iter()
+            .map(|f| (f.offset, f.len))
+            .collect::<Vec<_>>(),
+        truth.iter().map(|f| (f.offset, f.len)).collect::<Vec<_>>(),
+        "no bound written is the whole file as the bound"
+    );
+    // The thing that must not happen: one frame credited with the rest of
+    // the file. A frame is never longer than the longest one really is.
+    assert!(
+        flac::frames(&understated).iter().all(|f| f.len <= longest),
+        "nothing swallowed the file"
+    );
+}
+
+/// A tagger writes its tag onto a finished file. ID3v1 is 128 bytes, but
+/// APEv2 and Lyrics3 are whatever length their contents are, and the last
+/// frame has to be found anyway — every play would otherwise be short by a
+/// block, and the station's clock short by that much on every track.
+#[test]
+fn a_tag_appended_after_the_audio_does_not_cost_the_last_frame() {
+    let truth = flac::frames(REFERENCE);
+    let same_as_truth = |bytes: &[u8], what: &str| {
+        let found = flac::frames(bytes);
+        assert_eq!(
+            found.iter().map(|f| (f.offset, f.len)).collect::<Vec<_>>(),
+            truth.iter().map(|f| (f.offset, f.len)).collect::<Vec<_>>(),
+            "the audio ends where it ends, {what}"
+        );
+    };
+    let with = |tail: &[u8]| {
+        let mut bytes = REFERENCE.to_vec();
+        bytes.extend_from_slice(tail);
+        bytes
+    };
+    // An APEv2 tag: its footer is the last 32 bytes, its header the first.
+    let mut ape = b"APETAGEX".to_vec();
+    ape.extend_from_slice(&[0u8; 34]);
+    same_as_truth(&with(&ape), "APEv2");
+    same_as_truth(&with(b"LYRICSBEGIN and the words"), "Lyrics3");
+    // An ID3v2 tag at the end of the file, which the tag's own spec allows.
+    same_as_truth(&with(b"ID3\x04\x00\x00\x00\x00\x00\x0a0123456789"), "ID3v2");
+    // Zeros, which some writers pad with. This CRC stays put while it is
+    // fed zeros, so the end of the file agrees with the check as surely as
+    // the end of the audio does — a megabyte of padding must not be sent
+    // as if it were the last 21 milliseconds of the song.
+    same_as_truth(&with(&[0u8; 77]), "padding");
+    same_as_truth(&with(&vec![0u8; 1 << 20]), "a megabyte of padding");
+    // ID3v1 again, the one that already worked.
+    let mut id3v1 = b"TAG".to_vec();
+    id3v1.extend_from_slice(&[0u8; 125]);
+    same_as_truth(&with(&id3v1), "ID3v1");
+
+    // Bytes that are not a tag anybody writes are not taken for audio
+    // either: the last frame is left out rather than sent with junk on the
+    // end of it. Honest, and never more than the file.
+    let junk = with(b"\x01\x02\x03\x04\x05");
+    let found = flac::frames(&junk);
+    assert!(found.len() < truth.len(), "{found:?}");
+    assert!(found
+        .iter()
+        .all(|f| f.offset + f.len <= REFERENCE.len() - 1));
+}

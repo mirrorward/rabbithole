@@ -628,7 +628,15 @@ async fn install_radio_library(
     shared: &Arc<Shared>,
     areas: &std::collections::HashMap<String, String>,
 ) {
-    for (mount, area) in areas {
+    // A mount is a name listeners tune to, so which library takes which name
+    // is settled the same way at every start: by name, not by however the
+    // config happened to come out of a map.
+    let mut ordered: Vec<(&String, &String)> = areas.iter().collect();
+    ordered.sort();
+    // Names already on the air this pass, so a second library cannot take a
+    // mount out from under the first one without saying so.
+    let mut installed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (mount, area) in ordered {
         let nodes = match shared.files.manifest(area, None).await {
             Ok(files) => files
                 .into_iter()
@@ -647,45 +655,92 @@ async fn install_radio_library(
         // one mount, exactly as before.
         let split = radio::split_by_sound(&nodes);
         let covers = radio::covers_from_nodes(&nodes);
-        // Whatever it holds most of keeps the bare mount, so a library that
-        // has always been MP3 stays where its listeners left it; the others
-        // sit beside it, named for what they are.
-        let mut kinds: Vec<(&str, Vec<rabbithole_radio::Track>)> = vec![
-            ("mp3", split.mpeg),
-            ("ogg", split.ogg),
-            ("flac", split.flac),
+        // Which kind keeps the bare mount is settled by what it is, not by
+        // how many of each there happen to be: MP3 if there is any, else
+        // Ogg, else FLAC. Counting would move a station's listeners onto a
+        // different kind of sound the day somebody adds files, which is not
+        // a thing a mount should do.
+        let mut kinds: Vec<(&str, radio::Sound, Vec<rabbithole_radio::Track>)> = vec![
+            ("mp3", radio::Sound::Mpeg, split.mpeg),
+            ("ogg", radio::Sound::Ogg(0), split.ogg),
+            ("flac", radio::Sound::Flac, split.flac),
         ];
-        kinds.retain(|(_, tracks)| !tracks.is_empty());
-        kinds.sort_by_key(|(ext, tracks)| (std::cmp::Reverse(tracks.len()), *ext));
-        let mut programs: Vec<(String, String, Vec<rabbithole_radio::Track>)> = Vec::new();
-        for (i, (ext, mut tracks)) in kinds.into_iter().enumerate() {
+        kinds.retain(|(_, _, tracks)| !tracks.is_empty());
+        // A mount the operator named for a kind — `jukebox.flac` — is that
+        // kind's mount. It keeps the name they chose and the other kinds
+        // hang off the base of it, so a listener who tunes to a name that
+        // says FLAC is not answered MP3, with the FLAC away at a name
+        // nobody would guess: `jukebox.flac.flac`.
+        let lower = mount.to_ascii_lowercase();
+        let named = kinds.iter().position(|(ext, _, _)| {
+            lower.len() > ext.len() + 1 && lower.ends_with(&format!(".{ext}"))
+        });
+        let mut base = mount.to_string();
+        if let Some(i) = named {
+            let kind = kinds.remove(i);
+            base.truncate(base.len() - kind.0.len() - 1);
+            kinds.insert(0, kind);
+        }
+        // Each mount, what to call it, what goes on it, and what it sends
+        // before the first track has been read.
+        let mut programs: Vec<(
+            String,
+            String,
+            Vec<rabbithole_radio::Track>,
+            Option<radio::Sound>,
+        )> = Vec::new();
+        for (i, (ext, sound, mut tracks)) in kinds.into_iter().enumerate() {
             if i == 0 {
                 // Audio of a kind this burrow cannot send goes with the
                 // first mount, which says what it could not play.
                 tracks.extend(split.other.iter().cloned());
-                programs.push((mount.clone(), format!("{mount} (library)"), tracks));
-            } else {
                 programs.push((
-                    format!("{mount}.{ext}"),
-                    format!("{mount} (library, {})", ext.to_uppercase()),
+                    mount.to_string(),
+                    format!("{mount} (library)"),
                     tracks,
+                    Some(sound),
                 ));
+                continue;
             }
+            // A station of the operator's own by that name comes first, and
+            // so does one another library already put on the air: neither is
+            // quietly replaced by one derived from this.
+            let beside = format!("{base}.{ext}");
+            if areas.contains_key(&beside) || installed.contains(&beside) {
+                tracing::warn!(
+                    mount = %beside,
+                    area = %area,
+                    tracks = tracks.len(),
+                    "radio: a station of that name is already on the air, so this \
+                     library's tracks of that kind are not"
+                );
+                continue;
+            }
+            programs.push((
+                beside,
+                format!("{mount} (library, {})", ext.to_uppercase()),
+                tracks,
+                Some(sound),
+            ));
         }
         if programs.is_empty() {
             // Nothing playable at all: the station still exists, so the
             // console can say the area holds no music it can send.
             programs.push((
-                mount.clone(),
+                mount.to_string(),
                 format!("{mount} (library)"),
                 split.other.clone(),
+                None,
             ));
         }
-        for (slug, name, tracks) in programs {
+        for (slug, name, tracks, sound) in programs {
             let count = tracks.len();
             shared.radio.set_covers(&slug, covers.clone());
-            shared.radio.install_program(&slug, &name, area, tracks);
+            shared
+                .radio
+                .install_program(&slug, &name, area, tracks, sound);
             tracing::info!(mount = %slug, area = %area, tracks = count, "radio library program installed");
+            installed.insert(slug);
         }
     }
 }

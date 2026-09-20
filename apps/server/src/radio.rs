@@ -327,35 +327,25 @@ impl Stations {
     }
 
     /// Installs a library-backed program: a station whose default rotation is
-    /// `tracks`. Registers it in the directory and starts playout at the first
-    /// track (now-playing is populated immediately, deterministically).
+    /// `tracks`, sending `expected`. Registers it in the directory and starts
+    /// playout at the first track (now-playing is populated immediately,
+    /// deterministically).
+    ///
+    /// `expected` is what the mount goes up as before the first track has
+    /// been read, so a listener who tunes in during that moment is told the
+    /// truth and is not cut off a second later when it turns out to be
+    /// something else. A caller that sorted the tracks by kind knows it
+    /// exactly and says so; one that did not asks [`sound_of_tracks`].
     pub fn install_program(
         &self,
         slug: &str,
         display_name: &str,
         description: &str,
         tracks: Vec<Track>,
+        expected: Option<Sound>,
     ) {
         let station = Station::new(slug, STATION_CAPACITY);
         let track_count = tracks.len();
-        // Whatever most of them are: a rotation is one kind of sound, and
-        // the odd file out is left out with a word about it.
-        let expected = {
-            let of = |want: fn(&Sound) -> bool| {
-                tracks
-                    .iter()
-                    .filter(|t| sound_of_name(&t.title, "").as_ref().is_some_and(want))
-                    .count()
-            };
-            let ogg = of(|s| matches!(s, Sound::Ogg(_)));
-            let flac = of(|s| matches!(s, Sound::Flac));
-            match track_count {
-                0 => None,
-                total if ogg * 2 > total => Some(Sound::Ogg(0)),
-                total if flac * 2 > total => Some(Sound::Flac),
-                _ => Some(Sound::Mpeg),
-            }
-        };
         let playlist = Playlist::new(tracks, RotationMode::Sequential);
         let mut controller = StationController::new(station, playlist, description, AUTOMATION_DJ);
         // Start playout at the opening track so now-playing is live at once.
@@ -1118,6 +1108,32 @@ pub fn sound_of_name(name: &str, mime: &str) -> Option<Sound> {
     None
 }
 
+/// What a rotation of `tracks` will send, worked out from their names alone.
+/// The most of any one kind wins, and a tie goes the way a library hands out
+/// its mounts: MP3, then Ogg, then FLAC. Files this burrow cannot send at all
+/// are not counted — they would otherwise vote the mount up as MP3 and cut
+/// every listener the moment the first real track was read.
+///
+/// A caller that has already sorted its tracks by kind knows better than this
+/// and passes the kind straight to [`Stations::install_program`].
+pub fn sound_of_tracks(tracks: &[Track]) -> Option<Sound> {
+    let of = |want: fn(&Sound) -> bool| {
+        tracks
+            .iter()
+            .filter(|t| sound_of_name(&t.title, "").as_ref().is_some_and(want))
+            .count()
+    };
+    let mpeg = of(|s| matches!(s, Sound::Mpeg));
+    let ogg = of(|s| matches!(s, Sound::Ogg(_)));
+    let flac = of(|s| matches!(s, Sound::Flac));
+    match mpeg.max(ogg).max(flac) {
+        0 => None,
+        most if mpeg == most => Some(Sound::Mpeg),
+        most if ogg == most => Some(Sound::Ogg(0)),
+        _ => Some(Sound::Flac),
+    }
+}
+
 /// Split a library's tracks by the kind of sound they are, so each kind can
 /// have a mount of its own: the MP3 files on one, the Ogg files on another,
 /// and nothing left out for being the wrong kind. Tracks that are neither
@@ -1290,6 +1306,12 @@ pub fn station_status(shared: &Arc<Shared>) -> Vec<rabbithole_proto::radio::Radi
 /// the air is noticed within a quarter of a second.
 const PUMP_BATCH_MICROS: u64 = 250_000;
 
+/// And no send is bigger than this, whatever the timing arithmetic says. A
+/// quarter second of audio is far under it; a file whose frames claim less
+/// time than they hold is what it is for, so no listener is ever handed a
+/// whole track in one breath.
+const PUMP_BATCH_BYTES: usize = 1 << 20;
+
 /// How far ahead of the clock the pump runs, so a player that just tuned in
 /// has something to buffer instead of starving on its first frame.
 const PUMP_LEAD: Duration = Duration::from_secs(2);
@@ -1310,7 +1332,11 @@ pub fn batches(track: &[u8]) -> Vec<Batch> {
     for frame in rabbithole_radio::mp3::frames(track) {
         let end = frame.offset + frame.len;
         match open.as_mut() {
-            Some(b) if b.bytes.end == frame.offset && b.micros < PUMP_BATCH_MICROS => {
+            Some(b)
+                if b.bytes.end == frame.offset
+                    && b.micros < PUMP_BATCH_MICROS
+                    && b.bytes.len() < PUMP_BATCH_BYTES =>
+            {
                 b.bytes.end = end;
                 b.micros += frame.micros();
             }
@@ -1352,7 +1378,11 @@ pub fn ogg_batches(track: &[u8], rate: u32) -> Vec<Batch> {
             _ => 0,
         };
         match open.as_mut() {
-            Some(b) if b.bytes.end == page.offset && b.micros < PUMP_BATCH_MICROS => {
+            Some(b)
+                if b.bytes.end == page.offset
+                    && b.micros < PUMP_BATCH_MICROS
+                    && b.bytes.len() < PUMP_BATCH_BYTES =>
+            {
                 b.bytes.end = end;
                 b.micros += micros;
             }
@@ -1378,16 +1408,27 @@ pub fn flac_batches(track: &[u8]) -> Vec<Batch> {
     let Some(info) = flac::streaminfo(track) else {
         return Vec::new();
     };
+    // Headers and no frames is not a track: sending them alone would take
+    // no time at all, and a station would race through its rotation. One
+    // walk of the file, because walking it is the expensive part.
+    let frames = flac::frames(track);
+    if frames.is_empty() {
+        return Vec::new();
+    }
     let mut out: Vec<Batch> = Vec::new();
     // The header blocks lead, worth no time of their own.
     let mut open = (info.audio_at > 0).then_some(Batch {
         bytes: 0..info.audio_at,
         micros: 0,
     });
-    for frame in flac::frames(track) {
+    for frame in frames {
         let end = frame.offset + frame.len;
         match open.as_mut() {
-            Some(b) if b.bytes.end == frame.offset && b.micros < PUMP_BATCH_MICROS => {
+            Some(b)
+                if b.bytes.end == frame.offset
+                    && b.micros < PUMP_BATCH_MICROS
+                    && b.bytes.len() < PUMP_BATCH_BYTES =>
+            {
                 b.bytes.end = end;
                 b.micros += frame.micros();
             }
@@ -1517,6 +1558,13 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
             Some((bytes, kind, cuts)) => (Some(bytes), kind, cuts),
             None => (None, None, None),
         };
+        let had_bytes = audio.is_some();
+        // A file can say what it is in its headers and hold no audio at
+        // all — a FLAC cut off after STREAMINFO, an upload that stopped.
+        // Sending the headers alone would take no time, so the rotation
+        // would spin through the whole station at once, saying nothing was
+        // wrong. A track with no time in it is a track that cannot play.
+        let cuts = cuts.filter(|cuts: &Vec<Batch>| cuts.iter().any(|b| b.micros > 0));
         // What this track is, and whether this mount can send it: a
         // listener's decoder is never handed a different kind of sound
         // part-way through, so a station sends one kind and says which
@@ -1531,12 +1579,13 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
             // format this burrow does not stream, or the wrong kind for a
             // mount already on the air. Said out loud, once per track —
             // silence with no reason is the worst way to find out.
-            let reason = match (kind, sending) {
-                (None, _) => "not audio this burrow can stream".to_string(),
-                (Some(_), Some(air)) => {
+            let reason = match (had_bytes, kind, sending) {
+                (false, _, _) => "could not be read".to_string(),
+                (true, None, _) => "not audio this burrow can stream".to_string(),
+                (true, Some(kind), Some(air)) if !air.same_as(kind) => {
                     format!("not what this station is sending ({})", air.content_type())
                 }
-                (Some(_), None) => "could not be read".to_string(),
+                _ => "no audio could be read from it".to_string(),
             };
             tracing::warn!(mount = %slug, track = %track.title, %reason, "radio: track left out");
             shared
@@ -2017,6 +2066,30 @@ mod tests {
     }
 
     #[test]
+    fn a_file_with_headers_and_no_audio_is_not_a_track_to_play() {
+        // A FLAC cut off after its metadata still says it is a FLAC, and
+        // its headers are real. Sending them takes no time, so a station
+        // that counted that as playing would race through its whole
+        // rotation in an instant and never say a word about why.
+        let info = rabbithole_radio::flac::streaminfo(REFERENCE_FLAC).unwrap();
+        let headers = &REFERENCE_FLAC[..info.audio_at];
+        assert_eq!(
+            Sound::of(headers),
+            None,
+            "headers with no frame behind them are not a track"
+        );
+        // And the guard behind that one: a file whose first frame is there
+        // but does not finish. It still says FLAC, and there is nothing to
+        // send, so the station says so rather than playing it in no time.
+        let torn = &REFERENCE_FLAC[..info.audio_at + 10];
+        assert_eq!(Sound::of(torn), Some(Sound::Flac));
+        assert!(
+            Sound::Flac.batches(torn).is_empty(),
+            "nothing to send and no time to send it in"
+        );
+    }
+
+    #[test]
     fn a_library_of_both_kinds_becomes_a_mount_of_each() {
         let nodes = vec![
             file_node(1, "one.mp3", "audio/mpeg", Some([1u8; 32])),
@@ -2138,7 +2211,7 @@ mod tests {
     fn a_rotations_mount_gives_way_to_a_dj_and_not_to_a_second_one() {
         let radio = Stations::new();
         let track = Track::new(TrackId(1), "One.mp3", "", DEFAULT_TRACK_MS, BlobId([1; 32]));
-        radio.install_program("ambient", "Ambient", "slow", vec![track]);
+        radio.install_program("ambient", "Ambient", "slow", vec![track], Some(Sound::Mpeg));
         assert_eq!(radio.track_count("ambient"), 1);
         assert!(!radio.is_streaming("ambient"), "no pump, no audio");
         let (tx, _) = radio
@@ -2299,6 +2372,42 @@ mod tests {
     }
 
     #[test]
+    fn a_rotation_of_names_says_which_kind_of_sound_it_is() {
+        let t = |name: &str| Track::new(TrackId(1), name, "", DEFAULT_TRACK_MS, BlobId([1; 32]));
+        assert_eq!(sound_of_tracks(&[]), None);
+        // Nothing playable says nothing, rather than saying MP3 and putting
+        // a mount up as something it will never send.
+        assert_eq!(sound_of_tracks(&[t("notes.txt"), t("rip.wav")]), None);
+        // Three FLACs and three files this burrow cannot send is a FLAC
+        // station: only what can be played gets a vote.
+        assert_eq!(
+            sound_of_tracks(&[
+                t("a.flac"),
+                t("b.flac"),
+                t("c.flac"),
+                t("a.wav"),
+                t("b.wav"),
+                t("c.wav"),
+            ]),
+            Some(Sound::Flac)
+        );
+        // Two Oggs against one MP3 is an Ogg station, majority or not.
+        assert_eq!(
+            sound_of_tracks(&[t("a.opus"), t("b.oga"), t("c.mp3")]),
+            Some(Sound::Ogg(0))
+        );
+        // A tie goes the way mounts are handed out: MP3, then Ogg.
+        assert_eq!(
+            sound_of_tracks(&[t("a.mp3"), t("b.flac")]),
+            Some(Sound::Mpeg)
+        );
+        assert_eq!(
+            sound_of_tracks(&[t("a.ogg"), t("b.flac")]),
+            Some(Sound::Ogg(0))
+        );
+    }
+
+    #[test]
     fn program_goes_live_and_resumes() {
         let stations = Stations::new();
         stations.install_program(
@@ -2312,6 +2421,7 @@ mod tests {
                 DEFAULT_TRACK_MS,
                 BlobId([1u8; 32]),
             )],
+            None,
         );
         // Playlist automation is now-playing to start.
         assert!(!stations.is_live("live"));
