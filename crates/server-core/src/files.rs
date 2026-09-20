@@ -255,6 +255,30 @@ impl FileService {
         Ok(self.repo().node_by_id(id).await?)
     }
 
+    /// Every file node holding this content (at most `limit`, newest
+    /// first). Which of them a person may have is the caller's business.
+    pub async fn nodes_with_blob(
+        &self,
+        blob_id: &[u8; 32],
+        limit: i64,
+    ) -> Result<Vec<FileNodeRow>, FileError> {
+        Ok(self.repo().nodes_with_blob(blob_id, limit).await?)
+    }
+
+    /// The same, a page at a time (`skip` rows in), for a caller walking
+    /// past the copies this person may not have.
+    pub async fn nodes_with_blob_after(
+        &self,
+        blob_id: &[u8; 32],
+        skip: i64,
+        limit: i64,
+    ) -> Result<Vec<FileNodeRow>, FileError> {
+        Ok(self
+            .repo()
+            .nodes_with_blob_after(blob_id, skip, limit)
+            .await?)
+    }
+
     pub async fn node_by_path(
         &self,
         area_slug: &str,

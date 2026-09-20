@@ -1133,6 +1133,18 @@ impl Client {
         .await
     }
 
+    /// Which file on this burrow holds `root`, if the person may download
+    /// it here: what lets a download running on another burrow take chunks
+    /// from this one too. `NotFound` when nothing here holds it or nothing
+    /// they may have does; `Unsupported` from a burrow before 0.232.
+    pub async fn file_by_content(
+        &mut self,
+        root: [u8; 32],
+    ) -> Result<rabbithole_proto::transfer::FileByContent, ClientError> {
+        self.request(&rabbithole_proto::transfer::FileByContentRequest::new(root))
+            .await
+    }
+
     /// Close a transfer ticket that will not be used any more.
     pub async fn close_transfer(&mut self, transfer_id: u64) -> Result<(), ClientError> {
         self.request_ack(&rabbithole_proto::transfer::TransferAbort::new(transfer_id))

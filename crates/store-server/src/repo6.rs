@@ -271,6 +271,40 @@ impl FilesRepo<'_> {
             .map(|r| row_to_node(&r)))
     }
 
+    /// Every file node holding this content, newest first, at most `limit`:
+    /// one blob can be filed in several places (and several areas). The
+    /// caller decides which of them the person asking may have.
+    pub async fn nodes_with_blob(
+        &self,
+        blob_id: &[u8; 32],
+        limit: i64,
+    ) -> Result<Vec<FileNodeRow>, StoreError> {
+        self.nodes_with_blob_after(blob_id, 0, limit).await
+    }
+
+    /// The same, one page at a time: `skip` rows in, at most `limit` rows,
+    /// in the same order. For walking past copies the asker may not have
+    /// without reading every one of them at once.
+    pub async fn nodes_with_blob_after(
+        &self,
+        blob_id: &[u8; 32],
+        skip: i64,
+        limit: i64,
+    ) -> Result<Vec<FileNodeRow>, StoreError> {
+        let sql = format!(
+            "{NODE_SELECT} WHERE n.blob_id = ? AND n.kind = 1 ORDER BY n.id DESC LIMIT ? OFFSET ?"
+        );
+        Ok(sqlx::query(&sql)
+            .bind(&blob_id[..])
+            .bind(limit)
+            .bind(skip)
+            .fetch_all(self.0)
+            .await?
+            .iter()
+            .map(row_to_node)
+            .collect())
+    }
+
     pub async fn node_by_path(
         &self,
         area_id: i64,
@@ -525,6 +559,55 @@ impl FilesRepo<'_> {
 mod tests {
     use super::*;
     use crate::open_in_memory;
+
+    #[tokio::test]
+    async fn one_content_is_found_wherever_it_is_filed() {
+        let pool = open_in_memory().await.unwrap();
+        let repo = FilesRepo(&pool);
+        let music = repo.create_area("music", "Music", "").await.unwrap();
+        let other = repo.create_area("demos", "Demos", "").await.unwrap();
+        let shared = [3u8; 32];
+        async fn file(pool: &sqlx::SqlitePool, area: i64, name: &str, blob: [u8; 32]) -> i64 {
+            FilesRepo(pool)
+                .create_file(
+                    area,
+                    None,
+                    name,
+                    name,
+                    &blob,
+                    12,
+                    "application/octet-stream",
+                    "",
+                    "",
+                    "x@y",
+                    1,
+                )
+                .await
+                .unwrap()
+                .id
+        }
+        let first = file(&pool, music.id, "tape.bin", shared).await;
+        let again = file(&pool, other.id, "same-tape.bin", shared).await;
+        file(&pool, music.id, "other.bin", [9u8; 32]).await;
+        repo.create_folder(music.id, None, "box", "box", false)
+            .await
+            .unwrap();
+
+        // Both places the content is filed, newest first; nothing else.
+        let found = repo.nodes_with_blob(&shared, 10).await.unwrap();
+        assert_eq!(
+            found.iter().map(|n| n.id).collect::<Vec<_>>(),
+            vec![again, first]
+        );
+        assert!(found.iter().all(|n| n.blob_id == Some(shared)));
+        // Content filed nowhere is found nowhere, and the limit holds.
+        assert!(repo
+            .nodes_with_blob(&[4u8; 32], 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(repo.nodes_with_blob(&shared, 1).await.unwrap().len(), 1);
+    }
 
     #[tokio::test]
     async fn area_tree_files_and_metadata() {

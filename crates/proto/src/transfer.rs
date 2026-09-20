@@ -465,3 +465,53 @@ impl Message for ProvedRange {
     const FAMILY: Family = Family::FILE;
     const MESSAGE_TYPE: u16 = 44;
 }
+
+/// Ask which file of this burrow's library holds `root`, so a download
+/// running elsewhere can take chunks from here too: the person must be able
+/// to download it here, by the same rules a [`TransferOpen`] would apply.
+/// → [`FileByContent`]; `NotFound` when nothing here holds it, or nothing
+/// they may have does (the two are deliberately the same answer). A burrow
+/// from before this answers `Unsupported`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileByContentRequest {
+    /// The content's blake3 root (its blob id).
+    pub root: [u8; 32],
+}
+
+impl FileByContentRequest {
+    pub fn new(root: [u8; 32]) -> Self {
+        Self { root }
+    }
+}
+
+impl Message for FileByContentRequest {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 45;
+}
+
+/// A file here holding the asked-for content, which the asker may download:
+/// enough to open a download ticket for it ([`TransferOpen`]) and ask for
+/// its ranges. One blob can be filed in several places; this names one.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileByContent {
+    pub root: [u8; 32],
+    pub node_id: i64,
+    pub size: u64,
+}
+
+impl FileByContent {
+    pub fn new(root: [u8; 32], node_id: i64, size: u64) -> Self {
+        Self {
+            root,
+            node_id,
+            size,
+        }
+    }
+}
+
+impl Message for FileByContent {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 46;
+}

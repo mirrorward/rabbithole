@@ -34,6 +34,13 @@ use crate::Shared;
 /// Max bytes a single chunk carries (well under the 1 MiB control-frame cap).
 const CHUNK_MAX: usize = 256 * 1024;
 
+/// How many places one content is filed in that a lookup will walk, and how
+/// many it reads at a time. Walking rather than taking the newest few means
+/// somebody who can file copies where others cannot read them still cannot
+/// hide the copy they can.
+const NODES_PER_CONTENT: i64 = 512;
+const NODES_PER_LOOK: i64 = 64;
+
 /// A live transfer authorization + progress.
 pub struct Ticket {
     pub account_id: i64,
@@ -538,6 +545,87 @@ pub async fn handle(
         if last {
             // Whole file served: retire the (single-use) download ticket.
             shared.transfers.remove_download(req.transfer_id);
+        }
+        return Ok(true);
+    }
+
+    // ---- Which file here holds this content (a swarm source elsewhere) ----
+    if let Some(Ok(req)) = frame.decode::<pt::FileByContentRequest>() {
+        // A guest can be had again by connecting again, so its budget is no
+        // budget at all: asking by content hash is for people with accounts.
+        if ctx.is_guest {
+            fail!(ErrorCode::Forbidden);
+        }
+        // Charged to the transfer budget: asking is the prelude to a ticket,
+        // and a lookup by content hash must not be a free oracle.
+        if !shared.rate_allow(Scope::Account(ctx.account_id), rl::TRANSFER) {
+            fail!(ErrorCode::RateLimited);
+        }
+        // Content on the deny list, or quarantined for review, is not
+        // admitted to exist here (a moderator may still find it).
+        let moderator = ctx.allows(shared, "moderation", Caps::MODERATE);
+        if shared.moderation.is_denied(&req.root)
+            || (shared.moderation.file_quarantined(Some(&req.root)) && !moderator)
+        {
+            fail!(ErrorCode::NotFound);
+        }
+        // Nothing is said about content this burrow does not actually store,
+        // whatever its library rows say.
+        let blobs = shared.blobs.clone();
+        let root = req.root;
+        let stored = tokio::task::spawn_blocking(move || blobs.contains(&BlobId(root)))
+            .await
+            .unwrap_or(false);
+        if !stored {
+            fail!(ErrorCode::NotFound);
+        }
+        // One blob may be filed in many places, under different rights: the
+        // first this person may both see and download answers, and they are
+        // walked oldest-last a page at a time, so filing copies nobody else
+        // may read cannot hide the copy they may. Nothing they may have
+        // reads exactly like nothing here.
+        let mut answer = None;
+        let mut walked = 0i64;
+        'walk: while walked < NODES_PER_CONTENT {
+            let page = match shared
+                .files
+                .nodes_with_blob_after(&req.root, walked, NODES_PER_LOOK)
+                .await
+            {
+                Ok(page) => page,
+                Err(e) => {
+                    tracing::warn!("content lookup failed: {e}");
+                    break;
+                }
+            };
+            if page.is_empty() {
+                break;
+            }
+            walked += page.len() as i64;
+            for node in page {
+                let res = resource(&node.area, Some(&node.path));
+                if !ctx.allows(shared, &res, Caps::FILE_LIST)
+                    || !ctx.allows(shared, &res, Caps::FILE_DOWNLOAD)
+                {
+                    continue;
+                }
+                if shared.files.in_dropbox(&node).await.unwrap_or(false)
+                    && !ctx.allows(shared, &res, Caps::DROPBOX_VIEW)
+                    && !ctx.allows(shared, &resource(&node.area, None), Caps::FILE_MANAGE)
+                {
+                    continue;
+                }
+                answer = Some(pt::FileByContent::new(
+                    req.root,
+                    node.id,
+                    node.size.max(0) as u64,
+                ));
+                break 'walk;
+            }
+        }
+        match answer {
+            Some(found) => reply!(&found),
+            None => fail!(ErrorCode::NotFound),
         }
         return Ok(true);
     }
