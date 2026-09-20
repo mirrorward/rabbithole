@@ -28,6 +28,11 @@ pub struct Frame {
     pub samples: u32,
     /// Samples per second, from the frame or the stream.
     pub sample_rate: u32,
+    /// How long this frame's header is, its CRC-8 included.
+    pub header: usize,
+    /// How long the frame-or-sample number inside that header is. What a
+    /// rewrite has to replace, and the only part of a frame that moves.
+    pub number: usize,
 }
 
 impl Frame {
@@ -209,15 +214,30 @@ pub fn streaminfo(bytes: &[u8]) -> Option<Stream> {
 /// calling that playable gives a station a track it can send in no time at
 /// all, over and over, saying nothing about why.
 pub fn looks_like_flac(bytes: &[u8]) -> bool {
-    let Some(info) = streaminfo(bytes) else {
-        return false;
-    };
-    header_at(bytes, info.audio_at, &info).is_some()
+    playable(bytes).is_some()
 }
 
-/// A frame header at `at`, if a whole and self-consistent one is there:
-/// returns (block size, sample rate, header length).
-fn header_at(bytes: &[u8], at: usize, info: &Stream) -> Option<(u32, u32, usize)> {
+/// What a file that a station could send says about itself: its STREAMINFO,
+/// when a frame starts where the headers end. A caller that needs the rate,
+/// the channel count or the depth asks this rather than asking twice.
+pub fn playable(bytes: &[u8]) -> Option<Stream> {
+    let info = streaminfo(bytes)?;
+    header_at(bytes, info.audio_at, &info).map(|_| info)
+}
+
+/// What a frame header says about its frame.
+#[derive(Debug, Clone, Copy)]
+struct Head {
+    block: u32,
+    rate: u32,
+    /// The header's own length, its CRC-8 included.
+    len: usize,
+    /// The length of the coded frame-or-sample number inside it.
+    number: usize,
+}
+
+/// A frame header at `at`, if a whole and self-consistent one is there.
+fn header_at(bytes: &[u8], at: usize, info: &Stream) -> Option<Head> {
     let head = bytes.get(at..at + 4)?;
     // Fourteen sync bits, then a reserved bit that is zero in every real
     // frame, then the blocking strategy. Insisting on the reserved zero
@@ -289,7 +309,12 @@ fn header_at(bytes: &[u8], at: usize, info: &Stream) -> Option<(u32, u32, usize)
     // taking it at its word makes a frame that lasts no time — a whole
     // track sent in one breath.
     let (block, rate) = (block?, rate?);
-    (block > 0 && rate > 0).then_some((block, rate, p + 1 - at))
+    (block > 0 && rate > 0).then_some(Head {
+        block,
+        rate,
+        len: p + 1 - at,
+        number: coded,
+    })
 }
 
 /// Every frame of the file, in order. A frame counts only when its header
@@ -302,18 +327,20 @@ pub fn frames(bytes: &[u8]) -> Vec<Frame> {
     let mut out = Vec::new();
     let mut at = info.audio_at;
     while at + 6 < bytes.len() {
-        let Some((samples, sample_rate, header_len)) = header_at(bytes, at, &info) else {
+        let Some(head) = header_at(bytes, at, &info) else {
             at += 1;
             continue;
         };
-        let Some(end) = frame_end(bytes, at, at + header_len, &info) else {
+        let Some(end) = frame_end(bytes, at, at + head.len, &info) else {
             break;
         };
         out.push(Frame {
             offset: at,
             len: end - at,
-            samples,
-            sample_rate,
+            samples: head.block,
+            sample_rate: head.rate,
+            header: head.len,
+            number: head.number,
         });
         at = end;
     }
@@ -428,6 +455,91 @@ fn tail_is_over(tail: &[u8]) -> bool {
         || tail.iter().all(|b| *b == 0)
 }
 
+/// The head of a mount's stream: the magic and one STREAMINFO, for the
+/// listener who joins in the middle of it. A station plays a file after a
+/// file, and a decoder is told once what it is listening to — so this says
+/// only what stays true all night. No length, because it does not end; no
+/// checksum of the audio, because it is not one file's audio; and any block
+/// size, because each track brings its own.
+///
+/// The rate, the channel count and the depth are the three things it cannot
+/// take back, which is why a mount sends one form of FLAC and leaves the
+/// rest of the library out with a word about why.
+pub fn stream_headers(rate: u32, channels: u8, bits: u8) -> Vec<u8> {
+    let mut out = b"fLaC".to_vec();
+    out.push(0x80); // the last metadata block, and it is STREAMINFO
+    out.extend_from_slice(&[0, 0, 34]); // which is always 34 bytes
+    out.extend_from_slice(&16u16.to_be_bytes()); // the smallest block there is
+    out.extend_from_slice(&u16::MAX.to_be_bytes()); // and the largest
+    out.extend_from_slice(&[0, 0, 0]); // shortest frame: not said
+    out.extend_from_slice(&[0, 0, 0]); // longest frame: not said
+                                       // Twenty bits of rate, three of channels, five of depth, then the
+                                       // thirty-six bits of total samples that a stream without an end has
+                                       // none of: sixty-four bits exactly.
+    let packed: u64 = (u64::from(rate) << 44)
+        | (u64::from(channels.saturating_sub(1) & 0x07) << 41)
+        | (u64::from(bits.saturating_sub(1) & 0x1F) << 36);
+    out.extend_from_slice(&packed.to_be_bytes());
+    out.extend_from_slice(&[0u8; 16]); // no MD5 of audio that is still coming
+    out
+}
+
+/// The same frame, written again as the frame holding the `sample`th sample
+/// of a stream that keeps going. The audio inside is copied across
+/// untouched — only the number moves — but both of the encoder's checksums
+/// cover the header it lives in, so both are written again.
+///
+/// `header` and `number` are the lengths [`frames`] found: the whole header
+/// including its CRC-8, and the coded number inside it.
+pub fn renumber(frame: &[u8], header: usize, number: usize, sample: u64) -> Option<Vec<u8>> {
+    if header < 5 + number || frame.len() < header + 2 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(frame.len() + 7);
+    out.push(*frame.first()?);
+    // The blocking-strategy bit, set: the number below counts samples, not
+    // frames. Tracks on one mount need not agree about how big their blocks
+    // are, and samples count across all of them either way.
+    out.push(frame.get(1)? | 0x01);
+    out.push(*frame.get(2)?);
+    out.push(*frame.get(3)?);
+    write_number(&mut out, sample);
+    // Whatever the header carried after the number — a block size or a
+    // sample rate written out in full — is this frame's own and stays.
+    out.extend_from_slice(frame.get(4 + number..header - 1)?);
+    let crc = crc8(&out);
+    out.push(crc);
+    out.extend_from_slice(frame.get(header..frame.len() - 2)?);
+    let crc = crc16(&out);
+    out.extend_from_slice(&crc.to_be_bytes());
+    Some(out)
+}
+
+/// A frame or sample number, in the shape FLAC borrowed from UTF-8: one
+/// byte up to 127, and up to seven for the thirty-six bits a sample number
+/// can need.
+fn write_number(out: &mut Vec<u8>, v: u64) {
+    const SHAPES: [(u64, u8, u32); 7] = [
+        (1 << 7, 0x00, 0),
+        (1 << 11, 0xC0, 1),
+        (1 << 16, 0xE0, 2),
+        (1 << 21, 0xF0, 3),
+        (1 << 26, 0xF8, 4),
+        (1 << 31, 0xFC, 5),
+        (1 << 36, 0xFE, 6),
+    ];
+    let v = v % (1 << 36); // a stream this long has been on the air for weeks
+    for (limit, lead, follow) in SHAPES {
+        if v < limit {
+            out.push(lead | (v >> (6 * follow)) as u8);
+            for i in (0..follow).rev() {
+                out.push(0x80 | ((v >> (6 * i)) & 0x3F) as u8);
+            }
+            return;
+        }
+    }
+}
+
 /// How long the whole stream plays for, in microseconds, as STREAMINFO
 /// says. `0` when it does not say.
 pub fn micros(bytes: &[u8]) -> u64 {
@@ -477,8 +589,11 @@ mod tests {
             h.push(crc8(&h));
             h
         };
-        assert_eq!(header_at(&header(8), 0, &info).map(|f| f.1), Some(8_000));
-        assert_eq!(header_at(&header(0), 0, &info), None, "0 kHz is not a rate");
+        assert_eq!(header_at(&header(8), 0, &info).map(|h| h.rate), Some(8_000));
+        assert!(
+            header_at(&header(0), 0, &info).is_none(),
+            "0 kHz is not a rate"
+        );
     }
 
     #[test]

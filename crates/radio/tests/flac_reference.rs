@@ -295,3 +295,89 @@ fn a_tag_appended_after_the_audio_does_not_cost_the_last_frame() {
         .iter()
         .all(|f| f.offset + f.len <= REFERENCE.len() - 1));
 }
+
+/// The number a frame carries, decoded here rather than by the code under
+/// test: FLAC borrowed UTF-8's shape for it.
+fn number_of(bytes: &[u8], frame: &flac::Frame) -> u64 {
+    let lead = bytes[frame.offset + 4];
+    let (mut v, follow) = match lead {
+        0x00..=0x7F => (u64::from(lead), 0),
+        0xC0..=0xDF => (u64::from(lead & 0x1F), 1),
+        0xE0..=0xEF => (u64::from(lead & 0x0F), 2),
+        0xF0..=0xF7 => (u64::from(lead & 0x07), 3),
+        0xF8..=0xFB => (u64::from(lead & 0x03), 4),
+        0xFC..=0xFD => (u64::from(lead & 0x01), 5),
+        _ => (0, 6),
+    };
+    for i in 0..follow {
+        v = (v << 6) | u64::from(bytes[frame.offset + 5 + i] & 0x3F);
+    }
+    v
+}
+
+/// A station plays a file after a file, and a decoder is told once what it
+/// is listening to. So a mount's stream is one set of headers and then
+/// frames, renumbered so they carry on from the track before instead of
+/// starting over — which is what stops a native FLAC player at the end of
+/// the first song.
+#[test]
+fn two_tracks_make_one_stream_that_carries_on() {
+    let info = flac::playable(REFERENCE).expect("a file a station could send");
+    let mut stream = flac::stream_headers(info.sample_rate, info.channels, info.bits_per_sample);
+    let head = stream.len();
+    let mut played = 0u64;
+    let mut wanted = Vec::new();
+    for _ in 0..2 {
+        for frame in flac::frames(REFERENCE) {
+            let bytes = &REFERENCE[frame.offset..frame.offset + frame.len];
+            let again = flac::renumber(bytes, frame.header, frame.number, played)
+                .expect("a frame written again");
+            stream.extend_from_slice(&again);
+            wanted.push(played);
+            played += u64::from(frame.samples);
+        }
+    }
+
+    // One set of headers for the stream, not one per track.
+    assert_eq!(
+        stream.windows(4).filter(|w| *w == b"fLaC").count(),
+        1,
+        "one fLaC, at the front"
+    );
+    assert_eq!(&stream[..4], b"fLaC");
+    // And it reads as one file: every frame of both tracks, back to back,
+    // adding up to twice the audio.
+    let walked = flac::frames(&stream);
+    assert_eq!(walked.len(), 8, "{walked:?}");
+    assert_eq!(walked[0].offset, head, "the audio starts after the headers");
+    assert_eq!(
+        walked.iter().map(|f| u64::from(f.samples)).sum::<u64>(),
+        info.total_samples * 2
+    );
+    assert!(
+        walked
+            .windows(2)
+            .all(|w| w[0].offset + w[0].len == w[1].offset),
+        "contiguous: {walked:?}"
+    );
+    let last = walked.last().unwrap();
+    assert_eq!(last.offset + last.len, stream.len(), "to the last byte");
+    assert_eq!(
+        walked.iter().map(|f| f.sample_rate).collect::<Vec<_>>(),
+        vec![info.sample_rate; 8]
+    );
+
+    // The numbers count samples across the join, so no decoder is ever told
+    // to go back to the beginning of a song it has already played.
+    assert_eq!(
+        walked
+            .iter()
+            .map(|f| number_of(&stream, f))
+            .collect::<Vec<_>>(),
+        wanted
+    );
+    assert!(
+        walked.iter().all(|f| stream[f.offset + 1] & 0x01 == 1),
+        "each frame says its number counts samples"
+    );
+}

@@ -663,7 +663,11 @@ async fn install_radio_library(
         let mut kinds: Vec<(&str, radio::Sound, Vec<rabbithole_radio::Track>)> = vec![
             ("mp3", radio::Sound::Mpeg, split.mpeg),
             ("ogg", radio::Sound::Ogg(0), split.ogg),
-            ("flac", radio::Sound::Flac, split.flac),
+            (
+                "flac",
+                radio::Sound::Flac(radio::Form::default()),
+                split.flac,
+            ),
         ];
         kinds.retain(|(_, _, tracks)| !tracks.is_empty());
         // A mount the operator named for a kind — `jukebox.flac` — is that

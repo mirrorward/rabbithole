@@ -115,6 +115,11 @@ struct MountEntry {
     /// Held by a library rotation's pump rather than a live source. A DJ may
     /// take such a mount over; a mount another DJ holds is refused.
     program_owned: bool,
+    /// What a listener needs before any of the audio makes sense, sent to
+    /// each one as they arrive. Empty for MP3, whose frames each say what
+    /// they are; a `fLaC` magic and one STREAMINFO for a FLAC mount, which
+    /// says it once for the whole night.
+    lead: Arc<[u8]>,
 }
 
 /// A listener's view of a mount: an event receiver plus the head it needs to
@@ -124,6 +129,9 @@ struct MountHandle {
     meta: StationMeta,
     content_type: String,
     now_playing: Arc<Mutex<Option<NowPlaying>>>,
+    /// The head of the stream, for a listener who joined in the middle of
+    /// it. Written before anything that comes over the air.
+    lead: Arc<[u8]>,
 }
 
 impl MountEntry {
@@ -133,6 +141,7 @@ impl MountEntry {
             meta: self.meta.clone(),
             content_type: self.content_type.clone(),
             now_playing: self.now_playing.clone(),
+            lead: self.lead.clone(),
         }
     }
 }
@@ -511,6 +520,9 @@ impl Stations {
                 content_type: sound.content_type().to_string(),
                 now_playing: now_playing.clone(),
                 program_owned: true,
+                // Settled by the pump when it has read a track and knows
+                // what to say about the stream.
+                lead: Arc::from(&[][..]),
             },
         );
         Some((tx, now_playing))
@@ -543,6 +555,30 @@ impl Stations {
             .get(slug)
             .filter(|m| m.program_owned)
             .map(|m| m.content_type.clone())
+    }
+
+    /// What every listener who joins is given before the air: the head of
+    /// the stream, for a mount that has one. Says whether it changed, so
+    /// the pump sends it over the air once for whoever is already here.
+    pub fn set_lead(&self, slug: &str, lead: Arc<[u8]>) -> bool {
+        let mut mounts = self.mounts.lock();
+        match mounts.get_mut(slug) {
+            Some(mount) if mount.program_owned && mount.lead != lead => {
+                mount.lead = lead;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether this mount has already told its listeners its stream is
+    /// something other than `lead`. A mount that has said nothing yet has
+    /// nothing to take back.
+    pub fn lead_differs(&self, slug: &str, lead: &Arc<[u8]>) -> bool {
+        self.mounts
+            .lock()
+            .get(slug)
+            .is_some_and(|m| m.program_owned && !m.lead.is_empty() && &m.lead != lead)
     }
 
     /// Take one rotation's mount down, so it can go back up sending
@@ -820,6 +856,9 @@ where
                     content_type: req.content_type.clone(),
                     now_playing: now_playing.clone(),
                     program_owned: false,
+                    // A DJ's stream is whatever they are sending; whatever
+                    // a listener needs is in it already.
+                    lead: Arc::from(&[][..]),
                 },
             );
             Some((tx, now_playing))
@@ -938,6 +977,18 @@ where
     W: AsyncWriteExt + Unpin,
 {
     let mut weaver = metaint.map(IcyMetaInterleaver::new);
+    // The head of the stream, for a listener who joined in the middle of a
+    // song: a FLAC mount says what it is once, and this is how everybody
+    // after the first person hears it.
+    if !handle.lead.is_empty() {
+        let lead = match weaver.as_mut() {
+            Some(weaver) => weaver.push(&handle.lead),
+            None => handle.lead.to_vec(),
+        };
+        if wr.write_all(&lead).await.is_err() {
+            return Ok(());
+        }
+    }
     loop {
         let chunk = match handle.rx.recv().await {
             Ok(chunk) => chunk,
@@ -1094,7 +1145,7 @@ pub fn sound_of_name(name: &str, mime: &str) -> Option<Sound> {
         return Some(Sound::Mpeg);
     }
     if lower.ends_with(".flac") || mime == "audio/flac" || mime == "audio/x-flac" {
-        return Some(Sound::Flac);
+        return Some(Sound::Flac(Form::default()));
     }
     if [".ogg", ".oga", ".opus"].iter().any(|e| lower.ends_with(e))
         || mime == "audio/ogg"
@@ -1125,12 +1176,12 @@ pub fn sound_of_tracks(tracks: &[Track]) -> Option<Sound> {
     };
     let mpeg = of(|s| matches!(s, Sound::Mpeg));
     let ogg = of(|s| matches!(s, Sound::Ogg(_)));
-    let flac = of(|s| matches!(s, Sound::Flac));
+    let flac = of(|s| matches!(s, Sound::Flac(_)));
     match mpeg.max(ogg).max(flac) {
         0 => None,
         most if mpeg == most => Some(Sound::Mpeg),
         most if ogg == most => Some(Sound::Ogg(0)),
-        _ => Some(Sound::Flac),
+        _ => Some(Sound::Flac(Form::default())),
     }
 }
 
@@ -1147,7 +1198,7 @@ pub fn split_by_sound(nodes: &[FileNodeRow]) -> Rotations {
         match sound_of_name(&node.name, &node.mime) {
             Some(Sound::Mpeg) => out.mpeg.push(track),
             Some(Sound::Ogg(_)) => out.ogg.push(track),
-            Some(Sound::Flac) => out.flac.push(track),
+            Some(Sound::Flac(_)) => out.flac.push(track),
             None => out.other.push(track),
         }
     }
@@ -1399,33 +1450,39 @@ pub fn ogg_batches(track: &[u8], rate: u32) -> Vec<Batch> {
     out
 }
 
-/// Cut a FLAC track into sends, as [`batches`] does for MPEG audio: whole
-/// frames only, contiguous bytes only, about a quarter second each. The
-/// metadata at the front (what the stream is, its tags, its cover) goes out
-/// ahead of the first frame, because a decoder needs it to play anything.
-pub fn flac_batches(track: &[u8]) -> Vec<Batch> {
+/// A FLAC track, written again as the next stretch of a mount's stream:
+/// whole frames only, about a quarter second to a send, each one renumbered
+/// to carry on from `from` — the samples the mount has already sent.
+///
+/// The file's own headers stay behind. A mount says what it is once, at the
+/// head of its stream, and a listener who joins later is given that as they
+/// arrive; a fresh `fLaC` magic between two songs is what stops a native
+/// FLAC player dead at the end of the first one.
+pub fn flac_stream(track: &[u8], from: u64) -> Cut {
     use rabbithole_radio::flac;
-    let Some(info) = flac::streaminfo(track) else {
-        return Vec::new();
-    };
     // Headers and no frames is not a track: sending them alone would take
     // no time at all, and a station would race through its rotation. One
     // walk of the file, because walking it is the expensive part.
     let frames = flac::frames(track);
-    if frames.is_empty() {
-        return Vec::new();
-    }
-    let mut out: Vec<Batch> = Vec::new();
-    // The header blocks lead, worth no time of their own.
-    let mut open = (info.audio_at > 0).then_some(Batch {
-        bytes: 0..info.audio_at,
-        micros: 0,
-    });
+    let mut audio = Vec::with_capacity(track.len());
+    let mut sends: Vec<Batch> = Vec::new();
+    let mut open: Option<Batch> = None;
+    let mut played = from;
     for frame in frames {
-        let end = frame.offset + frame.len;
+        let bytes = &track[frame.offset..frame.offset + frame.len];
+        // A frame that cannot be written again is one the mount cannot
+        // send: skipping it is a click, where sending it as it came would
+        // be a decoder told to go back to the beginning of another song.
+        let Some(again) = flac::renumber(bytes, frame.header, frame.number, played) else {
+            continue;
+        };
+        let start = audio.len();
+        audio.extend_from_slice(&again);
+        let end = audio.len();
+        played += u64::from(frame.samples);
         match open.as_mut() {
             Some(b)
-                if b.bytes.end == frame.offset
+                if b.bytes.end == start
                     && b.micros < PUMP_BATCH_MICROS
                     && b.bytes.len() < PUMP_BATCH_BYTES =>
             {
@@ -1433,16 +1490,20 @@ pub fn flac_batches(track: &[u8]) -> Vec<Batch> {
                 b.micros += frame.micros();
             }
             _ => {
-                out.extend(open.take());
+                sends.extend(open.take());
                 open = Some(Batch {
-                    bytes: frame.offset..end,
+                    bytes: start..end,
                     micros: frame.micros(),
                 });
             }
         }
     }
-    out.extend(open);
-    out
+    sends.extend(open);
+    Cut {
+        audio,
+        sends,
+        samples: played - from,
+    }
 }
 
 /// What a station is sending, and how a track of that kind is paced.
@@ -1452,8 +1513,48 @@ pub enum Sound {
     Mpeg,
     /// Ogg (Opus or Vorbis), `audio/ogg`, paced by granule at this rate.
     Ogg(u32),
-    /// FLAC, `audio/flac`, paced by the samples each frame holds.
-    Flac,
+    /// FLAC, `audio/flac`, paced by the samples each frame holds, in the
+    /// one form this mount's listeners were told about.
+    Flac(Form),
+}
+
+/// What a FLAC stream is: the three things a listener's decoder is told
+/// once, at the head of the stream, and cannot be told again part-way
+/// through. A mount sends one form of FLAC, so a track of another is left
+/// out with a word about why rather than stopping every decoder on it.
+///
+/// A form of zeros is one nobody has looked up yet — a name that ends in
+/// `.flac` says this much and no more — and it matches whatever it meets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Form {
+    pub rate: u32,
+    pub channels: u8,
+    pub bits: u8,
+}
+
+impl Form {
+    /// Whether a mount sending `self` can send `other` without its
+    /// listeners being told something new.
+    fn same_as(self, other: Form) -> bool {
+        self == other || self == Form::default() || other == Form::default()
+    }
+
+    /// The form, for a person: what the console says a station is sending.
+    fn say(self) -> String {
+        if self == Form::default() {
+            return "audio/flac".to_string();
+        }
+        format!(
+            "audio/flac, {} Hz, {}, {} bit",
+            self.rate,
+            match self.channels {
+                1 => "mono".to_string(),
+                2 => "stereo".to_string(),
+                n => format!("{n} channels"),
+            },
+            self.bits
+        )
+    }
 }
 
 impl Sound {
@@ -1462,7 +1563,16 @@ impl Sound {
         match self {
             Sound::Mpeg => "audio/mpeg",
             Sound::Ogg(_) => "audio/ogg",
-            Sound::Flac => "audio/flac",
+            Sound::Flac(_) => "audio/flac",
+        }
+    }
+
+    /// What this mount is sending, for a person: the content type, and for
+    /// FLAC the form of it, because two FLAC tracks are not interchangeable.
+    pub fn say(self) -> String {
+        match self {
+            Sound::Flac(form) => form.say(),
+            other => other.content_type().to_string(),
         }
     }
 
@@ -1471,18 +1581,23 @@ impl Sound {
         if rabbithole_radio::mp3::looks_like_mp3(track) {
             return Some(Sound::Mpeg);
         }
-        if rabbithole_radio::flac::looks_like_flac(track) {
-            return Some(Sound::Flac);
+        if let Some(info) = rabbithole_radio::flac::playable(track) {
+            return Some(Sound::Flac(Form {
+                rate: info.sample_rate,
+                channels: info.channels,
+                bits: info.bits_per_sample,
+            }));
         }
         rabbithole_radio::ogg::codec(track).map(|(_, rate)| Sound::Ogg(rate))
     }
 
-    /// The sends this track is cut into.
-    pub fn batches(self, track: &[u8]) -> Vec<Batch> {
+    /// The track, cut into sends. `from` is how many samples this mount has
+    /// sent already, which only FLAC has any use for.
+    pub fn cut(self, track: Vec<u8>, from: u64) -> Cut {
         match self {
-            Sound::Mpeg => batches(track),
-            Sound::Ogg(rate) => ogg_batches(track, rate),
-            Sound::Flac => flac_batches(track),
+            Sound::Mpeg => Cut::of(batches(&track), track),
+            Sound::Ogg(rate) => Cut::of(ogg_batches(&track, rate), track),
+            Sound::Flac(_) => flac_stream(&track, from),
         }
     }
 
@@ -1490,12 +1605,41 @@ impl Sound {
     /// kind of sound, because a listener's decoder is not told to start
     /// again mid-stream.
     pub fn same_as(self, other: Sound) -> bool {
-        matches!(
-            (self, other),
-            (Sound::Mpeg, Sound::Mpeg)
-                | (Sound::Ogg(_), Sound::Ogg(_))
-                | (Sound::Flac, Sound::Flac)
-        )
+        match (self, other) {
+            (Sound::Mpeg, Sound::Mpeg) | (Sound::Ogg(_), Sound::Ogg(_)) => true,
+            // Two FLAC tracks are not interchangeable the way two MP3s are:
+            // the rate, the channels and the depth are in the one STREAMINFO
+            // the mount's listeners were given, and cannot be taken back.
+            (Sound::Flac(a), Sound::Flac(b)) => a.same_as(b),
+            _ => false,
+        }
+    }
+}
+
+/// A track, ready to go out: the bytes a mount will send and the sends that
+/// point into them.
+///
+/// For MP3 and Ogg the bytes are the track's own, untouched. A FLAC mount
+/// sends a rewrite instead, because a stream is one stream and not a file
+/// after a file: the file's own headers stay behind (the mount said what it
+/// is once, at the top) and every frame is renumbered to carry on from the
+/// track before.
+pub struct Cut {
+    /// What goes out, which the sends below index into.
+    pub audio: Vec<u8>,
+    pub sends: Vec<Batch>,
+    /// How many samples this adds to what the mount has sent.
+    pub samples: u64,
+}
+
+impl Cut {
+    /// A track that goes out as it is.
+    fn of(sends: Vec<Batch>, audio: Vec<u8>) -> Cut {
+        Cut {
+            audio,
+            sends,
+            samples: 0,
+        }
     }
 }
 
@@ -1529,6 +1673,10 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
     let mut unplayable = 0usize;
     // What this station is sending, once a track has said so.
     let mut sending: Option<Sound> = None;
+    // How many samples this mount has sent. A FLAC stream numbers its
+    // frames by it, so a decoder is never told to go back to the start of
+    // a song it has already played.
+    let mut played = 0u64;
     loop {
         if shared.radio.is_live(&slug) || shared.radio.dj_holds(&slug) {
             clock = None; // whoever comes back starts a fresh stream
@@ -1545,26 +1693,26 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
         // sends all happen off the runtime: for a FLAC track that means
         // checking a checksum over the whole file, which is not something
         // to do on a thread that is also answering everybody else.
+        let from = played;
         let read = tokio::task::spawn_blocking(move || {
             let bytes = blobs.get(&id).ok()?;
             let kind = Sound::of(&bytes);
-            let cuts = kind.map(|kind| kind.batches(&bytes));
-            Some((bytes, kind, cuts))
+            let cut = kind.map(|kind| kind.cut(bytes, from));
+            Some((kind, cut))
         })
         .await
         .ok()
         .flatten();
-        let (audio, kind, cuts) = match read {
-            Some((bytes, kind, cuts)) => (Some(bytes), kind, cuts),
-            None => (None, None, None),
+        let (had_bytes, kind, cuts) = match read {
+            Some((kind, cut)) => (true, kind, cut),
+            None => (false, None, None),
         };
-        let had_bytes = audio.is_some();
         // A file can say what it is in its headers and hold no audio at
         // all — a FLAC cut off after STREAMINFO, an upload that stopped.
         // Sending the headers alone would take no time, so the rotation
         // would spin through the whole station at once, saying nothing was
         // wrong. A track with no time in it is a track that cannot play.
-        let cuts = cuts.filter(|cuts: &Vec<Batch>| cuts.iter().any(|b| b.micros > 0));
+        let cuts = cuts.filter(|cut: &Cut| cut.sends.iter().any(|b| b.micros > 0));
         // What this track is, and whether this mount can send it: a
         // listener's decoder is never handed a different kind of sound
         // part-way through, so a station sends one kind and says which
@@ -1574,7 +1722,7 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
             (Some(kind), Some(air)) if air.same_as(kind) => Some(kind),
             _ => None,
         };
-        let (Some(audio), Some(kind), Some(cuts)) = (audio, playable, cuts) else {
+        let (Some(kind), Some(cuts)) = (playable, cuts) else {
             // Nothing this station can send as it is: an unreadable file, a
             // format this burrow does not stream, or the wrong kind for a
             // mount already on the air. Said out loud, once per track —
@@ -1583,7 +1731,7 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
                 (false, _, _) => "could not be read".to_string(),
                 (true, None, _) => "not audio this burrow can stream".to_string(),
                 (true, Some(kind), Some(air)) if !air.same_as(kind) => {
-                    format!("not what this station is sending ({})", air.content_type())
+                    format!("not what this station is sending ({})", air.say())
                 }
                 _ => "no audio could be read from it".to_string(),
             };
@@ -1600,14 +1748,27 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
             continue;
         };
         unplayable = 0;
+        // What a listener needs before any of this makes sense. A FLAC
+        // mount says what its stream is once, at the head of it; the other
+        // kinds say it in every frame and need nothing here.
+        let lead: Arc<[u8]> = match kind {
+            Sound::Flac(form) => {
+                rabbithole_radio::flac::stream_headers(form.rate, form.channels, form.bits).into()
+            }
+            _ => Arc::from(&[][..]),
+        };
         // The first playable track settles what the mount is sending. The
         // mount is only remade when it is up as something else: remaking it
         // cuts whoever is listening, and a station of the kind the mount
-        // already went up as must not do that at every start.
+        // already went up as must not do that at every start. A mount that
+        // has already told its listeners what its stream is counts as
+        // something else when what it said no longer holds — better one
+        // clean cut than a decoder told something new mid-song.
         if shared
             .radio
             .program_content_type(&slug)
             .is_some_and(|sending| sending != kind.content_type())
+            || shared.radio.lead_differs(&slug, &lead)
         {
             shared.radio.retire_program_mount(&slug);
         }
@@ -1615,12 +1776,20 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
         let Some((tx, title_slot)) = shared.radio.program_mount(&slug, kind) else {
             continue; // a DJ got there first; the top of the loop waits
         };
+        // Everyone who arrives from here on is handed it as they connect;
+        // whoever was already here, waiting through the first track's read,
+        // is sent it now.
+        if shared.radio.set_lead(&slug, lead.clone()) && !lead.is_empty() {
+            let _ = tx.send(lead);
+        }
+        played += cuts.samples;
         *title_slot.lock() = shared.radio.now_playing(&slug);
         publish_now_playing(&shared, &slug, false);
 
         let (started, mut sent) = clock.unwrap_or((std::time::Instant::now(), Duration::ZERO));
         let mut interrupted = false;
-        for batch in cuts {
+        let Cut { audio, sends, .. } = cuts;
+        for batch in sends {
             if !shared.radio.owns_air(&slug, &tx) {
                 interrupted = true;
                 break;
@@ -1860,6 +2029,7 @@ where
                     content_type: req.content_type.clone(),
                     now_playing: Arc::new(Mutex::new(Some(np.clone()))),
                     program_owned: false,
+                    lead: Arc::from(&[][..]),
                 },
             );
             Some(tx)
@@ -2035,30 +2205,46 @@ mod tests {
     /// against: written by the reference encoder, not by us.
     const REFERENCE_FLAC: &[u8] =
         include_bytes!("../../../crates/radio/tests/fixtures/reference-8k-mono.flac");
+    /// What that file is: 8 kHz, one channel, 16 bits a sample.
+    const REFERENCE_FORM: Form = Form {
+        rate: 8_000,
+        channels: 1,
+        bits: 16,
+    };
 
     #[test]
-    fn a_flac_track_is_cut_into_sends_that_carry_its_headers_first() {
-        assert_eq!(Sound::of(REFERENCE_FLAC), Some(Sound::Flac));
-        let cut = Sound::Flac.batches(REFERENCE_FLAC);
+    fn a_flac_track_is_written_again_as_the_next_of_a_stream() {
+        assert_eq!(Sound::of(REFERENCE_FLAC), Some(Sound::Flac(REFERENCE_FORM)));
+        let cut = Sound::Flac(REFERENCE_FORM).cut(REFERENCE_FLAC.to_vec(), 0);
+        // What goes out is the frames, written again — not the file. The
+        // file's own headers stay behind: the mount said what it is once.
         assert_eq!(
-            cut.iter().map(|b| b.bytes.len()).sum::<usize>(),
-            REFERENCE_FLAC.len(),
-            "every byte goes out, the stream's headers included"
+            cut.sends.iter().map(|b| b.bytes.len()).sum::<usize>(),
+            cut.audio.len(),
+            "every byte of it goes out"
         );
-        assert_eq!(cut[0].bytes.start, 0, "what the decoder needs leads");
+        assert_eq!(cut.sends[0].bytes.start, 0);
+        assert_ne!(&cut.audio[..4], b"fLaC", "no second set of headers");
+        assert_eq!(cut.samples, 960, "what it adds to what the mount has sent");
         assert_eq!(
-            cut.iter().map(|b| b.micros).sum::<u64>(),
+            cut.sends.iter().map(|b| b.micros).sum::<u64>(),
             120_000,
             "0.12 s of tone, paced by the samples each frame holds"
         );
-        // Whole frames only: no send ends inside one.
-        let starts: Vec<usize> = rabbithole_radio::flac::frames(REFERENCE_FLAC)
+        // Whole frames only: no send ends inside one. The frames are the
+        // ones the walker finds when the mount's own head is put in front
+        // of what goes out — which is what a listener is given.
+        let mut whole = rabbithole_radio::flac::stream_headers(8_000, 1, 16);
+        let head = whole.len();
+        whole.extend_from_slice(&cut.audio);
+        let starts: Vec<usize> = rabbithole_radio::flac::frames(&whole)
             .iter()
-            .map(|f| f.offset)
+            .map(|f| f.offset - head)
             .collect();
-        for batch in &cut {
+        assert_eq!(starts.len(), 4, "the file's four frames, written again");
+        for batch in &cut.sends {
             assert!(
-                batch.bytes.end == REFERENCE_FLAC.len() || starts.contains(&batch.bytes.end),
+                batch.bytes.end == cut.audio.len() || starts.contains(&batch.bytes.end),
                 "a send ends where a frame does: {:?}",
                 batch.bytes
             );
@@ -2082,9 +2268,12 @@ mod tests {
         // but does not finish. It still says FLAC, and there is nothing to
         // send, so the station says so rather than playing it in no time.
         let torn = &REFERENCE_FLAC[..info.audio_at + 10];
-        assert_eq!(Sound::of(torn), Some(Sound::Flac));
+        assert_eq!(Sound::of(torn), Some(Sound::Flac(REFERENCE_FORM)));
         assert!(
-            Sound::Flac.batches(torn).is_empty(),
+            Sound::Flac(REFERENCE_FORM)
+                .cut(torn.to_vec(), 0)
+                .sends
+                .is_empty(),
             "nothing to send and no time to send it in"
         );
     }
@@ -2120,8 +2309,14 @@ mod tests {
         assert_eq!(sound_of_name("a", "audio/mpeg"), Some(Sound::Mpeg));
         assert_eq!(sound_of_name("a.opus", ""), Some(Sound::Ogg(0)));
         assert_eq!(sound_of_name("a.OGG", ""), Some(Sound::Ogg(0)));
-        assert_eq!(sound_of_name("a.flac", ""), Some(Sound::Flac));
-        assert_eq!(sound_of_name("a", "audio/flac"), Some(Sound::Flac));
+        assert_eq!(
+            sound_of_name("a.flac", ""),
+            Some(Sound::Flac(Form::default()))
+        );
+        assert_eq!(
+            sound_of_name("a", "audio/flac"),
+            Some(Sound::Flac(Form::default()))
+        );
         assert_eq!(
             sound_of_name("a.aac", "audio/aac"),
             None,
@@ -2137,7 +2332,7 @@ mod tests {
             Some(Sound::Ogg(48_000)),
             "an Opus stream is Ogg at 48 kHz"
         );
-        let cut = Sound::Ogg(48_000).batches(&track);
+        let cut = Sound::Ogg(48_000).cut(track.clone(), 0).sends;
         assert_eq!(
             cut.iter().map(|b| b.micros).sum::<u64>(),
             1_000_000,
@@ -2162,10 +2357,29 @@ mod tests {
         assert!(!Sound::Mpeg.same_as(Sound::Ogg(48_000)));
         assert_eq!(Sound::Mpeg.content_type(), "audio/mpeg");
         assert_eq!(Sound::Ogg(48_000).content_type(), "audio/ogg");
-        assert_eq!(Sound::Flac.content_type(), "audio/flac");
-        assert!(Sound::Flac.same_as(Sound::Flac));
-        assert!(!Sound::Flac.same_as(Sound::Mpeg));
-        assert!(!Sound::Flac.same_as(Sound::Ogg(0)));
+        assert_eq!(Sound::Flac(REFERENCE_FORM).content_type(), "audio/flac");
+        assert!(Sound::Flac(REFERENCE_FORM).same_as(Sound::Flac(REFERENCE_FORM)));
+        assert!(!Sound::Flac(REFERENCE_FORM).same_as(Sound::Mpeg));
+        assert!(!Sound::Flac(REFERENCE_FORM).same_as(Sound::Ogg(0)));
+        // A mount sends one form of FLAC. A track of another is not the
+        // same sound, whatever its name says, and a form nobody has looked
+        // up yet — all a file name can say — is any of them.
+        let other = Form {
+            rate: 44_100,
+            channels: 2,
+            bits: 24,
+        };
+        assert!(!Sound::Flac(REFERENCE_FORM).same_as(Sound::Flac(other)));
+        assert!(Sound::Flac(Form::default()).same_as(Sound::Flac(other)));
+        assert_eq!(
+            Sound::Flac(other).say(),
+            "audio/flac, 44100 Hz, stereo, 24 bit"
+        );
+        assert_eq!(
+            Sound::Flac(REFERENCE_FORM).say(),
+            "audio/flac, 8000 Hz, mono, 16 bit"
+        );
+        assert_eq!(Sound::Mpeg.say(), "audio/mpeg");
         // And a file that is neither is not sent at all.
         assert_eq!(Sound::of(b"not audio at all"), None);
         assert_eq!(Sound::of(&mp3_frames(3)), Some(Sound::Mpeg));
@@ -2234,6 +2448,7 @@ mod tests {
                 content_type: "audio/ogg".into(),
                 now_playing: Arc::new(Mutex::new(None)),
                 program_owned: false,
+                lead: Arc::from(&[][..]),
             },
         );
         assert!(radio.dj_holds("ambient"));
@@ -2389,7 +2604,7 @@ mod tests {
                 t("b.wav"),
                 t("c.wav"),
             ]),
-            Some(Sound::Flac)
+            Some(Sound::Flac(Form::default()))
         );
         // Two Oggs against one MP3 is an Ogg station, majority or not.
         assert_eq!(

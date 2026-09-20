@@ -89,7 +89,14 @@ disables that class.
   handed out in name order so they do not change from one start to the
   next. Audio of a kind the burrow cannot send stays in the rotation and is
   named, with the reason, in `RadioStatus` and the console's Stations
-  panel. `radio_public_base`
+  panel. A FLAC mount is **one stream**, not a file after a file: it sends
+  its own `fLaC` header once — every listener is given it as they connect,
+  whenever they arrive — and each track's frames are renumbered to carry on
+  from the one before, because a second header mid-stream stops a native
+  FLAC player dead at the end of the first song. That one header fixes the
+  rate, the channel count and the depth for the whole night, so a station
+  sends one form of FLAC and a track of another is left out with a word
+  saying which form it is not. `radio_public_base`
   names the public stream address when it is not this host on `radio_addr`'s
   port; clients are told it and never ask a person for it.
   The updinfo endpoints (`GET /admin/metadata`, `GET /admin.cgi`) ride the

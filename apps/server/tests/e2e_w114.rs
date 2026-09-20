@@ -824,9 +824,9 @@ async fn a_library_of_both_kinds_plays_on_a_mount_each() {
 }
 
 /// A library of FLAC files plays as a FLAC station: the listener is told it
-/// is `audio/flac` and hears the file, headers first. The file is the one
-/// the reference encoder wrote, so what arrives can be checked against it
-/// byte for byte.
+/// is `audio/flac` and is given the mount's own stream — one set of headers,
+/// then the file's frames. The file is the one the reference encoder wrote,
+/// so what arrives can be checked against it frame for frame.
 #[tokio::test]
 async fn a_library_of_flac_files_streams_as_a_flac_station() {
     use rabbithole_core::Client;
@@ -888,15 +888,197 @@ async fn a_library_of_flac_files_streams_as_a_flac_station() {
         "a FLAC station says so: {head:?}"
     );
 
-    // What arrives is the file itself, from its first byte: the magic and
-    // the headers a decoder needs before any audio.
-    let mut more = read_at_least(&mut listener, 64).await;
+    // What arrives is the mount's own stream: one `fLaC` magic and one
+    // STREAMINFO, said once for the whole night, and then the file's
+    // frames — not the file, which would put a second set of headers in
+    // the middle of the stream at every track and stop a decoder dead.
+    let mut more = read_at_least(&mut listener, 256).await;
     heard.append(&mut more);
-    assert!(heard.starts_with(b"fLaC"), "the stream's own header leads");
+    let info = rabbithole_radio::flac::playable(REFERENCE_FLAC).unwrap();
+    let head = rabbithole_radio::flac::stream_headers(
+        info.sample_rate,
+        info.channels,
+        info.bits_per_sample,
+    );
     assert_eq!(
-        &heard[..heard.len().min(64)],
-        &REFERENCE_FLAC[..heard.len().min(64)],
-        "verbatim, as the encoder wrote it"
+        &heard[..head.len()],
+        &head[..],
+        "the mount says what its stream is, once"
+    );
+    assert_eq!(
+        heard.windows(4).filter(|w| *w == b"fLaC").count(),
+        1,
+        "and does not say it again"
+    );
+    // And what follows is the audio of that file, frame for frame: the
+    // same bytes, renumbered to carry on from where the mount is.
+    let frames = rabbithole_radio::flac::frames(&heard);
+    let theirs = rabbithole_radio::flac::frames(REFERENCE_FLAC);
+    assert_eq!(frames.len(), theirs.len(), "{frames:?}");
+    assert_eq!(frames[0].offset, head.len(), "audio, straight after");
+    assert_eq!(
+        frames.iter().map(|f| u64::from(f.samples)).sum::<u64>(),
+        info.total_samples
+    );
+    for (ours, theirs) in frames.iter().zip(&theirs) {
+        assert_eq!(
+            &heard[ours.offset + ours.header..ours.offset + ours.len - 2],
+            &REFERENCE_FLAC[theirs.offset + theirs.header..theirs.offset + theirs.len - 2],
+            "the audio inside a frame is the encoder's own, untouched"
+        );
+    }
+
+    burrow.shutdown().await;
+}
+
+/// A station is one stream, not a file after a file. Two tracks play as one
+/// run of frames under one set of headers, numbered so they carry on across
+/// the join — a second `fLaC` magic mid-stream is what stops a native FLAC
+/// player at the end of the first song. A track of another form is not this
+/// stream, so it is left out with a word about why.
+#[tokio::test]
+async fn a_flac_station_carries_on_across_a_track_change() {
+    use rabbithole_core::Client;
+
+    const EIGHT_K: &[u8] =
+        include_bytes!("../../../crates/radio/tests/fixtures/reference-8k-mono.flac");
+    const FORTY_FOUR_K: &[u8] =
+        include_bytes!("../../../crates/radio/tests/fixtures/reference-44k-stereo.flac");
+
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path().join("srv");
+
+    {
+        let burrow = Burrow::start(test_config(&dir)).await.unwrap();
+        burrow
+            .shared
+            .auth
+            .create_account("dj", "spin-spin-spin", Role::Admin)
+            .await
+            .unwrap();
+        let mut dj = Client::connect(
+            &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
+            None,
+            None,
+            "e2e",
+            "0",
+        )
+        .await
+        .unwrap();
+        dj.auth_password("dj", "spin-spin-spin").await.unwrap();
+        dj.expect_welcome().await.unwrap();
+        dj.area_create("music", "Music", "").await.unwrap();
+        for (name, bytes) in [
+            ("a-tone.flac", EIGHT_K),
+            ("b-tone.flac", EIGHT_K),
+            ("c-other.flac", FORTY_FOUR_K),
+        ] {
+            let src = work.path().join(name);
+            std::fs::write(&src, bytes).unwrap();
+            dj.transfer_upload("music", None, name, &src, "audio/flac", "")
+                .await
+                .unwrap();
+        }
+        burrow.shutdown().await;
+    }
+
+    let mut config = test_config(&dir);
+    config
+        .radio_library_areas
+        .insert("lossless".into(), "music".into());
+    let burrow = Burrow::start(config).await.unwrap();
+    let radio = burrow.radio_addr.expect("radio enabled");
+
+    let mut listener = TcpStream::connect(radio).await.unwrap();
+    listener
+        .write_all(b"GET /lossless HTTP/1.0\r\n\r\n")
+        .await
+        .unwrap();
+    listener.flush().await.unwrap();
+    let (head, mut heard) = read_head(&mut listener).await;
+    assert!(head.starts_with("ICY 200 OK"), "{head:?}");
+
+    // Both 8 kHz tracks, which is every frame of that file twice.
+    let info = rabbithole_radio::flac::playable(EIGHT_K).unwrap();
+    let theirs = rabbithole_radio::flac::frames(EIGHT_K);
+    let want = rabbithole_radio::flac::stream_headers(
+        info.sample_rate,
+        info.channels,
+        info.bits_per_sample,
+    )
+    .len()
+        + theirs.iter().map(|f| f.len + 2).sum::<usize>() * 2;
+    let mut more = read_at_least(&mut listener, want).await;
+    heard.append(&mut more);
+
+    assert_eq!(
+        heard.windows(4).filter(|w| *w == b"fLaC").count(),
+        1,
+        "one set of headers for the whole stream"
+    );
+    let frames = rabbithole_radio::flac::frames(&heard);
+    assert!(
+        frames.len() >= theirs.len() * 2,
+        "both tracks, as frames: {} of {}",
+        frames.len(),
+        theirs.len() * 2
+    );
+    assert!(
+        frames
+            .windows(2)
+            .all(|w| w[0].offset + w[0].len == w[1].offset),
+        "back to back, with nothing between the songs"
+    );
+    assert!(
+        frames.iter().all(|f| f.sample_rate == info.sample_rate),
+        "one form, all the way through"
+    );
+
+    // The numbers count samples across the join, so no decoder is told to
+    // go back to the beginning of a song it has already played.
+    let numbers: Vec<u64> = frames
+        .iter()
+        .map(|f| {
+            let lead = heard[f.offset + 4];
+            let (mut v, follow) = match lead {
+                0x00..=0x7F => (u64::from(lead), 0),
+                0xC0..=0xDF => (u64::from(lead & 0x1F), 1),
+                0xE0..=0xEF => (u64::from(lead & 0x0F), 2),
+                0xF0..=0xF7 => (u64::from(lead & 0x07), 3),
+                0xF8..=0xFB => (u64::from(lead & 0x03), 4),
+                0xFC..=0xFD => (u64::from(lead & 0x01), 5),
+                _ => (0, 6),
+            };
+            for i in 0..follow {
+                v = (v << 6) | u64::from(heard[f.offset + 5 + i] & 0x3F);
+            }
+            v
+        })
+        .collect();
+    assert!(
+        numbers.windows(2).all(|w| w[1] > w[0]),
+        "always forwards: {numbers:?}"
+    );
+    assert_eq!(
+        numbers[theirs.len()],
+        info.total_samples,
+        "the second song starts where the first one ended"
+    );
+
+    // And the operator can see why the odd one out is silent.
+    let status = burrow::radio::station_status(&burrow.shared);
+    let station = status
+        .iter()
+        .find(|s| s.station == "lossless")
+        .expect("the station");
+    let left = station
+        .left_out
+        .iter()
+        .find(|l| l.title == "c-other.flac")
+        .expect("said out loud");
+    assert_eq!(
+        left.reason,
+        "not what this station is sending (audio/flac, 8000 Hz, mono, 16 bit)"
     );
 
     burrow.shutdown().await;

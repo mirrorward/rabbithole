@@ -452,14 +452,15 @@ async fn the_bare_mount_keeps_its_kind_and_a_named_station_is_left_alone() {
     assert_eq!(burrow.shared.radio.track_count("jukebox"), 1);
     assert_eq!(burrow.shared.radio.track_count("jukebox.flac"), 3);
     // Each mount goes up as what it is about to send, so nobody who tuned
-    // in early is cut off when the first track is read.
+    // in early is cut off when the first track is read. Which kind, that
+    // is: which FLAC is in the file, and no file has been read yet.
     assert_eq!(
         burrow.shared.radio.expected_sound("jukebox"),
         Some(burrow::radio::Sound::Mpeg)
     );
     assert_eq!(
         burrow.shared.radio.expected_sound("jukebox.flac"),
-        Some(burrow::radio::Sound::Flac)
+        Some(burrow::radio::Sound::Flac(Default::default()))
     );
     burrow.shutdown().await;
 
@@ -479,7 +480,7 @@ async fn the_bare_mount_keeps_its_kind_and_a_named_station_is_left_alone() {
     assert_eq!(burrow.shared.radio.track_count("jukebox.flac"), 3);
     assert_eq!(
         burrow.shared.radio.expected_sound("jukebox.flac"),
-        Some(burrow::radio::Sound::Flac),
+        Some(burrow::radio::Sound::Flac(Default::default())),
         "the name says FLAC, so the mount had better send FLAC"
     );
     burrow.shutdown().await;
@@ -576,7 +577,7 @@ async fn a_mount_goes_up_as_what_it_will_send_not_what_it_cannot_play() {
     );
     assert_eq!(
         burrow.shared.radio.expected_sound("jukebox"),
-        Some(burrow::radio::Sound::Flac),
+        Some(burrow::radio::Sound::Flac(Default::default())),
         "three FLACs and three files it cannot play is a FLAC station"
     );
     burrow.shutdown().await;
