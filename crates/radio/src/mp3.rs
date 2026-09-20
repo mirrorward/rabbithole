@@ -41,16 +41,26 @@ impl Frame {
 /// none. The tag's size is four 7-bit ("syncsafe") bytes, so that no tag byte
 /// can ever look like a frame sync.
 pub fn id3v2_len(bytes: &[u8]) -> usize {
-    if bytes.len() < 10 || &bytes[..3] != b"ID3" {
+    // Clamped: a tag that lies about its size cannot walk a reader off the
+    // end of what it is holding.
+    id3v2_says(bytes).min(bytes.len())
+}
+
+/// What a tag in front of a file says its own length is, even when the file
+/// in hand stops short of it. A caller holding only the front of a file uses
+/// this to go and read the part that matters; a caller holding the whole
+/// file wants [`id3v2_len`], which is this clamped to what is there.
+pub fn id3v2_says(front: &[u8]) -> usize {
+    if front.len() < 10 || &front[..3] != b"ID3" {
         return 0;
     }
-    let size = &bytes[6..10];
+    let size = &front[6..10];
     if size.iter().any(|b| b & 0x80 != 0) {
         return 0; // not syncsafe: not a tag we understand
     }
     let body = size.iter().fold(0usize, |n, b| (n << 7) | usize::from(*b));
-    let footer = if bytes[5] & 0x10 != 0 { 10 } else { 0 };
-    (10 + body + footer).min(bytes.len())
+    let footer = if front[5] & 0x10 != 0 { 10 } else { 0 };
+    10 + body + footer
 }
 
 /// Parse a frame header at `offset`, if a legal one that fits is there.
@@ -296,6 +306,7 @@ mod tests {
         let mut liar = b"ID3\x04\x00\x00\x7F\x7F\x7F\x7F".to_vec();
         liar.extend_from_slice(&[0; 20]);
         assert_eq!(id3v2_len(&liar), liar.len());
+        assert_eq!(id3v2_says(&liar), 10 + 0x0FFF_FFFF, "what it claims");
         assert_eq!(frames(&liar).count(), 0);
     }
 }

@@ -625,7 +625,22 @@ async fn a_stations_form_is_what_most_of_its_library_is() {
             )
             .await
             .unwrap();
-        let album = burrow.shared.blobs.put(ALBUM).unwrap();
+        // And the albums carry a tag longer than the look a library takes
+        // at a file, the way one with a picture in it does.
+        let tagged = {
+            const PAYLOAD: u32 = 2048;
+            let mut out = b"ID3\x04\x00\x00".to_vec();
+            out.extend_from_slice(&[
+                ((PAYLOAD >> 21) & 0x7F) as u8,
+                ((PAYLOAD >> 14) & 0x7F) as u8,
+                ((PAYLOAD >> 7) & 0x7F) as u8,
+                (PAYLOAD & 0x7F) as u8,
+            ]);
+            out.resize(10 + PAYLOAD as usize, 0);
+            out.extend_from_slice(ALBUM);
+            out
+        };
+        let album = burrow.shared.blobs.put(&tagged).unwrap();
         for n in 0..3 {
             files
                 .add_file(
@@ -633,7 +648,7 @@ async fn a_stations_form_is_what_most_of_its_library_is() {
                     None,
                     &format!("b-album-{n}.flac"),
                     &album.0,
-                    ALBUM.len() as i64,
+                    tagged.len() as i64,
                     "audio/flac",
                     "",
                     "",

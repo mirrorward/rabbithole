@@ -776,7 +776,19 @@ async fn flac_form(shared: &Arc<Shared>, tracks: &[rabbithole_radio::Track]) -> 
             let Ok(front) = blobs.read_range(&id, 0, 1 << 10) else {
                 continue;
             };
-            if let Some(form) = rabbithole_radio::flac::form_of(&front) {
+            let form = rabbithole_radio::flac::form_of(&front).or_else(|| {
+                // A tag in front of the music can be longer than the look
+                // we took — one with a picture in it usually is — and its
+                // own header says how long. The second look starts where
+                // the tag ends.
+                let skip = rabbithole_radio::mp3::id3v2_says(&front);
+                if skip == 0 || skip < front.len() {
+                    return None;
+                }
+                let past = blobs.read_range(&id, skip as u64, 1 << 10).ok()?;
+                rabbithole_radio::flac::form_of(&past)
+            });
+            if let Some(form) = form {
                 *counted.entry(form).or_default() += 1;
             }
         }
