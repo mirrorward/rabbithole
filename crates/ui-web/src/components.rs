@@ -3253,6 +3253,7 @@ pub fn Lobby() -> impl IntoView {
                         </button>
                     </div>
                 </Show>
+                <RoomKeepingPanel/>
                 // The burrow's news, where you actually land. It used to live
                 // only inside the welcome sheet, so a burrow with no MOTD showed
                 // no news at all — and dismissing the sheet lost it for good.
@@ -3282,9 +3283,13 @@ pub fn Lobby() -> impl IntoView {
                             // sender's burst shows the name + time, follow-ups
                             // render as bare grouped lines. A row's head-ness
                             // depends only on the (immutable) previous line,
-                            // so the index stays a sound key.
+                            // so within a room the index is a sound key. The
+                            // room is part of it: another room's line 0 is
+                            // another line, and reusing the row showed the
+                            // room you had left.
                             each=move || {
                                 let said = lines();
+                                let at = room();
                                 said.iter()
                                     .enumerate()
                                     .map(|(i, line)| {
@@ -3295,12 +3300,12 @@ pub fn Lobby() -> impl IntoView {
                                                 &line.from,
                                                 line.at_unix_ms,
                                             );
-                                        (i, line.clone(), head)
+                                        (at.clone(), i, line.clone(), head)
                                     })
                                     .collect::<Vec<_>>()
                             }
-                            key=|(i, _, _)| *i
-                            children=move |(_, line, head)| view! {
+                            key=|(at, i, _, _)| (at.clone(), *i)
+                            children=move |(_, _, line, head)| view! {
                                 <li class=if head { "rh-line rh-line-head" } else { "rh-line rh-line-cont" }>
                                     // The speaker's warren mark opens each burst,
                                     // so you know who is talking before you read
@@ -5237,6 +5242,290 @@ pub fn Radio() -> impl IntoView {
                 <RadioRequestsPanel/>
             </section>
         </main>
+    }
+}
+
+/// How the room being read is kept. Everybody is told its pace, and a
+/// muted person that they are (a message the burrow refuses says why in
+/// the scrollback, like every refusal of a room). The room's maker and chat
+/// moderators also get
+/// what they need to keep it: the pace, and each person in it with mute,
+/// let talk, and take out.
+#[component]
+fn RoomKeepingPanel() -> impl IntoView {
+    use crate::room_keeping::{mute_left, muted_line, pace_label, pace_line, MUTES, PACES};
+    let app = expect_context::<AppState>();
+    let state = move || app.focused_tracked().state;
+    // The room on show, as a memo: every line said changes the state, and
+    // none of them is a reason to ask how the room is kept.
+    let room = create_memo(move |_| state().with(|s| s.room().to_string()));
+    create_effect(move |_| app.load_keeping(&room.get()));
+    let kept = move || state().with(|s| s.keeping.of(&room.get()).cloned());
+    let me = move || app.focused_tracked().handle.get();
+    let pace = move || kept().map_or(0, |k| k.slow_mode_secs);
+    let mine = move || {
+        let me = me();
+        kept().and_then(|k| k.muted.into_iter().find(|m| m.screen_name == me))
+    };
+    let may_keep = move || kept().is_some_and(|k| k.may_moderate);
+    // When a mute heard of here ends, as a time of day.
+    let until = move |secs: Option<u32>| {
+        let end = state().with(|s| s.keeping.ends_at(&room.get(), secs))?;
+        let now = crate::clock::now_ms();
+        Some(crate::room_keeping::when_words(
+            &crate::clock::local_hhmm(end),
+            &crate::clock::local_hhmm(now),
+            end - now,
+        ))
+    };
+    let in_lobby = move || room.get() == crate::client::LOBBY;
+    let open = create_rw_signal(false);
+    // Taking somebody out is asked twice: (who, bar them too).
+    let taking = create_rw_signal(None::<(String, bool)>);
+    create_effect(move |_| {
+        let _ = room.get();
+        open.set(false);
+        taking.set(None);
+    });
+    // Who a keeper can act on: who the burrow says is in the room, anybody
+    // they have seen say something here (somebody invisible is left off the
+    // roster, but not out of what they say), and anybody muted here, even
+    // if they have gone or come back under another name — so a mute can
+    // always be lifted.
+    let people = move || {
+        let me = me();
+        let Some(k) = kept() else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = k.members.clone();
+        state().with(|s| {
+            for line in s.messages_in(&room.get()).into_iter().rev().take(200) {
+                if !line.from.starts_with('!') && !names.contains(&line.from) {
+                    names.push(line.from.clone());
+                }
+            }
+        });
+        for m in &k.muted {
+            if !names.contains(&m.screen_name) {
+                names.push(m.screen_name.clone());
+            }
+        }
+        names.retain(|n| *n != me && !n.is_empty());
+        names.sort();
+        names.dedup();
+        names
+            .into_iter()
+            .map(|name| {
+                let muted = k.muted.iter().find(|x| x.screen_name == name).cloned();
+                (name, muted)
+            })
+            .collect::<Vec<_>>()
+    };
+    let paced = move || pace() != 0;
+    let anything = move || paced() || mine().is_some() || may_keep();
+    view! {
+        <Show when=anything fallback=|| ()>
+            <div class="rh-keeping">
+                <div class="rh-keeping-notes">
+                    <Show when=move || mine().is_some() fallback=|| ()>
+                        <p class="rh-keeping-note">
+                            {move || {
+                                mine()
+                                    .map(|m| muted_line(until(m.remaining_secs).as_deref()))
+                                    .unwrap_or_default()
+                            }}
+                        </p>
+                    </Show>
+                    <Show when=paced fallback=|| ()>
+                        <p class="rh-keeping-note">{move || pace_line(pace()).unwrap_or_default()}</p>
+                    </Show>
+                    <Show when=move || open.get() && may_keep() fallback=|| ()>
+                        <h3 class="rh-requests-title">{move || format!("Keeping {}", room.get())}</h3>
+                    </Show>
+                    <Show when=may_keep fallback=|| ()>
+                        <button
+                            type="button"
+                            class="rh-btn ghost small rh-keeping-toggle"
+                            aria-expanded=move || open.get().to_string()
+                            on:click=move |_| {
+                                // Who is in a room changes as people come
+                                // and go; look again before showing them.
+                                if !open.get_untracked() {
+                                    app.load_keeping(&room.get_untracked());
+                                }
+                                open.update(|o| *o = !*o)
+                            }
+                        >
+                            {move || if open.get() { "Done" } else { "Keep this room" }}
+                        </button>
+                    </Show>
+                </div>
+                <Show when=move || open.get() && may_keep() fallback=|| ()>
+                    <div class="rh-keeping-panel">
+                        <label class="rh-keeping-pace">
+                            <span>"Slow mode"</span>
+                            <select
+                                class="rh-input"
+                                on:change=move |ev| {
+                                    if let Ok(secs) = event_target_value(&ev).parse::<u32>() {
+                                        app.set_room_pace(&room.get(), secs);
+                                    }
+                                }
+                            >
+                                {PACES
+                                    .iter()
+                                    .map(|(secs, words)| {
+                                        let secs = *secs;
+                                        view! {
+                                            <option value=secs.to_string() selected=move || pace() == secs>
+                                                {*words}
+                                            </option>
+                                        }
+                                    })
+                                    .collect_view()}
+                                <Show
+                                    when=move || PACES.iter().all(|(s, _)| *s != pace())
+                                    fallback=|| ()
+                                >
+                                    <option value=move || pace().to_string() selected=true>
+                                        {move || pace_label(pace())}
+                                    </option>
+                                </Show>
+                            </select>
+                        </label>
+                        <Show
+                            when=move || !people().is_empty()
+                            fallback=|| view! {
+                                <p class="rh-requests-empty">"Nobody else is in here just now."</p>
+                            }
+                        >
+                            <ul class="rh-keeping-people">
+                                <For
+                                    each=people
+                                    key=|(name, muted)| {
+                                        (name.clone(), muted.as_ref().map(|m| m.remaining_secs))
+                                    }
+                                    children=move |(name, muted)| {
+                                        let who = name.clone();
+                                        let is_muted = muted.is_some();
+                                        let left = muted.map(|m| mute_left(until(m.remaining_secs).as_deref()));
+                                        let unmute_who = who.clone();
+                                        let mute_who = who.clone();
+                                        let out_who = who.clone();
+                                        let bar_who = who.clone();
+                                        view! {
+                                            <li class="rh-keeping-person">
+                                                <span class="rh-keeping-who">
+                                                    <span class="rh-request-title">{name}</span>
+                                                    {left.map(|l| view! { <span class="rh-request-meta">{l}</span> })}
+                                                </span>
+                                                <span class="rh-keeping-acts">
+                                                    {if is_muted {
+                                                        view! {
+                                                            <button
+                                                                type="button"
+                                                                class="rh-btn ghost small"
+                                                                on:click=move |_| app.unmute_in_room(&room.get(), &unmute_who)
+                                                            >
+                                                                "Let them talk"
+                                                            </button>
+                                                        }.into_view()
+                                                    } else {
+                                                        // Back to "Mute…" once asked: a refusal leaves
+                                                        // nobody muted, and a choice left showing would
+                                                        // say otherwise (and could not be picked again).
+                                                        let picked = create_rw_signal(String::new());
+                                                        view! {
+                                                            <select
+                                                                class="rh-input rh-keeping-mute"
+                                                                aria-label=format!("Mute {}", mute_who)
+                                                                prop:value=picked
+                                                                on:change=move |ev| {
+                                                                    let chosen = event_target_value(&ev);
+                                                                    let secs = match chosen.as_str() {
+                                                                        "" => return,
+                                                                        "until" => None,
+                                                                        n => n.parse::<u32>().ok(),
+                                                                    };
+                                                                    app.mute_in_room(&room.get(), &mute_who, secs);
+                                                                    picked.set(chosen);
+                                                                    picked.set(String::new());
+                                                                }
+                                                            >
+                                                                <option value="" selected=true>"Mute\u{2026}"</option>
+                                                                {MUTES
+                                                                    .iter()
+                                                                    .map(|(secs, words)| {
+                                                                        let value = secs.map_or("until".to_string(), |s| s.to_string());
+                                                                        view! { <option value=value>{*words}</option> }
+                                                                    })
+                                                                    .collect_view()}
+                                                            </select>
+                                                        }.into_view()
+                                                    }}
+                                                    <Show when=move || !in_lobby() fallback=|| ()>
+                                                        <button
+                                                            type="button"
+                                                            class="rh-btn ghost small"
+                                                            on:click={
+                                                                let who = out_who.clone();
+                                                                move |_| taking.set(Some((who.clone(), false)))
+                                                            }
+                                                        >
+                                                            "Take out"
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            class="rh-btn ghost small"
+                                                            on:click={
+                                                                let who = bar_who.clone();
+                                                                move |_| taking.set(Some((who.clone(), true)))
+                                                            }
+                                                        >
+                                                            "Take out and bar"
+                                                        </button>
+                                                    </Show>
+                                                </span>
+                                            </li>
+                                        }
+                                    }
+                                />
+                            </ul>
+                        </Show>
+                        <Show when=move || taking.get().is_some() fallback=|| ()>
+                            <div class="rh-keeping-confirm" role="alert">
+                                <span>
+                                    {move || taking.get().map(|(who, bar)| if bar {
+                                        format!("Take {who} out of {}, and keep them out until somebody asks them back?", room.get())
+                                    } else {
+                                        format!("Take {who} out of {}? They can come back.", room.get())
+                                    }).unwrap_or_default()}
+                                </span>
+                                <button
+                                    type="button"
+                                    class="rh-btn small"
+                                    on:click=move |_| {
+                                        if let Some((who, bar)) = taking.get() {
+                                            app.remove_from_room(&room.get(), &who, bar);
+                                        }
+                                        taking.set(None);
+                                    }
+                                >
+                                    "Take them out"
+                                </button>
+                                <button
+                                    type="button"
+                                    class="rh-btn ghost small"
+                                    on:click=move |_| taking.set(None)
+                                >
+                                    "Never mind"
+                                </button>
+                            </div>
+                        </Show>
+                    </div>
+                </Show>
+            </div>
+        </Show>
     }
 }
 

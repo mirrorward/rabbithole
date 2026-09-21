@@ -387,6 +387,9 @@ pub struct UiState {
     /// What has been asked of this burrow's radio stations, and what they
     /// said.
     pub radio_requests: crate::radio::RequestsState,
+    /// How this burrow's rooms are kept, as last heard, and what it last
+    /// said no to.
+    pub keeping: crate::room_keeping::KeepingState,
     /// The rooms this burrow has, as it last listed them.
     pub rooms: Vec<rabbithole_proto::chat::RoomInfo>,
     /// Which room is being read. The lobby until somebody goes elsewhere.

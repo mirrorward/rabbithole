@@ -124,6 +124,16 @@ pub struct MockClient {
     /// The demo's rooms: the lobby everybody is in, and a couple more so
     /// the room strip is not a strip of one.
     rooms: Vec<rabbithole_proto::chat::RoomInfo>,
+    /// The demo rooms this person is in, so joining one twice is joining
+    /// it once, as a burrow takes it.
+    rooms_in: std::collections::BTreeSet<String>,
+    /// Who is in each demo room besides the person, once somebody has been
+    /// taken out of it: alice and bob until then.
+    room_people: std::collections::BTreeMap<String, Vec<String>>,
+    /// Who is muted in each demo room, and when it ends (Unix ms, `None`
+    /// until lifted); and each room's pace.
+    room_mutes: std::collections::BTreeMap<String, Vec<(String, Option<i64>)>>,
+    room_paces: std::collections::BTreeMap<String, u32>,
     admin_config: Vec<(String, String)>,
     /// Seeded RADIO now-playing frames, served through
     /// [`MockClient::radio_routes`] so the Radio view renders in dev without a
@@ -284,6 +294,10 @@ impl MockClient {
             admin_backups: Self::seeded_backups(),
             wishes: Self::seeded_wishes(),
             rooms: Self::seeded_rooms(),
+            rooms_in: std::collections::BTreeSet::new(),
+            room_people: std::collections::BTreeMap::new(),
+            room_mutes: std::collections::BTreeMap::new(),
+            room_paces: std::collections::BTreeMap::new(),
             radio_queue: std::collections::BTreeMap::from([(
                 "ambient".to_string(),
                 vec![
@@ -722,17 +736,22 @@ impl MockClient {
                 room.private = *private;
                 room.member_count = 1;
                 room.created_by = self.current_user.clone().unwrap_or_else(|| "you".into());
+                self.rooms_in.insert(name.to_lowercase());
                 self.rooms.push(room.clone());
                 Some(room)
             }
             RoomCommand::Join { room } => {
                 let slot = self.rooms.iter_mut().find(|r| &r.name == room)?;
-                slot.member_count += 1;
+                if self.rooms_in.insert(room.to_lowercase()) {
+                    slot.member_count += 1;
+                }
                 Some(slot.clone())
             }
             RoomCommand::Leave { room } => {
-                if let Some(slot) = self.rooms.iter_mut().find(|r| &r.name == room) {
-                    slot.member_count = slot.member_count.saturating_sub(1);
+                if self.rooms_in.remove(&room.to_lowercase()) {
+                    if let Some(slot) = self.rooms.iter_mut().find(|r| &r.name == room) {
+                        slot.member_count = slot.member_count.saturating_sub(1);
+                    }
                 }
                 None
             }
@@ -747,7 +766,100 @@ impl MockClient {
             RoomCommand::Invite { room, .. } => {
                 self.rooms.iter().find(|r| &r.name == room).cloned()
             }
+            // Keeping a room is answered by [`room_keeping`](Self::room_keeping).
+            RoomCommand::Keeping { .. }
+            | RoomCommand::Mute { .. }
+            | RoomCommand::Unmute { .. }
+            | RoomCommand::Remove { .. }
+            | RoomCommand::Pace { .. } => None,
         }
+    }
+
+    /// Keeping a demo room, answered the way a burrow answers: the demo's
+    /// person keeps every room (it is their burrow), and a mute, a pace or
+    /// somebody taken out is answered with how the room now stands.
+    pub fn room_keeping(
+        &mut self,
+        command: &crate::wire::RoomCommand,
+        me: &str,
+    ) -> Option<crate::wire::RoomKeepingAnswer> {
+        use crate::wire::{RoomAskKind, RoomCommand, RoomKeepingAnswer};
+        use rabbithole_proto::chat::{MutedMember, RoomModeration};
+        use rabbithole_proto::ErrorCode;
+        let me = if me.is_empty() { "you" } else { me };
+        let refused = |ask, code| Some(RoomKeepingAnswer::Refused { ask, code });
+        // A timed mute lapses, as a burrow's does.
+        let now = crate::clock::now_ms();
+        for list in self.room_mutes.values_mut() {
+            list.retain(|(_, end)| end.is_none_or(|end| end > now));
+        }
+        let room = match command {
+            RoomCommand::Keeping { room } => room,
+            RoomCommand::Mute { room, who, secs } => {
+                if who == me {
+                    return refused(RoomAskKind::Mute, ErrorCode::Forbidden);
+                }
+                let list = self.room_mutes.entry(room.to_lowercase()).or_default();
+                list.retain(|(name, _)| name != who);
+                list.push((who.clone(), secs.map(|secs| now + i64::from(secs) * 1_000)));
+                room
+            }
+            RoomCommand::Unmute { room, who } => {
+                let list = self.room_mutes.entry(room.to_lowercase()).or_default();
+                let before = list.len();
+                list.retain(|(name, _)| name != who);
+                if list.len() == before {
+                    return refused(RoomAskKind::Unmute, ErrorCode::NotFound);
+                }
+                room
+            }
+            RoomCommand::Remove { room, who, .. } => {
+                let people = self
+                    .room_people
+                    .entry(room.to_lowercase())
+                    .or_insert_with(|| vec!["alice".to_string(), "bob".to_string()]);
+                if !people.iter().any(|p| p == who) {
+                    return refused(RoomAskKind::Remove, ErrorCode::NotFound);
+                }
+                people.retain(|p| p != who);
+                room
+            }
+            RoomCommand::Pace { room, secs } => {
+                self.room_paces
+                    .insert(room.to_lowercase(), (*secs).min(3_600));
+                room
+            }
+            _ => return None,
+        };
+        let key = room.to_lowercase();
+        let mut members = self
+            .room_people
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| vec!["alice".to_string(), "bob".to_string()]);
+        members.push(me.to_string());
+        members.sort();
+        members.dedup();
+        let muted = self
+            .room_mutes
+            .get(&key)
+            .map(|list| {
+                list.iter()
+                    .map(|(name, end)| {
+                        let left =
+                            end.map(|end| u32::try_from((end - now + 999) / 1_000).unwrap_or(0));
+                        MutedMember::new(name.clone(), left)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(RoomKeepingAnswer::Kept(RoomModeration::new(
+            room.clone(),
+            self.room_paces.get(&key).copied().unwrap_or(0),
+            true,
+            members,
+            muted,
+        )))
     }
 
     /// A few wishes, so the demo's Wishing Well is a well and not a hole.
@@ -2026,6 +2138,105 @@ fn parent_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_demo_room_is_joined_once_however_often_it_is_shown() {
+        use crate::wire::RoomCommand;
+        let mut c = MockClient::new();
+        let count = |c: &MockClient| {
+            c.rooms()
+                .into_iter()
+                .find(|r| r.name == "tea-party")
+                .map(|r| r.member_count)
+        };
+        let before = count(&c).unwrap();
+        for _ in 0..3 {
+            c.room_command(&RoomCommand::Join {
+                room: "tea-party".into(),
+            });
+        }
+        assert_eq!(count(&c), Some(before + 1));
+        c.room_command(&RoomCommand::Leave {
+            room: "tea-party".into(),
+        });
+        c.room_command(&RoomCommand::Leave {
+            room: "tea-party".into(),
+        });
+        assert_eq!(count(&c), Some(before), "leaving twice is leaving once");
+    }
+
+    #[test]
+    fn a_demo_room_is_kept_the_way_a_burrow_keeps_one() {
+        use crate::wire::{RoomAskKind, RoomCommand, RoomKeepingAnswer};
+        use rabbithole_proto::ErrorCode;
+        let mut c = MockClient::new();
+        let kept = |a: Option<RoomKeepingAnswer>| match a {
+            Some(RoomKeepingAnswer::Kept(k)) => k,
+            other => panic!("{other:?}"),
+        };
+        let k = kept(c.room_keeping(
+            &RoomCommand::Mute {
+                room: "lobby".into(),
+                who: "bob".into(),
+                secs: Some(600),
+            },
+            "rabbit",
+        ));
+        assert_eq!(k.muted.len(), 1);
+        let k = kept(c.room_keeping(
+            &RoomCommand::Pace {
+                room: "lobby".into(),
+                secs: 30,
+            },
+            "rabbit",
+        ));
+        assert_eq!(k.slow_mode_secs, 30);
+        assert_eq!(
+            c.room_keeping(
+                &RoomCommand::Mute {
+                    room: "lobby".into(),
+                    who: "rabbit".into(),
+                    secs: None
+                },
+                "rabbit"
+            ),
+            Some(RoomKeepingAnswer::Refused {
+                ask: RoomAskKind::Mute,
+                code: ErrorCode::Forbidden
+            }),
+            "nobody mutes themselves"
+        );
+        let k = kept(c.room_keeping(
+            &RoomCommand::Unmute {
+                room: "lobby".into(),
+                who: "bob".into(),
+            },
+            "rabbit",
+        ));
+        assert!(k.muted.is_empty());
+        assert_eq!(
+            c.room_keeping(
+                &RoomCommand::Unmute {
+                    room: "lobby".into(),
+                    who: "bob".into()
+                },
+                "rabbit"
+            ),
+            Some(RoomKeepingAnswer::Refused {
+                ask: RoomAskKind::Unmute,
+                code: ErrorCode::NotFound
+            })
+        );
+        let k = kept(c.room_keeping(
+            &RoomCommand::Remove {
+                room: "tea-party".into(),
+                who: "alice".into(),
+                ban: false,
+            },
+            "rabbit",
+        ));
+        assert!(!k.members.iter().any(|m| m == "alice"), "taken out is out");
+    }
 
     fn connect_and_sign_in(handle: &str) -> MockClient {
         let mut c = MockClient::new();

@@ -53,6 +53,7 @@ open; private scrollback requires membership. Rooms are in-memory
 | 25 | RoomSlowMode | Request | `room`, `seconds` (0 = off; clamped to 3600); creator or CHAT_MODERATE |
 | 26 | RoomMuted | Push | `room`, `screen_name`, `muted`, `duration_secs` — to room members (lobby: everyone) |
 | 27 | RoomSlowModeChanged | Push | `room`, `seconds` (the applied value), `by` — to room members (lobby: everyone) |
+| 28/29 | RoomModerationRequest → RoomModeration | Request/Reply | how a room is kept: `slow_mode_secs`, `may_moderate` (the asker is its creator or holds CHAT_MODERATE), `members`, and `muted: [MutedMember {screen_name, remaining_secs}]` — every mute to one who may moderate, only the asker's own to anybody else. A private room is described only to its members |
 
 - Mutes and slow-mode are per-room state (lobby included), in-memory like
   the rooms themselves, and enforced in the shared chat service — native,

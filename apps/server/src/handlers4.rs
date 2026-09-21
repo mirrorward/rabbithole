@@ -60,6 +60,22 @@ async fn resolve_account(shared: &Shared, screen_name: &str) -> anyhow::Result<O
         .map(|p| p.account_id))
 }
 
+/// Sessions a viewer below moderator is not shown in a room's roster: the
+/// invisible ones (Cheshire mode), except their own — the rule the who-list
+/// keeps.
+fn hidden_sessions(shared: &Shared, ctx: &SessionCtx) -> std::collections::HashSet<u64> {
+    if ctx.role >= rabbithole_server_core::Role::Moderator {
+        return std::collections::HashSet::new();
+    }
+    shared
+        .presence
+        .snapshot()
+        .into_iter()
+        .filter(|e| e.is_invisible() && e.session_id != ctx.session_id)
+        .map(|e| e.session_id)
+        .collect()
+}
+
 pub async fn handle(
     conn: &mut Box<dyn Connection>,
     frame: &Frame,
@@ -195,8 +211,74 @@ pub async fn handle(
     }
 
     if let Some(Ok(req)) = frame.decode::<pchat::RoomMembersRequest>() {
+        // Whether the asker may see the room at all is the service's to
+        // say; who of its members they are shown follows the who-list.
         match shared.chat.members(&req.room, ctx.session_id) {
-            Ok(members) => reply!(&pchat::RoomMemberList::new(members)),
+            Ok(_) => {
+                let hidden = hidden_sessions(shared, ctx);
+                let mut members: Vec<String> = shared
+                    .chat
+                    .member_sessions(&req.room)
+                    .into_iter()
+                    .filter(|(session, _)| !hidden.contains(session))
+                    .map(|(_, name)| name)
+                    .collect();
+                members.sort();
+                members.dedup();
+                reply!(&pchat::RoomMemberList::new(members))
+            }
+            Err(e) => fail!(map_err(e)),
+        }
+        return Ok(true);
+    }
+
+    // How a room is kept: open to whoever may see its members; who is
+    // muted only to its keepers (and each person their own).
+    if let Some(Ok(req)) = frame.decode::<pchat::RoomModerationRequest>() {
+        let is_moderator = ctx.allows(shared, "chat", Caps::CHAT_MODERATE);
+        match shared.chat.keeping(
+            &req.room,
+            ctx.session_id,
+            ctx.account_id,
+            is_moderator,
+            now_ms(),
+        ) {
+            Ok(kept) => {
+                let hidden = hidden_sessions(shared, ctx);
+                let mut members: Vec<String> = kept
+                    .members
+                    .into_iter()
+                    .filter(|(session, _)| !hidden.contains(session))
+                    .map(|(_, name)| name)
+                    .collect();
+                // One person on two devices is one row.
+                members.sort();
+                members.dedup();
+                // Each mute by the name it was given here; the asker's own
+                // by the name they are asking under, which is the one they
+                // know themselves by.
+                let muted = kept
+                    .muted
+                    .into_iter()
+                    .map(|(account, name, left_ms)| {
+                        let name = if account == ctx.account_id {
+                            ctx.screen_name.clone()
+                        } else {
+                            name
+                        };
+                        let left =
+                            left_ms.map(|ms| u32::try_from(ms.div_ceil(1000)).unwrap_or(u32::MAX));
+                        pchat::MutedMember::new(name, left)
+                    })
+                    .collect();
+                reply!(&pchat::RoomModeration::new(
+                    req.room,
+                    kept.slow_mode_secs,
+                    kept.may_moderate,
+                    members,
+                    muted,
+                ))
+            }
             Err(e) => fail!(map_err(e)),
         }
         return Ok(true);
@@ -215,6 +297,7 @@ pub async fn handle(
             ctx.account_id,
             is_moderator,
             target_account,
+            &req.screen_name,
             duration,
             now_ms(),
         ) {

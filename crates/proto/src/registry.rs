@@ -49,8 +49,8 @@ use crate::board::{
 use crate::chat::{
     ChatHistory, ChatHistoryRequest, ChatMessage, ChatSend, RoomCreate, RoomInfoReply, RoomInvite,
     RoomInvited, RoomJoin, RoomKick, RoomKicked, RoomLeave, RoomList, RoomListRequest,
-    RoomMemberList, RoomMembersRequest, RoomMute, RoomMuted, RoomSlowMode, RoomSlowModeChanged,
-    RoomTopicSet, RoomUnmute,
+    RoomMemberList, RoomMembersRequest, RoomModeration, RoomModerationRequest, RoomMute, RoomMuted,
+    RoomSlowMode, RoomSlowModeChanged, RoomTopicSet, RoomUnmute,
 };
 use crate::directory::{DirectoryResults, DirectorySearch, ProfileCard, ProfileGet, UserChanged};
 use crate::dm::{
@@ -153,6 +153,7 @@ wire_registry! {
     RoomListRequest, RoomList, RoomCreate, RoomJoin, RoomLeave, RoomInvite, RoomInvited,
     RoomTopicSet, RoomKick, RoomInfoReply, RoomKicked, RoomMembersRequest, RoomMemberList,
     RoomMute, RoomUnmute, RoomSlowMode, RoomMuted, RoomSlowModeChanged,
+    RoomModerationRequest, RoomModeration,
 
     // ── Family 3: DM ─────────────────────────────────────────────────────
     DmSend, DmSent, DmReceived, DmHistoryRequest, DmHistory, DmThreadsRequest, DmThreads,
@@ -215,7 +216,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 238;
+pub const EXPECTED: usize = 240;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

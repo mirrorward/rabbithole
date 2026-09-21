@@ -530,3 +530,81 @@ impl Message for RoomSlowModeChanged {
     const FAMILY: Family = Family::CHAT;
     const MESSAGE_TYPE: u16 = 27;
 }
+
+/// Ask how a room is being kept: its slow mode, who is in it, who is muted,
+/// and whether you may do anything about it. → [`RoomModeration`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomModerationRequest {
+    pub room: String,
+}
+
+impl RoomModerationRequest {
+    pub fn new(room: impl Into<String>) -> Self {
+        Self { room: room.into() }
+    }
+}
+
+impl Message for RoomModerationRequest {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 28;
+}
+
+/// Somebody muted in a room, and for how much longer.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutedMember {
+    pub screen_name: String,
+    /// Seconds left; `None` = until somebody lifts it.
+    pub remaining_secs: Option<u32>,
+}
+
+impl MutedMember {
+    pub fn new(screen_name: impl Into<String>, remaining_secs: Option<u32>) -> Self {
+        Self {
+            screen_name: screen_name.into(),
+            remaining_secs,
+        }
+    }
+}
+
+/// How a room is being kept, as the one asking may see it. A private room
+/// is described only to its members.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomModeration {
+    pub room: String,
+    /// Slow mode's interval in seconds; `0` = off.
+    pub slow_mode_secs: u32,
+    /// Whether the one asking may mute, remove and set slow mode here: the
+    /// room's maker, or a chat moderator.
+    pub may_moderate: bool,
+    /// Who is in the room, by screen name.
+    pub members: Vec<String>,
+    /// Who is muted. Everybody, to one who may moderate; to anybody else,
+    /// only themselves, if they are.
+    pub muted: Vec<MutedMember>,
+}
+
+impl RoomModeration {
+    pub fn new(
+        room: impl Into<String>,
+        slow_mode_secs: u32,
+        may_moderate: bool,
+        members: Vec<String>,
+        muted: Vec<MutedMember>,
+    ) -> Self {
+        Self {
+            room: room.into(),
+            slow_mode_secs,
+            may_moderate,
+            members,
+            muted,
+        }
+    }
+}
+
+impl Message for RoomModeration {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 29;
+}

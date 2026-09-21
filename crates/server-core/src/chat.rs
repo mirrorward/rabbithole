@@ -66,6 +66,11 @@ struct Room {
     /// account → mute expiry in injected-clock milliseconds
     /// (`None` = permanent). Expired entries are pruned lazily.
     muted: HashMap<i64, Option<u64>>,
+    /// account → the name it was muted under: the name the keeper saw it
+    /// by, in this room, which is how the room's keepers go on knowing it.
+    /// An account can go by other names elsewhere, and a room is not told
+    /// them.
+    muted_as: HashMap<i64, String>,
     /// Slow-mode interval in seconds; `0` = off.
     slow_mode_secs: u32,
     /// account → last accepted send (injected-clock ms), tracked only while
@@ -84,10 +89,29 @@ impl Room {
             Some(Some(until)) if *until > now_ms => true,
             Some(Some(_)) => {
                 self.muted.remove(&account);
+                self.muted_as.remove(&account);
                 false
             }
         }
     }
+}
+
+/// How a room is being kept, as one person may see it: see
+/// [`ChatService::keeping`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomKeeping {
+    /// Slow mode's interval in seconds; `0` = off.
+    pub slow_mode_secs: u32,
+    /// Whether the one asking may mute, remove, and set slow mode here.
+    pub may_moderate: bool,
+    /// Who is in the room, `(session, screen name)` — for one who may
+    /// moderate, who needs them to keep it; nobody else is given the room's
+    /// roster this way. Whose presence to leave out is the caller's to say.
+    pub members: Vec<(u64, String)>,
+    /// Who is muted: `(account, the name muted under, milliseconds left)`,
+    /// `None` until lifted. Everybody, for one who may moderate; only the
+    /// one asking, if they are, for anybody else.
+    pub muted: Vec<(i64, String, Option<u64>)>,
 }
 
 /// Identity and standing of a chat sender, consulted by the moderation
@@ -158,6 +182,7 @@ impl ChatService {
                 invited: HashSet::new(),
                 banned: HashSet::new(),
                 muted: HashMap::new(),
+                muted_as: HashMap::new(),
                 slow_mode_secs: 0,
                 last_sent_ms: HashMap::new(),
                 history: VecDeque::new(),
@@ -259,6 +284,7 @@ impl ChatService {
             invited,
             banned: HashSet::new(),
             muted: HashMap::new(),
+            muted_as: HashMap::new(),
             slow_mode_secs: 0,
             last_sent_ms: HashMap::new(),
             history: VecDeque::new(),
@@ -390,12 +416,14 @@ impl ChatService {
     /// unmuted or the room is reaped; a timed mute expires lazily against
     /// the injected clock. Creator-or-moderator gated; the room's creator
     /// can't be muted (mirroring kick).
+    #[allow(clippy::too_many_arguments)]
     pub fn mute(
         &self,
         name: &str,
         by_account: i64,
         by_is_moderator: bool,
         target_account: i64,
+        target_name: &str,
         duration: Option<Duration>,
         now_ms: u64,
     ) -> Result<(), ChatError> {
@@ -412,6 +440,8 @@ impl ChatService {
         let until = duration
             .map(|d| now_ms.saturating_add(u64::try_from(d.as_millis()).unwrap_or(u64::MAX)));
         room.muted.insert(target_account, until);
+        room.muted_as
+            .insert(target_account, target_name.to_string());
         Ok(())
     }
 
@@ -435,6 +465,7 @@ impl ChatService {
         }
         let was_muted = room.muted_now(target_account, now_ms);
         room.muted.remove(&target_account);
+        room.muted_as.remove(&target_account);
         Ok(was_muted)
     }
 
@@ -496,6 +527,56 @@ impl ChatService {
             room.members.iter().map(|(s, n)| (*s, n.clone())).collect();
         out.sort_by_key(|(s, _)| *s);
         out
+    }
+
+    /// How `name` is being kept, as the viewer may see it. A private room
+    /// is not described to anybody outside it, the same as its members are
+    /// not. Expired mutes are dropped on the way.
+    pub fn keeping(
+        &self,
+        name: &str,
+        viewer_session: u64,
+        viewer_account: i64,
+        viewer_is_moderator: bool,
+        now_ms: u64,
+    ) -> Result<RoomKeeping, ChatError> {
+        let mut rooms = self.rooms.write();
+        let room = rooms
+            .get_mut(&key(name))
+            .ok_or_else(|| ChatError::NoSuchRoom(name.into()))?;
+        if room.private && !room.members.contains_key(&viewer_session) {
+            return Err(ChatError::NotMember);
+        }
+        room.muted
+            .retain(|_, until| until.is_none_or(|until| until > now_ms));
+        let still: HashSet<i64> = room.muted.keys().copied().collect();
+        room.muted_as.retain(|account, _| still.contains(account));
+        let may_moderate = Self::can_moderate(room, viewer_account, viewer_is_moderator);
+        let mut members: Vec<(u64, String)> = if may_moderate {
+            room.members
+                .iter()
+                .map(|(session, name)| (*session, name.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        members.sort();
+        let mut muted: Vec<(i64, String, Option<u64>)> = room
+            .muted
+            .iter()
+            .filter(|(account, _)| may_moderate || **account == viewer_account)
+            .map(|(account, until)| {
+                let name = room.muted_as.get(account).cloned().unwrap_or_default();
+                (*account, name, until.map(|until| until - now_ms))
+            })
+            .collect();
+        muted.sort();
+        Ok(RoomKeeping {
+            slow_mode_secs: room.slow_mode_secs,
+            may_moderate,
+            members,
+            muted,
+        })
     }
 
     pub fn members(&self, name: &str, viewer_session: u64) -> Result<Vec<String>, ChatError> {
@@ -761,14 +842,14 @@ mod tests {
         let chat = service();
         // A plain member can't mute; a moderator can (lobby included).
         assert!(matches!(
-            chat.mute(LOBBY, 20, false, 10, None, 0),
+            chat.mute(LOBBY, 20, false, 10, "someone", None, 0),
             Err(ChatError::Forbidden)
         ));
         assert!(matches!(
-            chat.mute("nowhere", 999, true, 10, None, 0),
+            chat.mute("nowhere", 999, true, 10, "someone", None, 0),
             Err(ChatError::NoSuchRoom(_))
         ));
-        chat.mute(LOBBY, 999, true, 10, None, 0).unwrap();
+        chat.mute(LOBBY, 999, true, 10, "someone", None, 0).unwrap();
         assert!(chat.is_muted(LOBBY, 10, 0));
         assert!(matches!(
             chat.send(LOBBY, sender(1, 10, "alice"), "gagged", 0),
@@ -792,8 +873,16 @@ mod tests {
             .unwrap();
 
         // A timed mute expires lazily on the injected clock.
-        chat.mute(LOBBY, 999, true, 10, Some(Duration::from_secs(5)), 1_000)
-            .unwrap();
+        chat.mute(
+            LOBBY,
+            999,
+            true,
+            10,
+            "someone",
+            Some(Duration::from_secs(5)),
+            1_000,
+        )
+        .unwrap();
         assert!(matches!(
             chat.send(LOBBY, sender(1, 10, "alice"), "early", 5_999),
             Err(ChatError::Muted)
@@ -802,9 +891,67 @@ mod tests {
             .unwrap();
         assert!(!chat.is_muted(LOBBY, 10, 6_000));
         // An already-expired mute reads as "nothing to unmute".
-        chat.mute(LOBBY, 999, true, 10, Some(Duration::from_secs(1)), 0)
-            .unwrap();
+        chat.mute(
+            LOBBY,
+            999,
+            true,
+            10,
+            "someone",
+            Some(Duration::from_secs(1)),
+            0,
+        )
+        .unwrap();
         assert!(!chat.unmute(LOBBY, 999, true, 10, 10_000).unwrap());
+    }
+
+    #[test]
+    fn a_room_says_how_it_is_kept_and_a_mute_only_to_whom_it_concerns() {
+        let chat = service();
+        chat.mute(
+            LOBBY,
+            999,
+            true,
+            10,
+            "someone",
+            Some(Duration::from_secs(60)),
+            0,
+        )
+        .unwrap();
+        chat.mute(LOBBY, 999, true, 20, "someone", None, 0).unwrap();
+        chat.set_slow_mode(LOBBY, 30, 999, true).unwrap();
+
+        // A moderator sees every mute and how long is left on it.
+        let kept = chat.keeping(LOBBY, 3, 999, true, 10_000).unwrap();
+        assert!(kept.may_moderate);
+        assert_eq!(kept.slow_mode_secs, 30);
+        assert_eq!(
+            kept.muted,
+            vec![
+                (10, "someone".to_string(), Some(50_000)),
+                (20, "someone".to_string(), None)
+            ]
+        );
+        assert!(kept.members.iter().any(|(_, name)| name == "alice"));
+
+        // Alice sees her own mute and nobody else's.
+        let hers = chat.keeping(LOBBY, 1, 10, false, 10_000).unwrap();
+        assert!(!hers.may_moderate);
+        assert_eq!(hers.muted, vec![(10, "someone".to_string(), Some(50_000))]);
+        assert_eq!(hers.slow_mode_secs, 30, "everybody is told the pace");
+        assert!(hers.members.is_empty(), "the roster is the keepers'");
+
+        // Once it has run out, it is gone.
+        let later = chat.keeping(LOBBY, 1, 10, false, 60_000).unwrap();
+        assert!(later.muted.is_empty());
+
+        // A private room is not described to anybody outside it; its maker
+        // keeps it.
+        chat.create("den", "", "", true, 10, "alice", 1).unwrap();
+        assert!(matches!(
+            chat.keeping("den", 2, 20, false, 0),
+            Err(ChatError::NotMember)
+        ));
+        assert!(chat.keeping("den", 1, 10, false, 0).unwrap().may_moderate);
     }
 
     #[test]
@@ -867,10 +1014,10 @@ mod tests {
 
         // The creator moderates their own room; plain members don't.
         assert!(matches!(
-            chat.mute("den", 20, false, 10, None, 0),
+            chat.mute("den", 20, false, 10, "someone", None, 0),
             Err(ChatError::Forbidden)
         ));
-        chat.mute("den", 10, false, 20, None, 0).unwrap();
+        chat.mute("den", 10, false, 20, "someone", None, 0).unwrap();
         assert!(chat.is_muted("den", 20, 0));
         assert!(matches!(
             chat.send("den", sender(2, 20, "bob"), "psst", 0),
@@ -883,7 +1030,7 @@ mod tests {
 
         // The creator can't be muted, even by a global moderator.
         assert!(matches!(
-            chat.mute("den", 999, true, 10, None, 0),
+            chat.mute("den", 999, true, 10, "someone", None, 0),
             Err(ChatError::Forbidden)
         ));
 

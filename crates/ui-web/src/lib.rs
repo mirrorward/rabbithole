@@ -120,6 +120,7 @@ pub mod pwa;
 pub mod radio;
 pub mod radio_admin;
 pub mod recent;
+pub mod room_keeping;
 pub mod save;
 pub mod scroll;
 pub mod send;

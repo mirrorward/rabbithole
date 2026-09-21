@@ -12,8 +12,10 @@ use rabbithole_core::{Client, ClientError};
 use rabbithole_legacy_hotline::constants::{field, transaction};
 use rabbithole_legacy_hotline::{Field, Handshake, HandshakeReply, Transaction, TransactionHeader};
 use rabbithole_proto::chat::{
-    ChatMessage, RoomMute, RoomMuted, RoomSlowMode, RoomSlowModeChanged, RoomUnmute,
+    ChatMessage, RoomCreate, RoomInfoReply, RoomJoin, RoomModeration, RoomModerationRequest,
+    RoomMute, RoomMuted, RoomSlowMode, RoomSlowModeChanged, RoomUnmute,
 };
+use rabbithole_proto::presence::PresenceState;
 use rabbithole_proto::ErrorCode;
 use rabbithole_server_core::{Role, ServerConfig, LOBBY};
 use rabbithole_store_server::repo::AuditRepo;
@@ -161,6 +163,82 @@ async fn native_mute_refuses_sends_and_unmute_restores() {
 
     wait_audited(&burrow, "room-mute").await;
     wait_audited(&burrow, "room-unmute").await;
+    burrow.shutdown().await;
+}
+
+/// A room says how it is being kept: its pace to everybody in it, who is
+/// muted to its keepers, and to a muted person only that they are. A
+/// private room says nothing to anybody outside it.
+#[tokio::test]
+async fn a_room_says_how_it_is_kept_and_to_whom() {
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(test_config(dir.path())).await;
+    let mut mo = login(&burrow, "mo").await;
+    let mut alice = login(&burrow, "alice").await;
+    let mut pest = login(&burrow, "pest").await;
+
+    mo.request_ack(&RoomMute::new(LOBBY, "pest", Some(600)))
+        .await
+        .unwrap();
+    mo.request_ack(&RoomSlowMode::new(LOBBY, 30)).await.unwrap();
+    let ask = || RoomModerationRequest::new(LOBBY);
+
+    // The moderator: may keep it, sees the mute and roughly how long is left.
+    let kept: RoomModeration = mo.request(&ask()).await.unwrap();
+    assert!(kept.may_moderate);
+    assert_eq!(kept.slow_mode_secs, 30);
+    assert_eq!(kept.muted.len(), 1);
+    assert_eq!(kept.muted[0].screen_name, "pest");
+    let left = kept.muted[0].remaining_secs.expect("a timed mute");
+    assert!((590..=600).contains(&left), "{left}");
+    for who in ["mo", "alice", "pest"] {
+        assert!(kept.members.iter().any(|m| m == who), "{who} is in it");
+    }
+
+    // Pest is told they are muted; alice is told nothing about it.
+    let theirs: RoomModeration = pest.request(&ask()).await.unwrap();
+    assert!(!theirs.may_moderate);
+    assert_eq!(theirs.muted.len(), 1);
+    let hers: RoomModeration = alice.request(&ask()).await.unwrap();
+    assert!(hers.muted.is_empty(), "a mute is not everybody's business");
+    assert_eq!(hers.slow_mode_secs, 30, "the pace is");
+    assert!(hers.members.is_empty(), "nor is the room's roster");
+
+    // A private room: its maker keeps it; nobody outside it hears of it.
+    let _: RoomInfoReply = alice.request(&RoomCreate::new("den", true)).await.unwrap();
+    let own: RoomModeration = alice
+        .request(&RoomModerationRequest::new("den"))
+        .await
+        .unwrap();
+    assert!(own.may_moderate, "its maker keeps it");
+
+    // Somebody invisible is not shown to a keeper who is not a moderator,
+    // the same as on the who-list; a moderator sees them.
+    let _: RoomInfoReply = alice
+        .request(&RoomCreate::new("hall", false))
+        .await
+        .unwrap();
+    let _: RoomInfoReply = pest.request(&RoomJoin::new("hall")).await.unwrap();
+    pest.presence_set(PresenceState::Invisible, None)
+        .await
+        .unwrap();
+    let hall = || RoomModerationRequest::new("hall");
+    let by_maker: RoomModeration = alice.request(&hall()).await.unwrap();
+    assert!(by_maker.may_moderate);
+    assert!(
+        !by_maker.members.iter().any(|m| m == "pest"),
+        "{:?}",
+        by_maker.members
+    );
+    let by_mo: RoomModeration = mo.request(&hall()).await.unwrap();
+    assert!(by_mo.members.iter().any(|m| m == "pest"));
+    let outside = pest
+        .request::<_, RoomModeration>(&RoomModerationRequest::new("den"))
+        .await;
+    assert!(
+        matches!(outside, Err(ClientError::Refused(_))),
+        "{outside:?}"
+    );
     burrow.shutdown().await;
 }
 
@@ -498,7 +576,7 @@ async fn telnet_surface_observes_mute() {
     burrow
         .shared
         .chat
-        .mute(LOBBY, 0, true, pest_account, None, now)
+        .mute(LOBBY, 0, true, pest_account, "pest", None, now)
         .unwrap();
     pest.send("can you hear me").await;
     pest.expect(b"(you are muted in this room)").await;

@@ -731,6 +731,20 @@ impl AppState {
                                     // the socket is up, and then it is a
                                     // burrow with one room in it, for ever.
                                     c.dispatch_room(&crate::wire::RoomCommand::List);
+                                    // …and back into the room being read, if
+                                    // it is not the lobby: a connection that
+                                    // dropped left it, and everything said
+                                    // there would be refused. Then how it is
+                                    // kept, for the same reason as the list.
+                                    let here = state.with_untracked(|s| s.room().to_string());
+                                    if here != crate::client::LOBBY {
+                                        c.dispatch_room(&crate::wire::RoomCommand::Join {
+                                            room: here.clone(),
+                                        });
+                                    }
+                                    c.dispatch_room(&crate::wire::RoomCommand::Keeping {
+                                        room: here,
+                                    });
                                     // This burrow inherits the user's current status.
                                     c.set_presence(presence.get_untracked(), None);
                                 });
@@ -880,7 +894,25 @@ impl AppState {
                 }
             }));
             ws.on_rooms(std::rc::Rc::new(move |rooms| {
-                state.update(|s| s.rooms = rooms)
+                state.update(|s| {
+                    s.rooms = rooms;
+                    // A room that is no longer there (emptied and gone while
+                    // the connection was down) is not somewhere to be.
+                    let here = s.room().to_string();
+                    if here != crate::client::LOBBY
+                        && !s.rooms.iter().any(|r| r.name.eq_ignore_ascii_case(&here))
+                    {
+                        s.room = String::new();
+                    }
+                })
+            }));
+            let keeping_endpoint = endpoint.clone();
+            ws.on_room_keeping(std::rc::Rc::new(move |answer| {
+                if let Some(app) = current() {
+                    if let Some(session) = app.session_at(&keeping_endpoint) {
+                        app.room_kept(session, answer);
+                    }
+                }
             }));
             ws.on_room(std::rc::Rc::new(move |room| {
                 state.update(|s| match s.rooms.iter_mut().find(|r| r.name == room.name) {
@@ -2257,12 +2289,13 @@ impl AppState {
     /// answer puts it in the list with you in it.
     pub fn show_room(&self, name: &str) {
         let name = name.to_string();
-        let joined = self
-            .focused()
-            .state
-            .with_untracked(|s| s.rooms.iter().any(|r| r.name == name && r.member_count > 0));
         self.focused().state.update(|s| s.room = name.clone());
-        if !joined {
+        // Joining is asked every time: the list says how many are in a
+        // room, not whether this person is one of them (it used to be read
+        // that way, so a room with anybody else in it was never joined and
+        // everything said there was refused). A burrow takes a second join
+        // as the first, and says nothing to anybody about it.
+        if name != crate::client::LOBBY {
             self.room_command(crate::wire::RoomCommand::Join { room: name });
         }
     }
@@ -2333,6 +2366,151 @@ impl AppState {
                     None => s.rooms.push(room),
                 }
             });
+        }
+    }
+
+    /// Ask how a room is kept: its pace, who is in it, who is muted.
+    pub fn load_keeping(&self, room: &str) {
+        self.keeping_command_at(
+            self.focused(),
+            crate::wire::RoomCommand::Keeping {
+                room: room.to_string(),
+            },
+        );
+    }
+
+    /// Stop somebody talking in a room, for `secs` or until lifted.
+    pub fn mute_in_room(&self, room: &str, who: &str, secs: Option<u32>) {
+        self.keep_room(crate::wire::RoomCommand::Mute {
+            room: room.to_string(),
+            who: who.to_string(),
+            secs,
+        });
+    }
+
+    /// Let somebody talk in a room again.
+    pub fn unmute_in_room(&self, room: &str, who: &str) {
+        self.keep_room(crate::wire::RoomCommand::Unmute {
+            room: room.to_string(),
+            who: who.to_string(),
+        });
+    }
+
+    /// Take somebody out of a room; `ban` keeps them out until asked back.
+    pub fn remove_from_room(&self, room: &str, who: &str, ban: bool) {
+        let room = room.to_string();
+        self.keep_room(crate::wire::RoomCommand::Remove {
+            room: room.clone(),
+            who: who.to_string(),
+            ban,
+        });
+        // Nobody else is told somebody was taken out, so look again: on the
+        // same socket, after the burrow has done it.
+        self.load_keeping(&room);
+    }
+
+    /// Set a room's pace: one message each every `secs`, `0` off.
+    pub fn set_room_pace(&self, room: &str, secs: u32) {
+        self.keep_room(crate::wire::RoomCommand::Pace {
+            room: room.to_string(),
+            secs,
+        });
+    }
+
+    /// One act of keeping a room, from the person.
+    fn keep_room(&self, command: crate::wire::RoomCommand) {
+        self.keeping_command_at(self.focused(), command);
+    }
+
+    /// Send something about keeping a room to `session`. Always a tick
+    /// later: this is asked from inside a reply's own sink (a mute pushed
+    /// by somebody else is a reason to look again), and a send from there
+    /// panics inside the socket's borrow and takes every later send with
+    /// it.
+    fn keeping_command_at(&self, session: Session, command: crate::wire::RoomCommand) {
+        #[cfg(target_arch = "wasm32")]
+        if session.live.get_untracked() {
+            let ws = session.ws;
+            defer(move || ws.with_value(|c| c.dispatch_room(&command)));
+            return;
+        }
+        let me = session.handle.get_untracked();
+        let mut answer = None;
+        session
+            .client
+            .update_value(|c| answer = c.room_keeping(&command, &me));
+        if let Some(answer) = answer {
+            self.room_kept(session, answer);
+        }
+    }
+
+    /// What a burrow said about keeping a room, into that burrow's state:
+    /// look again when a room's keeping changed, go back to the lobby when
+    /// this person was taken out of the room they were in.
+    fn room_kept(&self, session: Session, answer: crate::wire::RoomKeepingAnswer) {
+        use crate::room_keeping::Next;
+        // Over the wire a refusal is said in the scrollback on its way in;
+        // the demo has no wire, so it is said here.
+        if let crate::wire::RoomKeepingAnswer::Refused { ask, code } = &answer {
+            if !session.live.get_untracked() {
+                if let Some(words) = crate::room_keeping::refusal(*ask, *code) {
+                    session
+                        .state
+                        .update(|s| s.push_notice("the burrow", &words));
+                }
+            }
+        }
+        let me = session.handle.get_untracked();
+        let now = crate::clock::now_ms();
+        let next = session
+            .state
+            .try_update(|s| s.keeping.answered(answer, &me, now))
+            .flatten();
+        let app = *self;
+        let look = move |room: String| {
+            defer(move || {
+                app.keeping_command_at(session, crate::wire::RoomCommand::Keeping { room })
+            })
+        };
+        match next {
+            Some(Next::Look(room)) => look(room),
+            // A timed mute runs out without a word from the burrow: look
+            // again then, so nobody is told they are muted after they are
+            // not. Only the latest answer's time is kept, so a room looked
+            // at often does not pile timers up.
+            #[cfg(target_arch = "wasm32")]
+            Some(Next::LookAt { room, at_ms }) => {
+                let wait = u64::try_from(at_ms - now).unwrap_or(0) + 1_000;
+                leptos::set_timeout(
+                    move || {
+                        let due = session
+                            .state
+                            .try_update(|s| s.keeping.look_due(&room, crate::clock::now_ms()))
+                            .unwrap_or(false);
+                        if due {
+                            app.keeping_command_at(
+                                session,
+                                crate::wire::RoomCommand::Keeping { room },
+                            );
+                        }
+                    },
+                    std::time::Duration::from_millis(wait),
+                );
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(Next::LookAt { .. }) => {}
+            Some(Next::LookHere) => look(session.state.with_untracked(|s| s.room().to_string())),
+            Some(Next::Leave { room, words }) => {
+                // Back to the lobby, and told why there, where they land.
+                session.state.update(|s| {
+                    if s.room().eq_ignore_ascii_case(&room) {
+                        s.room = String::new();
+                    }
+                    s.push_notice("the burrow", &words);
+                });
+                defer(move || app.load_rooms());
+            }
+            None => {}
         }
     }
 

@@ -867,9 +867,15 @@ pub fn frame_to_notice_route(frame: &Frame) -> Option<NoticeRoute> {
         // a topic on a room that is not yours. It goes where they are
         // looking, which is the scrollback.
         if frame.family == rabbithole_proto::frame::Family::CHAT {
+            // Said for what was tried, where there are words for it; a look
+            // the app took on its own being refused is not said at all.
+            let text = match room_ask_of(frame.message_type) {
+                Some(ask) => crate::room_keeping::refusal(ask, *error)?,
+                None => refusal_words(*error).to_string(),
+            };
             return Some(NoticeRoute::Chat {
                 from: "the burrow".to_string(),
-                text: refusal_words(*error).to_string(),
+                text,
             });
         }
         return None;
@@ -1043,6 +1049,28 @@ pub enum RoomCommand {
     /// Ask somebody in. What a private room needs before anybody else can
     /// join it; an invitation also forgives a ban.
     Invite { room: String, who: String },
+    /// How the room is kept: its pace, who is in it, who is muted, and
+    /// whether this person may do anything about it.
+    /// → [`RoomModeration`](rabbithole_proto::chat::RoomModeration).
+    Keeping { room: String },
+    /// Stop somebody talking here, for `secs` or until lifted. The room's
+    /// maker, or a chat moderator.
+    Mute {
+        room: String,
+        who: String,
+        secs: Option<u32>,
+    },
+    /// Let them talk again.
+    Unmute { room: String, who: String },
+    /// Take somebody out of the room; `ban` keeps them out until they are
+    /// asked back in.
+    Remove {
+        room: String,
+        who: String,
+        ban: bool,
+    },
+    /// Set the pace: at most one message each every `secs`; `0` is off.
+    Pace { room: String, secs: u32 },
 }
 
 /// What the Wishing Well can be asked (family 10). A request board: the
@@ -1326,7 +1354,8 @@ pub fn swarm_event_to_file_events(ev: &SwarmWireEvent, size: u64) -> Vec<FileEve
 /// Encode one ask about rooms.
 pub fn room_command_to_frame(command: &RoomCommand, id: RequestId) -> Result<Frame, ProtoError> {
     use rabbithole_proto::chat::{
-        RoomCreate, RoomInvite, RoomJoin, RoomLeave, RoomListRequest, RoomTopicSet,
+        RoomCreate, RoomInvite, RoomJoin, RoomKick, RoomLeave, RoomListRequest,
+        RoomModerationRequest, RoomMute, RoomSlowMode, RoomTopicSet, RoomUnmute,
     };
     match command {
         RoomCommand::List => Frame::request(id, &RoomListRequest),
@@ -1347,7 +1376,117 @@ pub fn room_command_to_frame(command: &RoomCommand, id: RequestId) -> Result<Fra
         RoomCommand::Invite { room, who } => {
             Frame::request(id, &RoomInvite::new(room.clone(), who.clone()))
         }
+        RoomCommand::Keeping { room } => {
+            Frame::request(id, &RoomModerationRequest::new(room.clone()))
+        }
+        RoomCommand::Mute { room, who, secs } => {
+            Frame::request(id, &RoomMute::new(room.clone(), who.clone(), *secs))
+        }
+        RoomCommand::Unmute { room, who } => {
+            Frame::request(id, &RoomUnmute::new(room.clone(), who.clone()))
+        }
+        RoomCommand::Remove { room, who, ban } => {
+            Frame::request(id, &RoomKick::new(room.clone(), who.clone(), *ban))
+        }
+        RoomCommand::Pace { room, secs } => {
+            Frame::request(id, &RoomSlowMode::new(room.clone(), *secs))
+        }
     }
+}
+
+/// Which ask of a room a refusal answers, so it can be said the way that
+/// ask needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomAskKind {
+    /// Saying something in it.
+    Say,
+    Topic,
+    Invite,
+    Remove,
+    Mute,
+    Unmute,
+    Pace,
+    /// The pane's own look at how the room is kept.
+    Look,
+}
+
+/// Something a burrow says about keeping a room.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomKeepingAnswer {
+    /// How a room is kept, as this person may see it.
+    Kept(rabbithole_proto::chat::RoomModeration),
+    /// Somebody in `room` was muted (for `secs`, `None` until lifted) or
+    /// let talk again.
+    Muted {
+        room: String,
+        who: String,
+        muted: bool,
+        secs: Option<u32>,
+    },
+    /// The pace of `room` changed.
+    Paced { room: String, secs: u32 },
+    /// This person was taken out of `room`; `banned` if they may not come
+    /// back until asked.
+    Removed { room: String, banned: bool },
+    /// It would not, and which ask it would not answer.
+    Refused {
+        ask: RoomAskKind,
+        code: rabbithole_proto::ErrorCode,
+    },
+}
+
+/// Which ask of a room a CHAT message type is, for the ones a refusal is
+/// said for in their own words. An error reply keeps the type of what it
+/// refuses.
+fn room_ask_of(message_type: u16) -> Option<RoomAskKind> {
+    Some(match message_type {
+        1 => RoomAskKind::Say,
+        15 => RoomAskKind::Invite,
+        17 => RoomAskKind::Topic,
+        18 => RoomAskKind::Remove,
+        23 => RoomAskKind::Mute,
+        24 => RoomAskKind::Unmute,
+        25 => RoomAskKind::Pace,
+        28 => RoomAskKind::Look,
+        _ => return None,
+    })
+}
+
+/// A burrow's word on keeping a room, out of any CHAT frame that is one.
+pub fn frame_to_room_keeping(frame: &Frame) -> Option<RoomKeepingAnswer> {
+    use rabbithole_proto::chat::{RoomKicked, RoomModeration, RoomMuted, RoomSlowModeChanged};
+    use rabbithole_proto::frame::Family;
+    if frame.family != Family::CHAT {
+        return None;
+    }
+    if let Some(code) = frame.error {
+        let ask = room_ask_of(frame.message_type)?;
+        return Some(RoomKeepingAnswer::Refused { ask, code });
+    }
+    if let Some(Ok(kept)) = frame.decode::<RoomModeration>() {
+        return Some(RoomKeepingAnswer::Kept(kept));
+    }
+    if let Some(Ok(push)) = frame.decode::<RoomMuted>() {
+        return Some(RoomKeepingAnswer::Muted {
+            room: push.room,
+            who: push.screen_name,
+            muted: push.muted,
+            secs: push.duration_secs,
+        });
+    }
+    if let Some(Ok(push)) = frame.decode::<RoomSlowModeChanged>() {
+        return Some(RoomKeepingAnswer::Paced {
+            room: push.room,
+            secs: push.seconds,
+        });
+    }
+    frame
+        .decode::<RoomKicked>()
+        .and_then(Result::ok)
+        .map(|push| RoomKeepingAnswer::Removed {
+            room: push.room,
+            banned: push.banned,
+        })
 }
 
 /// Every room out of a listing.
@@ -2246,13 +2385,54 @@ mod tests {
         match frame_to_notice_route(&refused(rabbithole_proto::ErrorCode::NotFound)) {
             Some(NoticeRoute::Chat { from, text }) => {
                 assert_eq!(from, "the burrow");
-                assert_eq!(text, "No such room or person.");
+                assert_eq!(text, "Nobody on this burrow goes by that name.");
             }
             other => panic!("a refusal must be said out loud: {other:?}"),
         }
         match frame_to_notice_route(&refused(rabbithole_proto::ErrorCode::Forbidden)) {
             Some(NoticeRoute::Chat { text, .. }) => {
                 assert_eq!(text, "That is not yours to do here.")
+            }
+            other => panic!("{other:?}"),
+        }
+        // A message refused says why, in its own words.
+        let said = Frame::request(
+            RequestId(3),
+            &rabbithole_proto::chat::ChatSend::new("tea", "hello"),
+        )
+        .unwrap();
+        match frame_to_notice_route(&Frame::error_reply(
+            &said,
+            rabbithole_proto::ErrorCode::SlowMode {
+                retry_after_secs: 12,
+            },
+        )) {
+            Some(NoticeRoute::Chat { text, .. }) => assert!(text.contains("12 seconds"), "{text}"),
+            other => panic!("{other:?}"),
+        }
+        // The app's own look at how a room is kept, refused, is not said.
+        let look = Frame::request(
+            RequestId(4),
+            &rabbithole_proto::chat::RoomModerationRequest::new("den"),
+        )
+        .unwrap();
+        assert!(frame_to_notice_route(&Frame::error_reply(
+            &look,
+            rabbithole_proto::ErrorCode::Forbidden
+        ))
+        .is_none());
+        // Making a room keeps the words it had.
+        let made = Frame::request(
+            RequestId(5),
+            &rabbithole_proto::chat::RoomCreate::new("tea", false),
+        )
+        .unwrap();
+        match frame_to_notice_route(&Frame::error_reply(
+            &made,
+            rabbithole_proto::ErrorCode::AlreadyExists,
+        )) {
+            Some(NoticeRoute::Chat { text, .. }) => {
+                assert_eq!(text, "There is one of those already.")
             }
             other => panic!("{other:?}"),
         }
@@ -3516,6 +3696,116 @@ mod tests {
         assert_eq!(
             frame_to_radio_answer(&Frame::error_reply(&stations, ErrorCode::NotFound)),
             None
+        );
+    }
+
+    #[test]
+    fn a_room_refusal_says_which_ask_it_refuses() {
+        use rabbithole_proto::chat::{RoomModeration, RoomMuted, RoomSlowModeChanged};
+        use rabbithole_proto::ErrorCode;
+        let asks = [
+            (
+                RoomCommand::Mute {
+                    room: "den".into(),
+                    who: "pest".into(),
+                    secs: Some(600),
+                },
+                RoomAskKind::Mute,
+            ),
+            (
+                RoomCommand::Unmute {
+                    room: "den".into(),
+                    who: "pest".into(),
+                },
+                RoomAskKind::Unmute,
+            ),
+            (
+                RoomCommand::Remove {
+                    room: "den".into(),
+                    who: "pest".into(),
+                    ban: true,
+                },
+                RoomAskKind::Remove,
+            ),
+            (
+                RoomCommand::Pace {
+                    room: "den".into(),
+                    secs: 30,
+                },
+                RoomAskKind::Pace,
+            ),
+            (
+                RoomCommand::Keeping { room: "den".into() },
+                RoomAskKind::Look,
+            ),
+            (
+                RoomCommand::SetTopic {
+                    room: "den".into(),
+                    topic: "t".into(),
+                },
+                RoomAskKind::Topic,
+            ),
+            (
+                RoomCommand::Invite {
+                    room: "den".into(),
+                    who: "bob".into(),
+                },
+                RoomAskKind::Invite,
+            ),
+        ];
+        for (command, kind) in asks {
+            let request = room_command_to_frame(&command, RequestId(4)).unwrap();
+            let refused = Frame::error_reply(&request, ErrorCode::Forbidden);
+            assert_eq!(
+                frame_to_room_keeping(&refused),
+                Some(RoomKeepingAnswer::Refused {
+                    ask: kind,
+                    code: ErrorCode::Forbidden
+                }),
+                "{command:?}"
+            );
+        }
+        // A message refused is said as one.
+        let said = Frame::request(
+            RequestId(5),
+            &rabbithole_proto::chat::ChatSend::new("den", "hello"),
+        )
+        .unwrap();
+        assert_eq!(
+            frame_to_room_keeping(&Frame::error_reply(&said, ErrorCode::Muted)),
+            Some(RoomKeepingAnswer::Refused {
+                ask: RoomAskKind::Say,
+                code: ErrorCode::Muted
+            })
+        );
+        // The answer and the news.
+        let look =
+            room_command_to_frame(&RoomCommand::Keeping { room: "den".into() }, RequestId(6))
+                .unwrap();
+        let kept = RoomModeration::new("den", 30, true, vec!["pest".into()], Vec::new());
+        assert_eq!(
+            frame_to_room_keeping(&Frame::reply_to(&look, &kept).unwrap()),
+            Some(RoomKeepingAnswer::Kept(kept))
+        );
+        let muted =
+            Frame::request(RequestId(7), &RoomMuted::new("den", "pest", true, None)).unwrap();
+        assert_eq!(
+            frame_to_room_keeping(&muted),
+            Some(RoomKeepingAnswer::Muted {
+                room: "den".into(),
+                who: "pest".into(),
+                muted: true,
+                secs: None
+            })
+        );
+        let paced =
+            Frame::request(RequestId(8), &RoomSlowModeChanged::new("den", 0, "mo")).unwrap();
+        assert_eq!(
+            frame_to_room_keeping(&paced),
+            Some(RoomKeepingAnswer::Paced {
+                room: "den".into(),
+                secs: 0
+            })
         );
     }
 }

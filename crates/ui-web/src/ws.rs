@@ -105,6 +105,9 @@ pub type RoomSink = Rc<dyn Fn(rabbithole_proto::chat::RoomInfo)>;
 /// A station's answer to a listener: its queue, what can be asked for, or
 /// which ask it refused.
 pub type RadioRequestsSink = Rc<dyn Fn(crate::wire::RadioAnswer)>;
+/// A burrow's word on keeping a room: how it is kept, a mute or a pace
+/// changing, this person taken out, or which ask it refused.
+pub type RoomKeepingSink = Rc<dyn Fn(crate::wire::RoomKeepingAnswer)>;
 /// Receives the whole board tree (categories included), for the console.
 pub type BoardTreeSink = Rc<dyn Fn(Vec<crate::state::BoardNode>)>;
 /// A sink the transport pushes a board's thread list into.
@@ -168,6 +171,7 @@ struct Inner {
     rooms_sink: Option<RoomsSink>,
     room_sink: Option<RoomSink>,
     radio_requests_sink: Option<RadioRequestsSink>,
+    room_keeping_sink: Option<RoomKeepingSink>,
     front_page_sink: Option<FrontPageSink>,
     presence_sink: Option<PresenceSink>,
     board_sink: Option<BoardSink>,
@@ -350,6 +354,7 @@ impl WsClient {
                 rooms_sink: None,
                 room_sink: None,
                 radio_requests_sink: None,
+                room_keeping_sink: None,
                 front_page_sink: None,
                 presence_sink: None,
                 board_sink: None,
@@ -499,6 +504,11 @@ impl WsClient {
     /// A station's answers to this listener.
     pub fn on_radio_requests(&mut self, sink: RadioRequestsSink) {
         self.inner.borrow_mut().radio_requests_sink = Some(sink);
+    }
+
+    /// What the burrow says about keeping its rooms.
+    pub fn on_room_keeping(&mut self, sink: RoomKeepingSink) {
+        self.inner.borrow_mut().room_keeping_sink = Some(sink);
     }
 
     /// Ask a station something as a listener.
@@ -992,6 +1002,11 @@ impl WsClient {
                         }
                         if let Some(widgets) = wire::frame_to_front_page(&frame) {
                             b.emit_front_page(widgets);
+                        }
+                        if let Some(answer) = wire::frame_to_room_keeping(&frame) {
+                            if let Some(sink) = &b.room_keeping_sink {
+                                sink(answer);
+                            }
                         }
                         if let Some(answer) = wire::frame_to_radio_answer(&frame) {
                             if let Some(sink) = &b.radio_requests_sink {
