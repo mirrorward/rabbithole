@@ -1665,8 +1665,21 @@ pub fn spawn_program_pump(shared: Arc<Shared>, slug: String) -> JoinHandle<()> {
 /// Between songs is the place to do it. A jump backwards in a stream with no
 /// length is something a decoder takes in its stride; one in the middle of a
 /// song is a click in the middle of a song. Half of what a number can hold
-/// is about six hours of playing at 44.1 kHz, and no track is that long.
+/// is about six and three quarter hours of playing at 44.1 kHz, an hour and
+/// a half at 192 kHz, and no one track is that long.
+///
+/// Nobody hears it — every decoder tried plays straight through, and the
+/// audio is the same bytes either way — but a recording made with
+/// `ffmpeg -c copy` across the moment carries no usable timeline after it:
+/// the CLI drops the timestamp of every later frame, so the container says
+/// it is only as long as the part before. There is nowhere else to go: the
+/// seven-byte number that would avoid it is the one libavcodec refuses
+/// outright, which is silence rather than a wrong duration field.
 fn next_number(played: u64) -> u64 {
+    // Where the count actually is: a track longer than half of what a
+    // number can hold wraps inside itself, and starting the next one at
+    // zero would hand out numbers it has just written.
+    let played = played % rabbithole_radio::flac::NUMBER_LIMIT;
     if played >= rabbithole_radio::flac::NUMBER_LIMIT / 2 {
         0
     } else {
@@ -1694,6 +1707,12 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
         Some(Sound::Flac(form)) if form != Form::default() => Some(Sound::Flac(form)),
         _ => None,
     };
+    // Whether that is still only the library's word for it. It read the
+    // front of every file to work it out, and the front of a file can be
+    // the only part of it that is any good — so until a track has actually
+    // gone out, it is a guess, and a guess that leaves a whole rotation
+    // out is worse than no guess at all.
+    let mut unproven = sending.is_some();
     // How many samples this mount has sent. A FLAC stream numbers its
     // frames by it, so a decoder is never told to go back to the start of
     // a song it has already played.
@@ -1783,6 +1802,27 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
             }
             if unplayable >= shared.radio.track_count(&slug).max(1) {
                 unplayable = 0;
+                if unproven {
+                    // A whole rotation, and nothing in it is what the
+                    // library said this station sends. Take the next thing
+                    // that can play instead of being silent all night over
+                    // a shelf of music.
+                    tracing::warn!(
+                        mount = %slug,
+                        said = %sending.map(|s| s.say()).unwrap_or_default(),
+                        "radio: nothing in the rotation is what this station was said to send; \
+                         the next track that plays settles it"
+                    );
+                    sending = None;
+                    unproven = false;
+                    continue;
+                }
+                // Half a minute of not even trying, while the clock it
+                // paces by keeps running. Whatever plays next starts a
+                // fresh one, or it would go out all at once to catch up
+                // and a listener would get half a minute of audio in one
+                // breath after half a minute of silence.
+                clock = None;
                 tokio::time::sleep(Duration::from_secs(30)).await;
             }
             continue;
@@ -1813,6 +1853,7 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
             shared.radio.retire_program_mount(&slug);
         }
         sending = Some(kind);
+        unproven = false;
         let Some((tx, title_slot)) = shared.radio.program_mount(&slug, kind) else {
             continue; // a DJ got there first; the top of the loop waits
         };
@@ -2639,6 +2680,11 @@ mod tests {
         // And what is left is a number the coded shape can hold in six
         // bytes, with room for a song of any length anybody has.
         assert!(limit / 2 + 44_100 * 60 * 60 * 6 < limit);
+        // A track longer than that wraps inside itself, and where it ends
+        // is where the next one starts: never a number it just wrote.
+        assert_eq!(next_number(limit + 5), 5);
+        assert_eq!(next_number(limit), 0);
+        assert_eq!(next_number(limit + limit / 2), 0);
     }
 
     #[test]

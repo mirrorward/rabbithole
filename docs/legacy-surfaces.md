@@ -99,7 +99,13 @@ disables that class.
   saying which form it is not. Which form that is settled when the station
   is installed, by what most of its area is — read from the front of each
   file rather than the whole of it — so one odd file at the top of a folder
-  does not leave the rest of it out. `radio_public_base`
+  does not leave the rest of it out, and a download that stopped after its
+  headers gets no say at all. A station that then finds nothing it can play
+  under that form takes the next track that does, rather than standing
+  silent. The stream numbers its frames by the samples it has sent, and
+  that count starts again between songs about every seven hours at
+  44.1 kHz: nobody listening hears it, but a recording made with
+  `ffmpeg -c copy` across the moment reports only the part before it. `radio_public_base`
   names the public stream address when it is not this host on `radio_addr`'s
   port; clients are told it and never ask a person for it.
   The updinfo endpoints (`GET /admin/metadata`, `GET /admin.cgi`) ride the

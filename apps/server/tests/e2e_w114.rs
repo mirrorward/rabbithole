@@ -1083,3 +1083,178 @@ async fn a_flac_station_carries_on_across_a_track_change() {
 
     burrow.shutdown().await;
 }
+
+/// A download that stopped after the metadata still says what it was going
+/// to be. It does not get a say in what the station sends: the files that
+/// have audio where their headers end decide that, however many of the
+/// others there are.
+#[tokio::test]
+async fn a_stalled_download_does_not_decide_what_a_station_sends() {
+    const EIGHT_K: &[u8] =
+        include_bytes!("../../../crates/radio/tests/fixtures/reference-8k-mono.flac");
+    const FORTY_FOUR_K: &[u8] =
+        include_bytes!("../../../crates/radio/tests/fixtures/reference-44k-stereo.flac");
+
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path().join("srv");
+    let headers = &FORTY_FOUR_K[..rabbithole_radio::flac::playable(FORTY_FOUR_K)
+        .unwrap()
+        .audio_at];
+    library_of(
+        &work,
+        &dir,
+        &[
+            ("a-stopped.flac", headers),
+            ("b-stopped.flac", headers),
+            ("c-stopped.flac", headers),
+            ("d-good.flac", EIGHT_K),
+        ],
+    )
+    .await;
+
+    let mut config = test_config(&dir);
+    config
+        .radio_library_areas
+        .insert("lossless".into(), "music".into());
+    let burrow = Burrow::start(config).await.unwrap();
+    assert_eq!(
+        burrow.shared.radio.expected_sound("lossless"),
+        Some(burrow::radio::Sound::Flac(burrow::radio::Form {
+            rate: 8_000,
+            channels: 1,
+            bits: 16,
+        })),
+        "three files say 44.1 and hold no audio; one holds some"
+    );
+    burrow.shutdown().await;
+}
+
+/// And when the vote goes to a form that then turns out never to play — the
+/// files that hold it are corrupt past their first header — the station
+/// does not stand silent over the rest of the library. A rotation that
+/// leaves out everything takes the next track that can play instead.
+#[tokio::test]
+async fn a_station_does_not_stay_silent_over_a_form_that_never_plays() {
+    const EIGHT_K: &[u8] =
+        include_bytes!("../../../crates/radio/tests/fixtures/reference-8k-mono.flac");
+    const FORTY_FOUR_K: &[u8] =
+        include_bytes!("../../../crates/radio/tests/fixtures/reference-44k-stereo.flac");
+
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path().join("srv");
+
+    // A 44.1 kHz file whose first frame header is whole and whose audio is
+    // not: it looks playable from the front and walks to nothing.
+    let torn = {
+        let mut bytes = FORTY_FOUR_K.to_vec();
+        let frame = rabbithole_radio::flac::frames(FORTY_FOUR_K)[0];
+        bytes[frame.offset + frame.header + 4] ^= 0xFF;
+        bytes
+    };
+    assert!(
+        rabbithole_radio::flac::playable(&torn).is_some(),
+        "still says what it is"
+    );
+    assert!(
+        rabbithole_radio::flac::frames(&torn).is_empty(),
+        "and has nothing to send"
+    );
+
+    library_of(
+        &work,
+        &dir,
+        &[
+            ("a-torn.flac", &torn),
+            ("b-torn.flac", &torn),
+            ("c-torn.flac", &torn),
+            ("d-good.flac", EIGHT_K),
+        ],
+    )
+    .await;
+
+    let mut config = test_config(&dir);
+    config
+        .radio_library_areas
+        .insert("lossless".into(), "music".into());
+    let burrow = Burrow::start(config).await.unwrap();
+    assert_eq!(
+        burrow.shared.radio.expected_sound("lossless"),
+        Some(burrow::radio::Sound::Flac(burrow::radio::Form {
+            rate: 44_100,
+            channels: 2,
+            bits: 16,
+        })),
+        "three of them show a frame where their headers end, so they win the vote"
+    );
+    let radio = burrow.radio_addr.expect("radio enabled");
+
+    // Under that form nothing plays at all. The station is not left so.
+    let mut listener = TcpStream::connect(radio).await.unwrap();
+    listener
+        .write_all(b"GET /lossless HTTP/1.0\r\n\r\n")
+        .await
+        .unwrap();
+    listener.flush().await.unwrap();
+    let (head, mut heard) = read_head(&mut listener).await;
+    assert!(head.starts_with("ICY 200 OK"), "{head:?}");
+    let mut more = read_at_least(&mut listener, 512).await;
+    heard.append(&mut more);
+    let info = rabbithole_radio::flac::playable(EIGHT_K).unwrap();
+    let want = rabbithole_radio::flac::stream_headers(
+        info.sample_rate,
+        info.channels,
+        info.bits_per_sample,
+    );
+    assert_eq!(
+        heard.get(..want.len()),
+        Some(&want[..]),
+        "8 kHz mono: the one it can actually play"
+    );
+
+    // And the operator can see what it could not play on the way there.
+    let status = burrow::radio::station_status(&burrow.shared);
+    let station = status
+        .iter()
+        .find(|s| s.station == "lossless")
+        .expect("the station");
+    assert!(
+        station.left_out.iter().any(|l| l.title == "a-torn.flac"),
+        "{:?}",
+        station.left_out
+    );
+
+    burrow.shutdown().await;
+}
+
+/// A burrow whose `music` area holds exactly these files.
+async fn library_of(work: &tempfile::TempDir, dir: &std::path::Path, files: &[(&str, &[u8])]) {
+    use rabbithole_core::Client;
+
+    let burrow = Burrow::start(test_config(dir)).await.unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("dj", "spin-spin-spin", Role::Admin)
+        .await
+        .unwrap();
+    let mut dj = Client::connect(
+        &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
+        None,
+        None,
+        "e2e",
+        "0",
+    )
+    .await
+    .unwrap();
+    dj.auth_password("dj", "spin-spin-spin").await.unwrap();
+    dj.expect_welcome().await.unwrap();
+    dj.area_create("music", "Music", "").await.unwrap();
+    for (name, bytes) in files {
+        let src = work.path().join(name);
+        std::fs::write(&src, bytes).unwrap();
+        dj.transfer_upload("music", None, name, &src, "audio/flac", "")
+            .await
+            .unwrap();
+    }
+    burrow.shutdown().await;
+}

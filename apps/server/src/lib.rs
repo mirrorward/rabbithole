@@ -754,10 +754,16 @@ async fn install_radio_library(
 /// the depth a mount will say once, at the head of its stream.
 ///
 /// A FLAC file's STREAMINFO is its first metadata block, so this reads the
-/// front of each track rather than the track: a few dozen bytes each, at
-/// the one moment a station is installed. A library nobody can read, or one
-/// that is not FLAC after all, gives back the form nobody has looked up —
-/// and then the first track the pump reads settles it, as it did before.
+/// front of each track rather than the track. A file that has audio where
+/// its headers end votes for what it is; one that only *says* what it is —
+/// a download that stopped after the metadata, a file whose picture is
+/// bigger than the look — votes only when nothing better does, because
+/// otherwise a shelf of stalled downloads could settle what a station sends
+/// and leave every whole file out of it.
+///
+/// A library nobody can read, or one that is not FLAC after all, gives back
+/// the form nobody has looked up, and the first track the pump plays settles
+/// it instead.
 async fn flac_form(shared: &Arc<Shared>, tracks: &[rabbithole_radio::Track]) -> radio::Form {
     if tracks.is_empty() {
         return radio::Form::default();
@@ -768,43 +774,61 @@ async fn flac_form(shared: &Arc<Shared>, tracks: &[rabbithole_radio::Track]) -> 
         .map(|t| rabbithole_blobs::BlobId(t.source.0))
         .collect();
     let counted = tokio::task::spawn_blocking(move || {
-        let mut counted: std::collections::HashMap<(u32, u8, u8), usize> =
-            std::collections::HashMap::new();
+        // Enough for the magic, the metadata chain and the first frame
+        // header of an ordinary file. A file whose cover art is bigger
+        // than this still says what it is; it just cannot show it here.
+        const LOOK: usize = 64 << 10;
+        // What each file said, in the order the area lists them: whether
+        // it showed audio, and the form it claims.
+        let mut said: Vec<(bool, (u32, u8, u8))> = Vec::new();
         for id in ids {
-            // The magic, the first block header and its body: 42 bytes,
-            // plus room for a tag somebody put in front of them.
-            let Ok(front) = blobs.read_range(&id, 0, 1 << 10) else {
+            let Ok(front) = blobs.read_range(&id, 0, LOOK) else {
                 continue;
             };
-            let form = rabbithole_radio::flac::form_of(&front).or_else(|| {
-                // A tag in front of the music can be longer than the look
-                // we took — one with a picture in it usually is — and its
-                // own header says how long. The second look starts where
-                // the tag ends.
+            let looked = |bytes: &[u8]| {
+                rabbithole_radio::flac::playable(bytes)
+                    .map(|i| (true, (i.sample_rate, i.channels, i.bits_per_sample)))
+                    .or_else(|| rabbithole_radio::flac::form_of(bytes).map(|f| (false, f)))
+            };
+            let seen = looked(&front).or_else(|| {
+                // A tag in front of the music can be longer than the look,
+                // and its own header says how long. The second look starts
+                // where the tag ends.
                 let skip = rabbithole_radio::mp3::id3v2_says(&front);
-                if skip == 0 || skip < front.len() {
+                if skip == 0 {
                     return None;
                 }
-                let past = blobs.read_range(&id, skip as u64, 1 << 10).ok()?;
-                rabbithole_radio::flac::form_of(&past)
+                let past = blobs.read_range(&id, skip as u64, LOOK).ok()?;
+                looked(&past)
             });
-            if let Some(form) = form {
-                *counted.entry(form).or_default() += 1;
+            if let Some(seen) = seen {
+                said.push(seen);
             }
         }
-        counted
+        said
     })
     .await
     .unwrap_or_default();
-    // The most of any one form wins, and a tie goes to the one that sounds
-    // like more of the library: the highest rate, then the most channels,
-    // then the most bits. Deciding it the same way at every start matters
-    // more than which one wins.
-    let best = counted
+    // The files that showed audio decide it, if any of them did.
+    let heard = counted.iter().any(|(playable, _)| *playable);
+    // The most of any one form wins. A tie goes to whichever came first in
+    // the area — the one the station would have played anyway — so the
+    // answer is the same at every start.
+    let mut tally: Vec<((u32, u8, u8), usize, usize)> = Vec::new();
+    for (at, (playable, form)) in counted.into_iter().enumerate() {
+        if heard && !playable {
+            continue;
+        }
+        match tally.iter_mut().find(|(seen, _, _)| *seen == form) {
+            Some((_, count, _)) => *count += 1,
+            None => tally.push((form, 1, at)),
+        }
+    }
+    match tally
         .into_iter()
-        .max_by_key(|(form, count)| (*count, *form));
-    match best {
-        Some(((rate, channels, bits), _)) => radio::Form {
+        .max_by_key(|(_, count, first)| (*count, std::cmp::Reverse(*first)))
+    {
+        Some(((rate, channels, bits), _, _)) => radio::Form {
             rate,
             channels,
             bits,
