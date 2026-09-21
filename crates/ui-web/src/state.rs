@@ -44,6 +44,9 @@ pub struct ArtOpen {
 /// One rendered line of chat scrollback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatLine {
+    /// Which room it was said in. A burrow has more than the lobby, and a
+    /// line from one must not appear in another.
+    pub room: String,
     /// Handle of the sender.
     pub from: String,
     /// The message body.
@@ -381,6 +384,10 @@ pub struct UiState {
     pub sessions: Vec<SessionRow>,
     /// The Wishing Well: what people have asked this burrow for.
     pub wishes: WishesState,
+    /// The rooms this burrow has, as it last listed them.
+    pub rooms: Vec<rabbithole_proto::chat::RoomInfo>,
+    /// Which room is being read. The lobby until somebody goes elsewhere.
+    pub room: String,
     /// The board tree.
     pub boards: Vec<Board>,
     /// Every node of the board tree, for the admin console.
@@ -458,12 +465,13 @@ impl UiState {
                 }
             }
             Event::ChatMessage {
+                room,
                 from,
                 text,
                 at_unix_ms,
-                ..
             } => {
                 self.messages.push(ChatLine {
+                    room: room.clone(),
                     from: from.clone(),
                     text: text.clone(),
                     at_unix_ms: *at_unix_ms,
@@ -490,8 +498,28 @@ impl UiState {
     /// line. Radio now-playing never reaches here — RADIO-family frames are
     /// split off by [`frame_to_notice_route`](crate::wire::frame_to_notice_route)
     /// before the chat log.
+    /// Which room is being read. Empty means nobody has gone anywhere, and
+    /// a burrow always has a lobby, so that is where a person is.
+    pub fn room(&self) -> &str {
+        if self.room.is_empty() {
+            crate::client::LOBBY
+        } else {
+            &self.room
+        }
+    }
+
+    /// The scrollback of one room, oldest first.
+    pub fn messages_in(&self, room: &str) -> Vec<&ChatLine> {
+        self.messages
+            .iter()
+            .filter(|line| line.room == room || line.room.is_empty())
+            .collect()
+    }
+
     pub fn push_notice(&mut self, from: &str, text: &str) {
         self.messages.push(ChatLine {
+            // A notice is the burrow speaking, wherever you are reading.
+            room: self.room().to_string(),
             from: format!("! {from}"),
             text: text.to_string(),
             at_unix_ms: crate::clock::now_ms(),
@@ -719,6 +747,43 @@ pub fn derive_server_name(endpoint: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_room_keeps_its_own_talk() {
+        let mut s = UiState::default();
+        // Nobody has gone anywhere yet, so the lobby is where they are.
+        assert_eq!(s.room(), "lobby");
+        s.apply(&Event::ChatMessage {
+            room: "lobby".into(),
+            from: "alice".into(),
+            text: "morning".into(),
+            at_unix_ms: 1,
+        });
+        s.apply(&Event::ChatMessage {
+            room: "tea-party".into(),
+            from: "bob".into(),
+            text: "unbirthday".into(),
+            at_unix_ms: 2,
+        });
+        assert_eq!(s.messages.len(), 2, "both are kept");
+        let lobby: Vec<&str> = s
+            .messages_in("lobby")
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect();
+        assert_eq!(lobby, vec!["morning"], "one room's talk is its own");
+        let tea: Vec<&str> = s
+            .messages_in("tea-party")
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect();
+        assert_eq!(tea, vec!["unbirthday"]);
+        // A notice from the burrow lands where the person is reading.
+        s.room = "tea-party".into();
+        s.push_notice("burrow", "back in a moment");
+        assert_eq!(s.messages_in("tea-party").len(), 2);
+        assert_eq!(s.messages_in("lobby").len(), 1);
+    }
 
     #[test]
     fn connected_event_sets_name_and_flag() {

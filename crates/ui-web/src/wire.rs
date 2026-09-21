@@ -886,6 +886,26 @@ pub fn frame_to_notice_route(frame: &Frame) -> Option<NoticeRoute> {
 // variants, these fold into the shared enums with no shape change.
 // ---------------------------------------------------------------------------
 
+/// What a burrow's rooms can be asked (family 2). The lobby is one of
+/// them; the rest are what people have made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomCommand {
+    /// Every room this session may see. → [`RoomList`].
+    List,
+    /// Make one, and join it. → [`RoomInfoReply`].
+    Create {
+        name: String,
+        topic: String,
+        /// A private room is invitation-only and is not listed to anybody
+        /// who is not in it.
+        private: bool,
+    },
+    /// Go in. → [`RoomInfoReply`].
+    Join { room: String },
+    /// Come out.
+    Leave { room: String },
+}
+
 /// What the Wishing Well can be asked (family 10). A request board: the
 /// things people want this burrow to have, what each one is for, and who
 /// has taken one on.
@@ -1164,6 +1184,51 @@ pub fn swarm_event_to_file_events(ev: &SwarmWireEvent, size: u64) -> Vec<FileEve
 }
 
 /// Map a [`FileCommand`] to the FILE-family request [`Frame`] that carries it.
+/// Encode one ask about rooms.
+pub fn room_command_to_frame(command: &RoomCommand, id: RequestId) -> Result<Frame, ProtoError> {
+    use rabbithole_proto::chat::{RoomCreate, RoomJoin, RoomLeave, RoomListRequest};
+    match command {
+        RoomCommand::List => Frame::request(id, &RoomListRequest),
+        RoomCommand::Create {
+            name,
+            topic,
+            private,
+        } => {
+            let mut msg = RoomCreate::new(name.clone(), *private);
+            msg.topic = topic.clone();
+            Frame::request(id, &msg)
+        }
+        RoomCommand::Join { room } => Frame::request(id, &RoomJoin::new(room.clone())),
+        RoomCommand::Leave { room } => Frame::request(id, &RoomLeave::new(room.clone())),
+    }
+}
+
+/// Every room out of a listing.
+pub fn frame_to_rooms(frame: &Frame) -> Option<Vec<rabbithole_proto::chat::RoomInfo>> {
+    if frame.error.is_some() {
+        return None;
+    }
+    Some(
+        frame
+            .decode::<rabbithole_proto::chat::RoomList>()?
+            .ok()?
+            .rooms,
+    )
+}
+
+/// One room, as it now stands: made, joined, or its topic changed.
+pub fn frame_to_room(frame: &Frame) -> Option<rabbithole_proto::chat::RoomInfo> {
+    if frame.error.is_some() {
+        return None;
+    }
+    Some(
+        frame
+            .decode::<rabbithole_proto::chat::RoomInfoReply>()?
+            .ok()?
+            .room,
+    )
+}
+
 /// Encode one Wishing Well ask.
 pub fn wish_command_to_frame(command: &WishCommand, id: RequestId) -> Result<Frame, ProtoError> {
     use rabbithole_proto::wish::{WishCreate, WishListRequest, WishSetStatus, WishVote};

@@ -3050,10 +3050,25 @@ fn LoadFailed(
 pub fn Lobby() -> impl IntoView {
     let app = expect_context::<AppState>();
     let state = app.focused().state;
+    app.load_rooms();
     let draft = create_rw_signal(String::new());
     // Follow the newest line while the reader is at the bottom; offer a
     // "new messages" jump instead of yanking them out of history otherwise.
-    let log = crate::scroll::ChatScroll::install(move || state.with(|s| s.messages.len()));
+    // Which room is being read, and only its lines: a burrow has more than
+    // the lobby, and two rooms' talk must not run together.
+    let room = move || state.with(|s| s.room().to_string());
+    let lines = move || {
+        state.with(|s| {
+            s.messages_in(s.room())
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    };
+    let rooms = move || state.with(|s| s.rooms.clone());
+    let making = create_rw_signal(false);
+    let new_room = create_rw_signal(String::new());
+    let log = crate::scroll::ChatScroll::install(move || lines().len());
     // The view! macro wants a bare identifier for `node_ref=`.
     let log_node = log.node;
 
@@ -3073,7 +3088,81 @@ pub fn Lobby() -> impl IntoView {
         <StatusBar/>
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Lobby"</h1>
-            <section class="rh-chat" aria-label="Lobby chat">
+            <section class="rh-chat" aria-label="Chat">
+                <div class="rh-rooms" role="tablist" aria-label="Rooms">
+                    <For
+                        each=rooms
+                        key=|r| (r.name.clone(), r.member_count, r.topic.clone())
+                        children=move |r| {
+                            let name = r.name.clone();
+                            let mine = name.clone();
+                            let here = move || room() == mine;
+                            let title = if r.topic.trim().is_empty() {
+                                r.name.clone()
+                            } else {
+                                format!("{} \u{2014} {}", r.name, r.topic)
+                            };
+                            view! {
+                                <button
+                                    type="button"
+                                    role="tab"
+                                    class="rh-btn ghost small"
+                                    title=title
+                                    aria-selected=move || here().to_string()
+                                    on:click=move |_| app.show_room(&name)
+                                >
+                                    {r.name.clone()}
+                                    {(r.private).then(|| view! {
+                                        <span class="rh-badge">"private"</span>
+                                    })}
+                                </button>
+                            }
+                        }
+                    />
+                    <button
+                        type="button"
+                        class="rh-btn ghost small"
+                        aria-expanded=move || making.get().to_string()
+                        on:click=move |_| making.update(|m| *m = !*m)
+                    >
+                        "New room"
+                    </button>
+                    <Show
+                        when=move || room() != crate::client::LOBBY
+                        fallback=|| ()
+                    >
+                        <button
+                            type="button"
+                            class="rh-btn ghost small"
+                            on:click=move |_| app.leave_room(&room())
+                        >
+                            "Leave this room"
+                        </button>
+                    </Show>
+                </div>
+                <Show when=move || making.get() fallback=|| ()>
+                    <div class="rh-wish-tools">
+                        <input
+                            class="rh-input"
+                            maxlength="32"
+                            placeholder="What to call it"
+                            prop:value=move || new_room.get()
+                            on:input=move |ev| new_room.set(event_target_value(&ev))
+                        />
+                        <button
+                            type="button"
+                            class="rh-btn small"
+                            disabled=move || new_room.get().trim().is_empty()
+                            on:click=move |_| {
+                                app.create_room(&new_room.get(), "", false);
+                                new_room.set(String::new());
+                                making.set(false);
+                            }
+                        >
+                            "Make it"
+                        </button>
+                    </div>
+                </Show>
                 // The burrow's news, where you actually land. It used to live
                 // only inside the welcome sheet, so a burrow with no MOTD showed
                 // no news at all — and dismissing the sheet lost it for good.
@@ -3088,13 +3177,13 @@ pub fn Lobby() -> impl IntoView {
                     on:scroll=move |_| log.on_scroll()
                 >
                     <Show
-                        when=move || state.with(|s| s.messages.is_empty())
+                        when=move || lines().is_empty()
                         fallback=|| ()
                     >
                         <EmptyState
                             icon="/lobby"
                             title="Quiet in here"
-                            sub="Say hello \u{2014} the lobby's yours to open."
+                            sub="Say hello \u{2014} the room's yours to open."
                         />
                     </Show>
                     <ul class="rh-lines">
@@ -3105,22 +3194,20 @@ pub fn Lobby() -> impl IntoView {
                             // depends only on the (immutable) previous line,
                             // so the index stays a sound key.
                             each=move || {
-                                state.with(|s| {
-                                    s.messages
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, line)| {
-                                            let head = i == 0
-                                                || !crate::state::continues_group(
-                                                    &s.messages[i - 1].from,
-                                                    s.messages[i - 1].at_unix_ms,
-                                                    &line.from,
-                                                    line.at_unix_ms,
-                                                );
-                                            (i, line.clone(), head)
-                                        })
-                                        .collect::<Vec<_>>()
-                                })
+                                let said = lines();
+                                said.iter()
+                                    .enumerate()
+                                    .map(|(i, line)| {
+                                        let head = i == 0
+                                            || !crate::state::continues_group(
+                                                &said[i - 1].from,
+                                                said[i - 1].at_unix_ms,
+                                                &line.from,
+                                                line.at_unix_ms,
+                                            );
+                                        (i, line.clone(), head)
+                                    })
+                                    .collect::<Vec<_>>()
                             }
                             key=|(i, _, _)| *i
                             children=move |(_, line, head)| view! {
@@ -3174,8 +3261,11 @@ pub fn Lobby() -> impl IntoView {
                 </Show>
                 <Composer
                     draft=draft
-                    label="Message the lobby"
-                    placeholder="Message the lobby\u{2026}"
+                    // The room being read, not "the lobby": there is more
+                    // than one now, and a box that names the wrong one is a
+                    // message sent somewhere you did not mean.
+                    label=Signal::derive(move || format!("Message #{}", room()))
+                    placeholder=Signal::derive(move || format!("Message #{}\u{2026}", room()))
                     on_send=move |_| send()
                     can_send=Signal::derive(move || {
                         app.online() && !draft.get().trim().is_empty()
@@ -3211,9 +3301,11 @@ pub fn Composer(
     /// The draft being edited.
     draft: RwSignal<String>,
     /// Accessible name for the text area.
-    label: &'static str,
+    #[prop(into)]
+    label: MaybeSignal<String>,
     /// Placeholder text.
-    placeholder: &'static str,
+    #[prop(into)]
+    placeholder: MaybeSignal<String>,
     /// Called when the composer asks to send (Enter, or the button).
     #[prop(into)]
     on_send: Callback<()>,

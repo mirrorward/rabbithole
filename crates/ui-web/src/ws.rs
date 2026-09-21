@@ -99,6 +99,9 @@ pub type FileBytesSink = Rc<dyn Fn(crate::wire::DownloadedFile)>;
 /// The Wishing Well's list, and single wishes as they change.
 pub type WishesSink = Rc<dyn Fn(Vec<rabbithole_proto::wish::WishView>)>;
 pub type WishSink = Rc<dyn Fn(rabbithole_proto::wish::WishView)>;
+/// The burrow's rooms, and single rooms as they change.
+pub type RoomsSink = Rc<dyn Fn(Vec<rabbithole_proto::chat::RoomInfo>)>;
+pub type RoomSink = Rc<dyn Fn(rabbithole_proto::chat::RoomInfo)>;
 /// Receives the whole board tree (categories included), for the console.
 pub type BoardTreeSink = Rc<dyn Fn(Vec<crate::state::BoardNode>)>;
 /// A sink the transport pushes a board's thread list into.
@@ -159,6 +162,8 @@ struct Inner {
     file_bytes_sink: Option<FileBytesSink>,
     wishes_sink: Option<WishesSink>,
     wish_sink: Option<WishSink>,
+    rooms_sink: Option<RoomsSink>,
+    room_sink: Option<RoomSink>,
     front_page_sink: Option<FrontPageSink>,
     presence_sink: Option<PresenceSink>,
     board_sink: Option<BoardSink>,
@@ -338,6 +343,8 @@ impl WsClient {
                 file_bytes_sink: None,
                 wishes_sink: None,
                 wish_sink: None,
+                rooms_sink: None,
+                room_sink: None,
                 front_page_sink: None,
                 presence_sink: None,
                 board_sink: None,
@@ -472,6 +479,27 @@ impl WsClient {
     /// One wish, as it changes.
     pub fn on_wish(&mut self, sink: WishSink) {
         self.inner.borrow_mut().wish_sink = Some(sink);
+    }
+
+    /// The burrow's room list.
+    pub fn on_rooms(&mut self, sink: RoomsSink) {
+        self.inner.borrow_mut().rooms_sink = Some(sink);
+    }
+
+    /// One room, as it changes.
+    pub fn on_room(&mut self, sink: RoomSink) {
+        self.inner.borrow_mut().room_sink = Some(sink);
+    }
+
+    /// Ask about rooms: list them, make one, go in, come out.
+    pub fn dispatch_room(&self, command: &crate::wire::RoomCommand) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(frame) = wire::room_command_to_frame(command, id) {
+            if let Ok(bytes) = encode_frame(&frame) {
+                Self::write(&mut b, &bytes);
+            }
+        }
     }
 
     /// Ask the Wishing Well for something.
@@ -943,6 +971,16 @@ impl WsClient {
                         }
                         if let Some(widgets) = wire::frame_to_front_page(&frame) {
                             b.emit_front_page(widgets);
+                        }
+                        if let Some(rooms) = wire::frame_to_rooms(&frame) {
+                            if let Some(sink) = &b.rooms_sink {
+                                sink(rooms);
+                            }
+                        }
+                        if let Some(room) = wire::frame_to_room(&frame) {
+                            if let Some(sink) = &b.room_sink {
+                                sink(room);
+                            }
                         }
                         if let Some(wishes) = wire::frame_to_wishes(&frame) {
                             if let Some(sink) = &b.wishes_sink {

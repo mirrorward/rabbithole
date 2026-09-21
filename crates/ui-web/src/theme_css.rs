@@ -1155,6 +1155,9 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 .rh-adm-peer-waiting{color:var(--rh-accent);font-weight:600}\
 .rh-adm-peer-actions,.rh-adm-backup-actions{display:flex;gap:var(--rh-space-2);align-items:center;justify-content:flex-end;flex-wrap:wrap}\
 .rh-adm-peer-actions .rh-input{width:13rem;max-width:100%;padding:.35rem .6rem;font-size:var(--rh-font-sm)}\
+.rh-rooms{display:flex;flex-wrap:wrap;align-items:center;gap:var(--rh-space-2);padding:.45rem var(--rh-space-4);border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
+.rh-rooms .rh-btn[aria-selected=true]{background:color-mix(in srgb,var(--rh-accent) 16%,transparent);color:var(--rh-accent)}\
+.rh-rooms .rh-badge{margin-left:.35rem}\
 .rh-wish-tools{display:flex;flex-wrap:wrap;align-items:center;gap:var(--rh-space-2);margin:0 0 var(--rh-space-3)}\
 .rh-wish-tools .rh-art-areas{margin:0;flex:1 1 auto}\
 .rh-wish-form{display:flex;flex-direction:column;gap:var(--rh-space-2);padding:var(--rh-space-3);margin:0 0 var(--rh-space-3);border:1px solid color-mix(in srgb,var(--rh-text) 10%,transparent);border-radius:var(--rh-radius);background:var(--rh-surface)}\

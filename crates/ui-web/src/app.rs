@@ -726,6 +726,11 @@ impl AppState {
                                     // …and what is on the air, and where: the
                                     // stream address is the burrow's to say.
                                     c.request_radio_stations();
+                                    // …and which rooms there are. A pane that
+                                    // asks when it opens can be opened before
+                                    // the socket is up, and then it is a
+                                    // burrow with one room in it, for ever.
+                                    c.dispatch_room(&crate::wire::RoomCommand::List);
                                     // This burrow inherits the user's current status.
                                     c.set_presence(presence.get_untracked(), None);
                                 });
@@ -865,6 +870,15 @@ impl AppState {
                 if let Some(app) = current() {
                     app.show_art(file);
                 }
+            }));
+            ws.on_rooms(std::rc::Rc::new(move |rooms| {
+                state.update(|s| s.rooms = rooms)
+            }));
+            ws.on_room(std::rc::Rc::new(move |room| {
+                state.update(|s| match s.rooms.iter_mut().find(|r| r.name == room.name) {
+                    Some(slot) => *slot = room,
+                    None => s.rooms.push(room),
+                })
             }));
             ws.on_wishes(std::rc::Rc::new(move |wishes| {
                 state.update(|s| s.wishes.wishes = wishes)
@@ -1360,7 +1374,12 @@ impl AppState {
     /// Send a lobby chat line — over the live socket when connected, else
     /// through the seeded mock seam.
     pub fn send_chat(&self, text: String) {
-        let room = crate::client::LOBBY.to_string();
+        // Whichever room is being read: a burrow has more than the lobby,
+        // and what somebody types belongs where they are looking.
+        let room = self
+            .focused()
+            .state
+            .with_untracked(|s| s.room().to_string());
         #[cfg(target_arch = "wasm32")]
         if self.focused().live.get_untracked() {
             use crate::wire::EventClient;
@@ -2097,6 +2116,80 @@ impl AppState {
     /// Show a node's metadata card.
     pub fn select_file(&self, id: i64) {
         self.focused().files.update(|f| f.selected = Some(id));
+    }
+
+    /// Ask the burrow what rooms it has.
+    pub fn load_rooms(&self) {
+        #[cfg(target_arch = "wasm32")]
+        if self.focused().live.get_untracked() {
+            self.focused()
+                .ws
+                .with_value(|c| c.dispatch_room(&crate::wire::RoomCommand::List));
+            return;
+        }
+        let rooms = self.focused().client.with_value(|c| c.rooms());
+        self.focused().state.update(|s| s.rooms = rooms);
+    }
+
+    /// Read a room. Joining it is the burrow's business: ask, and the
+    /// answer puts it in the list with you in it.
+    pub fn show_room(&self, name: &str) {
+        let name = name.to_string();
+        let joined = self
+            .focused()
+            .state
+            .with_untracked(|s| s.rooms.iter().any(|r| r.name == name && r.member_count > 0));
+        self.focused().state.update(|s| s.room = name.clone());
+        if !joined {
+            self.room_command(crate::wire::RoomCommand::Join { room: name });
+        }
+    }
+
+    /// Make a room and go into it.
+    pub fn create_room(&self, name: &str, topic: &str, private: bool) {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        self.focused().state.update(|s| s.room = name.clone());
+        self.room_command(crate::wire::RoomCommand::Create {
+            name,
+            topic: topic.trim().to_string(),
+            private,
+        });
+    }
+
+    /// Come out of a room, and go back to the lobby.
+    pub fn leave_room(&self, name: &str) {
+        self.room_command(crate::wire::RoomCommand::Leave {
+            room: name.to_string(),
+        });
+        self.focused().state.update(|s| {
+            s.rooms.retain(|r| r.name != name);
+            s.room = crate::client::LOBBY.to_string();
+        });
+    }
+
+    /// One ask about rooms, over the live socket or the demo's own.
+    fn room_command(&self, command: crate::wire::RoomCommand) {
+        #[cfg(target_arch = "wasm32")]
+        if self.focused().live.get_untracked() {
+            self.focused().ws.with_value(|c| c.dispatch_room(&command));
+            self.load_rooms();
+            return;
+        }
+        let mut answered = None;
+        self.focused()
+            .client
+            .update_value(|c| answered = c.room_command(&command));
+        if let Some(room) = answered {
+            self.focused().state.update(|s| {
+                match s.rooms.iter_mut().find(|r| r.name == room.name) {
+                    Some(slot) => *slot = room,
+                    None => s.rooms.push(room),
+                }
+            });
+        }
     }
 
     /// Ask the Wishing Well what people have asked for. `status` `None` is

@@ -117,6 +117,9 @@ pub struct MockClient {
     /// The demo's Wishing Well: a few things somebody asked this burrow
     /// for, so the pane has something in it before anyone wishes.
     wishes: Vec<rabbithole_proto::wish::WishView>,
+    /// The demo's rooms: the lobby everybody is in, and a couple more so
+    /// the room strip is not a strip of one.
+    rooms: Vec<rabbithole_proto::chat::RoomInfo>,
     admin_config: Vec<(String, String)>,
     /// Seeded RADIO now-playing frames, served through
     /// [`MockClient::radio_routes`] so the Radio view renders in dev without a
@@ -276,6 +279,7 @@ impl MockClient {
             admin_origins: Self::seeded_origins(),
             admin_backups: Self::seeded_backups(),
             wishes: Self::seeded_wishes(),
+            rooms: Self::seeded_rooms(),
             admin_config: Self::seeded_config(),
             radio_frames: Self::seeded_radio_frames(),
             invite_seq: 0,
@@ -552,6 +556,63 @@ impl MockClient {
             bytes: crate::demo_files::bytes_for(&n.name)
                 .unwrap_or_else(|| vec![0u8; n.size.max(0) as usize]),
         })
+    }
+
+    /// The demo's rooms.
+    fn seeded_rooms() -> Vec<rabbithole_proto::chat::RoomInfo> {
+        use rabbithole_proto::chat::RoomInfo;
+        let mut lobby = RoomInfo::new(LOBBY);
+        lobby.topic = "Everybody, all at once.".into();
+        lobby.member_count = 3;
+        let mut tea = RoomInfo::new("tea-party");
+        tea.topic = "Unbirthdays, mostly.".into();
+        tea.member_count = 2;
+        let mut quiet = RoomInfo::new("the-quiet-corner");
+        quiet.topic = "For reading.".into();
+        quiet.member_count = 1;
+        vec![lobby, tea, quiet]
+    }
+
+    /// The demo's rooms, as a burrow lists them.
+    pub fn rooms(&self) -> Vec<rabbithole_proto::chat::RoomInfo> {
+        self.rooms.clone()
+    }
+
+    /// One ask about the demo's rooms, answered with the room as it now
+    /// stands. Leaving answers nothing, as the wire does.
+    pub fn room_command(
+        &mut self,
+        command: &crate::wire::RoomCommand,
+    ) -> Option<rabbithole_proto::chat::RoomInfo> {
+        use crate::wire::RoomCommand;
+        use rabbithole_proto::chat::RoomInfo;
+        match command {
+            RoomCommand::List => None,
+            RoomCommand::Create {
+                name,
+                topic,
+                private,
+            } => {
+                let mut room = RoomInfo::new(name.clone());
+                room.topic = topic.clone();
+                room.private = *private;
+                room.member_count = 1;
+                room.created_by = self.current_user.clone().unwrap_or_else(|| "you".into());
+                self.rooms.push(room.clone());
+                Some(room)
+            }
+            RoomCommand::Join { room } => {
+                let slot = self.rooms.iter_mut().find(|r| &r.name == room)?;
+                slot.member_count += 1;
+                Some(slot.clone())
+            }
+            RoomCommand::Leave { room } => {
+                if let Some(slot) = self.rooms.iter_mut().find(|r| &r.name == room) {
+                    slot.member_count = slot.member_count.saturating_sub(1);
+                }
+                None
+            }
+        }
     }
 
     /// A few wishes, so the demo's Wishing Well is a well and not a hole.
