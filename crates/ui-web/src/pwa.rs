@@ -253,6 +253,41 @@ mod tests {
         assert_eq!(hex(ICON_HOLE), clean_dark["--rh-bg"]);
     }
 
+    /// A bundle the browser refuses — a cached copy that no longer matches
+    /// this document's integrity hash is the usual way — leaves a blank
+    /// window that says nothing and does not mend itself on a reload,
+    /// because the same cached copy comes back. The shell watches for the
+    /// failure and clears what is stored, once per visit.
+    #[test]
+    fn the_shell_mends_itself_when_the_bundle_will_not_load() {
+        // The loader is a module, so a refusal is a failed import, not a
+        // resource error on a tag: both are watched for, and so is an app
+        // that simply never starts.
+        for signal in [
+            r#"addEventListener("error""#,
+            r#"addEventListener("unhandledrejection""#,
+            "TrunkApplicationStarted",
+            "!document.body.firstChild",
+        ] {
+            assert!(INDEX_HTML.contains(signal), "the shell must watch {signal}");
+        }
+        // Scoped to this app's own bundle: a font or an icon that fails is
+        // not a reason to throw away everything and reload.
+        assert!(INDEX_HTML.contains(r#"url.indexOf("/rabbithole-ui-web-")"#));
+        // Once per visit, or a bundle that is genuinely gone would loop.
+        assert!(INDEX_HTML.contains("rh-shell-reset"));
+        // And what it clears is the worker and its caches, then it reloads.
+        for step in [
+            "getRegistrations()",
+            "r.unregister()",
+            "caches.keys()",
+            "caches.delete(k)",
+            "location.reload()",
+        ] {
+            assert!(INDEX_HTML.contains(step), "the shell must {step}");
+        }
+    }
+
     // ---- sw.js shape (textual, deliberately crude) ------------------------
 
     #[test]

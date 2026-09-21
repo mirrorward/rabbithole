@@ -50,6 +50,97 @@
     <!-- The display face (Space Grotesk, latin, OFL: assets/space-grotesk-OFL.txt). -->
     <link data-trunk rel="copy-file" href="assets/space-grotesk-latin.woff2" />
 
+    <!-- A bundle that will not load leaves a blank window and says nothing.
+         The usual cause is a copy kept in this browser that no longer
+         matches this document: the browser checks the integrity hash,
+         refuses the file, and the service worker hands back the same copy
+         at every reload, so it never mends on its own.
+
+         Two signals. The loader above is a module, so a refusal arrives as
+         a failed import — an error or a rejected promise — rather than as
+         a resource error on a tag. And whatever the reason, an app that has
+         not started after a good long wait has not started. Either way:
+         clear what is stored and come back for a fresh copy, once per
+         visit, rather than leaving somebody looking at nothing. -->
+    <script>
+      (function () {
+        var started = false;
+        var mending = false;
+        addEventListener("TrunkApplicationStarted", function () {
+          started = true;
+        });
+        function mend() {
+          if (mending || started) return;
+          try {
+            /* Once. Without somewhere to remember that, a bundle that is
+               genuinely gone would reload for ever, so a browser that
+               refuses storage is left alone. */
+            if (sessionStorage.getItem("rh-shell-reset")) return;
+            sessionStorage.setItem("rh-shell-reset", "1");
+          } catch (_) {
+            return;
+          }
+          mending = true;
+          var again = function () {
+            location.reload();
+          };
+          var jobs = [];
+          try {
+            if (navigator.serviceWorker) {
+              jobs.push(
+                navigator.serviceWorker.getRegistrations().then(function (rs) {
+                  return Promise.all(
+                    rs.map(function (r) {
+                      return r.unregister();
+                    }),
+                  );
+                }),
+              );
+            }
+            if (window.caches) {
+              jobs.push(
+                caches.keys().then(function (ks) {
+                  return Promise.all(
+                    ks.map(function (k) {
+                      return caches.delete(k);
+                    }),
+                  );
+                }),
+              );
+            }
+          } catch (_) {
+            /* nothing to clear */
+          }
+          Promise.all(jobs).then(again, again);
+        }
+        function blames_the_bundle(text) {
+          return (
+            text.indexOf("integrity") !== -1 ||
+            text.indexOf("rabbithole-ui-web-") !== -1 ||
+            text.indexOf("Failed to fetch dynamically imported module") !== -1
+          );
+        }
+        addEventListener("error", function (e) {
+          var el = e.target;
+          var url = (el && (el.src || el.href)) || "";
+          if (url.indexOf("/rabbithole-ui-web-") !== -1) return mend();
+          if (e.message && blames_the_bundle(String(e.message))) mend();
+        }, true);
+        addEventListener("unhandledrejection", function (e) {
+          var why = e.reason && (e.reason.message || e.reason);
+          if (why && blames_the_bundle(String(why))) mend();
+        });
+        /* And the catch-all: nothing on screen and nothing started, long
+           after everything should have. A slow phone on a slow line is
+           given far more time than it needs. */
+        addEventListener("load", function () {
+          setTimeout(function () {
+            if (!started && !document.body.firstChild) mend();
+          }, 30000);
+        });
+      })();
+    </script>
+
     <style>
       /* Pre-boot backdrop: the Clean-dark background token, so the first
          paint (before the wasm mounts and injects the app stylesheet)

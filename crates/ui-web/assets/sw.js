@@ -11,8 +11,11 @@
  *    previously cached shell ("activate" deletes all other versions).
  *  - Same-origin GETs (trunk's content-hashed wasm/js bundles, icons, the
  *    manifest): cache-first with a runtime "fetch-then-cache" fill. Trunk
- *    hashes bundle filenames, so a stale entry can never mask a new build
- *    and no hardcoded precache list exists to drift out of date.
+ *    hashes bundle filenames, so no hardcoded precache list exists to drift
+ *    out of date. A cached entry can still go bad — a fetch that was cut
+ *    short is stored just the same, and the document's integrity hash then
+ *    refuses it on every load — so the shell in `index.html` watches for a
+ *    bundle that will not load and clears this cache once per visit.
  *  - Navigations: network-first (the entry document is NOT content-hashed,
  *    so the network copy must win when reachable) with the cached shell
  *    document as the offline fallback. Unknown paths also fall back to the
