@@ -542,6 +542,7 @@ impl MockClient {
             return None;
         }
         Some(crate::wire::DownloadedFile {
+            id: n.id,
             name: n.name.clone(),
             mime: n.mime.clone(),
             bytes: crate::demo_files::bytes_for(&n.name)

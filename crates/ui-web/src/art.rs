@@ -17,6 +17,22 @@
 //! assert_eq!(ops[0].fg, [0xAA, 0x00, 0x00]); // VGA red
 //! ```
 
+/// What a file has to be for the gallery to draw it: art made of CP437
+/// characters, which is what this pipeline reads. The name is what says so
+/// — `.ans` and `.asc` are what a scene pack is full of, `.nfo` and `.diz`
+/// what comes with a release — and a burrow that recorded a type may say it
+/// too. Anything else is a file, not a picture.
+pub fn looks_like_art(name: &str, mime: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let mime = mime.to_ascii_lowercase();
+    ["ans", "asc", "nfo", "diz", "ice", "cia"]
+        .iter()
+        .any(|ext| name.ends_with(&format!(".{ext}")))
+        || mime == "text/x-ansi"
+        || mime == "text/ansi"
+        || mime == "application/x-ansi"
+}
+
 use rabbithole_art::ansi::{self, Attrs, Canvas, Cell};
 use rabbithole_art::raster::PALETTE;
 use rabbithole_art::sauce::SauceRecord;
@@ -155,6 +171,33 @@ pub fn paint(element: &web_sys::HtmlCanvasElement, canvas: &Canvas) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn what_the_gallery_will_draw_is_art_and_not_everything_else() {
+        for name in [
+            "WARREN.ANS",
+            "logo.ans",
+            "pack.asc",
+            "file_id.diz",
+            "release.nfo",
+            "art.ice",
+        ] {
+            assert!(looks_like_art(name, ""), "{name} is art");
+        }
+        // A burrow that recorded a type may say so too.
+        assert!(looks_like_art("untitled", "text/x-ansi"));
+        // And the rest of a library is not.
+        for name in [
+            "a-tone.flac",
+            "notes.txt",
+            "photo.png",
+            "archive.zip",
+            "ansible.yml",
+            "",
+        ] {
+            assert!(!looks_like_art(name, "application/octet-stream"), "{name}");
+        }
+    }
+
     use super::*;
 
     #[test]

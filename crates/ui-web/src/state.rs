@@ -9,6 +9,16 @@ use rabbithole_core::api::Event;
 
 use crate::conn::ConnState;
 
+/// A picture the gallery is showing, or fetching: which node it is, what it
+/// is called, and its bytes once they arrive. `bytes` empty means the ask is
+/// still out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtOpen {
+    pub id: i64,
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
 /// One rendered line of chat scrollback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatLine {

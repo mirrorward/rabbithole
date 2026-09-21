@@ -1238,6 +1238,10 @@ pub fn frame_to_file_events(frame: &Frame) -> Vec<FileEvent> {
 /// these bytes straight to the browser as a file save.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadedFile {
+    /// The node these bytes are: what was asked for, so a caller that
+    /// wanted to *look* at something rather than keep it can tell which
+    /// answer is theirs.
+    pub id: i64,
     pub name: String,
     pub mime: String,
     pub bytes: Vec<u8>,
@@ -1251,6 +1255,7 @@ pub fn frame_to_file_content(frame: &Frame) -> Option<DownloadedFile> {
     }
     let m = frame.decode::<FileContent>()?.ok()?;
     Some(DownloadedFile {
+        id: m.node.id,
         name: m.node.name,
         mime: m.node.mime,
         bytes: m.bytes,

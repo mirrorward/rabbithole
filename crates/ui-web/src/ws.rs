@@ -92,6 +92,10 @@ pub type BoardSink = Rc<dyn Fn(Vec<crate::state::Board>)>;
 /// Receives every session on the burrow (the roster before it is collapsed
 /// to people).
 pub type SessionsSink = Rc<dyn Fn(Vec<crate::state::SessionRow>)>;
+/// The bytes of a file this session asked for. What happens to them — kept,
+/// or looked at — is the app's to decide; without a sink they are saved,
+/// which is what a download is.
+pub type FileBytesSink = Rc<dyn Fn(crate::wire::DownloadedFile)>;
 /// Receives the whole board tree (categories included), for the console.
 pub type BoardTreeSink = Rc<dyn Fn(Vec<crate::state::BoardNode>)>;
 /// A sink the transport pushes a board's thread list into.
@@ -149,6 +153,7 @@ struct Inner {
     notice_sink: Option<NoticeSink>,
     who_sink: Option<WhoSink>,
     sessions_sink: Option<SessionsSink>,
+    file_bytes_sink: Option<FileBytesSink>,
     front_page_sink: Option<FrontPageSink>,
     presence_sink: Option<PresenceSink>,
     board_sink: Option<BoardSink>,
@@ -325,6 +330,7 @@ impl WsClient {
                 notice_sink: None,
                 who_sink: None,
                 sessions_sink: None,
+                file_bytes_sink: None,
                 front_page_sink: None,
                 presence_sink: None,
                 board_sink: None,
@@ -444,6 +450,11 @@ impl WsClient {
     /// Register the sink for every session (what a moderator kicks).
     pub fn on_sessions(&mut self, sink: SessionsSink) {
         self.inner.borrow_mut().sessions_sink = Some(sink);
+    }
+
+    /// Where a downloaded file's bytes go. Without one they are saved.
+    pub fn on_file_bytes(&mut self, sink: FileBytesSink) {
+        self.inner.borrow_mut().file_bytes_sink = Some(sink);
     }
 
     /// Register the board-list sink. The most recent registration wins.
@@ -888,11 +899,16 @@ impl WsClient {
                             }
                             b.emit_admin((tag, events));
                         }
-                        // A FileContent reply only arrives in response to a user
-                        // Download; deliver its bytes to the browser as a file
-                        // save. Touches no Inner state, so it's borrow-safe here.
+                        // A FileContent reply arrives for anything this
+                        // session asked to download. Where the bytes go is
+                        // the app's to say — kept, or looked at where they
+                        // are — and a save is what happens without a sink.
+                        // Touches no Inner state, so it's borrow-safe here.
                         if let Some(dl) = wire::frame_to_file_content(&frame) {
-                            crate::save::save_bytes(&dl.name, &dl.mime, &dl.bytes);
+                            match &b.file_bytes_sink {
+                                Some(sink) => sink(dl),
+                                None => crate::save::save_bytes(&dl.name, &dl.mime, &dl.bytes),
+                            }
                         }
                         if let Some(route) = wire::frame_to_notice_route(&frame) {
                             b.emit_notice(route);

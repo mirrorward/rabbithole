@@ -5685,22 +5685,129 @@ fn ThemeEditorPreview(style: Signal<String>) -> impl IntoView {
     }
 }
 
-/// The ANSI art gallery: renders a built-in sample to a canvas.
+/// The ANSI art gallery: the burrow's own art, drawn where it is.
+///
+/// A file library is where a burrow keeps its art, so this is a view of one:
+/// pick an area, and everything in it the pipeline can draw is here to be
+/// looked at without downloading it first. A burrow with no art of its own
+/// shows the sample, so the pane is never a blank rectangle.
 #[component]
 pub fn ArtGallery() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    app.load_areas();
+    let files = move || app.focused().files.get();
+    let areas = move || files().areas;
+    let current = move || files().current_area;
+    // Everything in the open area that this pipeline can draw.
+    let pieces = move || {
+        files()
+            .nodes
+            .into_iter()
+            .filter(|n| {
+                n.kind == crate::files::KIND_FILE && crate::art::looks_like_art(&n.name, &n.mime)
+            })
+            .collect::<Vec<_>>()
+    };
+    let open = move || app.art_open.get();
     view! {
         <StatusBar/>
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <section class="rh-panel">
                 <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">"ANSI Art"</h1>
-                <p class="rh-empty">
-                    "CP437/ANSI rendered to a canvas through the shared art pipeline."
-                </p>
+                <Show
+                    when=move || !areas().is_empty()
+                    fallback=|| view! {
+                        <p class="rh-empty">
+                            "No file areas here yet. Art lives in a library, so make one \
+                             under Files and put some in it."
+                        </p>
+                    }
+                >
+                    <div class="rh-art-areas" role="tablist" aria-label="File areas">
+                        <For
+                            each=areas
+                            key=|a| a.slug.clone()
+                            children=move |a| {
+                                let slug = a.slug.clone();
+                                let mine = slug.clone();
+                                let is_open = move || current().as_deref() == Some(mine.as_str());
+                                view! {
+                                    <button
+                                        type="button"
+                                        role="tab"
+                                        class="rh-btn ghost small"
+                                        aria-selected=move || is_open().to_string()
+                                        on:click=move |_| {
+                                            app.close_art();
+                                            app.open_area(&slug);
+                                        }
+                                    >
+                                        {a.title.clone()}
+                                    </button>
+                                }
+                            }
+                        />
+                    </div>
+                </Show>
+                <Show when=move || current().is_some() fallback=|| ()>
+                    <Show
+                        when=move || !pieces().is_empty()
+                        fallback=|| view! {
+                            <p class="rh-empty">
+                                "Nothing to look at in this area. ANSI art is \
+                                 \".ans\" and \".asc\" files, and the notes that come \
+                                 with a release."
+                            </p>
+                        }
+                    >
+                        <ul class="rh-art-list">
+                            <For
+                                each=pieces
+                                key=|n| n.id
+                                children=move |n| {
+                                    let id = n.id;
+                                    let name = n.name.clone();
+                                    let shown = move || {
+                                        open().map(|o| o.id) == Some(id)
+                                    };
+                                    view! {
+                                        <li>
+                                            <button
+                                                type="button"
+                                                class="rh-btn ghost small"
+                                                aria-pressed=move || shown().to_string()
+                                                on:click=move |_| app.open_art(id, &name)
+                                            >
+                                                {n.name.clone()}
+                                            </button>
+                                        </li>
+                                    }
+                                }
+                            />
+                        </ul>
+                    </Show>
+                </Show>
                 <div class="rh-art-wrap">
-                    <ArtCanvas
-                        bytes=SAMPLE_ANSI.to_vec()
-                        label="Sample ANSI artwork: RabbitHole warren art in classic CP437 blocks"
-                    />
+                    {move || match open() {
+                        Some(piece) if !piece.bytes.is_empty() => view! {
+                            <ArtCanvas
+                                bytes=piece.bytes.clone()
+                                label=format!("{}, drawn from the library", piece.name)
+                            />
+                        }
+                        .into_view(),
+                        Some(piece) => view! {
+                            <p class="rh-empty">{format!("Fetching {}\u{2026}", piece.name)}</p>
+                        }
+                        .into_view(),
+                        None => view! {
+                            <ArtCanvas
+                                bytes=SAMPLE_ANSI.to_vec()
+                                label="Sample ANSI artwork: RabbitHole warren art in classic CP437 blocks"
+                            />
+                        }
+                        .into_view(),
+                    }}
                 </div>
             </section>
         </main>

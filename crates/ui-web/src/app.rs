@@ -137,6 +137,10 @@ pub struct AppState {
     /// The cross-burrow sightings ledger — where you know each person from,
     /// persisted. Fed by every roster that arrives ([`crate::sightings`]).
     pub sightings: RwSignal<Vec<crate::sightings::Sighting>>,
+    /// The picture being looked at: which file it is, its name, and its
+    /// bytes. A file the gallery asked for arrives here instead of being
+    /// saved; everything else a person downloads still goes to disk.
+    pub art_open: RwSignal<Option<crate::state::ArtOpen>>,
     /// Your chosen warren mark, if you've picked one instead of the mark your
     /// key derives ([`crate::avatar::ChosenMark`]). Local-only: the wire has
     /// no mark field, so this changes what *you* see.
@@ -252,6 +256,7 @@ impl AppState {
             you: create_rw_signal(None),
             identity: store_value(None),
             sightings: create_rw_signal(Vec::new()),
+            art_open: create_rw_signal(None),
             friends: create_rw_signal(Vec::new()),
             settings: create_rw_signal(crate::settings::Settings::default()),
             my_mark: create_rw_signal(None),
@@ -855,6 +860,11 @@ impl AppState {
             }));
             ws.on_sessions(std::rc::Rc::new(move |sessions| {
                 state.update(|s| s.sessions = sessions)
+            }));
+            ws.on_file_bytes(std::rc::Rc::new(move |file| {
+                if let Some(app) = current() {
+                    app.show_art(file);
+                }
             }));
             ws.on_boards(std::rc::Rc::new(move |boards| {
                 state.update(|s| s.set_boards(boards))
@@ -2081,6 +2091,58 @@ impl AppState {
     /// Show a node's metadata card.
     pub fn select_file(&self, id: i64) {
         self.focused().files.update(|f| f.selected = Some(id));
+    }
+
+    /// Open a picture in the gallery: ask for its bytes and keep them, so
+    /// they can be drawn where they are rather than saved and forgotten.
+    ///
+    /// The ask goes out the same way a download does; the answer is claimed
+    /// by [`AppState::art_open`] carrying this id, and anything else a
+    /// person downloads still goes to disk.
+    pub fn open_art(&self, id: i64, name: &str) {
+        self.art_open.set(Some(crate::state::ArtOpen {
+            id,
+            name: name.to_string(),
+            bytes: Vec::new(),
+        }));
+        #[cfg(target_arch = "wasm32")]
+        if self.focused().live.get_untracked() {
+            self.focused()
+                .ws
+                .update_value(|c| c.dispatch_file(&FileCommand::Download { id }));
+            return;
+        }
+        // The demo answers out of its own seeded bytes.
+        let file = self
+            .focused()
+            .client
+            .with_value(|client| client.download_bytes(id));
+        if let Some(file) = file {
+            self.show_art(file);
+        }
+    }
+
+    /// Bytes that came back for a picture: keep them if they are the ones
+    /// the gallery is waiting for, and otherwise save them, which is what a
+    /// download is.
+    pub fn show_art(&self, file: crate::wire::DownloadedFile) {
+        let wanted = self
+            .art_open
+            .with_untracked(|open| open.as_ref().map(|o| o.id) == Some(file.id));
+        if !wanted {
+            crate::save::save_bytes(&file.name, &file.mime, &file.bytes);
+            return;
+        }
+        self.art_open.set(Some(crate::state::ArtOpen {
+            id: file.id,
+            name: file.name,
+            bytes: file.bytes,
+        }));
+    }
+
+    /// Close the gallery's picture.
+    pub fn close_art(&self) {
+        self.art_open.set(None);
     }
 
     /// Download a file inline; the completed transfer lands in the queue.
