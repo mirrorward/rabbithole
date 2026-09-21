@@ -612,6 +612,17 @@ impl MockClient {
                 }
                 None
             }
+            RoomCommand::SetTopic { room, topic } => {
+                let slot = self.rooms.iter_mut().find(|r| &r.name == room)?;
+                slot.topic = topic.clone();
+                Some(slot.clone())
+            }
+            // The demo has one person in it, so an invitation has nobody to
+            // reach; the room is answered back unchanged, as a burrow's ack
+            // leaves it.
+            RoomCommand::Invite { room, .. } => {
+                self.rooms.iter().find(|r| &r.name == room).cloned()
+            }
         }
     }
 

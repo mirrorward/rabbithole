@@ -2159,6 +2159,26 @@ impl AppState {
         });
     }
 
+    /// Say what a room is about.
+    pub fn set_room_topic(&self, room: &str, topic: &str) {
+        self.room_command(crate::wire::RoomCommand::SetTopic {
+            room: room.to_string(),
+            topic: topic.trim().to_string(),
+        });
+    }
+
+    /// Ask somebody into a room.
+    pub fn invite_to_room(&self, room: &str, who: &str) {
+        let who = who.trim().trim_start_matches('@').to_string();
+        if who.is_empty() {
+            return;
+        }
+        self.room_command(crate::wire::RoomCommand::Invite {
+            room: room.to_string(),
+            who,
+        });
+    }
+
     /// Come out of a room, and go back to the lobby.
     pub fn leave_room(&self, name: &str) {
         self.room_command(crate::wire::RoomCommand::Leave {
@@ -2175,6 +2195,8 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         if self.focused().live.get_untracked() {
             self.focused().ws.with_value(|c| c.dispatch_room(&command));
+            // A topic and an invitation are answered with a bare ack, so
+            // the list is what says what came of them.
             self.load_rooms();
             return;
         }

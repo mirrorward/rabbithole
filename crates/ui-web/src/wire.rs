@@ -842,12 +842,36 @@ pub enum NoticeRoute {
     },
 }
 
+/// What a burrow's refusal means, for a person. The wire says a code; this
+/// says what to do about it.
+fn refusal_words(error: rabbithole_proto::ErrorCode) -> &'static str {
+    use rabbithole_proto::ErrorCode as E;
+    match error {
+        E::NotFound => "No such room or person.",
+        E::Forbidden => "That is not yours to do here.",
+        E::AlreadyExists => "There is one of those already.",
+        E::BadRequest => "That name will not do.",
+        E::RateLimited => "Too much at once; try again in a moment.",
+        _ => "The burrow said no.",
+    }
+}
+
 /// Map an inbound push [`Frame`] to its [`NoticeRoute`]: a RADIO
 /// `RadioNowPlaying` / `RadioOff` becomes a radio-reducer update; a
 /// [`ServerNotice`] becomes a chat-log notice. Frames from other families (or
 /// error replies) yield `None` — the "tolerate unknown messages" contract.
 pub fn frame_to_notice_route(frame: &Frame) -> Option<NoticeRoute> {
-    if frame.error.is_some() {
+    if let Some(error) = &frame.error {
+        // A refusal in the room family is the one kind a person is waiting
+        // on and cannot otherwise see: asking somebody in who is not here,
+        // a topic on a room that is not yours. It goes where they are
+        // looking, which is the scrollback.
+        if frame.family == rabbithole_proto::frame::Family::CHAT {
+            return Some(NoticeRoute::Chat {
+                from: "the burrow".to_string(),
+                text: refusal_words(*error).to_string(),
+            });
+        }
         return None;
     }
     if let Some(Ok(np)) = frame.decode::<RadioNowPlaying>() {
@@ -904,6 +928,11 @@ pub enum RoomCommand {
     Join { room: String },
     /// Come out.
     Leave { room: String },
+    /// Say what a room is about. The room's maker, or a chat moderator.
+    SetTopic { room: String, topic: String },
+    /// Ask somebody in. What a private room needs before anybody else can
+    /// join it; an invitation also forgives a ban.
+    Invite { room: String, who: String },
 }
 
 /// What the Wishing Well can be asked (family 10). A request board: the
@@ -1186,7 +1215,9 @@ pub fn swarm_event_to_file_events(ev: &SwarmWireEvent, size: u64) -> Vec<FileEve
 /// Map a [`FileCommand`] to the FILE-family request [`Frame`] that carries it.
 /// Encode one ask about rooms.
 pub fn room_command_to_frame(command: &RoomCommand, id: RequestId) -> Result<Frame, ProtoError> {
-    use rabbithole_proto::chat::{RoomCreate, RoomJoin, RoomLeave, RoomListRequest};
+    use rabbithole_proto::chat::{
+        RoomCreate, RoomInvite, RoomJoin, RoomLeave, RoomListRequest, RoomTopicSet,
+    };
     match command {
         RoomCommand::List => Frame::request(id, &RoomListRequest),
         RoomCommand::Create {
@@ -1200,6 +1231,12 @@ pub fn room_command_to_frame(command: &RoomCommand, id: RequestId) -> Result<Fra
         }
         RoomCommand::Join { room } => Frame::request(id, &RoomJoin::new(room.clone())),
         RoomCommand::Leave { room } => Frame::request(id, &RoomLeave::new(room.clone())),
+        RoomCommand::SetTopic { room, topic } => {
+            Frame::request(id, &RoomTopicSet::new(room.clone(), topic.clone()))
+        }
+        RoomCommand::Invite { room, who } => {
+            Frame::request(id, &RoomInvite::new(room.clone(), who.clone()))
+        }
     }
 }
 
@@ -2087,6 +2124,34 @@ impl EventClient for crate::client::MockClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_room_the_burrow_refuses_says_so_where_a_person_is_looking() {
+        use rabbithole_proto::chat::RoomInvite;
+        use rabbithole_proto::frame::RequestId;
+        let asked = Frame::request(RequestId(1), &RoomInvite::new("tea", "nobody")).unwrap();
+        let refused = |code| Frame::error_reply(&asked, code);
+        // What a person is waiting on: an invitation to somebody who is not
+        // here, a topic on a room that is not theirs.
+        match frame_to_notice_route(&refused(rabbithole_proto::ErrorCode::NotFound)) {
+            Some(NoticeRoute::Chat { from, text }) => {
+                assert_eq!(from, "the burrow");
+                assert_eq!(text, "No such room or person.");
+            }
+            other => panic!("a refusal must be said out loud: {other:?}"),
+        }
+        match frame_to_notice_route(&refused(rabbithole_proto::ErrorCode::Forbidden)) {
+            Some(NoticeRoute::Chat { text, .. }) => {
+                assert_eq!(text, "That is not yours to do here.")
+            }
+            other => panic!("{other:?}"),
+        }
+        // A refusal in another family is somebody else's to say.
+        let other_family =
+            Frame::request(RequestId(2), &rabbithole_proto::filelib::AreaListRequest).unwrap();
+        let elsewhere = Frame::error_reply(&other_family, rabbithole_proto::ErrorCode::NotFound);
+        assert!(frame_to_notice_route(&elsewhere).is_none());
+    }
 
     #[test]
     fn an_empty_password_signs_in_as_a_guest() {

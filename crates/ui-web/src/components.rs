@@ -3068,6 +3068,15 @@ pub fn Lobby() -> impl IntoView {
     let rooms = move || state.with(|s| s.rooms.clone());
     let making = create_rw_signal(false);
     let new_room = create_rw_signal(String::new());
+    let new_private = create_rw_signal(false);
+    // What this room is about, and who else might come: shown for a room
+    // somebody made, never for the lobby, which is everybody's.
+    let here = move || state.with(|s| s.rooms.iter().find(|r| r.name == s.room()).cloned());
+    let topic = move || here().map(|r| r.topic).unwrap_or_default();
+    let elsewhere = move || room() != crate::client::LOBBY;
+    let editing = create_rw_signal(false);
+    let draft_topic = create_rw_signal(String::new());
+    let inviting = create_rw_signal(String::new());
     let log = crate::scroll::ChatScroll::install(move || lines().len());
     // The view! macro wants a bare identifier for `node_ref=`.
     let log_node = log.node;
@@ -3149,17 +3158,98 @@ pub fn Lobby() -> impl IntoView {
                             prop:value=move || new_room.get()
                             on:input=move |ev| new_room.set(event_target_value(&ev))
                         />
+                        <label class="rh-check">
+                            <input
+                                type="checkbox"
+                                prop:checked=move || new_private.get()
+                                on:change=move |ev| new_private.set(event_target_checked(&ev))
+                            />
+                            <span>"Private \u{2014} only people asked in"</span>
+                        </label>
                         <button
                             type="button"
                             class="rh-btn small"
                             disabled=move || new_room.get().trim().is_empty()
                             on:click=move |_| {
-                                app.create_room(&new_room.get(), "", false);
+                                app.create_room(&new_room.get(), "", new_private.get());
                                 new_room.set(String::new());
+                                new_private.set(false);
                                 making.set(false);
                             }
                         >
                             "Make it"
+                        </button>
+                    </div>
+                </Show>
+                <Show when=elsewhere fallback=|| ()>
+                    <div class="rh-room-bar">
+                        <Show
+                            when=move || !editing.get()
+                            fallback=move || view! {
+                                <input
+                                    class="rh-input"
+                                    maxlength="200"
+                                    placeholder="What this room is about"
+                                    prop:value=move || draft_topic.get()
+                                    on:input=move |ev| draft_topic.set(event_target_value(&ev))
+                                />
+                                <button
+                                    type="button"
+                                    class="rh-btn small"
+                                    on:click=move |_| {
+                                        app.set_room_topic(&room(), &draft_topic.get());
+                                        editing.set(false);
+                                    }
+                                >
+                                    "Set it"
+                                </button>
+                                <button
+                                    type="button"
+                                    class="rh-btn ghost small"
+                                    on:click=move |_| editing.set(false)
+                                >
+                                    "Never mind"
+                                </button>
+                            }
+                        >
+                            <span class="rh-room-topic">
+                                {move || {
+                                    let t = topic();
+                                    if t.trim().is_empty() {
+                                        "No topic yet.".to_string()
+                                    } else {
+                                        t
+                                    }
+                                }}
+                            </span>
+                            <button
+                                type="button"
+                                class="rh-btn ghost small"
+                                on:click=move |_| {
+                                    draft_topic.set(topic());
+                                    editing.set(true);
+                                }
+                            >
+                                "Set the topic"
+                            </button>
+                        </Show>
+                        <input
+                            class="rh-input rh-room-invite"
+                            maxlength="32"
+                            placeholder="Ask somebody in (a handle)"
+                            prop:value=move || inviting.get()
+                            on:input=move |ev| inviting.set(event_target_value(&ev))
+                        />
+                        <button
+                            type="button"
+                            class="rh-btn ghost small"
+                            disabled=move || inviting.get().trim().is_empty()
+                            on:click=move |_| {
+                                app.invite_to_room(&room(), &inviting.get());
+                                inviting.set(String::new());
+                            }
+                        >
+                            "Invite"
                         </button>
                     </div>
                 </Show>

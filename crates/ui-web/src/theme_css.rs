@@ -1155,6 +1155,11 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 .rh-adm-peer-waiting{color:var(--rh-accent);font-weight:600}\
 .rh-adm-peer-actions,.rh-adm-backup-actions{display:flex;gap:var(--rh-space-2);align-items:center;justify-content:flex-end;flex-wrap:wrap}\
 .rh-adm-peer-actions .rh-input{width:13rem;max-width:100%;padding:.35rem .6rem;font-size:var(--rh-font-sm)}\
+.rh-room-bar{display:flex;flex-wrap:wrap;align-items:center;gap:var(--rh-space-2);padding:.4rem var(--rh-space-4);border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent);font-size:var(--rh-font-sm)}\
+.rh-room-topic{flex:1 1 12rem;min-width:0;color:var(--rh-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+.rh-room-bar .rh-input{flex:1 1 10rem;min-width:0;padding:.3rem .55rem;font-size:var(--rh-font-sm)}\
+.rh-room-invite{max-width:16rem}\
+.rh-check{display:flex;align-items:center;gap:.4rem;font-size:var(--rh-font-sm);color:var(--rh-muted)}\
 .rh-rooms{display:flex;flex-wrap:wrap;align-items:center;gap:var(--rh-space-2);padding:.45rem var(--rh-space-4);border-bottom:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
 .rh-rooms .rh-btn[aria-selected=true]{background:color-mix(in srgb,var(--rh-accent) 16%,transparent);color:var(--rh-accent)}\
 .rh-rooms .rh-badge{margin-left:.35rem}\
