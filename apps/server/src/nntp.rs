@@ -285,6 +285,14 @@ pub(crate) fn event_id_from_message_id(mid: &MessageId) -> Option<[u8; 32]> {
 }
 
 /// Every post in a board, numbered `1..=N` by `(created_at, event_id)`.
+///
+/// Posts held for review are not here. This is the one funnel every gateway
+/// reads a board through — netnews, the peer feed, QWK packets and the
+/// catalog a burrow federates — and none of them has anywhere to show a
+/// moderator held content or any way for one to act on it, so the rule is
+/// the simple one: what is held does not leave by a gateway. Numbering
+/// shifts when a post is held, exactly as it already does when retention
+/// drops one.
 pub(crate) async fn group_articles(shared: &Shared, slug: &str) -> Result<Vec<PostRow>> {
     let roots = shared
         .boards
@@ -293,12 +301,21 @@ pub(crate) async fn group_articles(shared: &Shared, slug: &str) -> Result<Vec<Po
         .map_err(anyhow::Error::msg)?;
     let mut all = Vec::new();
     for (root, _replies, _last) in roots {
+        // A held thread root takes its replies with it, as it does on the
+        // native surface: the whole thread reads as absent.
+        if shared.moderation.post_quarantined(&root.event_id) {
+            continue;
+        }
         let posts = shared
             .boards
             .thread(&root.event_id, 100_000)
             .await
             .map_err(anyhow::Error::msg)?;
-        all.extend(posts);
+        all.extend(
+            posts
+                .into_iter()
+                .filter(|p| !shared.moderation.post_quarantined(&p.event_id)),
+        );
     }
     all.sort_by(|a, b| {
         a.created_at

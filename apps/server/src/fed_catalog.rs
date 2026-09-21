@@ -220,6 +220,14 @@ async fn public_entries(shared: &Shared) -> Result<Vec<CatalogEntry>> {
             {
                 continue; // hidden or unlisted for the public subject
             }
+            // Held for review, or refused by its hash: not something to
+            // tell other burrows about. The serve path refuses to hand it
+            // over anyway, so advertising it only sends peers after a file
+            // they can never have.
+            if shared.moderation.file_quarantined(Some(&hash)) || shared.moderation.is_denied(&hash)
+            {
+                continue;
+            }
             let folder = node
                 .path
                 .strip_suffix(&node.name)

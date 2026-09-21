@@ -2376,6 +2376,11 @@ async fn get_file_name_list(
         Ok(n) => n,
         Err(e) => return err_reply(ty, id, &format!("{e}")),
     };
+    // Content held for review is hidden here as it is on every other
+    // surface; a moderator still sees it, which is how it gets looked at.
+    let sees_quarantined = shared
+        .perms
+        .allows(&active.subject, "moderation", Caps::MODERATE);
     let mut fields = Vec::new();
     for n in &nodes {
         // Hide entries the caller can't even SEE.
@@ -2384,6 +2389,9 @@ async fn get_file_name_list(
             &file_resource(area, Some(&n.path)),
             Caps::SEE,
         ) {
+            continue;
+        }
+        if !sees_quarantined && shared.moderation.file_quarantined(n.blob_id.as_ref()) {
             continue;
         }
         let (tc, size) = node_type_size(n);
@@ -2439,6 +2447,19 @@ async fn get_file_info(shared: &Arc<Shared>, active: &Active, txn: &Transaction)
         Ok(None) => return err_reply(ty, id, "no such file"),
         Err(e) => return err_reply(ty, id, &format!("{e}")),
     };
+    // Held for review, or refused by its hash: absent, to everybody who is
+    // not the moderator who will look at it.
+    if !shared
+        .perms
+        .allows(&active.subject, "moderation", Caps::MODERATE)
+        && (shared.moderation.file_quarantined(node.blob_id.as_ref())
+            || node
+                .blob_id
+                .as_ref()
+                .is_some_and(|b| shared.moderation.is_denied(b)))
+    {
+        return err_reply(ty, id, "no such file");
+    }
     let (tc, size) = node_type_size(&node);
     let type_str = if node.kind == KIND_FOLDER {
         "folder".to_string()
@@ -2525,6 +2546,13 @@ async fn download_file(shared: &Arc<Shared>, active: &Active, txn: &Transaction)
     let Some(blob_id) = target.blob_id else {
         return err_reply(ty, id, "no content");
     };
+    // Moderation, last: quarantined-for-review and hash-denied content
+    // reads as absent here exactly as it does over HTTP and telnet. Without
+    // this, "I quarantined that" was untrue for anybody on a Hotline
+    // client, which is the one thing a moderator has to be able to rely on.
+    if shared.moderation.file_quarantined(Some(&blob_id)) || shared.moderation.is_denied(&blob_id) {
+        return err_reply(ty, id, "no such file");
+    }
     let served = match shared.files.record_download(node.id).await {
         Ok(s) => s,
         Err(e) => return err_reply(ty, id, &format!("{e}")),

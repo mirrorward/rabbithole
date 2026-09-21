@@ -342,6 +342,12 @@ impl FtnGateway {
         if !post.author.ends_with(&local_suffix) {
             return Ok(None); // remote/injected content is never re-scanned
         }
+        // Held for review does not go out to the network. A packet cannot
+        // be recalled once it is tossed, so this is the one gateway where
+        // getting it wrong cannot be undone.
+        if self.shared.moderation.post_quarantined(&post.event_id) {
+            return Ok(None);
+        }
         self.scan_local_post(&post).await
     }
 

@@ -677,3 +677,93 @@ async fn hotline_oversized_vs_declared_upload_refused() {
 
     burrow.shutdown().await;
 }
+
+/// Content a moderator has held for review reads as absent to a Hotline
+/// client — in the listing, in a file's details, and on the way down —
+/// exactly as it does over HTTP and telnet. "I quarantined that" has to be
+/// true on every surface or it is not true at all.
+#[tokio::test]
+async fn held_back_content_is_absent_over_hotline() {
+    use rabbithole_proto::admin::subject_kind;
+
+    let work = tempfile::tempdir().unwrap();
+    let (burrow, mut alice, addr) = setup(work.path()).await;
+
+    // Two files: one ordinary, one that will be held.
+    for (name, data) in [("fine.bin", content(2_000)), ("held.bin", content(3_000))] {
+        let ffo = client_ffo(name, "", &data, 0);
+        let up =
+            negotiate_upload(&mut alice, name, &["warez"], Some(ffo.len() as u32), false).await;
+        assert_eq!(up.header.error, 0, "{name} upload authorized");
+        let refnum = field_int(&up, field::REF_NUM).expect("refnum");
+        htxf_send(addr, refnum, &ffo).await;
+    }
+    let held = burrow
+        .shared
+        .files
+        .node_by_path("warez", "held.bin")
+        .await
+        .unwrap()
+        .expect("the file is there");
+    let blob = held.blob_id.expect("it has content");
+
+    // Both are listed, and both come down.
+    let listed = |txn: &Transaction| {
+        txn.fields
+            .iter()
+            .filter(|f| f.id == field::FILE_NAME_WITH_INFO)
+            .count()
+    };
+    alice
+        .send(
+            transaction::GET_FILE_NAME_LIST,
+            vec![Field::new(field::FILE_PATH, encode_path(&["warez"]))],
+        )
+        .await;
+    let before = alice.read_until(transaction::GET_FILE_NAME_LIST).await;
+    assert_eq!(listed(&before), 2, "both files listed to begin with");
+    let down = negotiate_download(&mut alice, "held.bin", &["warez"], None).await;
+    assert_eq!(down.header.error, 0, "and both download");
+
+    // Hold one for review.
+    burrow
+        .shared
+        .moderation
+        .quarantine_set(subject_kind::FILE, &blob, "under review", "mo")
+        .await
+        .unwrap();
+
+    // Gone from the listing.
+    alice
+        .send(
+            transaction::GET_FILE_NAME_LIST,
+            vec![Field::new(field::FILE_PATH, encode_path(&["warez"]))],
+        )
+        .await;
+    let after = alice.read_until(transaction::GET_FILE_NAME_LIST).await;
+    assert_eq!(listed(&after), 1, "the held file is not listed");
+
+    // Gone from its details.
+    alice
+        .send(
+            transaction::GET_FILE_INFO,
+            vec![
+                Field::text(field::FILE_NAME, "held.bin"),
+                Field::new(field::FILE_PATH, encode_path(&["warez"])),
+            ],
+        )
+        .await;
+    let info = alice.read_until(transaction::GET_FILE_INFO).await;
+    assert_ne!(info.header.error, 0, "no details for a held file");
+
+    // And refused on the way down, as absent rather than forbidden: a
+    // refusal that names it would tell the asker what is being held.
+    let refused = negotiate_download(&mut alice, "held.bin", &["warez"], None).await;
+    assert_ne!(refused.header.error, 0, "the held file does not come down");
+
+    // The other one is untouched.
+    let fine = negotiate_download(&mut alice, "fine.bin", &["warez"], None).await;
+    assert_eq!(fine.header.error, 0, "everything else still works");
+
+    burrow.shutdown().await;
+}

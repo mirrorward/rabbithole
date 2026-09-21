@@ -333,3 +333,70 @@ async fn local_catalog_generation_is_content_driven_and_survives_restart() {
 
     a2.shutdown().await;
 }
+
+/// A file a moderator has held for review, or refused by its hash, is not
+/// advertised to other burrows. The serve path already refuses to hand one
+/// over; telling peers about it only sends them after something they can
+/// never have, and says out loud what this burrow is holding back.
+#[tokio::test]
+async fn held_back_content_is_not_advertised_to_other_burrows() {
+    use rabbithole_proto::admin::subject_kind;
+
+    let work = tempfile::tempdir().unwrap();
+    let a = Burrow::start(fed_config(&work.path().join("a")))
+        .await
+        .unwrap();
+    a.shared
+        .files
+        .create_area("pub", "Public", "")
+        .await
+        .unwrap();
+    add_file(&a, "pub", None, "fine.zip", 1, 11).await;
+    add_file(&a, "pub", None, "held.zip", 2, 22).await;
+    add_file(&a, "pub", None, "refused.zip", 3, 33).await;
+
+    let named = |c: &rabbithole_federation::SignedCatalog| {
+        let mut names: Vec<String> = c.catalog.entries.iter().map(|e| e.name.clone()).collect();
+        names.sort();
+        names
+    };
+
+    let all = burrow::fed_catalog::local_catalog(&a.shared).await.unwrap();
+    assert_eq!(
+        named(&all),
+        vec!["fine.zip", "held.zip", "refused.zip"],
+        "everything public, to begin with"
+    );
+
+    // One held for review, one refused by hash.
+    a.shared
+        .moderation
+        .quarantine_set(subject_kind::FILE, &[2u8; 32], "under review", "mo")
+        .await
+        .unwrap();
+    a.shared
+        .moderation
+        .deny_add(&[3u8; 32], "malware", "mo")
+        .await
+        .unwrap();
+
+    let after = burrow::fed_catalog::local_catalog(&a.shared).await.unwrap();
+    assert_eq!(
+        named(&after),
+        vec!["fine.zip"],
+        "neither the held file nor the refused one is offered"
+    );
+    // And the change is a change: peers are told a new generation.
+    assert!(after.catalog.generation > all.catalog.generation);
+
+    // Letting it through again puts it back.
+    a.shared
+        .moderation
+        .quarantine_clear(subject_kind::FILE, &[2u8; 32], "mo")
+        .await
+        .unwrap();
+    let back = burrow::fed_catalog::local_catalog(&a.shared).await.unwrap();
+    assert_eq!(named(&back), vec!["fine.zip", "held.zip"]);
+
+    a.shutdown().await;
+}

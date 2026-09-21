@@ -479,3 +479,85 @@ async fn telnet_qwk_mints_links_and_refuses_politely() {
     c.expect(b"Goodbye").await;
     burrow.shutdown().await;
 }
+
+/// A post a moderator has held for review does not leave by a gateway.
+/// QWK, netnews, the peer feed and the catalog a burrow federates all read
+/// a board through one funnel, and none of them has anywhere to show a
+/// moderator held content or any way to act on it — so what is held stays
+/// here. A packet, once tossed, cannot be recalled.
+#[tokio::test]
+async fn a_held_post_is_not_packed_into_a_packet() {
+    use rabbithole_proto::admin::subject_kind;
+
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("alice", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    seed_boards(&burrow).await;
+    seed_post(&burrow, "alpha", "Fine", "ordinary", 1000).await;
+    seed_post(&burrow, "alpha", "Held", "under review", 2000).await;
+
+    // Which one is which, by subject.
+    let roots = burrow.shared.boards.threads("alpha", 10).await.unwrap();
+    let held = roots
+        .iter()
+        .map(|(root, _, _)| root)
+        .find(|r| r.subject == "Held")
+        .expect("the post is there");
+    let held_id = held.event_id;
+
+    let build = |login: &'static str| {
+        let shared = burrow.shared.clone();
+        async move { burrow::ctl::handle(&shared, &json!({"cmd": "qwk-build", "login": login})).await }
+    };
+
+    // Both are packed to begin with.
+    let first = build("alice").await;
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(first["data"]["total_messages"], 2, "{first}");
+
+    // Hold one, and rebuild from scratch for a second reader, so the
+    // pointers of the first are not what is being measured.
+    burrow
+        .shared
+        .auth
+        .create_account("bob", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .moderation
+        .quarantine_set(subject_kind::POST, &held_id, "under review", "mo")
+        .await
+        .unwrap();
+    let second = build("bob").await;
+    assert_eq!(second["ok"], true, "{second}");
+    assert_eq!(
+        second["data"]["total_messages"], 1,
+        "the held post is not in the packet: {second}"
+    );
+
+    // And letting it through again puts it back for the next reader.
+    burrow
+        .shared
+        .moderation
+        .quarantine_clear(subject_kind::POST, &held_id, "mo")
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("carol", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    let third = build("carol").await;
+    assert_eq!(third["data"]["total_messages"], 2, "{third}");
+
+    burrow.shutdown().await;
+}
