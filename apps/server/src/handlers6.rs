@@ -276,6 +276,16 @@ pub async fn handle(
             .await
         {
             Ok(event_id) => {
+                // Somebody taking their own post down is their business;
+                // a moderator taking somebody else's down is the record's.
+                if !is_author {
+                    audit(
+                        shared,
+                        &ctx.login,
+                        "post-delete",
+                        format!("{} in {}", existing.subject, existing.board_slug),
+                    );
+                }
                 shared.bus.publish(ServerEvent::BoardEvent {
                     board: existing.board_slug.clone(),
                     id: event_id,
@@ -322,6 +332,7 @@ pub async fn handle(
             .await
         {
             Ok(r) => {
+                audit(shared, &ctx.login, "board-create", r.slug.clone());
                 let mut info = pb::BoardInfo::new(r.slug, r.title, r.kind);
                 info.description = r.description;
                 info.parent_slug = r.parent_slug;

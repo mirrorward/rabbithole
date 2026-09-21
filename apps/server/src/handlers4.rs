@@ -176,6 +176,12 @@ pub async fn handle(
             req.ban,
         ) {
             Ok(_kicked) => {
+                audit(
+                    shared,
+                    &ctx.login,
+                    if req.ban { "room-ban" } else { "room-kick" },
+                    format!("{} from {}", req.screen_name, req.room),
+                );
                 shared.bus.publish(ServerEvent::RoomKicked {
                     account: target_account,
                     room: req.room.clone(),

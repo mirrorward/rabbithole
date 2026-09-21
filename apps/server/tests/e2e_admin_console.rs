@@ -298,3 +298,113 @@ async fn a_gateway_saved_as_on_is_on_after_the_restart() {
     assert_ne!(addr.port(), 0);
     again.shutdown().await;
 }
+
+/// The audit log says it holds every change an operator or moderator made.
+/// It used to miss a good half of them: a board made, a file area made or
+/// taken away, a folder, a hash refused, a report acted on, a moderator
+/// removing somebody else's post. Each of those is a thing an operator
+/// would want to find afterwards, and none of them was written down.
+#[tokio::test]
+async fn every_operator_change_is_on_the_record() {
+    use rabbithole_proto::admin::{
+        report_state, AuditList, AuditListRequest, DenyHashAdd, DenyHashRemove, ReportCreate,
+        ReportList, ReportListRequest, ReportResolve,
+    };
+    use rabbithole_proto::board::{BoardCreate, PostCreate, PostDelete};
+    use rabbithole_proto::filelib::{AreaCreate, AreaDelete, AreaUpdate, FolderCreate};
+
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(dir.path()).await;
+    let mut root = login(&burrow, "root").await;
+
+    // A board, a post on it by somebody else, and the moderator taking it
+    // down: only the last is anybody's business but the author's.
+    root.board_create(&BoardCreate::new("talk", "Talk", 2))
+        .await
+        .unwrap();
+    let mut alice = login(&burrow, "alice").await;
+    let post = alice
+        .post(&PostCreate::new("talk", "Hello", "is it me"))
+        .await
+        .unwrap();
+    root.request_ack(&PostDelete::new(post.id)).await.unwrap();
+
+    // A file area, renamed, given a folder, then taken away.
+    root.request_ack(&AreaCreate::new("shelf", "The Shelf"))
+        .await
+        .unwrap();
+    root.request_ack(&AreaUpdate::new("shelf", "The Long Shelf", ""))
+        .await
+        .unwrap();
+    root.request_ack(&FolderCreate::new("shelf", None, "papers"))
+        .await
+        .unwrap();
+
+    // A hash refused and allowed again.
+    root.request_ack(&DenyHashAdd::new([7u8; 32], "malware"))
+        .await
+        .unwrap();
+    root.request_ack(&DenyHashRemove::new([7u8; 32]))
+        .await
+        .unwrap();
+
+    // A report, acted on.
+    alice
+        .request_ack(&ReportCreate::new(0, post.id.to_vec(), "rude"))
+        .await
+        .unwrap();
+    let open: ReportList = root
+        .request(&ReportListRequest::new(Some(report_state::OPEN), 0, 10))
+        .await
+        .unwrap();
+    let report = open.reports.first().expect("the report is queued");
+    root.request_ack(&ReportResolve::new(
+        report.id,
+        report_state::RESOLVED,
+        "dealt with",
+    ))
+    .await
+    .unwrap();
+
+    // An empty one, made and taken away again.
+    root.request_ack(&AreaCreate::new("attic", "The Attic"))
+        .await
+        .unwrap();
+    root.request_ack(&AreaDelete::new("attic")).await.unwrap();
+
+    // The audit log is written from a task of its own, so give it a moment.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let log: AuditList = root.request(&AuditListRequest::new(100)).await.unwrap();
+    let actions: Vec<&str> = log.entries.iter().map(|e| e.action.as_str()).collect();
+    for want in [
+        "board-create",
+        "post-delete",
+        "area-create",
+        "area-update",
+        "area-delete",
+        "folder-create",
+        "deny-add",
+        "deny-remove",
+        "report-resolve",
+    ] {
+        assert!(
+            actions.contains(&want),
+            "{want} is not on the record: {actions:?}"
+        );
+    }
+    // And the one thing that is not an operator's doing is not in it:
+    // alice taking down her own post would have been her own business.
+    let removal = log
+        .entries
+        .iter()
+        .find(|e| e.action == "post-delete")
+        .unwrap();
+    assert_eq!(removal.actor, "root");
+    assert!(
+        removal.detail.contains("Hello") && removal.detail.contains("talk"),
+        "{:?}",
+        removal.detail
+    );
+
+    burrow.shutdown().await;
+}

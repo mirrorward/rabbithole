@@ -16,6 +16,7 @@ use rabbithole_server_core::files::KIND_FILE;
 use rabbithole_server_core::{Caps, FileError, ServerEvent};
 use rabbithole_store_server::repo6::FileNodeRow;
 
+use crate::handlers15::audit;
 use crate::session::SessionCtx;
 use crate::Shared;
 
@@ -171,6 +172,7 @@ pub async fn handle(
                 .create_area(&req.slug, &req.title, &req.description)
                 .await
         );
+        audit(shared, &ctx.login, "area-create", area.slug.clone());
         reply!(&pf::AreaReply::new(pf::FileAreaView::new(
             area.slug,
             area.title,
@@ -190,6 +192,7 @@ pub async fn handle(
                 .update_area(&req.slug, &req.title, &req.description)
                 .await
         );
+        audit(shared, &ctx.login, "area-update", req.slug.clone());
         conn.send(Frame::ack(frame)).await?;
         return Ok(true);
     }
@@ -199,6 +202,7 @@ pub async fn handle(
             fail!(ErrorCode::Forbidden);
         }
         try_file!(shared.files.delete_area(&req.slug).await);
+        audit(shared, &ctx.login, "area-delete", req.slug.clone());
         conn.send(Frame::ack(frame)).await?;
         return Ok(true);
     }
@@ -217,6 +221,16 @@ pub async fn handle(
                 .files
                 .mkdir(&req.area, req.parent.as_deref(), &req.name, req.is_dropbox)
                 .await
+        );
+        audit(
+            shared,
+            &ctx.login,
+            if req.is_dropbox {
+                "dropbox-create"
+            } else {
+                "folder-create"
+            },
+            format!("{} in {}", node.name, req.area),
         );
         reply!(&pf::NodeReply::new(view(&node)));
         return Ok(true);
@@ -341,6 +355,16 @@ pub async fn handle(
             fail!(ErrorCode::Forbidden);
         }
         try_file!(shared.files.delete(node.id).await);
+        // Somebody clearing out their own upload is their business; a
+        // manager removing somebody else's is the record's.
+        if !is_owner {
+            audit(
+                shared,
+                &ctx.login,
+                "node-delete",
+                format!("{} in {}", node.name, node.area),
+            );
+        }
         conn.send(Frame::ack(frame)).await?;
         return Ok(true);
     }
@@ -388,7 +412,16 @@ pub async fn handle(
         if !is_owner && !ctx.allows(shared, &resource(&node.area, None), Caps::FILE_MANAGE) {
             fail!(ErrorCode::Forbidden);
         }
+        let was = node.name.clone();
         let node = try_file!(shared.files.rename(node.id, &req.name).await);
+        if !is_owner {
+            audit(
+                shared,
+                &ctx.login,
+                "node-rename",
+                format!("{was} to {} in {}", node.name, node.area),
+            );
+        }
         reply!(&pf::NodeReply::new(view(&node)));
         return Ok(true);
     }
@@ -404,6 +437,12 @@ pub async fn handle(
         {
             fail!(ErrorCode::Forbidden);
         }
+        audit(
+            shared,
+            &ctx.login,
+            "node-move",
+            format!("{} in {}", node.name, node.area),
+        );
         let node = try_file!(shared.files.move_to(node.id, dest).await);
         reply!(&pf::NodeReply::new(view(&node)));
         return Ok(true);
@@ -473,6 +512,12 @@ pub async fn handle(
                     &req.target_path
                 )
                 .await
+        );
+        audit(
+            shared,
+            &ctx.login,
+            "alias-create",
+            format!("{} to {} in {}", node.name, req.target_path, req.area),
         );
         reply!(&pf::NodeReply::new(view(&node)));
         return Ok(true);

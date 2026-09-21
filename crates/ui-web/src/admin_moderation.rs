@@ -103,6 +103,11 @@ pub fn short_hash(hash: &[u8; 32]) -> String {
 }
 
 /// One line of the audit log, as a person reads it.
+///
+/// Every action a burrow records has words here. The names come from the
+/// `audit(...)` calls in `apps/server/src` — `rg -o 'audit\(.*?"([a-z-]+)"'`
+/// lists them — and a burrow newer than this console may know one this does
+/// not, so an unknown action still says what it was rather than nothing.
 pub fn audit_line(entry: &AuditEntry) -> String {
     let what = match entry.action.as_str() {
         "config-set" => format!("changed a setting: {}", entry.detail),
@@ -114,7 +119,7 @@ pub fn audit_line(entry: &AuditEntry) -> String {
         "invite-create" => format!("made the invitation {}", entry.detail),
         "invite-revoke" => format!("withdrew the invitation {}", entry.detail),
         "kick" => format!("kicked {}", entry.detail),
-        "broadcast" => format!("broadcast: {}", entry.detail),
+        "broadcast" => format!("sent a notice to everyone: {}", entry.detail),
         "theme-set" => format!("published the theme {}", entry.detail),
         "theme-clear" => "cleared the theme".to_string(),
         "board-update" => format!("changed the board {}", entry.detail),
@@ -132,6 +137,37 @@ pub fn audit_line(entry: &AuditEntry) -> String {
         "origin-pin" => format!("pinned the origin {}", entry.detail),
         "backup" => format!("made a snapshot: {}", entry.detail),
         "backup-delete" => format!("removed the snapshot {}", entry.detail),
+        "backup-verify" => format!("checked the snapshot {}", entry.detail),
+        "quarantine-set" => format!("held back a {}", entry.detail),
+        "quarantine-clear" => format!("let a {} through again", entry.detail),
+        "folder-create" => format!("made the folder {}", entry.detail),
+        "dropbox-create" => format!("made the drop box {}", entry.detail),
+        "alias-create" => format!("made the shortcut {}", entry.detail),
+        "node-delete" => format!("removed somebody's file: {}", entry.detail),
+        "node-rename" => format!("renamed somebody's file: {}", entry.detail),
+        "node-move" => format!("moved a file: {}", entry.detail),
+        "room-kick" => format!("kicked {}", entry.detail),
+        "room-ban" => format!("banned {}", entry.detail),
+        "room-mute" => format!("muted somebody: {}", entry.detail),
+        "room-unmute" => format!("unmuted somebody: {}", entry.detail),
+        "room-slow-mode" => format!("set slow mode: {}", entry.detail),
+        "account-delete" => format!("removed the account {}", entry.detail),
+        "account-get" => format!("looked up the account {}", entry.detail),
+        "board-post" => format!("posted to a board: {}", entry.detail),
+        "file-area-create" => format!("made the file area {}", entry.detail),
+        "persona-set" => format!("set a persona: {}", entry.detail),
+        "key-enroll" => format!("added a sign-in key {}", entry.detail),
+        "totp-enroll" => "turned two-factor on".to_string(),
+        "totp-disable" => "turned two-factor off".to_string(),
+        "theme-set-refused" => format!("could not publish a theme: {}", entry.detail),
+        "door-run" => format!("ran the door {}", entry.detail),
+        "door-denied" => format!("was refused the door {}", entry.detail),
+        "qwk-build" => format!("built a QWK packet: {}", entry.detail),
+        "qwk-ingest" => format!("took in a QWK reply packet: {}", entry.detail),
+        "zmodem-send" => format!("sent a file over ZMODEM: {}", entry.detail),
+        "zmodem-recv" => format!("took a file over ZMODEM: {}", entry.detail),
+        "pull-grant" => format!("granted a pull: {}", entry.detail),
+        "pull-accept" => format!("took a pull: {}", entry.detail),
         other => format!("{other}: {}", entry.detail),
     };
     format!("{} {}", entry.actor, what.trim_end_matches(": "))
@@ -244,10 +280,80 @@ mod tests {
             "ada kicked session 12"
         );
         assert_eq!(audit_line(&e("theme-clear", "")), "ada cleared the theme");
+        // A burrow newer than the console still says something.
         assert_eq!(
             audit_line(&e("something-new", "x=1")),
             "ada something-new: x=1"
         );
+        // And everything a burrow records today reads as a sentence, not
+        // as its own name. The list is the `audit(...)` calls in
+        // apps/server/src; a new one there belongs here too.
+        for action in [
+            "account-create",
+            "account-delete",
+            "account-get",
+            "account-password-set",
+            "account-set",
+            "account-totp-reset",
+            "alias-create",
+            "area-create",
+            "area-delete",
+            "area-update",
+            "backup",
+            "backup-delete",
+            "board-create",
+            "board-delete",
+            "board-post",
+            "board-update",
+            "broadcast",
+            "class-set",
+            "config-set",
+            "deny-add",
+            "deny-remove",
+            "door-denied",
+            "door-run",
+            "dropbox-create",
+            "file-area-create",
+            "folder-create",
+            "invite-create",
+            "invite-revoke",
+            "key-enroll",
+            "kick",
+            "node-delete",
+            "node-move",
+            "node-rename",
+            "origin-pin",
+            "peer-approve",
+            "peer-revoke",
+            "persona-set",
+            "post-delete",
+            "pull-accept",
+            "pull-grant",
+            "quarantine-clear",
+            "quarantine-set",
+            "qwk-build",
+            "qwk-ingest",
+            "report-resolve",
+            "room-ban",
+            "room-kick",
+            "room-mute",
+            "room-slow-mode",
+            "room-unmute",
+            "theme-clear",
+            "theme-set",
+            "theme-set-refused",
+            "totp-disable",
+            "totp-enroll",
+            "zmodem-recv",
+            "zmodem-send",
+        ] {
+            let line = audit_line(&e(action, "whatever"));
+            assert_ne!(
+                line,
+                format!("ada {action}: whatever"),
+                "{action} has no words of its own"
+            );
+        }
         let denied = DenyHashEntry::new([1; 32], "", "mo", 0);
         assert_eq!(deny_line(&denied), "denied by mo");
         let denied = DenyHashEntry::new([1; 32], "malware", "mo", 0);
