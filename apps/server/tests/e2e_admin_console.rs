@@ -307,8 +307,8 @@ async fn a_gateway_saved_as_on_is_on_after_the_restart() {
 #[tokio::test]
 async fn every_operator_change_is_on_the_record() {
     use rabbithole_proto::admin::{
-        report_state, AuditList, AuditListRequest, DenyHashAdd, DenyHashRemove, ReportCreate,
-        ReportList, ReportListRequest, ReportResolve,
+        report_action, report_state, AuditList, AuditListRequest, DenyHashAdd, DenyHashRemove,
+        ReportCreate, ReportList, ReportListRequest, ReportResolve,
     };
     use rabbithole_proto::board::{BoardCreate, PostCreate, PostDelete};
     use rabbithole_proto::filelib::{AreaCreate, AreaDelete, AreaUpdate, FolderCreate};
@@ -360,7 +360,7 @@ async fn every_operator_change_is_on_the_record() {
     let report = open.reports.first().expect("the report is queued");
     root.request_ack(&ReportResolve::new(
         report.id,
-        report_state::RESOLVED,
+        report_action::RESOLVE,
         "dealt with",
     ))
     .await
@@ -383,8 +383,8 @@ async fn every_operator_change_is_on_the_record() {
         "area-update",
         "area-delete",
         "folder-create",
-        "deny-add",
-        "deny-remove",
+        "deny-hash-add",
+        "deny-hash-remove",
         "report-resolve",
     ] {
         assert!(

@@ -102,6 +102,35 @@ pub fn short_hash(hash: &[u8; 32]) -> String {
     format!("{}\u{2026}{}", &hex[..8], &hex[56..])
 }
 
+/// A detail with a long id in it, shortened the way the rest of the
+/// console shortens one. A 64-character hash is a wall in a sentence, and
+/// the first and last few are what a person matches against anyway. Runs
+/// shorter than a hash are left alone, wherever they sit in the line.
+fn short_detail(detail: &str) -> String {
+    fn flush(out: &mut String, run: &mut String) {
+        if run.len() >= 32 {
+            out.push_str(&run[..8]);
+            out.push('\u{2026}');
+            out.push_str(&run[run.len() - 8..]);
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    }
+    let mut out = String::with_capacity(detail.len());
+    let mut run = String::new();
+    for c in detail.chars() {
+        if c.is_ascii_hexdigit() {
+            run.push(c);
+        } else {
+            flush(&mut out, &mut run);
+            out.push(c);
+        }
+    }
+    flush(&mut out, &mut run);
+    out
+}
+
 /// One line of the audit log, as a person reads it.
 ///
 /// Every action a burrow records has words here. The names come from the
@@ -129,17 +158,23 @@ pub fn audit_line(entry: &AuditEntry) -> String {
         "area-create" => format!("made the file area {}", entry.detail),
         "area-update" => format!("changed the file area {}", entry.detail),
         "area-delete" => format!("removed the file area {}", entry.detail),
-        "report-resolve" => format!("acted on a report: {}", entry.detail),
-        "deny-add" => format!("refused a file: {}", entry.detail),
-        "deny-remove" => format!("allowed a file again: {}", entry.detail),
+        "report-create" => format!("reported something: {}", short_detail(&entry.detail)),
+        "report-claim" => format!("took on a report: {}", entry.detail),
+        "report-resolve" => format!("resolved a report: {}", entry.detail),
+        "report-dismiss" => format!("dismissed a report: {}", entry.detail),
+        "deny-hash-add" => format!("refused a file: {}", short_detail(&entry.detail)),
+        "deny-hash-remove" => format!("allowed a file again: {}", short_detail(&entry.detail)),
         "peer-approve" => format!("approved the peer {}", entry.detail),
         "peer-revoke" => format!("revoked the peer {}", entry.detail),
         "origin-pin" => format!("pinned the origin {}", entry.detail),
         "backup" => format!("made a snapshot: {}", entry.detail),
         "backup-delete" => format!("removed the snapshot {}", entry.detail),
         "backup-verify" => format!("checked the snapshot {}", entry.detail),
-        "quarantine-set" => format!("held back a {}", entry.detail),
-        "quarantine-clear" => format!("let a {} through again", entry.detail),
+        "quarantine-set" => format!("held something back: {}", short_detail(&entry.detail)),
+        "quarantine-clear" => format!(
+            "let something through again: {}",
+            short_detail(&entry.detail)
+        ),
         "folder-create" => format!("made the folder {}", entry.detail),
         "dropbox-create" => format!("made the drop box {}", entry.detail),
         "alias-create" => format!("made the shortcut {}", entry.detail),
@@ -308,8 +343,8 @@ mod tests {
             "broadcast",
             "class-set",
             "config-set",
-            "deny-add",
-            "deny-remove",
+            "deny-hash-add",
+            "deny-hash-remove",
             "door-denied",
             "door-run",
             "dropbox-create",
@@ -333,6 +368,9 @@ mod tests {
             "quarantine-set",
             "qwk-build",
             "qwk-ingest",
+            "report-claim",
+            "report-create",
+            "report-dismiss",
             "report-resolve",
             "room-ban",
             "room-kick",
@@ -354,6 +392,19 @@ mod tests {
                 "{action} has no words of its own"
             );
         }
+        // A long id in a detail is shortened the way the rest of the
+        // console shortens one, and the words around it are left alone.
+        assert_eq!(
+            audit_line(&e("deny-hash-add", &"ab".repeat(32))),
+            "ada refused a file: abababab\u{2026}abababab"
+        );
+        assert_eq!(
+            audit_line(&e(
+                "quarantine-set",
+                &format!("kind=2 ref={}", "cd".repeat(32))
+            )),
+            "ada held something back: kind=2 ref=cdcdcdcd\u{2026}cdcdcdcd"
+        );
         let denied = DenyHashEntry::new([1; 32], "", "mo", 0);
         assert_eq!(deny_line(&denied), "denied by mo");
         let denied = DenyHashEntry::new([1; 32], "malware", "mo", 0);

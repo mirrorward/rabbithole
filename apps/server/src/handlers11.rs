@@ -15,38 +15,8 @@ use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::{Caps, ServerEvent};
 use rabbithole_store_server::repo7::ReportRow;
 
-use crate::handlers15::audit;
 use crate::session::SessionCtx;
 use crate::Shared;
-
-/// A report's or a quarantine's subject, short enough to read in a log
-/// line: what kind of thing it is, and enough of its reference to find it.
-fn subject(kind: u8, reference: &[u8]) -> String {
-    let what = match kind {
-        padm::subject_kind::POST => "post",
-        padm::subject_kind::DM => "message",
-        padm::subject_kind::FILE => "file",
-        padm::subject_kind::USER => "account",
-        _ => "something",
-    };
-    let hex = hex::encode(reference);
-    let short = if hex.len() > 16 {
-        format!("{}\u{2026}{}", &hex[..8], &hex[hex.len() - 8..])
-    } else {
-        hex
-    };
-    format!("{what} {short}")
-}
-
-/// What a moderator did with a report, for the record.
-fn report_action(action: u8) -> &'static str {
-    match action {
-        padm::report_state::RESOLVED => "resolved",
-        padm::report_state::DISMISSED => "dismissed",
-        padm::report_state::OPEN => "reopened",
-        _ => "looked at",
-    }
-}
 
 /// The ACL resource moderation ops are checked against (so operators can
 /// grant or revoke the suite independently of `admin`).
@@ -160,15 +130,7 @@ pub async fn handle(
             .work_report(req.id, req.action, &ctx.login, &req.note)
             .await
         {
-            Ok(_) => {
-                audit(
-                    shared,
-                    &ctx.login,
-                    "report-resolve",
-                    format!("#{} {}", req.id, report_action(req.action)),
-                );
-                conn.send(Frame::ack(frame)).await?
-            }
+            Ok(_) => conn.send(Frame::ack(frame)).await?,
             Err(e) => fail!(map_err(e)),
         }
         return Ok(true);
@@ -182,19 +144,7 @@ pub async fn handle(
             .quarantine_set(req.subject_kind, &req.subject_ref, &req.reason, &ctx.login)
             .await
         {
-            Ok(()) => {
-                audit(
-                    shared,
-                    &ctx.login,
-                    "quarantine-set",
-                    format!(
-                        "{} ({})",
-                        subject(req.subject_kind, &req.subject_ref),
-                        req.reason
-                    ),
-                );
-                conn.send(Frame::ack(frame)).await?
-            }
+            Ok(()) => conn.send(Frame::ack(frame)).await?,
             Err(e) => fail!(map_err(e)),
         }
         return Ok(true);
@@ -207,15 +157,7 @@ pub async fn handle(
             .quarantine_clear(req.subject_kind, &req.subject_ref, &ctx.login)
             .await
         {
-            Ok(true) => {
-                audit(
-                    shared,
-                    &ctx.login,
-                    "quarantine-clear",
-                    subject(req.subject_kind, &req.subject_ref),
-                );
-                conn.send(Frame::ack(frame)).await?
-            }
+            Ok(true) => conn.send(Frame::ack(frame)).await?,
             Ok(false) => fail!(ErrorCode::NotFound),
             Err(e) => fail!(map_err(e)),
         }
@@ -230,15 +172,7 @@ pub async fn handle(
             .deny_add(&req.hash, &req.reason, &ctx.login)
             .await
         {
-            Ok(()) => {
-                audit(
-                    shared,
-                    &ctx.login,
-                    "deny-add",
-                    format!("{} ({})", hex::encode(req.hash), req.reason),
-                );
-                conn.send(Frame::ack(frame)).await?
-            }
+            Ok(()) => conn.send(Frame::ack(frame)).await?,
             Err(e) => fail!(map_err(e)),
         }
         return Ok(true);
@@ -247,10 +181,7 @@ pub async fn handle(
     if let Some(Ok(req)) = frame.decode::<padm::DenyHashRemove>() {
         moderators_only!();
         match shared.moderation.deny_remove(&req.hash, &ctx.login).await {
-            Ok(true) => {
-                audit(shared, &ctx.login, "deny-remove", hex::encode(req.hash));
-                conn.send(Frame::ack(frame)).await?
-            }
+            Ok(true) => conn.send(Frame::ack(frame)).await?,
             Ok(false) => fail!(ErrorCode::NotFound),
             Err(e) => fail!(map_err(e)),
         }

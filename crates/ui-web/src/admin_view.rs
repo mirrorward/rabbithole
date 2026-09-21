@@ -180,6 +180,11 @@ fn SectionNav(current: Memo<&'static str>) -> impl IntoView {
 #[component]
 fn SectionPane(section: &'static Section) -> impl IntoView {
     let app = expect_context::<AppState>();
+    // The line below says what just happened *here*. Whatever happened in
+    // another pane before this one was opened is not news: without this it
+    // greets an operator with the last thing they did somewhere else,
+    // minutes ago and with nothing around it to say what it meant.
+    app.admin.update(|a| a.status.clear());
     let status = move || app.admin.with(|a| a.status.clone());
     let body = match section.pane {
         Pane::Settings => view! { <SettingsGroups section=section/> }.into_view(),
