@@ -60,6 +60,13 @@ pub fn section_icon(path: &str) -> String {
             "<path d=\"M7 7.5h.01M7 16.5h.01\"/>"
         ),
         // A framed picture with a sun and a hill.
+        // A well: the roof over it, and the bucket on its rope. What a
+        // burrow's people drop their asks into.
+        "/wishing-well" => concat!(
+            "<path d=\"M4 10.5 12 4l8 6.5\"/>",
+            "<rect x=\"6\" y=\"10.5\" width=\"12\" height=\"9\" rx=\"1.5\"/>",
+            "<path d=\"M12 10.5v4.5M9.5 15h5\"/>"
+        ),
         "/art" => concat!(
             "<rect x=\"3.5\" y=\"4.5\" width=\"17\" height=\"15\" rx=\"2\"/>",
             "<circle cx=\"8.6\" cy=\"9.4\" r=\"1.5\"/>",
@@ -314,7 +321,7 @@ mod tests {
     use super::*;
 
     /// Every section the nav can link to.
-    const PATHS: [&str; 13] = [
+    const PATHS: [&str; 14] = [
         "/lobby",
         "/boards",
         "/dms",
@@ -323,6 +330,7 @@ mod tests {
         "/radio",
         "/servers",
         "/art",
+        "/wishing-well",
         "/admin",
         "/people",
         "/transfers",
@@ -424,7 +432,7 @@ mod tests {
     #[test]
     fn an_unknown_route_still_draws_something() {
         // A new route added without an icon should look plain, not broken.
-        let svg = section_icon("/wishing-well");
+        let svg = section_icon("/nothing-like-this");
         assert!(svg.starts_with("<svg") && svg.contains("circle"));
     }
 }

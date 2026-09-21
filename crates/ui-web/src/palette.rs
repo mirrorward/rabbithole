@@ -78,6 +78,12 @@ pub const BURROW_SECTIONS: &[Section] = &[
         hint: "gallery",
         aliases: &["gallery", "ansi", "images"],
     },
+    Section {
+        label: "Wishes",
+        route: "/wishing-well",
+        hint: "requests",
+        aliases: &["wish", "wishing well", "requests", "wanted", "asks"],
+    },
 ];
 
 /// The warren's own sections — everything that spans burrows rather than

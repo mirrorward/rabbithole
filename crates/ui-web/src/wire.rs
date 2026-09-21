@@ -886,6 +886,41 @@ pub fn frame_to_notice_route(frame: &Frame) -> Option<NoticeRoute> {
 // variants, these fold into the shared enums with no shape change.
 // ---------------------------------------------------------------------------
 
+/// What the Wishing Well can be asked (family 10). A request board: the
+/// things people want this burrow to have, what each one is for, and who
+/// has taken one on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WishCommand {
+    /// Every wish, or only those in one state. → [`WishList`].
+    List {
+        /// A `wish_status`, or `None` for all of them.
+        status: Option<u8>,
+        /// How many at most.
+        limit: u32,
+    },
+    /// Make a wish. → [`WishReply`].
+    Make {
+        /// A `wish_kind`: a file, a board, a feature, something else.
+        kind: u8,
+        title: String,
+        details: String,
+    },
+    /// Add or take back your vote. → [`WishReply`].
+    Vote {
+        /// Wish id.
+        id: i64,
+    },
+    /// Take one on, finish it, or turn it down. → [`WishReply`].
+    SetStatus {
+        /// Wish id.
+        id: i64,
+        /// A `wish_status`.
+        status: u8,
+        /// What came of it, for a wish that is finished.
+        note: Option<String>,
+    },
+}
+
 /// A file-library action the SPA issues, mapped to a FILE-family request
 /// [`Frame`] by [`file_command_to_frame`].
 #[non_exhaustive]
@@ -1129,6 +1164,65 @@ pub fn swarm_event_to_file_events(ev: &SwarmWireEvent, size: u64) -> Vec<FileEve
 }
 
 /// Map a [`FileCommand`] to the FILE-family request [`Frame`] that carries it.
+/// Encode one Wishing Well ask.
+pub fn wish_command_to_frame(command: &WishCommand, id: RequestId) -> Result<Frame, ProtoError> {
+    use rabbithole_proto::wish::{WishCreate, WishListRequest, WishSetStatus, WishVote};
+    match command {
+        WishCommand::List { status, limit } => {
+            Frame::request(id, &WishListRequest::new(*status, *limit))
+        }
+        WishCommand::Make {
+            kind,
+            title,
+            details,
+        } => Frame::request(id, &WishCreate::new(*kind, title.clone(), details.clone())),
+        WishCommand::Vote { id: wish } => Frame::request(id, &WishVote::new(*wish)),
+        WishCommand::SetStatus {
+            id: wish,
+            status,
+            note,
+        } => {
+            let msg = WishSetStatus::new(*wish, *status);
+            let msg = match note {
+                Some(note) => msg.with_fulfillment(note.clone()),
+                None => msg,
+            };
+            Frame::request(id, &msg)
+        }
+    }
+}
+
+/// Every wish out of a listing. `None` for any other frame or an error.
+pub fn frame_to_wishes(frame: &Frame) -> Option<Vec<rabbithole_proto::wish::WishView>> {
+    if frame.error.is_some() {
+        return None;
+    }
+    Some(
+        frame
+            .decode::<rabbithole_proto::wish::WishList>()?
+            .ok()?
+            .wishes,
+    )
+}
+
+/// One wish that has just changed: made, voted on, taken on, finished. A
+/// reply to something this session asked, or a push about a wish of its
+/// own — the pane folds either into its list the same way.
+pub fn frame_to_wish(frame: &Frame) -> Option<rabbithole_proto::wish::WishView> {
+    if frame.error.is_some() {
+        return None;
+    }
+    if let Some(Ok(reply)) = frame.decode::<rabbithole_proto::wish::WishReply>() {
+        return Some(reply.wish);
+    }
+    Some(
+        frame
+            .decode::<rabbithole_proto::wish::WishUpdated>()?
+            .ok()?
+            .wish,
+    )
+}
+
 pub fn file_command_to_frame(
     command: &FileCommand,
     id: RequestId,

@@ -96,6 +96,9 @@ pub type SessionsSink = Rc<dyn Fn(Vec<crate::state::SessionRow>)>;
 /// or looked at — is the app's to decide; without a sink they are saved,
 /// which is what a download is.
 pub type FileBytesSink = Rc<dyn Fn(crate::wire::DownloadedFile)>;
+/// The Wishing Well's list, and single wishes as they change.
+pub type WishesSink = Rc<dyn Fn(Vec<rabbithole_proto::wish::WishView>)>;
+pub type WishSink = Rc<dyn Fn(rabbithole_proto::wish::WishView)>;
 /// Receives the whole board tree (categories included), for the console.
 pub type BoardTreeSink = Rc<dyn Fn(Vec<crate::state::BoardNode>)>;
 /// A sink the transport pushes a board's thread list into.
@@ -154,6 +157,8 @@ struct Inner {
     who_sink: Option<WhoSink>,
     sessions_sink: Option<SessionsSink>,
     file_bytes_sink: Option<FileBytesSink>,
+    wishes_sink: Option<WishesSink>,
+    wish_sink: Option<WishSink>,
     front_page_sink: Option<FrontPageSink>,
     presence_sink: Option<PresenceSink>,
     board_sink: Option<BoardSink>,
@@ -331,6 +336,8 @@ impl WsClient {
                 who_sink: None,
                 sessions_sink: None,
                 file_bytes_sink: None,
+                wishes_sink: None,
+                wish_sink: None,
                 front_page_sink: None,
                 presence_sink: None,
                 board_sink: None,
@@ -455,6 +462,27 @@ impl WsClient {
     /// Where a downloaded file's bytes go. Without one they are saved.
     pub fn on_file_bytes(&mut self, sink: FileBytesSink) {
         self.inner.borrow_mut().file_bytes_sink = Some(sink);
+    }
+
+    /// The Wishing Well's listing.
+    pub fn on_wishes(&mut self, sink: WishesSink) {
+        self.inner.borrow_mut().wishes_sink = Some(sink);
+    }
+
+    /// One wish, as it changes.
+    pub fn on_wish(&mut self, sink: WishSink) {
+        self.inner.borrow_mut().wish_sink = Some(sink);
+    }
+
+    /// Ask the Wishing Well for something.
+    pub fn dispatch_wish(&self, command: &crate::wire::WishCommand) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(frame) = wire::wish_command_to_frame(command, id) {
+            if let Ok(bytes) = encode_frame(&frame) {
+                Self::write(&mut b, &bytes);
+            }
+        }
     }
 
     /// Register the board-list sink. The most recent registration wins.
@@ -915,6 +943,16 @@ impl WsClient {
                         }
                         if let Some(widgets) = wire::frame_to_front_page(&frame) {
                             b.emit_front_page(widgets);
+                        }
+                        if let Some(wishes) = wire::frame_to_wishes(&frame) {
+                            if let Some(sink) = &b.wishes_sink {
+                                sink(wishes);
+                            }
+                        }
+                        if let Some(wish) = wire::frame_to_wish(&frame) {
+                            if let Some(sink) = &b.wish_sink {
+                                sink(wish);
+                            }
                         }
                         if let Some(sessions) = wire::frame_to_sessions(&frame) {
                             if let Some(sink) = &b.sessions_sink {

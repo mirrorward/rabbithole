@@ -5685,6 +5685,251 @@ fn ThemeEditorPreview(style: Signal<String>) -> impl IntoView {
     }
 }
 
+/// The Wishing Well: what people have asked this burrow for.
+///
+/// A request board. Anybody signed in may wish for something, add their
+/// wish to somebody else's, take one on, and say what came of it. The
+/// burrow decides what is allowed; this offers what it will allow.
+#[component]
+pub fn WishingWell() -> impl IntoView {
+    use crate::wish::{
+        in_reading_order, kind_label, status, status_label, votes_line, wish_line, KINDS,
+    };
+    let app = expect_context::<AppState>();
+    app.load_wishes(None);
+    let state = move || app.focused_tracked().state.get().wishes;
+    let wishes = move || in_reading_order(state().wishes);
+    let showing = move || state().showing;
+    let said = move || state().status;
+    let may = move || {
+        crate::wish::may_work_on(
+            app.focused_tracked().is_guest.get(),
+            !app.focused_tracked().handle.get().is_empty(),
+        )
+    };
+    let asking = create_rw_signal(false);
+    let kind = create_rw_signal(0u8);
+    let title = create_rw_signal(String::new());
+    let details = create_rw_signal(String::new());
+    let make = move |_| {
+        app.make_wish(kind.get(), &title.get(), &details.get());
+        title.set(String::new());
+        details.set(String::new());
+        asking.set(false);
+    };
+    view! {
+        <StatusBar/>
+        <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
+            <section class="rh-panel">
+                <h1 class="rh-panel-title" id=a11y::VIEW_TITLE_ID tabindex="-1">
+                    "The Wishing Well"
+                </h1>
+                <p class="rh-adm-group-blurb">
+                    "What people would like this burrow to have: a file, a board, \
+                     something it does not do yet. Add your wish to one and whoever \
+                     looks after the place can see what is wanted most."
+                </p>
+                <div class="rh-wish-tools">
+                    <div class="rh-art-areas" role="tablist" aria-label="Which wishes">
+                        {[
+                            (None, "All"),
+                            (Some(status::OPEN), "Open"),
+                            (Some(status::CLAIMED), "Being done"),
+                            (Some(status::FULFILLED), "Granted"),
+                        ]
+                        .into_iter()
+                        .map(|(want, label)| {
+                            let chosen = move || showing() == want;
+                            view! {
+                                <button
+                                    type="button"
+                                    role="tab"
+                                    class="rh-btn ghost small"
+                                    aria-selected=move || chosen().to_string()
+                                    on:click=move |_| app.load_wishes(want)
+                                >
+                                    {label}
+                                </button>
+                            }
+                        })
+                        .collect_view()}
+                    </div>
+                    <Show when=may fallback=|| ()>
+                        <button
+                            type="button"
+                            class="rh-btn small"
+                            aria-expanded=move || asking.get().to_string()
+                            on:click=move |_| asking.update(|a| *a = !*a)
+                        >
+                            "Make a wish"
+                        </button>
+                    </Show>
+                </div>
+                <Show when=move || !said().is_empty() fallback=|| ()>
+                    <p class="rh-adm-status" role="status">{said}</p>
+                </Show>
+                <Show when=move || asking.get() fallback=|| ()>
+                    <div class="rh-wish-form">
+                        <label class="rh-field">
+                            <span>"What kind"</span>
+                            <select
+                                class="rh-input"
+                                on:change=move |ev| {
+                                    kind.set(event_target_value(&ev).parse().unwrap_or(0))
+                                }
+                            >
+                                {KINDS
+                                    .iter()
+                                    .map(|(k, label)| {
+                                        view! { <option value=k.to_string()>{*label}</option> }
+                                    })
+                                    .collect_view()}
+                            </select>
+                        </label>
+                        <label class="rh-field">
+                            <span>"What you would like"</span>
+                            <input
+                                class="rh-input"
+                                maxlength="120"
+                                placeholder="Say it in a few words"
+                                prop:value=move || title.get()
+                                on:input=move |ev| title.set(event_target_value(&ev))
+                            />
+                        </label>
+                        <label class="rh-field">
+                            <span>"Anything that would help"</span>
+                            <textarea
+                                class="rh-input"
+                                rows="3"
+                                placeholder="Where you saw it, why it would be good, who else wants it"
+                                prop:value=move || details.get()
+                                on:input=move |ev| details.set(event_target_value(&ev))
+                            ></textarea>
+                        </label>
+                        <div class="rh-wish-tools">
+                            <button
+                                type="button"
+                                class="rh-btn small"
+                                disabled=move || title.get().trim().is_empty()
+                                on:click=make
+                            >
+                                "Wish for it"
+                            </button>
+                            <button
+                                type="button"
+                                class="rh-btn ghost small"
+                                on:click=move |_| asking.set(false)
+                            >
+                                "Never mind"
+                            </button>
+                        </div>
+                    </div>
+                </Show>
+                <Show
+                    when=move || !wishes().is_empty()
+                    fallback=|| view! {
+                        <p class="rh-empty">
+                            "Nobody has wished for anything yet. The well is open."
+                        </p>
+                    }
+                >
+                    <ul class="rh-wish-list">
+                        <For
+                            each=wishes
+                            key=|w| (w.id, w.status, w.votes, w.claimed_by.clone())
+                            children=move |w| {
+                                let id = w.id;
+                                let open = w.status == status::OPEN;
+                                let settled = matches!(
+                                    w.status,
+                                    status::FULFILLED | status::DECLINED
+                                );
+                                let line = wish_line(&w);
+                                view! {
+                                    <li class="rh-wish">
+                                        <div class="rh-wish-head">
+                                            <span class="rh-wish-title">{w.title.clone()}</span>
+                                            <span class="rh-badge">{kind_label(w.kind)}</span>
+                                            <span class="rh-badge">{status_label(w.status)}</span>
+                                        </div>
+                                        <Show
+                                            when={
+                                                let d = w.details.clone();
+                                                move || !d.trim().is_empty()
+                                            }
+                                            fallback=|| ()
+                                        >
+                                            <p class="rh-wish-details">{w.details.clone()}</p>
+                                        </Show>
+                                        <p class="rh-wish-meta">
+                                            {line} " " {votes_line(w.votes)} "."
+                                        </p>
+                                        <Show
+                                            when={
+                                                let note = w.fulfillment.clone();
+                                                move || {
+                                                    note.as_deref()
+                                                        .is_some_and(|n| !n.trim().is_empty())
+                                                }
+                                            }
+                                            fallback=|| ()
+                                        >
+                                            <p class="rh-wish-done">
+                                                {w.fulfillment.clone().unwrap_or_default()}
+                                            </p>
+                                        </Show>
+                                        <div class="rh-wish-tools">
+                                            <Show when=may fallback=|| ()>
+                                                <button
+                                                    type="button"
+                                                    class="rh-btn ghost small"
+                                                    on:click=move |_| app.vote_wish(id)
+                                                >
+                                                    "Wish for it too"
+                                                </button>
+                                                <Show when=move || open fallback=|| ()>
+                                                    <button
+                                                        type="button"
+                                                        class="rh-btn ghost small"
+                                                        on:click=move |_| {
+                                                            app.set_wish_status(
+                                                                id,
+                                                                status::CLAIMED,
+                                                                None,
+                                                            )
+                                                        }
+                                                    >
+                                                        "I will do it"
+                                                    </button>
+                                                </Show>
+                                                <Show when=move || !settled fallback=|| ()>
+                                                    <button
+                                                        type="button"
+                                                        class="rh-btn ghost small"
+                                                        on:click=move |_| {
+                                                            app.set_wish_status(
+                                                                id,
+                                                                status::FULFILLED,
+                                                                None,
+                                                            )
+                                                        }
+                                                    >
+                                                        "Done"
+                                                    </button>
+                                                </Show>
+                                            </Show>
+                                        </div>
+                                    </li>
+                                }
+                            }
+                        />
+                    </ul>
+                </Show>
+            </section>
+        </main>
+    }
+}
+
 /// The ANSI art gallery: the burrow's own art, drawn where it is.
 ///
 /// A file library is where a burrow keeps its art, so this is a view of one:

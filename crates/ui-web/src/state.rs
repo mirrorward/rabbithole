@@ -9,6 +9,28 @@ use rabbithole_core::api::Event;
 
 use crate::conn::ConnState;
 
+/// The Wishing Well as this session knows it: what people have asked this
+/// burrow for, newest first as the burrow sent them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WishesState {
+    pub wishes: Vec<rabbithole_proto::wish::WishView>,
+    /// Which state the list was asked for, so the pane can say so.
+    pub showing: Option<u8>,
+    /// What the burrow said about the last thing tried here.
+    pub status: String,
+}
+
+impl WishesState {
+    /// Fold in one wish that changed: it replaces the one it is, or joins
+    /// the front of the list when it is new.
+    pub fn changed(&mut self, wish: rabbithole_proto::wish::WishView) {
+        match self.wishes.iter_mut().find(|w| w.id == wish.id) {
+            Some(slot) => *slot = wish,
+            None => self.wishes.insert(0, wish),
+        }
+    }
+}
+
 /// A picture the gallery is showing, or fetching: which node it is, what it
 /// is called, and its bytes once they arrive. `bytes` empty means the ask is
 /// still out.
@@ -357,6 +379,8 @@ pub struct UiState {
     pub who: Vec<Presence>,
     /// Every session on the burrow, for the moderation pane.
     pub sessions: Vec<SessionRow>,
+    /// The Wishing Well: what people have asked this burrow for.
+    pub wishes: WishesState,
     /// The board tree.
     pub boards: Vec<Board>,
     /// Every node of the board tree, for the admin console.

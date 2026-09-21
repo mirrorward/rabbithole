@@ -18,7 +18,7 @@ use crate::client::{MockClient, UiClient, LOBBY};
 use crate::components::{
     About, ArtGallery, BoardView, Boards, CommandPalette, ConfirmDialog, Directory, Dms, Files,
     Lobby, Login, Nav, People, PersonPage, Radio, ServerBrowser, Settings, Toasts, Transfers,
-    WelcomeSheet, You,
+    WelcomeSheet, WishingWell, You,
 };
 use crate::files::{join_path, FilesState};
 use crate::packs::PackTokens;
@@ -865,6 +865,12 @@ impl AppState {
                 if let Some(app) = current() {
                     app.show_art(file);
                 }
+            }));
+            ws.on_wishes(std::rc::Rc::new(move |wishes| {
+                state.update(|s| s.wishes.wishes = wishes)
+            }));
+            ws.on_wish(std::rc::Rc::new(move |wish| {
+                state.update(|s| s.wishes.changed(wish))
             }));
             ws.on_boards(std::rc::Rc::new(move |boards| {
                 state.update(|s| s.set_boards(boards))
@@ -2091,6 +2097,57 @@ impl AppState {
     /// Show a node's metadata card.
     pub fn select_file(&self, id: i64) {
         self.focused().files.update(|f| f.selected = Some(id));
+    }
+
+    /// Ask the Wishing Well what people have asked for. `status` `None` is
+    /// all of them.
+    pub fn load_wishes(&self, status: Option<u8>) {
+        self.focused().state.update(|s| s.wishes.showing = status);
+        #[cfg(target_arch = "wasm32")]
+        if self.focused().live.get_untracked() {
+            self.focused().ws.with_value(|c| {
+                c.dispatch_wish(&crate::wire::WishCommand::List { status, limit: 100 })
+            });
+            return;
+        }
+        let wishes = self.focused().client.with_value(|c| c.wishes(status));
+        self.focused().state.update(|s| s.wishes.wishes = wishes);
+    }
+
+    /// Wish for something.
+    pub fn make_wish(&self, kind: u8, title: &str, details: &str) {
+        self.wish_command(crate::wire::WishCommand::Make {
+            kind,
+            title: title.trim().to_string(),
+            details: details.trim().to_string(),
+        });
+    }
+
+    /// Add your vote to a wish, or take it back.
+    pub fn vote_wish(&self, id: i64) {
+        self.wish_command(crate::wire::WishCommand::Vote { id });
+    }
+
+    /// Take a wish on, finish it, or turn it down.
+    pub fn set_wish_status(&self, id: i64, status: u8, note: Option<String>) {
+        self.wish_command(crate::wire::WishCommand::SetStatus { id, status, note });
+    }
+
+    /// One ask of the Wishing Well, over the live socket or the demo's own.
+    fn wish_command(&self, command: crate::wire::WishCommand) {
+        #[cfg(target_arch = "wasm32")]
+        if self.focused().live.get_untracked() {
+            self.focused().ws.with_value(|c| c.dispatch_wish(&command));
+            return;
+        }
+        let mut answered = Err("nothing happened".to_string());
+        self.focused()
+            .client
+            .update_value(|c| answered = c.wish_command(&command));
+        match answered {
+            Ok(wish) => self.focused().state.update(|s| s.wishes.changed(wish)),
+            Err(why) => self.focused().state.update(|s| s.wishes.status = why),
+        }
     }
 
     /// Open a picture in the gallery: ask for its bytes and keep them, so
@@ -3489,6 +3546,7 @@ pub fn App() -> impl IntoView {
                                         <Route path="/radio" view=Radio/>
                                         <Route path="/servers" view=ServerBrowser/>
                                         <Route path="/art" view=ArtGallery/>
+                                        <Route path="/wishing-well" view=WishingWell/>
                                         <Route path="/admin" view=Admin/>
                                         <Route path="/admin/:section" view=Admin/>
                                     </Routes>

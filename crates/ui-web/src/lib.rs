@@ -137,6 +137,7 @@ pub mod theme_editor;
 pub mod toasts;
 pub mod upload;
 pub mod wire;
+pub mod wish;
 
 /// Browser WebSocket transport (`wasm32-unknown-unknown` only).
 #[cfg(target_arch = "wasm32")]

@@ -1155,6 +1155,20 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 .rh-adm-peer-waiting{color:var(--rh-accent);font-weight:600}\
 .rh-adm-peer-actions,.rh-adm-backup-actions{display:flex;gap:var(--rh-space-2);align-items:center;justify-content:flex-end;flex-wrap:wrap}\
 .rh-adm-peer-actions .rh-input{width:13rem;max-width:100%;padding:.35rem .6rem;font-size:var(--rh-font-sm)}\
+.rh-wish-tools{display:flex;flex-wrap:wrap;align-items:center;gap:var(--rh-space-2);margin:0 0 var(--rh-space-3)}\
+.rh-wish-tools .rh-art-areas{margin:0;flex:1 1 auto}\
+.rh-wish-form{display:flex;flex-direction:column;gap:var(--rh-space-2);padding:var(--rh-space-3);margin:0 0 var(--rh-space-3);border:1px solid color-mix(in srgb,var(--rh-text) 10%,transparent);border-radius:var(--rh-radius);background:var(--rh-surface)}\
+.rh-wish-form .rh-field{display:flex;flex-direction:column;gap:.2rem;font-size:var(--rh-font-sm)}\
+.rh-wish-form .rh-field>span{color:var(--rh-muted);font-size:var(--rh-font-xs)}\
+.rh-wish-list{list-style:none;margin:0;padding:0;border:1px solid color-mix(in srgb,var(--rh-text) 10%,transparent);border-radius:var(--rh-radius);background:var(--rh-surface);overflow:clip}\
+.rh-wish{display:flex;flex-direction:column;gap:.3rem;padding:.8rem var(--rh-space-4);font-size:var(--rh-font-sm)}\
+.rh-wish+.rh-wish{border-top:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\
+.rh-wish-head{display:flex;align-items:center;gap:var(--rh-space-2);flex-wrap:wrap;min-width:0}\
+.rh-wish-title{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis}\
+.rh-wish-details{margin:0;white-space:pre-wrap}\
+.rh-wish-meta{margin:0;color:var(--rh-muted);font-size:var(--rh-font-xs)}\
+.rh-wish-done{margin:0;font-size:var(--rh-font-xs);color:var(--rh-brand)}\
+.rh-wish .rh-wish-tools{margin:.1rem 0 0}\
 .rh-art-areas{display:flex;flex-wrap:wrap;gap:var(--rh-space-2);margin:0 0 var(--rh-space-3)}\
 .rh-art-list{list-style:none;display:flex;flex-wrap:wrap;gap:var(--rh-space-2);margin:0 0 var(--rh-space-3);padding:0}\
 .rh-art-list .rh-btn[aria-pressed=true],.rh-art-areas .rh-btn[aria-selected=true]{background:color-mix(in srgb,var(--rh-accent) 16%,transparent);color:var(--rh-accent)}\

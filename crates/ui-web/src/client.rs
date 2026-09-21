@@ -114,6 +114,9 @@ pub struct MockClient {
     admin_peers: Vec<PeerEntry>,
     admin_origins: Vec<OriginEntry>,
     admin_backups: Vec<BackupEntry>,
+    /// The demo's Wishing Well: a few things somebody asked this burrow
+    /// for, so the pane has something in it before anyone wishes.
+    wishes: Vec<rabbithole_proto::wish::WishView>,
     admin_config: Vec<(String, String)>,
     /// Seeded RADIO now-playing frames, served through
     /// [`MockClient::radio_routes`] so the Radio view renders in dev without a
@@ -272,6 +275,7 @@ impl MockClient {
             admin_peers: Self::seeded_peers(),
             admin_origins: Self::seeded_origins(),
             admin_backups: Self::seeded_backups(),
+            wishes: Self::seeded_wishes(),
             admin_config: Self::seeded_config(),
             radio_frames: Self::seeded_radio_frames(),
             invite_seq: 0,
@@ -548,6 +552,123 @@ impl MockClient {
             bytes: crate::demo_files::bytes_for(&n.name)
                 .unwrap_or_else(|| vec![0u8; n.size.max(0) as usize]),
         })
+    }
+
+    /// A few wishes, so the demo's Wishing Well is a well and not a hole.
+    fn seeded_wishes() -> Vec<rabbithole_proto::wish::WishView> {
+        use rabbithole_proto::wish::WishView;
+        vec![
+            WishView::new(
+                3,
+                2,
+                "A door game night",
+                "Tuesdays, and somebody to keep score.",
+                "alice",
+                0,
+                None,
+                None,
+                4,
+                0,
+            ),
+            WishView::new(
+                2,
+                0,
+                "The 1993 demo pack",
+                "The one with the tracker music. Any part of it.",
+                "bob",
+                1,
+                Some("rabbit".to_string()),
+                None,
+                7,
+                0,
+            ),
+            WishView::new(
+                1,
+                1,
+                "A board for trading carrots",
+                "Half the lobby is people swapping vegetables.",
+                "rabbit",
+                2,
+                Some("rabbit".to_string()),
+                Some("Made it: /boards/carrot-swap".to_string()),
+                11,
+                0,
+            ),
+        ]
+    }
+
+    /// The demo's Wishing Well, filtered the way a burrow filters it.
+    pub fn wishes(&self, status: Option<u8>) -> Vec<rabbithole_proto::wish::WishView> {
+        self.wishes
+            .iter()
+            .filter(|w| status.is_none_or(|s| w.status == s))
+            .cloned()
+            .collect()
+    }
+
+    /// One ask of the demo's Wishing Well, answered the way a burrow
+    /// answers: the wish as it now stands, or why not.
+    pub fn wish_command(
+        &mut self,
+        command: &crate::wire::WishCommand,
+    ) -> Result<rabbithole_proto::wish::WishView, String> {
+        use crate::wire::WishCommand;
+        use rabbithole_proto::wish::WishView;
+        match command {
+            WishCommand::List { .. } => Err("ask for the list instead".to_string()),
+            WishCommand::Make {
+                kind,
+                title,
+                details,
+            } => {
+                if title.is_empty() {
+                    return Err("A wish needs a name.".to_string());
+                }
+                let id = self.wishes.iter().map(|w| w.id).max().unwrap_or(0) + 1;
+                let wish = WishView::new(
+                    id,
+                    *kind,
+                    title.clone(),
+                    details.clone(),
+                    self.current_user.clone().unwrap_or_else(|| "you".into()),
+                    0,
+                    None,
+                    None,
+                    1,
+                    0,
+                );
+                self.wishes.insert(0, wish.clone());
+                Ok(wish)
+            }
+            WishCommand::Vote { id } => {
+                let me = self.current_user.clone().unwrap_or_else(|| "you".into());
+                let wish = self
+                    .wishes
+                    .iter_mut()
+                    .find(|w| w.id == *id)
+                    .ok_or_else(|| "No such wish.".to_string())?;
+                // The demo has no ballot box, so a vote is a toggle on the
+                // count, which is what a burrow's own answer looks like.
+                if wish.requester == me && wish.votes > 1 {
+                    wish.votes -= 1;
+                } else {
+                    wish.votes += 1;
+                }
+                Ok(wish.clone())
+            }
+            WishCommand::SetStatus { id, status, note } => {
+                let me = self.current_user.clone().unwrap_or_else(|| "you".into());
+                let wish = self
+                    .wishes
+                    .iter_mut()
+                    .find(|w| w.id == *id)
+                    .ok_or_else(|| "No such wish.".to_string())?;
+                wish.status = *status;
+                wish.claimed_by = Some(me);
+                wish.fulfillment = note.clone();
+                Ok(wish.clone())
+            }
+        }
     }
 
     /// The next free node id (max existing + 1).
