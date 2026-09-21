@@ -102,6 +102,9 @@ pub type WishSink = Rc<dyn Fn(rabbithole_proto::wish::WishView)>;
 /// The burrow's rooms, and single rooms as they change.
 pub type RoomsSink = Rc<dyn Fn(Vec<rabbithole_proto::chat::RoomInfo>)>;
 pub type RoomSink = Rc<dyn Fn(rabbithole_proto::chat::RoomInfo)>;
+/// A station's answer to a listener: its queue, what can be asked for, or
+/// which ask it refused.
+pub type RadioRequestsSink = Rc<dyn Fn(crate::wire::RadioAnswer)>;
 /// Receives the whole board tree (categories included), for the console.
 pub type BoardTreeSink = Rc<dyn Fn(Vec<crate::state::BoardNode>)>;
 /// A sink the transport pushes a board's thread list into.
@@ -164,6 +167,7 @@ struct Inner {
     wish_sink: Option<WishSink>,
     rooms_sink: Option<RoomsSink>,
     room_sink: Option<RoomSink>,
+    radio_requests_sink: Option<RadioRequestsSink>,
     front_page_sink: Option<FrontPageSink>,
     presence_sink: Option<PresenceSink>,
     board_sink: Option<BoardSink>,
@@ -345,6 +349,7 @@ impl WsClient {
                 wish_sink: None,
                 rooms_sink: None,
                 room_sink: None,
+                radio_requests_sink: None,
                 front_page_sink: None,
                 presence_sink: None,
                 board_sink: None,
@@ -489,6 +494,22 @@ impl WsClient {
     /// One room, as it changes.
     pub fn on_room(&mut self, sink: RoomSink) {
         self.inner.borrow_mut().room_sink = Some(sink);
+    }
+
+    /// A station's answers to this listener.
+    pub fn on_radio_requests(&mut self, sink: RadioRequestsSink) {
+        self.inner.borrow_mut().radio_requests_sink = Some(sink);
+    }
+
+    /// Ask a station something as a listener.
+    pub fn dispatch_radio_ask(&self, ask: &crate::wire::RadioAsk) {
+        let mut b = self.inner.borrow_mut();
+        let id = b.next_request_id();
+        if let Ok(frame) = wire::radio_ask_to_frame(ask, id) {
+            if let Ok(bytes) = encode_frame(&frame) {
+                Self::write(&mut b, &bytes);
+            }
+        }
     }
 
     /// Ask about rooms: list them, make one, go in, come out.
@@ -971,6 +992,11 @@ impl WsClient {
                         }
                         if let Some(widgets) = wire::frame_to_front_page(&frame) {
                             b.emit_front_page(widgets);
+                        }
+                        if let Some(answer) = wire::frame_to_radio_answer(&frame) {
+                            if let Some(sink) = &b.radio_requests_sink {
+                                sink(answer);
+                            }
                         }
                         if let Some(rooms) = wire::frame_to_rooms(&frame) {
                             if let Some(sink) = &b.rooms_sink {

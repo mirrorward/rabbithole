@@ -910,6 +910,116 @@ pub fn frame_to_notice_route(frame: &Frame) -> Option<NoticeRoute> {
 // variants, these fold into the shared enums with no shape change.
 // ---------------------------------------------------------------------------
 
+/// What a station can be asked by a listener (family 9, types 7..12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RadioAsk {
+    /// What is waiting. → [`RadioRequests`].
+    List { station: String },
+    /// What can be asked for, as far as `search` narrows it.
+    /// → [`RadioOffer`](rabbithole_proto::radio::RadioOffer).
+    Offer { station: String, search: String },
+    /// Ask for a track to play next. → [`RadioRequests`].
+    Request { station: String, track: u64 },
+    /// Join somebody else's request. → [`RadioRequests`].
+    Vote { station: String, track: u64 },
+}
+
+impl RadioAsk {
+    /// Which kind of ask this is.
+    pub fn kind(&self) -> RadioAskKind {
+        match self {
+            RadioAsk::List { .. } => RadioAskKind::List,
+            RadioAsk::Offer { .. } => RadioAskKind::Offer,
+            RadioAsk::Request { .. } => RadioAskKind::Request,
+            RadioAsk::Vote { .. } => RadioAskKind::Vote,
+        }
+    }
+
+    /// The station it is about.
+    pub fn station(&self) -> &str {
+        match self {
+            RadioAsk::List { station }
+            | RadioAsk::Offer { station, .. }
+            | RadioAsk::Request { station, .. }
+            | RadioAsk::Vote { station, .. } => station,
+        }
+    }
+}
+
+/// Which of the asks a refusal answers. A look the pane takes on its own
+/// being refused is not the person being told no, and is not said as if
+/// it were.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadioAskKind {
+    List,
+    Offer,
+    Request,
+    Vote,
+}
+
+/// A station's answer to a listener.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RadioAnswer {
+    /// What is waiting, as it now stands.
+    Requests(rabbithole_proto::radio::RadioRequests),
+    /// What can be asked for.
+    Offer(rabbithole_proto::radio::RadioOffer),
+    /// It would not, and which ask it would not answer.
+    Refused {
+        ask: RadioAskKind,
+        code: rabbithole_proto::ErrorCode,
+    },
+}
+
+/// Encode one ask of a station.
+pub fn radio_ask_to_frame(ask: &RadioAsk, id: RequestId) -> Result<Frame, ProtoError> {
+    use rabbithole_proto::radio::{
+        RadioOfferRequest, RadioRequest, RadioRequestVote, RadioRequestsRequest,
+    };
+    match ask {
+        RadioAsk::List { station } => {
+            Frame::request(id, &RadioRequestsRequest::new(station.clone()))
+        }
+        RadioAsk::Offer { station, search } => {
+            Frame::request(id, &RadioOfferRequest::new(station.clone(), search.clone()))
+        }
+        RadioAsk::Request { station, track } => {
+            Frame::request(id, &RadioRequest::new(station.clone(), *track))
+        }
+        RadioAsk::Vote { station, track } => {
+            Frame::request(id, &RadioRequestVote::new(station.clone(), *track))
+        }
+    }
+}
+
+/// A station's answer to one of the asks above. `None` for any frame that
+/// is not one: the other RADIO replies have their own homes.
+pub fn frame_to_radio_answer(frame: &Frame) -> Option<RadioAnswer> {
+    use rabbithole_proto::frame::Family;
+    use rabbithole_proto::radio::{RadioOffer, RadioRequests};
+    if frame.family != Family::RADIO {
+        return None;
+    }
+    if let Some(code) = frame.error {
+        // An error reply keeps the type of what it refuses.
+        let ask = match frame.message_type {
+            7 => RadioAskKind::List,
+            9 => RadioAskKind::Request,
+            10 => RadioAskKind::Vote,
+            11 => RadioAskKind::Offer,
+            _ => return None,
+        };
+        return Some(RadioAnswer::Refused { ask, code });
+    }
+    if let Some(Ok(view)) = frame.decode::<RadioRequests>() {
+        return Some(RadioAnswer::Requests(view));
+    }
+    frame
+        .decode::<RadioOffer>()
+        .and_then(Result::ok)
+        .map(RadioAnswer::Offer)
+}
+
 /// What a burrow's rooms can be asked (family 2). The lobby is one of
 /// them; the rest are what people have made.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3351,5 +3461,61 @@ mod tests {
         );
         let events = seen.borrow();
         assert!(matches!(events.as_slice(), [Event::Connected { .. }]));
+    }
+
+    #[test]
+    fn a_station_answer_says_which_ask_it_answers() {
+        use rabbithole_proto::radio::{RadioOffer, RadioRequests};
+        use rabbithole_proto::ErrorCode;
+        let asks = [
+            RadioAsk::List {
+                station: "jukebox".into(),
+            },
+            RadioAsk::Offer {
+                station: "jukebox".into(),
+                search: "dawn".into(),
+            },
+            RadioAsk::Request {
+                station: "jukebox".into(),
+                track: 4,
+            },
+            RadioAsk::Vote {
+                station: "jukebox".into(),
+                track: 4,
+            },
+        ];
+        for ask in &asks {
+            let request = radio_ask_to_frame(ask, RequestId(9)).unwrap();
+            // A refusal is placed by the ask it refuses.
+            let refused = Frame::error_reply(&request, ErrorCode::NotFound);
+            assert_eq!(
+                frame_to_radio_answer(&refused),
+                Some(RadioAnswer::Refused {
+                    ask: ask.kind(),
+                    code: ErrorCode::NotFound
+                }),
+                "{ask:?}"
+            );
+            assert_eq!(ask.station(), "jukebox");
+        }
+        let list = radio_ask_to_frame(&asks[0], RequestId(1)).unwrap();
+        let view = RadioRequests::new("jukebox", true, false, Vec::new());
+        assert_eq!(
+            frame_to_radio_answer(&Frame::reply_to(&list, &view).unwrap()),
+            Some(RadioAnswer::Requests(view))
+        );
+        let look = radio_ask_to_frame(&asks[1], RequestId(2)).unwrap();
+        let offer = RadioOffer::new("jukebox", "dawn", Vec::new(), 3);
+        assert_eq!(
+            frame_to_radio_answer(&Frame::reply_to(&look, &offer).unwrap()),
+            Some(RadioAnswer::Offer(offer))
+        );
+        // Another RADIO reply, refused or not, is not one of these.
+        let stations =
+            Frame::request(RequestId(3), &rabbithole_proto::radio::RadioStationsRequest).unwrap();
+        assert_eq!(
+            frame_to_radio_answer(&Frame::error_reply(&stations, ErrorCode::NotFound)),
+            None
+        );
     }
 }

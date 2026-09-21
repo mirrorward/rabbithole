@@ -289,12 +289,15 @@ fn mp3_of(count: usize, tag: u8) -> Vec<u8> {
 #[tokio::test]
 async fn a_library_station_streams_its_rotation_and_yields_to_a_dj() {
     use rabbithole_core::Client;
-    use rabbithole_proto::radio::{RadioStationInfo, RadioStations, RadioStationsRequest};
+    use rabbithole_proto::radio::{
+        RadioOffer, RadioOfferRequest, RadioRequest, RadioRequests, RadioRequestsRequest,
+        RadioStationInfo, RadioStations, RadioStationsRequest,
+    };
 
     let work = tempfile::tempdir().unwrap();
     let dir = work.path().join("srv");
     // About three seconds of audio each.
-    let (one, two) = (mp3_of(115, 0x11), mp3_of(115, 0x22));
+    let (one, two, three) = (mp3_of(115, 0x11), mp3_of(115, 0x22), mp3_of(115, 0x33));
 
     // First boot: put the music in a file area.
     {
@@ -317,7 +320,7 @@ async fn a_library_station_streams_its_rotation_and_yields_to_a_dj() {
         dj.auth_password("dj", "spin-spin-spin").await.unwrap();
         dj.expect_welcome().await.unwrap();
         dj.area_create("music", "Music", "").await.unwrap();
-        for (name, bytes) in [("one.mp3", &one), ("two.mp3", &two)] {
+        for (name, bytes) in [("one.mp3", &one), ("two.mp3", &two), ("three.mp3", &three)] {
             let src = work.path().join(name);
             std::fs::write(&src, bytes).unwrap();
             dj.transfer_upload("music", None, name, &src, "audio/mpeg", "The Lagomorphs")
@@ -364,6 +367,7 @@ async fn a_library_station_streams_its_rotation_and_yields_to_a_dj() {
     assert!(
         one.windows(whole).any(|w| w == &heard[..whole])
             || two.windows(whole).any(|w| w == &heard[..whole])
+            || three.windows(whole).any(|w| w == &heard[..whole])
             || heard[..whole]
                 .chunks(417)
                 .all(|f| f.starts_with(&[0xFF, 0xFB, 0x90, 0x00])),
@@ -400,7 +404,7 @@ async fn a_library_station_streams_its_rotation_and_yields_to_a_dj() {
     assert!(now.streaming, "Listen would work");
     assert!(!now.live);
     assert!(
-        ["one.mp3", "two.mp3"].contains(&now.title.as_str()),
+        ["one.mp3", "two.mp3", "three.mp3"].contains(&now.title.as_str()),
         "{now:?}"
     );
 
@@ -420,6 +424,28 @@ async fn a_library_station_streams_its_rotation_and_yields_to_a_dj() {
         moved.recent[0].title, moved.title,
         "history is the track before"
     );
+
+    // Somebody asks for a song, and a DJ takes the air before it comes up.
+    let mut asker = Client::connect(
+        &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
+        None,
+        None,
+        "e2e",
+        "0",
+    )
+    .await
+    .unwrap();
+    asker.auth_password("dj", "spin-spin-spin").await.unwrap();
+    asker.expect_welcome().await.unwrap();
+    let offer: RadioOffer = asker
+        .request(&RadioOfferRequest::new("ambient", ""))
+        .await
+        .unwrap();
+    let wanted = offer.tracks[0].clone();
+    let _: RadioRequests = asker
+        .request(&RadioRequest::new("ambient", wanted.id))
+        .await
+        .unwrap();
 
     // A DJ takes the air. A rotation's mount gives way; it is not a 403.
     let mut source = TcpStream::connect(radio).await.unwrap();
@@ -441,6 +467,27 @@ async fn a_library_station_streams_its_rotation_and_yields_to_a_dj() {
     let on_air = ambient(&mut guest).await.unwrap();
     assert!(on_air.live, "a person has the air: {on_air:?}");
 
+    // The request is not spent while the DJ has the air: nobody would hear
+    // it. (Unless the song before it ended first, a moment before the DJ
+    // arrived, and it was already playing when they took over.)
+    async fn waiting(asker: &mut Client) -> RadioRequests {
+        asker
+            .request(&RadioRequestsRequest::new("ambient"))
+            .await
+            .unwrap()
+    }
+    let during = waiting(&mut asker).await;
+    assert!(during.dj_live, "{during:?}");
+    let still_to_come = during.queue.iter().any(|q| q.id == wanted.id);
+    if still_to_come {
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let later = waiting(&mut asker).await;
+        assert!(
+            later.queue.iter().any(|q| q.id == wanted.id),
+            "a request waits out the DJ rather than being played to nobody: {later:?}"
+        );
+    }
+
     // The DJ leaves, and the rotation picks itself back up.
     drop(source);
     let mut resumed = false;
@@ -455,6 +502,16 @@ async fn a_library_station_streams_its_rotation_and_yields_to_a_dj() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(resumed, "the rotation came back on its own");
+    // And what was asked for is what comes back first — announced as the
+    // DJ goes, not after the song they talked over is said to play again.
+    if still_to_come {
+        let back = ambient(&mut guest).await.unwrap();
+        assert_eq!(
+            back.title, wanted.title,
+            "{} plays once the DJ has gone",
+            wanted.title
+        );
+    }
 
     burrow.shutdown().await;
 }
@@ -1256,5 +1313,380 @@ async fn library_of(work: &tempfile::TempDir, dir: &std::path::Path, files: &[(&
             .await
             .unwrap();
     }
+    burrow.shutdown().await;
+}
+
+/// Listeners steer a station by asking for songs. What a station's rotation
+/// offers is open to anybody; asking and joining in take an account that
+/// may talk, one vote each, and a few waiting per person — enough to ask
+/// for a song or two, not enough to take the evening over. And what is
+/// asked for is what plays next.
+#[tokio::test]
+async fn a_listener_asks_for_a_song_and_it_plays_next() {
+    use rabbithole_core::{Client, ClientError};
+    use rabbithole_proto::radio::{
+        RadioOffer, RadioOfferRequest, RadioRequest, RadioRequestVote, RadioRequests,
+        RadioRequestsRequest,
+    };
+    use rabbithole_proto::ErrorCode;
+
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    for login in ["alice", "bob"] {
+        burrow
+            .shared
+            .auth
+            .create_account(login, "pw-pw-pw-pw", Role::User)
+            .await
+            .unwrap();
+    }
+    // A rotation of five, the way a library station is installed.
+    let tracks: Vec<rabbithole_radio::Track> = (1..=5)
+        .map(|n| {
+            rabbithole_radio::Track::new(
+                rabbithole_radio::TrackId(n),
+                format!("song-{n}.mp3"),
+                "The Lagomorphs",
+                180_000,
+                rabbithole_radio::BlobId([n as u8; 32]),
+            )
+        })
+        .collect();
+    let sound = burrow::radio::sound_of_tracks(&tracks);
+    burrow
+        .shared
+        .radio
+        .install_program("jukebox", "Jukebox", "music", tracks, sound);
+
+    let url = format!("ws://127.0.0.1:{}", burrow.ws_addr.port());
+    let signed_in = |login: &'static str| {
+        let url = url.clone();
+        async move {
+            let mut c = Client::connect(&url, None, None, "e2e", "0").await.unwrap();
+            c.auth_password(login, "pw-pw-pw-pw").await.unwrap();
+            c.expect_welcome().await.unwrap();
+            c
+        }
+    };
+    let mut alice = signed_in("alice").await;
+    let mut bob = signed_in("bob").await;
+
+    // Nothing waiting yet; the station takes requests, and no DJ has it.
+    let seen: RadioRequests = alice
+        .request(&RadioRequestsRequest::new("jukebox"))
+        .await
+        .unwrap();
+    assert!(seen.requestable && !seen.dj_live);
+    assert!(seen.queue.is_empty());
+    // What can be asked for is the rotation, less what is playing now.
+    assert_eq!(
+        burrow.shared.radio.now_playing("jukebox").unwrap().title,
+        "song-1.mp3"
+    );
+    let offer: RadioOffer = alice
+        .request(&RadioOfferRequest::new("jukebox", ""))
+        .await
+        .unwrap();
+    let offered: Vec<u64> = offer.tracks.iter().map(|t| t.id).collect();
+    assert_eq!(offered, [2, 3, 4, 5]);
+    assert_eq!(offer.more, 0);
+    let playing = alice
+        .request::<_, RadioRequests>(&RadioRequest::new("jukebox", 1))
+        .await;
+    assert!(
+        matches!(playing, Err(ClientError::Refused(ErrorCode::AlreadyExists))),
+        "what is playing now is not asked for: {playing:?}"
+    );
+
+    // Alice asks for song 4; it is waiting, and it is hers.
+    let after: RadioRequests = alice
+        .request(&RadioRequest::new("jukebox", 4))
+        .await
+        .unwrap();
+    assert_eq!(after.queue.len(), 1);
+    assert_eq!(after.queue[0].title, "song-4.mp3");
+    assert_eq!(after.queue[0].votes, 1);
+    assert!(after.queue[0].mine, "she asked for it");
+
+    // Bob sees it as somebody else's, and joins in; voting twice is one vote.
+    let his: RadioRequests = bob
+        .request(&RadioRequestsRequest::new("jukebox"))
+        .await
+        .unwrap();
+    assert!(!his.queue[0].mine);
+    let _: RadioRequests = bob
+        .request(&RadioRequestVote::new("jukebox", 4))
+        .await
+        .unwrap();
+    let again: RadioRequests = bob
+        .request(&RadioRequestVote::new("jukebox", 4))
+        .await
+        .unwrap();
+    assert_eq!(
+        again.queue[0].votes, 2,
+        "one vote each, however often it is sent"
+    );
+    assert!(again.queue[0].mine, "and now it is his too");
+
+    // Asking for what is already waiting is joining in, not a second copy.
+    let same: RadioRequests = bob.request(&RadioRequest::new("jukebox", 4)).await.unwrap();
+    assert_eq!(same.queue.len(), 1);
+
+    // Three waiting each, and no more — said as its own reason, not as the
+    // posting budget running out.
+    let _: RadioRequests = alice
+        .request(&RadioRequest::new("jukebox", 2))
+        .await
+        .unwrap();
+    let _: RadioRequests = alice
+        .request(&RadioRequest::new("jukebox", 3))
+        .await
+        .unwrap();
+    let too_many = alice
+        .request::<_, RadioRequests>(&RadioRequest::new("jukebox", 5))
+        .await;
+    assert!(
+        matches!(too_many, Err(ClientError::Refused(ErrorCode::TooLarge))),
+        "a fourth of hers waiting is refused: {too_many:?}"
+    );
+    // A vote for something nobody asked for is not a request.
+    let stray = bob
+        .request::<_, RadioRequests>(&RadioRequestVote::new("jukebox", 5))
+        .await;
+    assert!(matches!(
+        stray,
+        Err(ClientError::Refused(ErrorCode::NotFound))
+    ));
+
+    // Something that is not in the rotation cannot be asked for.
+    let nonsense = alice
+        .request::<_, RadioRequests>(&RadioRequest::new("jukebox", 99))
+        .await;
+    assert!(matches!(
+        nonsense,
+        Err(ClientError::Refused(ErrorCode::NotFound))
+    ));
+
+    // The most wanted plays next, whatever the rotation would have picked.
+    burrow.shared.radio.advance("jukebox", 1);
+    let late = bob
+        .request::<_, RadioRequests>(&RadioRequestVote::new("jukebox", 4))
+        .await;
+    assert!(
+        matches!(late, Err(ClientError::Refused(ErrorCode::AlreadyExists))),
+        "a vote for what has just started is told it is playing: {late:?}"
+    );
+    assert_eq!(
+        burrow.shared.radio.now_playing("jukebox").unwrap().title,
+        "song-4.mp3",
+        "two votes beat one"
+    );
+    let left: RadioRequests = alice
+        .request(&RadioRequestsRequest::new("jukebox"))
+        .await
+        .unwrap();
+    assert_eq!(left.queue.len(), 2, "and it is no longer waiting");
+
+    // A guest can see what is waiting but cannot ask.
+    let mut guest = Client::connect(&url, None, None, "e2e", "0").await.unwrap();
+    guest.auth_guest(Some("visitor".into())).await.unwrap();
+    guest.expect_welcome().await.unwrap();
+    let looked: RadioRequests = guest
+        .request(&RadioRequestsRequest::new("jukebox"))
+        .await
+        .unwrap();
+    assert_eq!(looked.queue.len(), 2);
+    let refused = guest
+        .request::<_, RadioRequests>(&RadioRequest::new("jukebox", 5))
+        .await;
+    assert!(
+        matches!(refused, Err(ClientError::Refused(ErrorCode::Forbidden))),
+        "a guest may look but not ask: {refused:?}"
+    );
+
+    burrow.shutdown().await;
+}
+
+/// A station offers only what it can play, and a library bigger than a
+/// reply is looked through, not sent whole: a page of it, how many more
+/// there are, and a search to reach them. What cannot go out — audio of a
+/// kind the burrow does not stream, a track it had to leave out, a file a
+/// moderator is holding back — is neither offered nor taken, so nothing
+/// waits in the queue only to be passed over without a word.
+#[tokio::test]
+async fn a_station_offers_only_what_it_can_play_a_page_at_a_time() {
+    use rabbithole_core::{Client, ClientError};
+    use rabbithole_proto::admin::subject_kind;
+    use rabbithole_proto::radio::{
+        RadioOffer, RadioOfferRequest, RadioRequest, RadioRequestVote, RadioRequests,
+        RadioRequestsRequest,
+    };
+    use rabbithole_proto::ErrorCode;
+
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    for login in ["alice", "bob"] {
+        burrow
+            .shared
+            .auth
+            .create_account(login, "pw-pw-pw-pw", Role::User)
+            .await
+            .unwrap();
+    }
+    // Two hundred and fifty songs, a long comment on one of them, and one
+    // file this burrow cannot send.
+    let mut tracks: Vec<rabbithole_radio::Track> = (1..=250u64)
+        .map(|n| {
+            let artist = if n == 7 {
+                "x".repeat(10_000)
+            } else {
+                "The Lagomorphs".into()
+            };
+            let mut blob = [0u8; 32];
+            blob[..8].copy_from_slice(&n.to_le_bytes());
+            rabbithole_radio::Track::new(
+                rabbithole_radio::TrackId(n),
+                format!("song-{n}.mp3"),
+                artist,
+                180_000,
+                rabbithole_radio::BlobId(blob),
+            )
+        })
+        .collect();
+    tracks.push(rabbithole_radio::Track::new(
+        rabbithole_radio::TrackId(999),
+        "memo.m4a",
+        "",
+        180_000,
+        rabbithole_radio::BlobId([9u8; 32]),
+    ));
+    let sound = burrow::radio::sound_of_tracks(&tracks);
+    let radio = &burrow.shared.radio;
+    radio.install_program("jukebox", "Jukebox", "music", tracks, sound);
+    radio.set_unsendable("jukebox", [rabbithole_radio::TrackId(999)]);
+
+    let url = format!("ws://127.0.0.1:{}", burrow.ws_addr.port());
+    let mut alice = Client::connect(&url, None, None, "e2e", "0").await.unwrap();
+    alice.auth_password("alice", "pw-pw-pw-pw").await.unwrap();
+    alice.expect_welcome().await.unwrap();
+    // Asking is spent from the posting budget, so a second listener takes
+    // the asks past the first few.
+    let mut bob = Client::connect(&url, None, None, "e2e", "0").await.unwrap();
+    bob.auth_password("bob", "pw-pw-pw-pw").await.unwrap();
+    bob.expect_welcome().await.unwrap();
+    let offer = |search: &'static str| RadioOfferRequest::new("jukebox", search);
+
+    // A page, and how many more: 249 it can play (song 1 is playing).
+    let first: RadioOffer = alice.request(&offer("")).await.unwrap();
+    assert_eq!(first.tracks.len(), burrow::radio::OFFER_SHOWN);
+    assert_eq!(first.more as usize, 249 - burrow::radio::OFFER_SHOWN);
+    assert!(first.tracks.iter().all(|t| t.id != 1 && t.id != 999));
+    let seventh = first.tracks.iter().find(|t| t.id == 7).unwrap();
+    assert!(
+        seventh.artist.chars().count() <= 200,
+        "an uploader's essay is cut to size"
+    );
+
+    // A search reaches the rest, and says which search it answers.
+    let found: RadioOffer = alice.request(&offer("SONG-24")).await.unwrap();
+    assert_eq!(found.search, "SONG-24");
+    let ids: Vec<u64> = found.tracks.iter().map(|t| t.id).collect();
+    assert_eq!(ids, [24, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249]);
+    assert_eq!(found.more, 0);
+
+    // What cannot be sent is neither offered nor taken.
+    let memo: RadioOffer = alice.request(&offer("memo")).await.unwrap();
+    assert!(memo.tracks.is_empty());
+    let refused = alice
+        .request::<_, RadioRequests>(&RadioRequest::new("jukebox", 999))
+        .await;
+    assert!(matches!(
+        refused,
+        Err(ClientError::Refused(ErrorCode::NotFound))
+    ));
+
+    // Nor a track the station found it could not play when its turn came —
+    // until it does play, when it is offered again.
+    radio.cannot_play("jukebox", rabbithole_radio::TrackId(30));
+    let thirty: RadioOffer = alice.request(&offer("song-30")).await.unwrap();
+    assert!(thirty.tracks.is_empty(), "{thirty:?}");
+    radio.can_play("jukebox", rabbithole_radio::TrackId(30), "song-30.mp3");
+    let thirty: RadioOffer = alice.request(&offer("song-30")).await.unwrap();
+    assert_eq!(thirty.tracks.len(), 1, "it played, so it can be asked for");
+
+    // Somebody asks for songs 5, 6 and 7; then a moderator holds 5's file
+    // back. It leaves the queue as everybody sees it and the offer, cannot
+    // be asked for or voted for, and does not use up one of her three,
+    // until it is let through.
+    for n in [5, 6, 7] {
+        let _: RadioRequests = alice
+            .request(&RadioRequest::new("jukebox", n))
+            .await
+            .unwrap();
+    }
+    let mut blob = [0u8; 32];
+    blob[..8].copy_from_slice(&5u64.to_le_bytes());
+    burrow
+        .shared
+        .moderation
+        .quarantine_set(subject_kind::FILE, &blob, "under review", "mo")
+        .await
+        .unwrap();
+    let waiting: RadioRequests = alice
+        .request(&RadioRequestsRequest::new("jukebox"))
+        .await
+        .unwrap();
+    assert!(
+        waiting.queue.iter().all(|q| q.id != 5),
+        "a held file's name is not shown"
+    );
+    let _: RadioRequests = alice
+        .request(&RadioRequest::new("jukebox", 8))
+        .await
+        .expect("what she cannot see does not count against her");
+    let voted = bob
+        .request::<_, RadioRequests>(&RadioRequestVote::new("jukebox", 5))
+        .await;
+    assert!(matches!(
+        voted,
+        Err(ClientError::Refused(ErrorCode::NotFound))
+    ));
+    let five: RadioOffer = alice.request(&offer("song-5")).await.unwrap();
+    assert!(five.tracks.iter().all(|t| t.id != 5));
+    let again = bob
+        .request::<_, RadioRequests>(&RadioRequest::new("jukebox", 5))
+        .await;
+    assert!(matches!(
+        again,
+        Err(ClientError::Refused(ErrorCode::NotFound))
+    ));
+    burrow
+        .shared
+        .moderation
+        .quarantine_clear(subject_kind::FILE, &blob, "mo")
+        .await
+        .unwrap();
+    let back: RadioRequests = alice
+        .request(&RadioRequestsRequest::new("jukebox"))
+        .await
+        .unwrap();
+    assert!(
+        back.queue.iter().any(|q| q.id == 5),
+        "let through, it is waiting again"
+    );
+
+    // A station nobody has heard of is not there to ask about.
+    let nowhere = alice
+        .request::<_, RadioOffer>(&RadioOfferRequest::new("nowhere", ""))
+        .await;
+    assert!(matches!(
+        nowhere,
+        Err(ClientError::Refused(ErrorCode::NotFound))
+    ));
+
     burrow.shutdown().await;
 }

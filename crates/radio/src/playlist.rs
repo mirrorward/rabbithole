@@ -58,6 +58,12 @@ impl Playlist {
         }
     }
 
+    /// Every track in the rotation, in the order it was given: what a
+    /// listener may ask for.
+    pub fn tracks(&self) -> &[Track] {
+        &self.tracks
+    }
+
     /// The active rotation mode.
     pub fn mode(&self) -> RotationMode {
         self.mode

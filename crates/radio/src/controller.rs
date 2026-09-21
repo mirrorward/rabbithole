@@ -63,6 +63,9 @@ pub struct StationController {
     description: String,
     dj: String,
     current: Option<Track>,
+    /// Whether the current track came off the request queue rather than
+    /// the rotation.
+    current_requested: bool,
     started_at_ms: u64,
 }
 
@@ -84,6 +87,7 @@ impl StationController {
             description: description.into(),
             dj: dj.into(),
             current: None,
+            current_requested: false,
             started_at_ms: 0,
         }
     }
@@ -103,9 +107,21 @@ impl StationController {
         &self.queue
     }
 
+    /// Every track in the rotation: what a listener may ask for.
+    pub fn rotation(&self) -> &[Track] {
+        self.playlist.tracks()
+    }
+
     /// The track currently playing, if any.
     pub fn current(&self) -> Option<&Track> {
         self.current.as_ref()
+    }
+
+    /// Whether the current track is one somebody asked for, rather than the
+    /// rotation's turn. A station that has to pass over what it cannot play
+    /// counts its way round the rotation; a request is not part of that.
+    pub fn current_was_requested(&self) -> bool {
+        self.current_requested
     }
 
     /// The opaque media handle of the current track (the blob the transport
@@ -160,11 +176,9 @@ impl StationController {
     /// It does **not** push audio frames — see the module seam docs. Returns
     /// `None` only when both the queue and playlist are empty.
     pub fn on_track_finished(&mut self, now_ms: u64) -> Option<Track> {
-        let next = self
-            .queue
-            .pop_next()
-            .map(|request| request.track().clone())
-            .or_else(|| self.playlist.advance().cloned());
+        let requested = self.queue.pop_next().map(|request| request.track().clone());
+        self.current_requested = requested.is_some();
+        let next = requested.or_else(|| self.playlist.advance().cloned());
 
         self.current = next.clone();
         self.started_at_ms = now_ms;
@@ -270,5 +284,19 @@ mod tests {
         let mut c = StationController::new(station, playlist, "", "auto");
         assert!(c.on_track_finished(0).is_none());
         assert!(c.now_playing().is_none());
+    }
+
+    #[test]
+    fn a_controller_knows_whether_what_it_plays_was_asked_for() {
+        let station = Station::new("t", 8);
+        let playlist = Playlist::new(vec![track(1, 10), track(2, 10)], RotationMode::Sequential);
+        let mut c = StationController::new(station, playlist, "", "auto");
+        c.on_track_finished(0);
+        assert!(!c.current_was_requested());
+        c.queue_mut().enqueue(track(2, 10), "alice").unwrap();
+        c.on_track_finished(10);
+        assert!(c.current_was_requested());
+        c.on_track_finished(20);
+        assert!(!c.current_was_requested(), "back to the rotation");
     }
 }

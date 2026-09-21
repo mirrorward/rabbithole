@@ -5234,8 +5234,216 @@ pub fn Radio() -> impl IntoView {
             </section>
             <section class="rh-panel rh-player" aria-label="Radio player">
                 <RadioPlayerPanel/>
+                <RadioRequestsPanel/>
             </section>
         </main>
+    }
+}
+
+/// What a listener can do beyond listening: ask for a song, or join
+/// somebody else's asking. What is asked for plays before the rotation, the
+/// most wanted first. A station with no rotation — a DJ's own mount — has
+/// nothing to ask for, and this says nothing rather than offering it.
+#[component]
+fn RadioRequestsPanel() -> impl IntoView {
+    use crate::radio::{more_line, place_line, wanted_line};
+    let app = expect_context::<AppState>();
+    let prefs = app.radio_prefs;
+    let radio = app.radio;
+    // The station on show, the burrow it is on, and what it is playing: a
+    // new song means the one at the top of the queue has just been played,
+    // so ask again. A memo, so a listener count changing is not a reason
+    // to ask.
+    let shown = create_memo(move |_| {
+        radio.with(|r| {
+            let endpoint = r.endpoint()?.to_string();
+            prefs
+                .with(|p| p.station.clone())
+                .and_then(|slug| r.get(&slug).cloned())
+                .or_else(|| r.on_air().cloned())
+                .map(|s| (endpoint, s.station, s.title))
+        })
+    });
+    // The burrow that station is on answers for it, whichever is focused.
+    let owner = move || {
+        let (endpoint, _, _) = shown.get()?;
+        app.session_at_tracked(&endpoint)
+    };
+    let station = move || shown.get().map(|(_, s, _)| s).unwrap_or_default();
+    let requests = move || {
+        owner()
+            .map(|s| s.state.with(|u| u.radio_requests.clone()))
+            .unwrap_or_default()
+    };
+    let browsing = create_rw_signal(false);
+    let search = create_rw_signal(String::new());
+    let may_ask = move || owner().is_some_and(|s| !s.is_guest.get() && !s.handle.get().is_empty());
+    create_effect(move |_| {
+        if let Some((_, station, _playing)) = shown.get() {
+            app.load_requests(&station);
+        }
+    });
+    // Another burrow's stations on show: what was being looked for on the
+    // last one is closed, since it may not be one this person can ask of.
+    let endpoint = create_memo(move |_| shown.get().map(|(endpoint, _, _)| endpoint));
+    create_effect(move |before: Option<Option<String>>| {
+        let now = endpoint.get();
+        if before.is_some_and(|before| before != now) {
+            browsing.set(false);
+            search.set(String::new());
+        }
+        now
+    });
+    // What can be asked for, looked through as it is typed; looked at again
+    // when the song changes, since what is playing is not offered.
+    create_effect(move |_| {
+        let shown = shown.get();
+        let (open, typed) = (browsing.get() && may_ask(), search.get());
+        if let (true, Some((_, station, _))) = (open, shown) {
+            app.look_for_songs(&station, &typed);
+        }
+    });
+    let answer = move || requests().views.get(&station()).cloned();
+    let waiting = move || answer().map(|v| v.queue).unwrap_or_default();
+    let offer = move || requests().offers.get(&station()).cloned();
+    let offered = move || offer().map(|o| o.tracks).unwrap_or_default();
+    let more = move || offer().and_then(|o| more_line(o.more));
+    let dj_live = move || answer().is_some_and(|v| v.dj_live);
+    let numbered = move || {
+        waiting()
+            .into_iter()
+            .enumerate()
+            .collect::<Vec<(usize, rabbithole_proto::radio::QueuedTrack)>>()
+    };
+    let said = move || requests().refusal_for(&station());
+    // Shown for a station that takes requests, once it has said what is
+    // waiting. A DJ's own mount has nothing to ask for and shows nothing.
+    let requestable = move || answer().is_some_and(|v| v.requestable);
+    view! {
+        <Show when=requestable fallback=|| ()>
+            <div class="rh-requests">
+                <div class="rh-requests-head">
+                    <h3 class="rh-requests-title">"Asked for"</h3>
+                    <Show when=may_ask fallback=|| ()>
+                        <button
+                            type="button"
+                            class="rh-btn ghost small"
+                            aria-expanded=move || browsing.get().to_string()
+                            on:click=move |_| browsing.update(|b| *b = !*b)
+                        >
+                            {move || if browsing.get() { "Done" } else { "Ask for a song" }}
+                        </button>
+                    </Show>
+                </div>
+                <Show when=move || said().is_some() fallback=|| ()>
+                    <p class="rh-adm-status" role="status">{move || said().unwrap_or_default()}</p>
+                </Show>
+                <Show when=dj_live fallback=|| ()>
+                    <p class="rh-requests-empty">
+                        "A DJ has the air. What is asked for plays when they are done."
+                    </p>
+                </Show>
+                <Show
+                    when=move || !waiting().is_empty()
+                    fallback=move || view! {
+                        <p class="rh-requests-empty">
+                            {move || if dj_live() {
+                                "Nothing asked for yet."
+                            } else {
+                                "Nothing asked for. The rotation plays until somebody does."
+                            }}
+                        </p>
+                    }
+                >
+                    <ol class="rh-requests-list">
+                        <For
+                            each=numbered
+                            key=|(i, q)| (*i, q.id, q.votes, q.mine)
+                            children=move |(i, q)| {
+                                let id = q.id;
+                                let who = if q.artist.trim().is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" \u{2014} {}", q.artist)
+                                };
+                                view! {
+                                    <li class="rh-request">
+                                        <span class="rh-request-place">{place_line(i)}</span>
+                                        <span class="rh-request-what">
+                                            <span class="rh-request-title">{q.title.clone()}</span>
+                                            {who}
+                                            <span class="rh-request-meta">
+                                                {wanted_line(q.votes, q.mine)}
+                                            </span>
+                                        </span>
+                                        <Show when=move || may_ask() && !q.mine fallback=|| ()>
+                                            <button
+                                                type="button"
+                                                class="rh-btn ghost small"
+                                                on:click=move |_| app.join_request(&station(), id)
+                                            >
+                                                "Me too"
+                                            </button>
+                                        </Show>
+                                    </li>
+                                }
+                            }
+                        />
+                    </ol>
+                </Show>
+                <Show when=move || browsing.get() && may_ask() fallback=|| ()>
+                    <div class="rh-requests-browse">
+                        <input
+                            class="rh-input rh-requests-find"
+                            type="search"
+                            aria-label="Find a song to ask for"
+                            placeholder="Find a song\u{2026}"
+                            prop:value=search
+                            on:input=move |ev| search.set(event_target_value(&ev))
+                        />
+                        <Show
+                            when=move || !offered().is_empty()
+                            fallback=move || view! {
+                                <p class="rh-requests-empty">
+                                    {move || if search.with(|s| s.trim().is_empty()) {
+                                        "Nothing else to ask for just now."
+                                    } else {
+                                        "Nothing here by that name."
+                                    }}
+                                </p>
+                            }
+                        >
+                            <ul class="rh-requests-offer">
+                                <For
+                                    each=offered
+                                    key=|t| t.id
+                                    children=move |t| {
+                                        let id = t.id;
+                                        let queued = move || waiting().iter().any(|q| q.id == id);
+                                        view! {
+                                            <li>
+                                                <span class="rh-request-title">{t.title.clone()}</span>
+                                                <button
+                                                    type="button"
+                                                    class="rh-btn ghost small"
+                                                    disabled=queued
+                                                    on:click=move |_| app.ask_for_song(&station(), id)
+                                                >
+                                                    {move || if queued() { "Waiting" } else { "Ask" }}
+                                                </button>
+                                            </li>
+                                        }
+                                    }
+                                />
+                            </ul>
+                        </Show>
+                        <Show when=move || more().is_some() fallback=|| ()>
+                            <p class="rh-requests-more">{move || more().unwrap_or_default()}</p>
+                        </Show>
+                    </div>
+                </Show>
+            </div>
+        </Show>
     }
 }
 

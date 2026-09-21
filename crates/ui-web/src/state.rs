@@ -384,6 +384,9 @@ pub struct UiState {
     pub sessions: Vec<SessionRow>,
     /// The Wishing Well: what people have asked this burrow for.
     pub wishes: WishesState,
+    /// What has been asked of this burrow's radio stations, and what they
+    /// said.
+    pub radio_requests: crate::radio::RequestsState,
     /// The rooms this burrow has, as it last listed them.
     pub rooms: Vec<rabbithole_proto::chat::RoomInfo>,
     /// Which room is being read. The lobby until somebody goes elsewhere.

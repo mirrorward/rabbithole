@@ -209,6 +209,11 @@ impl RadioState {
         self.stations.get(station)
     }
 
+    /// The burrow this listing came from, once one has arrived.
+    pub fn endpoint(&self) -> Option<&str> {
+        self.tuning.as_ref().map(|t| t.endpoint.as_str())
+    }
+
     /// Whether nothing is on the air.
     pub fn is_empty(&self) -> bool {
         self.stations.is_empty()
@@ -399,8 +404,265 @@ pub mod storage {
     }
 }
 
+/// What this person has seen of the requests on one burrow's stations, and
+/// what a station said about the last thing they asked of it. Kept per
+/// burrow, beside its rooms and wishes: each burrow answers for its own
+/// stations, and one burrow's "ambient" is not another's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestsState {
+    /// Each station's queue as last answered, by station. Kept per station
+    /// so a late answer about one does not stand in for another.
+    pub views: BTreeMap<String, rabbithole_proto::radio::RadioRequests>,
+    /// What each station offered for the search last looked for there.
+    pub offers: BTreeMap<String, rabbithole_proto::radio::RadioOffer>,
+    /// The search last looked for on each station, so the answer to an
+    /// older one is not shown as the answer to what is typed now.
+    searching: BTreeMap<String, String>,
+    /// The station this person last asked for a song or a vote.
+    asked: Option<String>,
+    /// Why it said no, if it did, and which station said it.
+    refusal: Option<(String, &'static str)>,
+}
+
+impl RequestsState {
+    /// This person asks `station` for a song, or joins a request: what it
+    /// said about the last one no longer stands.
+    pub fn asking(&mut self, station: &str) {
+        self.asked = Some(station.to_string());
+        self.refusal = None;
+    }
+
+    /// This person is looking through `station` for `search`, kept as the
+    /// burrow will say it back: trimmed, and no longer than it looks for.
+    pub fn looking(&mut self, station: &str, search: &str) {
+        let search: String = search
+            .trim()
+            .chars()
+            .take(rabbithole_proto::radio::OFFER_SEARCH_CHARS)
+            .collect();
+        self.searching.insert(station.to_string(), search);
+    }
+
+    /// The song on `station` has changed, or the person has come back to
+    /// it: why it said no before is no longer the state of things.
+    pub fn moved_on(&mut self, station: &str) {
+        if self.refusal.as_ref().is_some_and(|(at, _)| at == station) {
+            self.refusal = None;
+        }
+    }
+
+    /// Fold in a station's answer. Returns the station whose queue should
+    /// be asked for again: a request or a vote turned down usually means
+    /// the queue a person was looking at has moved on without them.
+    ///
+    /// A refusal of a look the pane took on its own — what is waiting, what
+    /// can be asked for — is not said: nobody asked for anything, and a
+    /// station with nothing to ask for says nothing.
+    pub fn answered(&mut self, answer: crate::wire::RadioAnswer) -> Option<String> {
+        use crate::wire::RadioAnswer;
+        match answer {
+            RadioAnswer::Requests(view) => {
+                self.views.insert(view.station.clone(), view);
+                None
+            }
+            RadioAnswer::Offer(offer) => {
+                let current = self
+                    .searching
+                    .get(&offer.station)
+                    .is_none_or(|search| *search == offer.search);
+                if current {
+                    self.offers.insert(offer.station.clone(), offer);
+                }
+                None
+            }
+            RadioAnswer::Refused { ask, code } => {
+                let words = request_refusal(ask, code)?;
+                let station = self.asked.clone()?;
+                self.refusal = Some((station.clone(), words));
+                Some(station)
+            }
+        }
+    }
+
+    /// What `station` said no about, if it was the last one asked.
+    pub fn refusal_for(&self, station: &str) -> Option<&'static str> {
+        self.refusal
+            .as_ref()
+            .filter(|(at, _)| at == station)
+            .map(|(_, words)| *words)
+    }
+}
+
+/// How many want a waiting song, said the way a person would.
+pub fn wanted_line(votes: u32, mine: bool) -> String {
+    match (votes, mine) {
+        (0, _) => "Nobody wants it any more".to_string(),
+        (1, true) => "You asked for it".to_string(),
+        (1, false) => "1 person wants it".to_string(),
+        (n, true) => format!("{n} want it, you included"),
+        (n, false) => format!("{n} people want it"),
+    }
+}
+
+/// What a station's refusal means for a listener. The wire says a code and
+/// which ask it refuses; this says what to do about it. `None` for a
+/// refusal of a look the pane took on its own, which is not said.
+pub fn request_refusal(
+    ask: crate::wire::RadioAskKind,
+    code: rabbithole_proto::ErrorCode,
+) -> Option<&'static str> {
+    use crate::wire::RadioAskKind as K;
+    use rabbithole_proto::ErrorCode as E;
+    let is_vote = match ask {
+        K::List | K::Offer => return None,
+        K::Request => false,
+        K::Vote => true,
+    };
+    Some(match code {
+        // No number: the cap is the burrow's to set, and words that name
+        // one would be wrong the day it changes.
+        E::TooLarge => "You have as many waiting as one person may. Let one play, then ask again.",
+        E::RateLimited => "That is a lot of asking at once. Wait a minute, then try again.",
+        E::AlreadyExists => "That one is playing now.",
+        E::NotFound if is_vote => "That one is not waiting any more. It may be playing now.",
+        E::NotFound => "That song cannot be asked for on this station now.",
+        E::Forbidden => "Asking for songs needs an account that may talk here.",
+        E::Unavailable => "The queue is full. Wait for a few to play, then ask.",
+        _ => "The station did not take that.",
+    })
+}
+
+/// How many more a search matched than are shown, and what to do about it.
+pub fn more_line(more: u32) -> Option<String> {
+    match more {
+        0 => None,
+        1 => Some("And 1 more. Type more of its name to find it.".to_string()),
+        n => Some(format!("And {n} more. Type more of a name to narrow it.")),
+    }
+}
+
+/// Where a song is in the queue, from the top: "Next", then its place.
+pub fn place_line(index: usize) -> String {
+    match index {
+        0 => "Next".to_string(),
+        n => format!("{}", n + 1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_request_is_said_the_way_a_person_would() {
+        assert_eq!(wanted_line(1, true), "You asked for it");
+        assert_eq!(wanted_line(1, false), "1 person wants it");
+        assert_eq!(wanted_line(3, true), "3 want it, you included");
+        assert_eq!(wanted_line(3, false), "3 people want it");
+        assert_eq!(place_line(0), "Next");
+        assert_eq!(place_line(2), "3");
+        use crate::wire::RadioAskKind as K;
+        use rabbithole_proto::ErrorCode as E;
+        let said = |ask, code| request_refusal(ask, code).unwrap_or_default();
+        // The cap and the budget are different reasons, said differently.
+        assert!(said(K::Request, E::TooLarge).contains("as many waiting"));
+        assert!(said(K::Request, E::RateLimited).contains("Wait a minute"));
+        assert!(said(K::Request, E::AlreadyExists).contains("playing now"));
+        assert!(said(K::Vote, E::NotFound).contains("not waiting any more"));
+        assert!(said(K::Request, E::NotFound).contains("cannot be asked for"));
+        assert!(said(K::Request, E::Forbidden).contains("account"));
+        assert!(said(K::Request, E::Unavailable).contains("full"));
+        // A look the pane took on its own is not a person being told no.
+        assert_eq!(request_refusal(K::List, E::NotFound), None);
+        assert_eq!(request_refusal(K::Offer, E::Unsupported), None);
+        assert_eq!(more_line(0), None);
+        assert!(more_line(40).unwrap().contains("40 more"));
+    }
+
+    #[test]
+    fn a_refusal_stays_with_the_station_that_said_it() {
+        use crate::wire::{RadioAnswer, RadioAskKind as K};
+        use rabbithole_proto::radio::{RadioOffer, RadioRequests};
+        use rabbithole_proto::ErrorCode as E;
+        let mut state = RequestsState::default();
+
+        // The pane's own look being refused says nothing and asks nothing.
+        state.asking("jukebox");
+        assert_eq!(
+            state.answered(RadioAnswer::Refused {
+                ask: K::List,
+                code: E::NotFound
+            }),
+            None
+        );
+        assert_eq!(state.refusal_for("jukebox"), None);
+
+        // A request turned down is said at the station that said it, and
+        // only there; its queue is asked for again.
+        let again = state.answered(RadioAnswer::Refused {
+            ask: K::Request,
+            code: E::TooLarge,
+        });
+        assert_eq!(again.as_deref(), Some("jukebox"));
+        assert!(state.refusal_for("jukebox").is_some());
+        assert_eq!(state.refusal_for("ambient"), None);
+        // The queue arriving again does not wipe it before anyone reads it.
+        state.answered(RadioAnswer::Requests(RadioRequests::new(
+            "jukebox",
+            true,
+            false,
+            Vec::new(),
+        )));
+        assert!(state.refusal_for("jukebox").is_some());
+        // The next ask does.
+        state.asking("jukebox");
+        assert_eq!(state.refusal_for("jukebox"), None);
+
+        // A refusal stops standing once the song has changed.
+        state.answered(RadioAnswer::Refused {
+            ask: K::Request,
+            code: E::AlreadyExists,
+        });
+        state.moved_on("ambient");
+        assert!(
+            state.refusal_for("jukebox").is_some(),
+            "another station moving on is not this one"
+        );
+        state.moved_on("jukebox");
+        assert_eq!(state.refusal_for("jukebox"), None);
+
+        // An answer to an older search is not the answer to this one.
+        state.looking("jukebox", "da");
+        state.looking("jukebox", " dawn ");
+        state.answered(RadioAnswer::Offer(RadioOffer::new(
+            "jukebox",
+            "da",
+            Vec::new(),
+            9,
+        )));
+        assert!(!state.offers.contains_key("jukebox"));
+        state.answered(RadioAnswer::Offer(RadioOffer::new(
+            "jukebox",
+            "dawn",
+            Vec::new(),
+            0,
+        )));
+        assert_eq!(state.offers["jukebox"].search, "dawn");
+        // A search longer than the burrow looks for is matched as it says
+        // it back.
+        let long = "x".repeat(500);
+        state.looking("jukebox", &long);
+        let said: String = long
+            .chars()
+            .take(rabbithole_proto::radio::OFFER_SEARCH_CHARS)
+            .collect();
+        state.answered(RadioAnswer::Offer(RadioOffer::new(
+            "jukebox",
+            said.clone(),
+            Vec::new(),
+            0,
+        )));
+        assert_eq!(state.offers["jukebox"].search, said);
+    }
+
     use super::*;
 
     fn auto(station: &str, title: &str, artist: &str, listeners: u32) -> StationStatus {

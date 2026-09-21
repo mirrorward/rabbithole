@@ -27,6 +27,9 @@ use crate::track::{Track, TrackId};
 pub struct QueuedRequest {
     track: Track,
     voters: HashSet<String>,
+    /// Who asked for it, as opposed to who joined in afterwards: what a
+    /// fair-use cap counts.
+    requester: String,
     seq: u64,
 }
 
@@ -44,6 +47,16 @@ impl QueuedRequest {
     /// Insertion order; lower values were requested earlier.
     pub fn seq(&self) -> u64 {
         self.seq
+    }
+
+    /// Who asked for it.
+    pub fn requester(&self) -> &str {
+        &self.requester
+    }
+
+    /// Whether `listener` asked for it or has voted for it since.
+    pub fn backed_by(&self, listener: &str) -> bool {
+        self.voters.contains(listener)
     }
 }
 
@@ -85,12 +98,36 @@ impl RequestQueue {
         if self.contains(track.id) {
             return Err(RadioError::TrackAlreadyQueued(track.id));
         }
+        let requester = listener.into();
         let mut voters = HashSet::new();
-        voters.insert(listener.into());
+        voters.insert(requester.clone());
         let seq = self.next_seq;
         self.next_seq += 1;
-        self.requests.push(QueuedRequest { track, voters, seq });
+        self.requests.push(QueuedRequest {
+            track,
+            voters,
+            requester,
+            seq,
+        });
         Ok(())
+    }
+
+    /// How many requests waiting in the queue `listener` asked for — not
+    /// the ones they only voted for. What a station counts before letting
+    /// one person ask for more.
+    pub fn requests_by(&self, listener: &str) -> usize {
+        self.requests
+            .iter()
+            .filter(|r| r.requester == listener)
+            .count()
+    }
+
+    /// Every request waiting, in the order they will play: most votes
+    /// first, and the earlier of two equally wanted.
+    pub fn in_play_order(&self) -> Vec<&QueuedRequest> {
+        let mut all: Vec<&QueuedRequest> = self.requests.iter().collect();
+        all.sort_by(|a, b| b.votes().cmp(&a.votes()).then_with(|| a.seq.cmp(&b.seq)));
+        all
     }
 
     /// Adds `listener`'s vote to an already-queued track and returns its new
@@ -201,5 +238,38 @@ mod tests {
         let mut q = RequestQueue::new();
         let err = q.upvote(TrackId(99), "alice").unwrap_err();
         assert_eq!(err, RadioError::TrackNotQueued(TrackId(99)));
+    }
+
+    #[test]
+    fn a_queue_knows_who_asked_and_plays_in_the_order_it_says() {
+        let mut q = RequestQueue::new();
+        q.enqueue(track(1), "alice").unwrap();
+        q.enqueue(track(2), "alice").unwrap();
+        q.enqueue(track(3), "bob").unwrap();
+        q.upvote(TrackId(3), "carol").unwrap();
+        q.upvote(TrackId(1), "bob").unwrap();
+
+        // Asking is not the same as voting: bob backs two, asked for one.
+        assert_eq!(q.requests_by("alice"), 2);
+        assert_eq!(q.requests_by("bob"), 1);
+        assert_eq!(q.requests_by("carol"), 0);
+
+        // The order the list is shown in is the order it will play.
+        let order: Vec<u64> = q.in_play_order().iter().map(|r| r.track().id.0).collect();
+        assert_eq!(
+            order,
+            vec![1, 3, 2],
+            "two votes each, then the earlier; one vote last"
+        );
+        assert_eq!(
+            q.peek().unwrap().track().id.0,
+            order[0],
+            "and it agrees with what plays"
+        );
+
+        let first = &q.in_play_order()[0];
+        assert_eq!(first.requester(), "alice");
+        assert!(first.backed_by("bob"), "bob voted for it");
+        assert!(!first.backed_by("carol"));
     }
 }

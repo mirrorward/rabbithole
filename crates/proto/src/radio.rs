@@ -402,3 +402,226 @@ impl Message for RadioStatus {
     const FAMILY: Family = Family::RADIO;
     const MESSAGE_TYPE: u16 = 6;
 }
+
+/// A track a listener may ask a station for: something in its rotation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RequestableTrack {
+    pub id: u64,
+    pub title: String,
+    pub artist: String,
+}
+
+impl RequestableTrack {
+    pub fn new(id: u64, title: impl Into<String>, artist: impl Into<String>) -> Self {
+        Self {
+            id,
+            title: title.into(),
+            artist: artist.into(),
+        }
+    }
+}
+
+/// A request waiting to be played, in the order it will be: most wanted
+/// first, and the earlier of two equally wanted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct QueuedTrack {
+    pub id: u64,
+    pub title: String,
+    pub artist: String,
+    /// How many people want it, the one who asked included.
+    pub votes: u32,
+    /// Whether the person asking is one of them — so a pane does not offer
+    /// a vote they have already cast.
+    pub mine: bool,
+}
+
+impl QueuedTrack {
+    pub fn new(
+        id: u64,
+        title: impl Into<String>,
+        artist: impl Into<String>,
+        votes: u32,
+        mine: bool,
+    ) -> Self {
+        Self {
+            id,
+            title: title.into(),
+            artist: artist.into(),
+            votes,
+            mine,
+        }
+    }
+}
+
+/// Ask what a station's listeners have asked for. → [`RadioRequests`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RadioRequestsRequest {
+    pub station: String,
+}
+
+impl RadioRequestsRequest {
+    pub fn new(station: impl Into<String>) -> Self {
+        Self {
+            station: station.into(),
+        }
+    }
+}
+
+impl Message for RadioRequestsRequest {
+    const FAMILY: Family = Family::RADIO;
+    const MESSAGE_TYPE: u16 = 7;
+}
+
+/// A station's queue of requests, in the order they will play. The answer
+/// to asking about it, requesting and voting alike. Small by construction:
+/// a station holds a bounded number of requests. What can be asked for is
+/// [`RadioOffer`], which is looked through rather than sent whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RadioRequests {
+    pub station: String,
+    /// Whether the station takes requests at all. A mount a DJ streams to
+    /// has no rotation to ask from; it answers with an empty queue and
+    /// `false` rather than a refusal, since nobody asked for anything.
+    pub requestable: bool,
+    /// A DJ has the air: requests wait until they leave.
+    pub dj_live: bool,
+    pub queue: Vec<QueuedTrack>,
+}
+
+impl RadioRequests {
+    pub fn new(
+        station: impl Into<String>,
+        requestable: bool,
+        dj_live: bool,
+        queue: Vec<QueuedTrack>,
+    ) -> Self {
+        Self {
+            station: station.into(),
+            requestable,
+            dj_live,
+            queue,
+        }
+    }
+}
+
+impl Message for RadioRequests {
+    const FAMILY: Family = Family::RADIO;
+    const MESSAGE_TYPE: u16 = 8;
+}
+
+/// Ask for a track to play next. A signed-in account, not a guest: a guest
+/// could come back under another name and ask again. → [`RadioRequests`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RadioRequest {
+    pub station: String,
+    pub track: u64,
+}
+
+impl RadioRequest {
+    pub fn new(station: impl Into<String>, track: u64) -> Self {
+        Self {
+            station: station.into(),
+            track,
+        }
+    }
+}
+
+impl Message for RadioRequest {
+    const FAMILY: Family = Family::RADIO;
+    const MESSAGE_TYPE: u16 = 9;
+}
+
+/// Add your vote to a request already waiting. One vote each, however many
+/// times it is sent. → [`RadioRequests`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RadioRequestVote {
+    pub station: String,
+    pub track: u64,
+}
+
+impl RadioRequestVote {
+    pub fn new(station: impl Into<String>, track: u64) -> Self {
+        Self {
+            station: station.into(),
+            track,
+        }
+    }
+}
+
+impl Message for RadioRequestVote {
+    const FAMILY: Family = Family::RADIO;
+    const MESSAGE_TYPE: u16 = 10;
+}
+
+/// The most of a search a station looks for, and says back in
+/// [`RadioOffer::search`]. A client keeps the same much of what it sent, so
+/// the answer can be matched to the question.
+pub const OFFER_SEARCH_CHARS: usize = 200;
+
+/// Look through what a station can be asked for: tracks whose title or
+/// artist holds `search` (all of them when it is empty; the first
+/// [`OFFER_SEARCH_CHARS`] of it, trimmed), a page at a time.
+/// → [`RadioOffer`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RadioOfferRequest {
+    pub station: String,
+    pub search: String,
+}
+
+impl RadioOfferRequest {
+    pub fn new(station: impl Into<String>, search: impl Into<String>) -> Self {
+        Self {
+            station: station.into(),
+            search: search.into(),
+        }
+    }
+}
+
+impl Message for RadioOfferRequest {
+    const FAMILY: Family = Family::RADIO;
+    const MESSAGE_TYPE: u16 = 11;
+}
+
+/// What a station can be asked for, as far as `search` narrows it: only
+/// what it can actually play, and not what is playing now. A library can
+/// hold more than one reply should carry, so this is the first of them and
+/// how many more there are; a person narrows the search to reach the rest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RadioOffer {
+    pub station: String,
+    /// The search this answers, so a late answer to an older one can be
+    /// told apart from the answer to what the person is typing now.
+    pub search: String,
+    pub tracks: Vec<RequestableTrack>,
+    /// How many more matched than are here.
+    pub more: u32,
+}
+
+impl RadioOffer {
+    pub fn new(
+        station: impl Into<String>,
+        search: impl Into<String>,
+        tracks: Vec<RequestableTrack>,
+        more: u32,
+    ) -> Self {
+        Self {
+            station: station.into(),
+            search: search.into(),
+            tracks,
+            more,
+        }
+    }
+}
+
+impl Message for RadioOffer {
+    const FAMILY: Family = Family::RADIO;
+    const MESSAGE_TYPE: u16 = 12;
+}

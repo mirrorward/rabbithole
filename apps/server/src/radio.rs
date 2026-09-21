@@ -36,7 +36,7 @@
 //! drop-behind fan-out here mirrors the audio `Station` semantics exactly: a
 //! listener that falls behind skips ahead and never blocks the source.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -241,11 +241,79 @@ struct Program {
     expected: Option<Sound>,
     /// How many tracks the rotation holds.
     tracks: usize,
+    /// Tracks in the rotation that are not what this station sends — audio
+    /// of a kind this burrow cannot stream, or FLAC in another form than
+    /// the mount's — kept here so the station can say it left them out.
+    /// Never offered to a listener to ask for.
+    unsendable: HashSet<TrackId>,
+    /// Tracks the pump found it could not play when their turn came. Not
+    /// offered until one does play: a file can be fixed, or the station can
+    /// change what it sends.
+    unplayable: HashSet<TrackId>,
+    /// A DJ talked over the current track. It is moved past when they
+    /// leave, not when they arrive: moving on takes the most wanted request
+    /// off the queue, and nobody would hear it until then.
+    owed: bool,
 }
 
 impl Program {
     fn is_live(&self) -> bool {
         self.live.is_some()
+    }
+
+    /// What is playing now, as far as a listener is concerned: nothing
+    /// of the rotation's while a DJ has the air or has just talked over it.
+    fn playing(&self) -> Option<TrackId> {
+        if self.is_live() || self.owed {
+            return None;
+        }
+        self.controller.current().map(|t| t.id)
+    }
+
+    /// Whether a listener may ask for `track`: in the rotation, something
+    /// this station can send and has not found it could not play, and not
+    /// what is playing now. Whether a moderator is holding it back is the
+    /// caller's to say.
+    fn offers(&self, track: &Track) -> bool {
+        !self.unsendable.contains(&track.id)
+            && !self.unplayable.contains(&track.id)
+            && self.playing() != Some(track.id)
+    }
+
+    /// How many of `listener`'s requests are waiting, not counting any a
+    /// moderator has since held back: those are not shown to them, so
+    /// they must not use up what they may ask for either.
+    fn waiting_for(&self, listener: &str, held: &impl Fn(&Track) -> bool) -> usize {
+        self.controller
+            .queue()
+            .in_play_order()
+            .into_iter()
+            .filter(|r| r.requester() == listener && !held(r.track()))
+            .count()
+    }
+
+    /// How many requests are waiting that anybody can see.
+    fn waiting(&self, held: &impl Fn(&Track) -> bool) -> usize {
+        self.controller
+            .queue()
+            .in_play_order()
+            .into_iter()
+            .filter(|r| !held(r.track()))
+            .count()
+    }
+
+    /// Move to the next track, passing over what a moderator is holding
+    /// back (`held`) so its name is never announced as playing. Once round
+    /// the rotation and everything waiting, at most: a station held back
+    /// entirely lands on something rather than going round for ever, and
+    /// the pump, which checks again, does not play it.
+    fn move_on(&mut self, now_ms: u64, held: &impl Fn(&Track) -> bool) {
+        self.controller.on_track_finished(now_ms);
+        let mut tries = self.tracks + self.controller.queue().len();
+        while tries > 0 && self.controller.current().is_some_and(held) {
+            self.controller.on_track_finished(now_ms);
+            tries -= 1;
+        }
     }
 
     /// The now-playing to surface: the live DJ's when live, else the playlist's.
@@ -357,8 +425,9 @@ impl Stations {
         let track_count = tracks.len();
         let playlist = Playlist::new(tracks, RotationMode::Sequential);
         let mut controller = StationController::new(station, playlist, description, AUTOMATION_DJ);
-        // Start playout at the opening track so now-playing is live at once.
-        controller.on_track_finished(0);
+        // Start playout at the opening track so now-playing is live at once,
+        // on the clock the pump and the timer driver both advance it by.
+        controller.on_track_finished(unix_ms());
         let _ = self.registry.create(StationConfig {
             slug: slug.to_string(),
             display_name: display_name.to_string(),
@@ -375,8 +444,192 @@ impl Stations {
                 pumped: false,
                 expected,
                 tracks: track_count,
+                unsendable: HashSet::new(),
+                unplayable: HashSet::new(),
+                owed: false,
             },
         );
+    }
+
+    /// Say which of `slug`'s tracks are not what it sends, so they are not
+    /// offered to listeners to ask for. The rotation keeps them, so the
+    /// station can say it left them out.
+    pub fn set_unsendable(&self, slug: &str, tracks: impl IntoIterator<Item = TrackId>) {
+        if let Some(p) = self.programs.lock().get_mut(slug) {
+            p.unsendable = tracks.into_iter().collect();
+        }
+    }
+
+    /// What `listener` sees of `slug`'s requests: the queue in the order it
+    /// will play, without anything a moderator is holding back (`held`). A
+    /// mount with no rotation — one a DJ streams to — takes no requests and
+    /// says so rather than refusing, since nobody asked for anything. `None`
+    /// for no station by that name at all.
+    pub fn requests(
+        &self,
+        slug: &str,
+        listener: &str,
+        held: impl Fn(&Track) -> bool,
+    ) -> Option<rabbithole_proto::radio::RadioRequests> {
+        use rabbithole_proto::radio::{QueuedTrack, RadioRequests};
+        let (queue, live) = {
+            let programs = self.programs.lock();
+            match programs.get(slug) {
+                Some(p) => {
+                    let queue = p
+                        .controller
+                        .queue()
+                        .in_play_order()
+                        .into_iter()
+                        .filter(|r| !held(r.track()))
+                        .map(|r| {
+                            let t = r.track();
+                            QueuedTrack::new(
+                                t.id.0,
+                                clip(&t.title),
+                                clip(&t.artist),
+                                r.votes(),
+                                r.backed_by(listener),
+                            )
+                        })
+                        .collect();
+                    (Some(queue), p.is_live())
+                }
+                None => (None, false),
+            }
+        };
+        let dj = live || self.dj_holds(slug);
+        match queue {
+            Some(queue) => Some(RadioRequests::new(slug, true, dj, queue)),
+            None if dj || self.registry.get(slug).is_some() => {
+                Some(RadioRequests::new(slug, false, dj, Vec::new()))
+            }
+            None => None,
+        }
+    }
+
+    /// What `slug` can be asked for, as far as `search` narrows it: the
+    /// first [`OFFER_SHOWN`] of what it can play and nobody is holding back,
+    /// and how many more there are. `None` for a station with no rotation.
+    pub fn offer(
+        &self,
+        slug: &str,
+        search: &str,
+        held: impl Fn(&Track) -> bool,
+    ) -> Option<rabbithole_proto::radio::RadioOffer> {
+        use rabbithole_proto::radio::{RadioOffer, RequestableTrack};
+        let search: String = search
+            .trim()
+            .chars()
+            .take(rabbithole_proto::radio::OFFER_SEARCH_CHARS)
+            .collect();
+        let needle = search.to_lowercase();
+        let programs = self.programs.lock();
+        let p = programs.get(slug)?;
+        let mut tracks = Vec::new();
+        let mut more = 0u32;
+        for t in p.controller.rotation() {
+            if !p.offers(t) || held(t) {
+                continue;
+            }
+            if !needle.is_empty()
+                && !t.title.to_lowercase().contains(&needle)
+                && !t.artist.to_lowercase().contains(&needle)
+            {
+                continue;
+            }
+            if tracks.len() < OFFER_SHOWN {
+                tracks.push(RequestableTrack::new(
+                    t.id.0,
+                    clip(&t.title),
+                    clip(&t.artist),
+                ));
+            } else {
+                more = more.saturating_add(1);
+            }
+        }
+        Some(RadioOffer::new(slug, search, tracks, more))
+    }
+
+    /// `listener` asks for `track` on `slug`. Asking for something already
+    /// waiting is a vote for it, which is what a person who asks for it
+    /// means. Only what the station would offer can be asked for, so
+    /// nothing waits that would be passed over without a word when its
+    /// turn came.
+    pub fn request(
+        &self,
+        slug: &str,
+        track: u64,
+        listener: &str,
+        held: impl Fn(&Track) -> bool,
+    ) -> Result<(), RequestRefused> {
+        let mut programs = self.programs.lock();
+        let p = programs
+            .get_mut(slug)
+            .ok_or(RequestRefused::NoSuchStation)?;
+        let id = rabbithole_radio::TrackId(track);
+        if p.playing() == Some(id) {
+            return Err(RequestRefused::PlayingNow);
+        }
+        let found = p
+            .controller
+            .rotation()
+            .iter()
+            .find(|t| t.id == id)
+            .filter(|t| p.offers(t) && !held(t))
+            .cloned()
+            .ok_or(RequestRefused::NotInRotation)?;
+        if p.controller.queue().contains(id) {
+            p.controller
+                .queue_mut()
+                .upvote(id, listener)
+                .map_err(|_| RequestRefused::NotInRotation)?;
+            return Ok(());
+        }
+        if p.waiting(&held) >= REQUESTS_WAITING {
+            return Err(RequestRefused::Full);
+        }
+        if p.waiting_for(listener, &held) >= REQUESTS_EACH {
+            return Err(RequestRefused::TooManyOfYours);
+        }
+        p.controller
+            .queue_mut()
+            .enqueue(found, listener)
+            .map_err(|_| RequestRefused::NotInRotation)
+    }
+
+    /// `listener` adds a vote to a request already waiting on `slug`. One
+    /// a moderator has since held back is not waiting as far as anybody
+    /// can see, and takes no votes.
+    pub fn vote_request(
+        &self,
+        slug: &str,
+        track: u64,
+        listener: &str,
+        held: impl Fn(&Track) -> bool,
+    ) -> Result<(), RequestRefused> {
+        let mut programs = self.programs.lock();
+        let p = programs
+            .get_mut(slug)
+            .ok_or(RequestRefused::NoSuchStation)?;
+        let id = rabbithole_radio::TrackId(track);
+        if p.playing() == Some(id) {
+            return Err(RequestRefused::PlayingNow);
+        }
+        let hidden = p
+            .controller
+            .queue()
+            .in_play_order()
+            .into_iter()
+            .any(|r| r.track().id == id && held(r.track()));
+        if hidden {
+            return Err(RequestRefused::NotWaiting);
+        }
+        p.controller
+            .queue_mut()
+            .upvote(id, listener)
+            .map(|_| ())
+            .map_err(|_| RequestRefused::NotWaiting)
     }
 
     /// A DJ took over `slug`: pause rotation and adopt the DJ's now-playing.
@@ -402,10 +655,15 @@ impl Stations {
         }
     }
 
-    /// The DJ disconnected from `slug`: resume playlist rotation.
-    pub fn end_live(&self, slug: &str) {
+    /// The DJ disconnected from `slug`: resume playlist rotation, moving
+    /// past the track they talked over in the same breath, so nobody is
+    /// told it is playing again.
+    pub fn end_live(&self, slug: &str, held: impl Fn(&Track) -> bool) {
         if let Some(p) = self.programs.lock().get_mut(slug) {
             p.live = None;
+            if std::mem::take(&mut p.owed) {
+                p.move_on(unix_ms(), &held);
+            }
         }
     }
 
@@ -434,7 +692,10 @@ impl Stations {
     /// Advances every non-live program whose current track has finished at
     /// `now_ms`, returning the slugs that rotated so the caller can republish
     /// now-playing. Live (DJ-sourced) programs are skipped — the DJ owns the air.
-    pub fn advance_finished(&self, now_ms: u64) -> Vec<String> {
+    ///
+    /// A track a moderator is holding back (`held`) is passed over, the way
+    /// the pump passes over it, so its name is not announced as playing.
+    pub fn advance_finished(&self, now_ms: u64, held: impl Fn(&Track) -> bool) -> Vec<String> {
         let mut advanced = Vec::new();
         let mut programs = self.programs.lock();
         for (slug, p) in programs.iter_mut() {
@@ -443,11 +704,75 @@ impl Stations {
                 continue;
             }
             if p.controller.is_finished(now_ms) {
-                p.controller.on_track_finished(now_ms);
+                p.move_on(now_ms, &held);
                 advanced.push(slug.clone());
             }
         }
         advanced
+    }
+
+    /// Whether what `slug` is playing is something somebody asked for.
+    pub fn current_was_requested(&self, slug: &str) -> bool {
+        self.programs
+            .lock()
+            .get(slug)
+            .is_some_and(|p| p.controller.current_was_requested())
+    }
+
+    /// The pump could not play `track` on `slug`: it is not offered to
+    /// listeners until it does.
+    pub fn cannot_play(&self, slug: &str, track: TrackId) {
+        if let Some(p) = self.programs.lock().get_mut(slug) {
+            p.unplayable.insert(track);
+        }
+    }
+
+    /// `track` (`title`) is going out on `slug`: whatever was wrong with it
+    /// is not any more — the install's guess from its name or form
+    /// included — so it is offered again and no longer said to have been
+    /// left out. Unless another file of the same name is still being left
+    /// out: the operator's list is by name, and that one has not changed.
+    pub fn can_play(&self, slug: &str, track: TrackId, title: &str) {
+        let namesake_still_out = {
+            let mut programs = self.programs.lock();
+            let Some(p) = programs.get_mut(slug) else {
+                return;
+            };
+            p.unplayable.remove(&track);
+            p.unsendable.remove(&track);
+            p.controller
+                .rotation()
+                .iter()
+                .any(|t| t.id != track && t.title == title && p.unplayable.contains(&t.id))
+        };
+        if namesake_still_out {
+            return;
+        }
+        if let Some(list) = self.left_out.lock().get_mut(slug) {
+            list.retain(|l| l.title != title);
+        }
+    }
+
+    /// A DJ talked over what `slug` was playing.
+    pub fn owe_advance(&self, slug: &str) {
+        if let Some(p) = self.programs.lock().get_mut(slug) {
+            p.owed = true;
+        }
+    }
+
+    /// The air is the rotation's again: if a DJ talked over its track, move
+    /// on now, so what is announced next is what will actually play.
+    /// Returns whether it moved.
+    pub fn take_air_back(&self, slug: &str, held: impl Fn(&Track) -> bool) -> bool {
+        let mut programs = self.programs.lock();
+        match programs.get_mut(slug) {
+            Some(p) if p.owed && !p.is_live() => {
+                p.owed = false;
+                p.move_on(unix_ms(), &held);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Hand a rotation to a pump: from now on it advances when told to.
@@ -531,15 +856,24 @@ impl Stations {
     /// Note that a station could not play a track, for its operator. The
     /// last few per station, newest first: a rotation of the wrong kind
     /// would otherwise be a silent station and a debug log.
-    pub fn left_out(&self, slug: &str, title: &str, reason: String, at_unix_ms: u64) {
+    ///
+    /// Returns whether this is news: a track not already left out for the
+    /// same reason, which is worth saying in the log. A rotation passes a
+    /// track it cannot play every time round, and saying so every time is
+    /// a log of nothing else.
+    pub fn left_out(&self, slug: &str, title: &str, reason: String, at_unix_ms: u64) -> bool {
         let mut left = self.left_out.lock();
         let list = left.entry(slug.to_string()).or_default();
+        let known = list
+            .iter()
+            .any(|l: &rabbithole_proto::radio::LeftOut| l.title == title && l.reason == reason);
         list.retain(|l: &rabbithole_proto::radio::LeftOut| l.title != title);
         list.insert(
             0,
             rabbithole_proto::radio::LeftOut::new(title, reason, at_unix_ms),
         );
         list.truncate(LEFT_OUT_REMEMBERED);
+        !known
     }
 
     /// What a station has had to leave out, newest first.
@@ -917,7 +1251,9 @@ where
     let _ = now_playing; // kept alive for the source's lifetime
     shared.radio.mounts.lock().remove(&slug);
     // And say so: a rotation behind the mount takes the air back, otherwise
-    // the station is off it.
+    // the station is off it. What it announces is what it plays next, not
+    // the song the DJ talked over.
+    shared.radio.take_air_back(&slug, |t| is_held(shared, t));
     if shared.radio.now_playing(&slug).is_some() {
         publish_now_playing(shared, &slug, false);
     } else {
@@ -1506,6 +1842,47 @@ pub fn flac_stream(track: &[u8], from: u64) -> Cut {
     }
 }
 
+/// How many requests one person may have waiting on a station at once.
+/// Enough to ask for a few songs; not enough to fill the evening.
+pub const REQUESTS_EACH: usize = 3;
+
+/// How many requests a station holds at all. A queue longer than this is
+/// hours of other people's asking, and nobody's request would ever come up.
+pub const REQUESTS_WAITING: usize = 50;
+
+/// How many tracks one look through a station's offer brings back. A
+/// library can hold tens of thousands; a person narrows the search to find
+/// the one they want, and a reply stays well inside a frame.
+pub const OFFER_SHOWN: usize = 100;
+
+/// The most of a title or an artist a listener is sent. A file's name is
+/// short; its comment, which stands for the artist, is whatever an uploader
+/// typed.
+const WORDS_SENT: usize = 200;
+
+/// `words`, cut to what a listener is sent.
+fn clip(words: &str) -> String {
+    words.chars().take(WORDS_SENT).collect()
+}
+
+/// Why a station would not take a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestRefused {
+    /// No station by that name has a rotation to ask of.
+    NoSuchStation,
+    /// Nothing by that id is in the station's rotation that it can play:
+    /// not there, of a kind it cannot send, left out, or held back.
+    NotInRotation,
+    /// A vote for something nobody has asked for.
+    NotWaiting,
+    /// It is what is playing now.
+    PlayingNow,
+    /// This person already has [`REQUESTS_EACH`] waiting.
+    TooManyOfYours,
+    /// The station already holds [`REQUESTS_WAITING`].
+    Full,
+}
+
 /// What a station is sending, and how a track of that kind is paced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sound {
@@ -1699,7 +2076,13 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
     // would push the lead again each time, and a listener's buffer would grow
     // by two seconds a song.
     let mut clock: Option<(std::time::Instant, Duration)> = None;
-    let mut unplayable = 0usize;
+    // Turns of the rotation in a row that could not be played. A request
+    // that could not be played is not a turn of the rotation.
+    let mut passed = 0usize;
+    // Whether any of those were held back by a moderator. A rotation passed
+    // over because of holds says nothing about whether the library guessed
+    // right about what the station sends.
+    let mut passed_held = false;
     // What this station is sending. The library already said, if it was
     // able to look: a mount says what its stream is once, so which form of
     // FLAC it is must not depend on which track came up first.
@@ -1723,23 +2106,34 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
             tokio::time::sleep(Duration::from_millis(250)).await;
             continue;
         }
+        // A track a DJ talked over moves on now they have gone, if the way
+        // they left has not already seen to it.
+        shared.radio.take_air_back(&slug, |t| is_held(&shared, t));
         let Some(track) = shared.radio.current_track(&slug) else {
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         };
+        let requested = shared.radio.current_was_requested(&slug);
+        // What a moderator is holding back is not played to anybody, the
+        // same as it is not handed out anywhere else. It is not even read.
+        let held = is_held(&shared, &track);
         let blobs = shared.blobs.clone();
         let id = rabbithole_blobs::BlobId(track.source.0);
         // Reading the file and working out what it is happen off the
         // runtime: it is a disk read and a look at the headers, and this
         // thread is also answering everybody else.
-        let read = tokio::task::spawn_blocking(move || {
-            let bytes = blobs.get(&id).ok()?;
-            let kind = Sound::of(&bytes);
-            Some((bytes, kind))
-        })
-        .await
-        .ok()
-        .flatten();
+        let read = if held {
+            None
+        } else {
+            tokio::task::spawn_blocking(move || {
+                let bytes = blobs.get(&id).ok()?;
+                let kind = Sound::of(&bytes);
+                Some((bytes, kind))
+            })
+            .await
+            .ok()
+            .flatten()
+        };
         let (had_bytes, bytes, kind) = match read {
             Some((bytes, kind)) => (true, Some(bytes), kind),
             None => (false, None, None),
@@ -1778,6 +2172,7 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
             // mount already on the air. Said out loud, once per track —
             // silence with no reason is the worst way to find out.
             let reason = match (had_bytes, kind, sending) {
+                _ if held => "held back by a moderator".to_string(),
                 (false, _, _) => "could not be read".to_string(),
                 (true, None, _) => "not audio this burrow can stream".to_string(),
                 (true, Some(kind), Some(air)) if !air.same_as(kind) => {
@@ -1785,12 +2180,23 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
                 }
                 _ => "no audio could be read from it".to_string(),
             };
-            tracing::warn!(mount = %slug, track = %track.title, %reason, "radio: track left out");
-            shared
+            let said = reason.clone();
+            // Not offered to listeners from now on. A held track is looked
+            // up afresh each time instead: a hold is lifted, a bad file is not.
+            if !held {
+                shared.radio.cannot_play(&slug, track.id);
+            }
+            if shared
                 .radio
-                .left_out(&slug, &track.title, reason, unix_ms());
+                .left_out(&slug, &track.title, reason, unix_ms())
+            {
+                tracing::warn!(mount = %slug, track = %track.title, reason = %said, "radio: track left out");
+            }
             shared.radio.advance(&slug, unix_ms());
-            unplayable += 1;
+            if !requested {
+                passed += 1;
+                passed_held |= held;
+            }
             // Reading a track and finding it cannot be sent takes time and
             // sends nothing, and the clock keeps running. Once the station
             // has fallen further behind its own clock than a listener's
@@ -1800,9 +2206,10 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
             if clock.is_some_and(|(started, sent)| started.elapsed() > sent + PUMP_LEAD) {
                 clock = None;
             }
-            if unplayable >= shared.radio.track_count(&slug).max(1) {
-                unplayable = 0;
-                if unproven {
+            if passed >= shared.radio.track_count(&slug).max(1) {
+                passed = 0;
+                let run_held = std::mem::take(&mut passed_held);
+                if unproven && !run_held {
                     // A whole rotation, and nothing in it is what the
                     // library said this station sends. Take the next thing
                     // that can play instead of being silent all night over
@@ -1827,7 +2234,11 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
             }
             continue;
         };
-        unplayable = 0;
+        passed = 0;
+        passed_held = false;
+        // It plays: offered again if it had been left out before, and no
+        // longer said to be.
+        shared.radio.can_play(&slug, track.id, &track.title);
         // What a listener needs before any of this makes sense. A FLAC
         // mount says what its stream is once, at the head of it; the other
         // kinds say it in every frame and need nothing here.
@@ -1887,9 +2298,21 @@ async fn program_pump(shared: Arc<Shared>, slug: String) {
         }
         clock = (!interrupted).then_some((started, sent));
         // Finished or interrupted, the rotation moves on: a station that was
-        // talked over does not replay the song from the top.
-        shared.radio.advance(&slug, unix_ms());
+        // talked over does not replay the song from the top. Talked over, it
+        // moves on when the DJ leaves.
+        if interrupted {
+            shared.radio.owe_advance(&slug);
+        } else {
+            shared.radio.advance(&slug, unix_ms());
+        }
     }
+}
+
+/// Whether a moderator is holding `track`'s file back, or its content is
+/// refused outright.
+pub fn is_held(shared: &Shared, track: &Track) -> bool {
+    shared.moderation.file_quarantined(Some(&track.source.0))
+        || shared.moderation.is_denied(&track.source.0)
 }
 
 /// Bind + serve the DJ **source ingest** surface (SOURCE/PUT). Distinct from
@@ -2156,7 +2579,8 @@ where
     // the air if it was a pure-DJ mount with no library rotation to fall back
     // to).
     shared.radio.mounts.lock().remove(&slug);
-    shared.radio.end_live(&slug);
+    shared.radio.end_live(&slug, |t| is_held(shared, t));
+    shared.radio.take_air_back(&slug, |t| is_held(shared, t));
     if had_program && shared.radio.now_playing(&slug).is_some() {
         publish_now_playing(shared, &slug, false);
     } else {
@@ -2181,14 +2605,16 @@ pub fn spawn_playlist_driver(shared: Arc<Shared>) -> JoinHandle<()> {
 }
 
 async fn playlist_driver(shared: Arc<Shared>) {
-    let start = std::time::Instant::now();
     let mut rx = shared.bus.subscribe();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                let now_ms = start.elapsed().as_millis() as u64;
-                for slug in shared.radio.advance_finished(now_ms) {
+                // The same clock the pump advances by and a rotation starts
+                // on: a station handed from its pump to this timer when the
+                // stream listener stops must still come to the end of a song.
+                let held = |t: &Track| is_held(&shared, t);
+                for slug in shared.radio.advance_finished(unix_ms(), held) {
                     publish_now_playing(&shared, &slug, false);
                 }
             }
@@ -2551,9 +2977,230 @@ mod tests {
 
         // A pumped rotation is not also advanced by the timer.
         radio.set_pumped("ambient", true);
-        assert!(radio.advance_finished(u64::MAX).is_empty());
+        assert!(radio.advance_finished(u64::MAX, |_| false).is_empty());
         radio.set_pumped("ambient", false);
-        assert_eq!(radio.advance_finished(u64::MAX), ["ambient"]);
+        assert_eq!(radio.advance_finished(u64::MAX, |_| false), ["ambient"]);
+    }
+
+    #[test]
+    fn a_track_left_out_is_news_once_per_reason() {
+        let radio = Stations::new();
+        assert!(radio.left_out("jukebox", "memo.m4a", "not audio".into(), 1));
+        assert!(
+            !radio.left_out("jukebox", "memo.m4a", "not audio".into(), 2),
+            "passing it again is not news"
+        );
+        assert!(radio.left_out("jukebox", "memo.m4a", "could not be read".into(), 3));
+        assert_eq!(radio.left_out_for("jukebox").len(), 1, "one line a track");
+    }
+
+    #[test]
+    fn a_rotation_the_timer_drives_comes_to_the_end_of_a_song() {
+        // The pump and the timer advance a station by the same clock, so a
+        // station handed from one to the other still moves on.
+        let radio = Stations::new();
+        let track = |n: u64| {
+            Track::new(
+                TrackId(n),
+                format!("t{n}.mp3"),
+                "",
+                1_000,
+                BlobId([n as u8; 32]),
+            )
+        };
+        radio.install_program(
+            "ambient",
+            "Ambient",
+            "",
+            vec![track(1), track(2)],
+            Some(Sound::Mpeg),
+        );
+        radio.set_pumped("ambient", true);
+        radio.advance("ambient", unix_ms());
+        radio.set_pumped("ambient", false);
+        assert!(
+            radio.advance_finished(unix_ms(), |_| false).is_empty(),
+            "not yet"
+        );
+        assert_eq!(
+            radio.advance_finished(unix_ms() + 2_000, |_| false),
+            ["ambient"]
+        );
+    }
+
+    #[test]
+    fn a_talked_over_track_is_moved_past_as_the_dj_leaves() {
+        let radio = Stations::new();
+        let track = |n: u64| {
+            Track::new(
+                TrackId(n),
+                format!("t{n}.mp3"),
+                "",
+                1_000,
+                BlobId([n as u8; 32]),
+            )
+        };
+        radio.install_program(
+            "ambient",
+            "Ambient",
+            "",
+            vec![track(1), track(2), track(3)],
+            Some(Sound::Mpeg),
+        );
+        radio.request("ambient", 3, "alice", |_| false).unwrap();
+        // A DJ takes the air in the middle of t1.
+        radio.go_live(
+            "ambient",
+            NowPlaying {
+                title: "Live Set".into(),
+                artist: String::new(),
+                dj: "source".into(),
+            },
+        );
+        radio.owe_advance("ambient");
+        let during = radio.requests("ambient", "alice", |_| false).unwrap();
+        assert!(during.dj_live);
+        assert_eq!(
+            during.queue.len(),
+            1,
+            "nothing is spent while the DJ has it"
+        );
+        assert!(
+            radio.request("ambient", 1, "bob", |_| false).is_ok(),
+            "talked over, t1 is not playing now"
+        );
+        // They leave: what is announced is what plays, the most wanted first.
+        radio.end_live("ambient", |_| false);
+        assert_eq!(radio.now_playing("ambient").unwrap().title, "t3.mp3");
+        assert!(
+            !radio.take_air_back("ambient", |_| false),
+            "moved on once, not twice"
+        );
+    }
+
+    #[test]
+    fn a_dj_leaving_does_not_announce_what_is_held() {
+        let radio = Stations::new();
+        let track = |n: u64| {
+            Track::new(
+                TrackId(n),
+                format!("t{n}.mp3"),
+                "",
+                1_000,
+                BlobId([n as u8; 32]),
+            )
+        };
+        radio.install_program(
+            "ambient",
+            "Ambient",
+            "",
+            vec![track(1), track(2), track(3), track(4)],
+            Some(Sound::Mpeg),
+        );
+        // t3 is the most wanted, then its file is held back; t4 is wanted too.
+        radio.request("ambient", 3, "alice", |_| false).unwrap();
+        radio.vote_request("ambient", 3, "bob", |_| false).unwrap();
+        radio.request("ambient", 4, "carol", |_| false).unwrap();
+        radio.go_live(
+            "ambient",
+            NowPlaying {
+                title: "Live Set".into(),
+                artist: String::new(),
+                dj: "source".into(),
+            },
+        );
+        radio.owe_advance("ambient");
+        radio.end_live("ambient", |t| t.id == TrackId(3));
+        assert_eq!(radio.now_playing("ambient").unwrap().title, "t4.mp3");
+    }
+
+    #[test]
+    fn a_track_that_plays_is_offered_whatever_was_guessed_about_it() {
+        let radio = Stations::new();
+        let track =
+            |n: u64, name: &str| Track::new(TrackId(n), name, "", 1_000, BlobId([n as u8; 32]));
+        radio.install_program(
+            "ambient",
+            "Ambient",
+            "",
+            vec![
+                track(1, "a.mp3"),
+                track(2, "odd-name"),
+                track(3, "Intro.mp3"),
+                track(4, "Intro.mp3"),
+            ],
+            Some(Sound::Mpeg),
+        );
+        let offered = |radio: &Stations| -> Vec<u64> {
+            radio
+                .offer("ambient", "", |_| false)
+                .unwrap()
+                .tracks
+                .iter()
+                .map(|t| t.id)
+                .collect()
+        };
+        // Guessed at install not to be sendable; it turns out to play.
+        radio.set_unsendable("ambient", [TrackId(2)]);
+        assert!(!offered(&radio).contains(&2));
+        radio.can_play("ambient", TrackId(2), "odd-name");
+        assert!(offered(&radio).contains(&2));
+
+        // Two files of one name, one of them bad: the good one playing
+        // does not take the bad one off the operator's list.
+        radio.cannot_play("ambient", TrackId(3));
+        radio.left_out("ambient", "Intro.mp3", "could not be read".into(), 1);
+        radio.can_play("ambient", TrackId(4), "Intro.mp3");
+        assert_eq!(radio.left_out_for("ambient").len(), 1, "still out");
+        assert!(!offered(&radio).contains(&3));
+        radio.can_play("ambient", TrackId(3), "Intro.mp3");
+        assert!(radio.left_out_for("ambient").is_empty(), "and now fixed");
+    }
+
+    #[test]
+    fn a_timer_driven_station_passes_over_what_is_held() {
+        let radio = Stations::new();
+        let track = |n: u64| {
+            Track::new(
+                TrackId(n),
+                format!("t{n}.mp3"),
+                "",
+                1_000,
+                BlobId([n as u8; 32]),
+            )
+        };
+        radio.install_program(
+            "ambient",
+            "Ambient",
+            "",
+            vec![track(1), track(2), track(3)],
+            Some(Sound::Mpeg),
+        );
+        let held = |t: &Track| t.id == TrackId(2);
+        assert_eq!(radio.advance_finished(unix_ms() + 2_000, held), ["ambient"]);
+        assert_eq!(radio.now_playing("ambient").unwrap().title, "t3.mp3");
+        // A station held back entirely still lands somewhere.
+        assert_eq!(
+            radio.advance_finished(unix_ms() + 4_000, |_| true),
+            ["ambient"]
+        );
+    }
+
+    #[test]
+    fn a_mount_with_no_rotation_takes_no_requests_rather_than_refusing() {
+        let radio = Stations::new();
+        let _ = radio.registry.create(StationConfig {
+            slug: "live".into(),
+            display_name: "Live".into(),
+            description: String::new(),
+            enabled: true,
+        });
+        let view = radio
+            .requests("live", "alice", |_| false)
+            .expect("a station");
+        assert!(!view.requestable && view.queue.is_empty());
+        assert!(radio.requests("nowhere", "alice", |_| false).is_none());
+        assert!(radio.offer("live", "", |_| false).is_none());
     }
 
     #[test]
@@ -2755,12 +3402,14 @@ mod tests {
         assert!(stations.is_live("live"));
         assert_eq!(stations.now_playing("live").unwrap().title, "Live Set");
         // A live program never advances, even long past the track duration.
-        assert!(stations.advance_finished(DEFAULT_TRACK_MS * 10).is_empty());
+        assert!(stations
+            .advance_finished(unix_ms() + DEFAULT_TRACK_MS * 10, |_| false)
+            .is_empty());
         stations.add_source_bytes("live", 4096);
         assert_eq!(stations.source_bytes("live"), 4096);
 
         // DJ disconnects: rotation resumes, playlist now-playing returns.
-        stations.end_live("live");
+        stations.end_live("live", |_| false);
         assert!(!stations.is_live("live"));
         assert_eq!(stations.now_playing("live").unwrap().title, "auto track");
     }

@@ -664,7 +664,7 @@ async fn install_radio_library(
         // what most of the library is, rather than by whichever track the
         // rotation happens to read first: one voice memo at the top of a
         // folder of albums would otherwise leave every album out.
-        let form = flac_form(shared, &split.flac).await;
+        let (form, other_forms) = flac_form(shared, &split.flac).await;
         let mut kinds: Vec<(&str, radio::Sound, Vec<rabbithole_radio::Track>)> = vec![
             ("mp3", radio::Sound::Mpeg, split.mpeg),
             ("ogg", radio::Sound::Ogg(0), split.ogg),
@@ -688,6 +688,14 @@ async fn install_radio_library(
         }
         // Each mount, what to call it, what goes on it, and what it sends
         // before the first track has been read.
+        // What cannot be sent is kept in the rotation so the station can
+        // say it left it out, and never offered to a listener to ask for.
+        let unsendable: Vec<rabbithole_radio::TrackId> = split
+            .other
+            .iter()
+            .map(|t| t.id)
+            .chain(other_forms)
+            .collect();
         let mut programs: Vec<(
             String,
             String,
@@ -744,6 +752,9 @@ async fn install_radio_library(
             shared
                 .radio
                 .install_program(&slug, &name, area, tracks, sound);
+            shared
+                .radio
+                .set_unsendable(&slug, unsendable.iter().copied());
             tracing::info!(mount = %slug, area = %area, tracks = count, "radio library program installed");
             installed.insert(slug);
         }
@@ -764,14 +775,19 @@ async fn install_radio_library(
 /// A library nobody can read, or one that is not FLAC after all, gives back
 /// the form nobody has looked up, and the first track the pump plays settles
 /// it instead.
-async fn flac_form(shared: &Arc<Shared>, tracks: &[rabbithole_radio::Track]) -> radio::Form {
+/// And which of `tracks` said they were in another form: the mount cannot
+/// send those, so they are not offered to listeners to ask for.
+async fn flac_form(
+    shared: &Arc<Shared>,
+    tracks: &[rabbithole_radio::Track],
+) -> (radio::Form, Vec<rabbithole_radio::TrackId>) {
     if tracks.is_empty() {
-        return radio::Form::default();
+        return (radio::Form::default(), Vec::new());
     }
     let blobs = shared.blobs.clone();
-    let ids: Vec<rabbithole_blobs::BlobId> = tracks
+    let ids: Vec<(rabbithole_radio::TrackId, rabbithole_blobs::BlobId)> = tracks
         .iter()
-        .map(|t| rabbithole_blobs::BlobId(t.source.0))
+        .map(|t| (t.id, rabbithole_blobs::BlobId(t.source.0)))
         .collect();
     let counted = tokio::task::spawn_blocking(move || {
         // Enough for the magic, the metadata chain and the first frame
@@ -780,8 +796,8 @@ async fn flac_form(shared: &Arc<Shared>, tracks: &[rabbithole_radio::Track]) -> 
         const LOOK: usize = 64 << 10;
         // What each file said, in the order the area lists them: whether
         // it showed audio, and the form it claims.
-        let mut said: Vec<(bool, (u32, u8, u8))> = Vec::new();
-        for id in ids {
+        let mut said: Vec<(rabbithole_radio::TrackId, bool, (u32, u8, u8))> = Vec::new();
+        for (track, id) in ids {
             let Ok(front) = blobs.read_range(&id, 0, LOOK) else {
                 continue;
             };
@@ -801,8 +817,8 @@ async fn flac_form(shared: &Arc<Shared>, tracks: &[rabbithole_radio::Track]) -> 
                 let past = blobs.read_range(&id, skip as u64, LOOK).ok()?;
                 looked(&past)
             });
-            if let Some(seen) = seen {
-                said.push(seen);
+            if let Some((playable, form)) = seen {
+                said.push((track, playable, form));
             }
         }
         said
@@ -810,12 +826,12 @@ async fn flac_form(shared: &Arc<Shared>, tracks: &[rabbithole_radio::Track]) -> 
     .await
     .unwrap_or_default();
     // The files that showed audio decide it, if any of them did.
-    let heard = counted.iter().any(|(playable, _)| *playable);
+    let heard = counted.iter().any(|(_, playable, _)| *playable);
     // The most of any one form wins. A tie goes to whichever came first in
     // the area — the one the station would have played anyway — so the
     // answer is the same at every start.
     let mut tally: Vec<((u32, u8, u8), usize, usize)> = Vec::new();
-    for (at, (playable, form)) in counted.into_iter().enumerate() {
+    for (at, (_, playable, form)) in counted.iter().copied().enumerate() {
         if heard && !playable {
             continue;
         }
@@ -824,17 +840,29 @@ async fn flac_form(shared: &Arc<Shared>, tracks: &[rabbithole_radio::Track]) -> 
             None => tally.push((form, 1, at)),
         }
     }
-    match tally
+    let chosen = tally
         .into_iter()
         .max_by_key(|(_, count, first)| (*count, std::cmp::Reverse(*first)))
-    {
-        Some(((rate, channels, bits), _, _)) => radio::Form {
+        .map(|(form, _, _)| form);
+    let Some((rate, channels, bits)) = chosen else {
+        return (radio::Form::default(), Vec::new());
+    };
+    // A file whose headers name another form cannot go out on this mount.
+    // One that named no form, or could not be read, is the pump's to find
+    // out about when its turn comes.
+    let other = counted
+        .iter()
+        .filter(|(_, _, form)| *form != (rate, channels, bits))
+        .map(|(track, _, _)| *track)
+        .collect();
+    (
+        radio::Form {
             rate,
             channels,
             bits,
         },
-        None => radio::Form::default(),
-    }
+        other,
+    )
 }
 
 /// Resolve a possibly-relative path under `base` (absolute paths pass through).

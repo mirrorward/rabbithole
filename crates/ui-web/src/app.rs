@@ -871,6 +871,14 @@ impl AppState {
                     app.show_art(file);
                 }
             }));
+            let requests_endpoint = endpoint.clone();
+            ws.on_radio_requests(std::rc::Rc::new(move |answer| {
+                if let Some(app) = current() {
+                    if let Some(session) = app.session_at(&requests_endpoint) {
+                        app.requests_answered(session, answer);
+                    }
+                }
+            }));
             ws.on_rooms(std::rc::Rc::new(move |rooms| {
                 state.update(|s| s.rooms = rooms)
             }));
@@ -2116,6 +2124,120 @@ impl AppState {
     /// Show a node's metadata card.
     pub fn select_file(&self, id: i64) {
         self.focused().files.update(|f| f.selected = Some(id));
+    }
+
+    /// The burrow whose stations the Radio view is showing: the one that
+    /// last said what is on the air. What is asked of a station goes to it,
+    /// and its answers are what the view shows, whichever burrow is focused.
+    pub fn radio_session(&self) -> Option<Session> {
+        let endpoint = self
+            .radio
+            .with_untracked(|r| r.endpoint().map(str::to_string))?;
+        self.session_at(&endpoint)
+    }
+
+    /// [`session_at`](Self::session_at), for a view that should follow the
+    /// burrow list as it changes.
+    pub fn session_at_tracked(&self, endpoint: &str) -> Option<Session> {
+        self.sessions.with(|list| {
+            list.iter()
+                .find(|(sid, _)| sid.0 == endpoint)
+                .map(|(_, session)| *session)
+        })
+    }
+
+    /// The connected burrow at `endpoint`, if there is one.
+    pub fn session_at(&self, endpoint: &str) -> Option<Session> {
+        self.sessions.with_untracked(|list| {
+            list.iter()
+                .find(|(sid, _)| sid.0 == endpoint)
+                .map(|(_, session)| *session)
+        })
+    }
+
+    /// Ask a station what is waiting, because the song has changed or the
+    /// person has come to look: a refusal from before no longer stands.
+    pub fn load_requests(&self, station: &str) {
+        if let Some(session) = self.radio_session() {
+            session.state.update(|s| s.radio_requests.moved_on(station));
+        }
+        self.radio_ask(crate::wire::RadioAsk::List {
+            station: station.to_string(),
+        });
+    }
+
+    /// Look through what a station can be asked for.
+    pub fn look_for_songs(&self, station: &str, search: &str) {
+        if let Some(session) = self.radio_session() {
+            session
+                .state
+                .update(|s| s.radio_requests.looking(station, search));
+        }
+        self.radio_ask(crate::wire::RadioAsk::Offer {
+            station: station.to_string(),
+            search: search.to_string(),
+        });
+    }
+
+    /// Ask a station for a song.
+    pub fn ask_for_song(&self, station: &str, track: u64) {
+        if let Some(session) = self.radio_session() {
+            session.state.update(|s| s.radio_requests.asking(station));
+        }
+        self.radio_ask(crate::wire::RadioAsk::Request {
+            station: station.to_string(),
+            track,
+        });
+    }
+
+    /// Join somebody else's request.
+    pub fn join_request(&self, station: &str, track: u64) {
+        if let Some(session) = self.radio_session() {
+            session.state.update(|s| s.radio_requests.asking(station));
+        }
+        self.radio_ask(crate::wire::RadioAsk::Vote {
+            station: station.to_string(),
+            track,
+        });
+    }
+
+    /// A station's answer, from either seam, into the state of the burrow
+    /// that gave it. A request or vote turned down asks for the queue again:
+    /// what the person was looking at has usually moved on.
+    fn requests_answered(&self, session: Session, answer: crate::wire::RadioAnswer) {
+        let again = session
+            .state
+            .try_update(|s| s.radio_requests.answered(answer))
+            .flatten();
+        if let Some(station) = again {
+            let app = *self;
+            defer(move || app.radio_ask_at(session, crate::wire::RadioAsk::List { station }));
+        }
+    }
+
+    fn radio_ask(&self, ask: crate::wire::RadioAsk) {
+        if let Some(session) = self.radio_session() {
+            self.radio_ask_at(session, ask);
+        }
+    }
+
+    fn radio_ask_at(&self, session: Session, ask: crate::wire::RadioAsk) {
+        // Sent a tick later: the pane asks again when the song changes, and
+        // that news arrives inside the socket's own borrow.
+        #[cfg(target_arch = "wasm32")]
+        if session.live.get_untracked() {
+            let ws = session.ws;
+            defer(move || ws.with_value(|c| c.dispatch_radio_ask(&ask)));
+            return;
+        }
+        let me = session.handle.get_untracked();
+        let mut answer = None;
+        session
+            .client
+            .update_value(|c| answer = Some(c.radio_ask(&ask, &me)));
+        if let Some(answer) = answer {
+            self.requests_answered(session, answer);
+        }
     }
 
     /// Ask the burrow what rooms it has.

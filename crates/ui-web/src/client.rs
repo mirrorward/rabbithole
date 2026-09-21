@@ -117,6 +117,10 @@ pub struct MockClient {
     /// The demo's Wishing Well: a few things somebody asked this burrow
     /// for, so the pane has something in it before anyone wishes.
     wishes: Vec<rabbithole_proto::wish::WishView>,
+    /// The demo's request queues, per station: `(track, votes, voters)`.
+    /// Seeded so the Radio pane shows what asking looks like before anyone
+    /// has asked.
+    radio_queue: std::collections::BTreeMap<String, Vec<(u64, Vec<String>)>>,
     /// The demo's rooms: the lobby everybody is in, and a couple more so
     /// the room strip is not a strip of one.
     rooms: Vec<rabbithole_proto::chat::RoomInfo>,
@@ -280,6 +284,13 @@ impl MockClient {
             admin_backups: Self::seeded_backups(),
             wishes: Self::seeded_wishes(),
             rooms: Self::seeded_rooms(),
+            radio_queue: std::collections::BTreeMap::from([(
+                "ambient".to_string(),
+                vec![
+                    (3, vec!["alice".to_string(), "bob".to_string()]),
+                    (5, vec!["bob".to_string()]),
+                ],
+            )]),
             admin_config: Self::seeded_config(),
             radio_frames: Self::seeded_radio_frames(),
             invite_seq: 0,
@@ -556,6 +567,119 @@ impl MockClient {
             bytes: crate::demo_files::bytes_for(&n.name)
                 .unwrap_or_else(|| vec![0u8; n.size.max(0) as usize]),
         })
+    }
+
+    /// What each demo station's rotation offers: the ambient one's quiet
+    /// songs, the live one nothing (a DJ's mount has no rotation to ask of).
+    fn demo_rotation(station: &str) -> Option<Vec<(u64, &'static str, &'static str)>> {
+        (station == "ambient").then(|| {
+            vec![
+                (1, "Warren Dawn", ""),
+                (2, "Dew on the Clover", ""),
+                (3, "First Light", ""),
+                (4, "Under the Roots", ""),
+                (5, "Hush of the Hill", ""),
+                (6, "Long Grass", ""),
+            ]
+        })
+    }
+
+    /// One ask of a demo station, answered the way a burrow answers, with
+    /// the burrow's own rules and codes: three waiting each, one vote each,
+    /// asking for what is already waiting is joining in, and what is playing
+    /// now is not asked for. The live DJ station takes no requests.
+    pub fn radio_ask(&mut self, ask: &crate::wire::RadioAsk, me: &str) -> crate::wire::RadioAnswer {
+        use crate::wire::{RadioAnswer, RadioAsk};
+        use rabbithole_proto::radio::{QueuedTrack, RadioOffer, RadioRequests, RequestableTrack};
+        use rabbithole_proto::ErrorCode;
+        let station = ask.station().to_string();
+        let refused = |code| RadioAnswer::Refused {
+            ask: ask.kind(),
+            code,
+        };
+        let Some(rotation) = Self::demo_rotation(&station) else {
+            return match ask {
+                RadioAsk::List { .. } if station == "live" => {
+                    RadioAnswer::Requests(RadioRequests::new(station, false, true, Vec::new()))
+                }
+                _ => refused(ErrorCode::NotFound),
+            };
+        };
+        // The demo station is playing its first track, as its listing says.
+        let playing = rotation[0].0;
+        let me = if me.is_empty() { "you" } else { me };
+        let queue = self.radio_queue.entry(station.clone()).or_default();
+        match ask {
+            RadioAsk::List { .. } => {}
+            RadioAsk::Offer { search, .. } => {
+                // Looked for and said back the way a burrow does.
+                let search: String = search
+                    .trim()
+                    .chars()
+                    .take(rabbithole_proto::radio::OFFER_SEARCH_CHARS)
+                    .collect();
+                let needle = search.to_lowercase();
+                let tracks = rotation
+                    .iter()
+                    .filter(|(id, title, artist)| {
+                        *id != playing
+                            && (needle.is_empty()
+                                || title.to_lowercase().contains(&needle)
+                                || artist.to_lowercase().contains(&needle))
+                    })
+                    .map(|(id, title, artist)| RequestableTrack::new(*id, *title, *artist))
+                    .collect();
+                return RadioAnswer::Offer(RadioOffer::new(station, search, tracks, 0));
+            }
+            RadioAsk::Request { track, .. } | RadioAsk::Vote { track, .. } => {
+                if *track == playing {
+                    return refused(ErrorCode::AlreadyExists);
+                }
+                let is_vote = matches!(ask, RadioAsk::Vote { .. });
+                match queue.iter_mut().find(|(t, _)| t == track) {
+                    Some((_, voters)) => {
+                        if !voters.iter().any(|v| v == me) {
+                            voters.push(me.to_string());
+                        }
+                    }
+                    None if is_vote => return refused(ErrorCode::NotFound),
+                    None => {
+                        if !rotation.iter().any(|(id, _, _)| id == track) {
+                            return refused(ErrorCode::NotFound);
+                        }
+                        let mine = queue
+                            .iter()
+                            .filter(|(_, voters)| voters.first().map(String::as_str) == Some(me))
+                            .count();
+                        if mine >= 3 {
+                            return refused(ErrorCode::TooLarge);
+                        }
+                        queue.push((*track, vec![me.to_string()]));
+                    }
+                }
+            }
+        }
+        let mut waiting: Vec<(usize, &(u64, Vec<String>))> = queue.iter().enumerate().collect();
+        waiting.sort_by(|a, b| b.1 .1.len().cmp(&a.1 .1.len()).then(a.0.cmp(&b.0)));
+        let named = |id: u64| rotation.iter().find(|(t, _, _)| *t == id).copied();
+        RadioAnswer::Requests(RadioRequests::new(
+            station,
+            true,
+            false,
+            waiting
+                .into_iter()
+                .filter_map(|(_, (id, voters))| {
+                    let (_, title, artist) = named(*id)?;
+                    Some(QueuedTrack::new(
+                        *id,
+                        title,
+                        artist,
+                        voters.len() as u32,
+                        voters.iter().any(|v| v == me),
+                    ))
+                })
+                .collect(),
+        ))
     }
 
     /// The demo's rooms.
