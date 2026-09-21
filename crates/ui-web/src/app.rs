@@ -1459,9 +1459,19 @@ impl AppState {
         });
     }
 
-    /// Refresh the who-list snapshot from the client. The mock reports bare
-    /// handles; present them all as Online over the mock "transport".
+    /// Ask again who is here. On a live burrow that is the server's to say,
+    /// and the answer arrives on `on_who` (and, being the same reply, on
+    /// `on_sessions`). Only the demo's roster is ours to make up.
+    ///
+    /// Making it up over a live one is how a real lobby came to show three
+    /// people who were never in it: the console's Moderation pane refreshes
+    /// the roster when it opens, and this used to hand it the demo's.
     pub fn refresh_who(&self) {
+        #[cfg(target_arch = "wasm32")]
+        if self.focused().live.get_untracked() {
+            self.focused().ws.with_value(|client| client.request_who());
+            return;
+        }
         let who: Vec<crate::state::Presence> = self
             .focused()
             .client
