@@ -493,6 +493,10 @@ fn refused(kind: &str, subject: &str, detail: &str) -> String {
         "account-create" if code("Forbidden") => {
             "You cannot hand out a role above your own.".to_string()
         }
+        "board-keeping" if code("Unsupported") => "This burrow is too old to say what its \
+             boards keep. A limit can still be set; it will not be shown."
+            .to_string(),
+        "board-keeping" => format!("The burrow did not say what its boards keep: {detail}"),
         "account-find" if code("Unsupported") => "This burrow is too old to look through its \
              accounts. What is shown is the page that is loaded."
             .to_string(),

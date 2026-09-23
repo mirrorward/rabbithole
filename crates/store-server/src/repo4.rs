@@ -127,6 +127,31 @@ impl BoardsRepo<'_> {
             > 0)
     }
 
+    /// What each board keeps: `(slug, max_threads, threads it holds now)`,
+    /// one row per board, for a console to read as a map. A board listing
+    /// carries neither number, so retention could be set and never shown.
+    /// Replies are not threads here: only a post with no parent counts.
+    pub async fn keeping(&self) -> Result<Vec<(String, i64, i64)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT b.slug AS slug, b.max_threads AS max_threads,
+                    (SELECT COUNT(*) FROM posts p
+                      WHERE p.board_slug = b.slug AND p.parent_id IS NULL) AS threads
+               FROM boards b",
+        )
+        .fetch_all(self.0)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("slug"),
+                    r.get::<i64, _>("max_threads"),
+                    r.get::<i64, _>("threads"),
+                )
+            })
+            .collect())
+    }
+
     /// Every board in reading order: each one where its operator put it
     /// among its own, with what is inside it straight after it. A position
     /// is only meaningful among siblings, so sorting the whole table by it
@@ -816,6 +841,44 @@ mod tests {
         assert_eq!(overflow.len(), 2);
         assert!(overflow.contains(&[1; 32]) && overflow.contains(&[2; 32]));
         assert!(posts.overflow_threads("b", 0).await.unwrap().is_empty()); // 0 = unlimited
+    }
+
+    #[tokio::test]
+    async fn keeping_counts_threads_not_replies() {
+        let pool = open_in_memory().await.unwrap();
+        let (boards, posts) = (BoardsRepo(&pool), PostsRepo(&pool));
+        boards
+            .create("talk", "Talk", "", 2, None, 12)
+            .await
+            .unwrap();
+        boards
+            .create("quiet", "Quiet", "", 2, None, 0)
+            .await
+            .unwrap();
+        // Two threads in "talk", one of them with a reply; none in "quiet".
+        posts
+            .insert(&post(1, "talk", None, None, 1000))
+            .await
+            .unwrap();
+        posts
+            .insert(&post(2, "talk", Some([1; 32]), Some([1; 32]), 2000))
+            .await
+            .unwrap();
+        posts
+            .insert(&post(3, "talk", None, None, 3000))
+            .await
+            .unwrap();
+
+        let kept: std::collections::BTreeMap<_, _> = boards
+            .keeping()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(slug, max, now)| (slug, (max, now)))
+            .collect();
+        assert_eq!(kept.get("talk"), Some(&(12, 2)));
+        // A board nobody has posted in is still listed, at zero.
+        assert_eq!(kept.get("quiet"), Some(&(0, 0)));
     }
 
     fn followup(id: u8, target: [u8; 32], root: [u8; 32], kind: u8, at: i64) -> FollowupRow {

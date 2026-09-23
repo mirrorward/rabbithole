@@ -240,3 +240,72 @@ async fn boards_are_read_in_the_order_an_operator_puts_them() {
 
     burrow.shutdown().await;
 }
+
+/// What a board keeps is something the console can see as well as set: a
+/// board listing carries neither the limit nor how many threads there are,
+/// so retention could be changed blind. Moderators only, and a board that
+/// is over its limit drops its oldest thread when the next one starts.
+#[tokio::test]
+async fn what_a_board_keeps_is_shown_and_set() {
+    use rabbithole_proto::board::{
+        BoardKeeping, BoardKeepingRequest, BoardUpdate, PostCreate, PostReply,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(dir.path()).await;
+    let mut mo = login(&burrow, "mo").await;
+    let mut alice = login(&burrow, "alice").await;
+
+    let _: rabbithole_proto::board::BoardCreated = mo
+        .request(&BoardCreate::new("swaps", "Swaps", 2))
+        .await
+        .unwrap();
+    async fn kept(c: &mut Client) -> rabbithole_proto::board::BoardKept {
+        let list: BoardKeeping = c.request(&BoardKeepingRequest).await.unwrap();
+        list.boards
+            .into_iter()
+            .find(|b| b.slug == "swaps")
+            .expect("the board")
+    }
+
+    // Nothing set, nothing posted.
+    let now = kept(&mut mo).await;
+    assert_eq!((now.max_threads, now.threads), (0, 0));
+
+    // Three threads, and a limit of two.
+    for subject in ["one", "two", "three"] {
+        let _: PostReply = alice
+            .request(&PostCreate::new("swaps", subject, "hello"))
+            .await
+            .unwrap();
+    }
+    let now = kept(&mut mo).await;
+    assert_eq!((now.max_threads, now.threads), (0, 3));
+    mo.request_ack(&BoardUpdate::new("swaps", "Swaps", "", Some(2)))
+        .await
+        .unwrap();
+    let now = kept(&mut mo).await;
+    assert_eq!(
+        (now.max_threads, now.threads),
+        (2, 3),
+        "the limit is shown, not only kept, and lowering it takes nothing \
+         away until the next thread starts"
+    );
+
+    // The next thread pushes the oldest out, and the count says so.
+    let _: PostReply = alice
+        .request(&PostCreate::new("swaps", "four", "hello"))
+        .await
+        .unwrap();
+    let now = kept(&mut mo).await;
+    assert_eq!(now.threads, 2, "kept to what it keeps: {now:?}");
+
+    // Not everybody's to read.
+    let refused = alice.request::<_, BoardKeeping>(&BoardKeepingRequest).await;
+    assert!(
+        matches!(refused, Err(ClientError::Refused(ErrorCode::Forbidden))),
+        "{refused:?}"
+    );
+
+    burrow.shutdown().await;
+}

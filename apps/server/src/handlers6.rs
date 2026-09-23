@@ -358,8 +358,40 @@ pub async fn handle(
             .await
         {
             Ok(()) => {
-                audit(shared, &ctx.login, "board-update", req.slug.clone());
+                // A retention change can cost a board most of what is in
+                // it, thread by thread, as new ones start. The log says so
+                // rather than reading as a plain edit.
+                let what = match req.max_threads {
+                    Some(0) => format!("{} keeps every thread", req.slug),
+                    Some(n) => format!("{} keeps {n}", req.slug),
+                    None => req.slug.clone(),
+                };
+                audit(shared, &ctx.login, "board-update", what);
                 conn.send(Frame::ack(frame)).await?;
+            }
+            Err(e) => fail!(map_err(e)),
+        }
+        return Ok(true);
+    }
+
+    if frame.decode::<pb::BoardKeepingRequest>().is_some() {
+        if !ctx.allows(shared, "board", Caps::BOARD_MODERATE) {
+            fail!(ErrorCode::Forbidden);
+        }
+        match shared.boards.keeping().await {
+            Ok(rows) => {
+                let boards = rows
+                    .into_iter()
+                    .map(|(slug, max, threads)| {
+                        pb::BoardKept::new(
+                            slug,
+                            u32::try_from(max.max(0)).unwrap_or(u32::MAX),
+                            u64::try_from(threads.max(0)).unwrap_or_default(),
+                        )
+                    })
+                    .collect();
+                conn.send(Frame::reply_to(frame, &pb::BoardKeeping::new(boards))?)
+                    .await?;
             }
             Err(e) => fail!(map_err(e)),
         }

@@ -88,8 +88,9 @@ use rabbithole_proto::admin::{
     ThemeBundleInfo, ThemeBundleSet,
 };
 use rabbithole_proto::board::{
-    BoardCreate, BoardDelete, BoardList, BoardListRequest, BoardMove, BoardUpdate, PostCreate,
-    PostDelete, ThreadList, ThreadListRequest, ThreadPosts, ThreadRequest,
+    BoardCreate, BoardDelete, BoardKeeping, BoardKeepingRequest, BoardKept, BoardList,
+    BoardListRequest, BoardMove, BoardUpdate, PostCreate, PostDelete, ThreadList,
+    ThreadListRequest, ThreadPosts, ThreadRequest,
 };
 use rabbithole_proto::chat::{ChatMessage, ChatSend};
 use rabbithole_proto::directory::{DirectoryResults, DirectorySearch, ProfileCard, ProfileGet};
@@ -1839,6 +1840,16 @@ pub enum AdminCommand {
         title: String,
         /// Its new description.
         description: String,
+        /// How many threads it keeps, newest first; `0` keeps all of them,
+        /// and `None` leaves it as it is.
+        keep: Option<u32>,
+    },
+    /// What every board keeps. → [`BoardKeeping`].
+    ListBoardKeeping {
+        /// Which burrow is being asked. The console's admin model is one
+        /// model for every burrow, and a board called `general` is a board
+        /// called `general` on all of them, so the answer says whose it is.
+        at: String,
     },
     /// Put a board straight after another among its own, or first when
     /// there is no `after`. → empty ack.
@@ -2024,6 +2035,8 @@ pub enum AdminEvent {
     /// The report queue arrived: the reports, and how many there are in all
     /// under the same filter.
     ReportsListed(Vec<ReportEntry>, u64),
+    /// What every board keeps arrived.
+    BoardKeepingListed(Vec<BoardKept>),
     /// A page of what is held back for review arrived, and how many there
     /// are in all.
     HeldListed(Vec<rabbithole_proto::admin::HeldItem>, u64),
@@ -2114,6 +2127,7 @@ impl AdminCommand {
             AdminCommand::RevokeInvite { code } => format!("*invite-revoke:{code}"),
             AdminCommand::CreateBoard { slug, .. } => format!("*board-create:{slug}"),
             AdminCommand::UpdateBoard { slug, .. } => format!("*board-update:{slug}"),
+            AdminCommand::ListBoardKeeping { at } => format!("*board-keeping:{at}"),
             AdminCommand::MoveBoard { slug, .. } => format!("*board-move:{slug}"),
             AdminCommand::DeleteBoard { slug } => format!("*board-delete:{slug}"),
             AdminCommand::DeletePost { id } => format!("*post-delete:{id}"),
@@ -2240,10 +2254,12 @@ pub fn admin_command_to_frame(
             slug,
             title,
             description,
+            keep,
         } => Frame::request(
             id,
-            &BoardUpdate::new(slug.clone(), title.clone(), description.clone(), None),
+            &BoardUpdate::new(slug.clone(), title.clone(), description.clone(), *keep),
         )?,
+        AdminCommand::ListBoardKeeping { .. } => Frame::request(id, &BoardKeepingRequest)?,
         AdminCommand::MoveBoard { slug, after } => {
             Frame::request(id, &BoardMove::new(slug.clone(), after.clone()))?
         }
@@ -2376,6 +2392,9 @@ pub fn frame_to_admin_events(frame: &Frame) -> Vec<AdminEvent> {
     }
     if let Some(Ok(m)) = frame.decode::<ReportList>() {
         return vec![AdminEvent::ReportsListed(m.reports, m.total)];
+    }
+    if let Some(Ok(m)) = frame.decode::<BoardKeeping>() {
+        return vec![AdminEvent::BoardKeepingListed(m.boards)];
     }
     if let Some(Ok(m)) = frame.decode::<QuarantineList>() {
         return vec![AdminEvent::HeldListed(m.held, m.total)];

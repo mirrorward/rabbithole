@@ -145,6 +145,11 @@ impl BoardService {
             .await?)
     }
 
+    /// What each board keeps: `(slug, max_threads, threads it holds)`.
+    pub async fn keeping(&self) -> Result<Vec<(String, i64, i64)>, BoardError> {
+        Ok(BoardsRepo(&self.pool).keeping().await?)
+    }
+
     /// Put a board where an operator wants it read, among its own: after
     /// `after`, or first when there is none. Its slug, which addresses and
     /// other burrows carry, is untouched.
@@ -251,7 +256,12 @@ impl BoardService {
             &self.origin_key(),
             now_ms,
             EventBody::Post {
-                board: board.to_string(),
+                // The board's own spelling, not the caller's. A slug
+                // matches case-insensitively, so "Rabbit.General" finds
+                // `rabbit.general`; storing the post under the spelling
+                // that was typed would hide it from the board's own
+                // threads, counts and retention.
+                board: board_row.slug.clone(),
                 root,
                 parent,
                 subject: subject.to_string(),
@@ -605,6 +615,33 @@ mod tests {
             .await
             .unwrap();
         svc
+    }
+
+    #[tokio::test]
+    async fn a_post_lands_under_the_boards_own_spelling() {
+        let svc = service().await;
+        // A slug matches case-insensitively, so this finds the board.
+        let row = svc
+            .post(
+                "Rabbit.General",
+                None,
+                "alice@home",
+                &[1; 32],
+                "Hello",
+                "world",
+                "text/plain",
+                1000,
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.board_slug, "rabbit.general", "stored canonically");
+        let ev: SignedEvent = postcard::from_bytes(&row.event_blob).unwrap();
+        let EventBody::Post { board, .. } = &ev.body else {
+            panic!("a post")
+        };
+        assert_eq!(board, "rabbit.general", "signed under the board's name");
+        // And so the board's own reads find it.
+        assert_eq!(svc.threads("rabbit.general", 10).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

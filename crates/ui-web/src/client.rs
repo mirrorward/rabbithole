@@ -126,6 +126,8 @@ pub struct MockClient {
     /// The demo's rooms: the lobby everybody is in, and a couple more so
     /// the room strip is not a strip of one.
     rooms: Vec<rabbithole_proto::chat::RoomInfo>,
+    /// How many threads each demo board keeps, once somebody has set it.
+    board_keeping: std::collections::BTreeMap<String, u32>,
     /// The demo rooms this person is in, so joining one twice is joining
     /// it once, as a burrow takes it.
     rooms_in: std::collections::BTreeSet<String>,
@@ -297,6 +299,7 @@ impl MockClient {
             admin_backups: Self::seeded_backups(),
             wishes: Self::seeded_wishes(),
             rooms: Self::seeded_rooms(),
+            board_keeping: std::collections::BTreeMap::new(),
             rooms_in: std::collections::BTreeSet::new(),
             room_people: std::collections::BTreeMap::new(),
             room_mutes: std::collections::BTreeMap::new(),
@@ -1557,6 +1560,7 @@ impl MockClient {
                 slug,
                 title,
                 description,
+                keep,
             } => match self.board_tree.iter_mut().find(|b| b.slug == slug) {
                 Some(node) => {
                     node.title = title.clone();
@@ -1565,10 +1569,28 @@ impl MockClient {
                         b.name = title;
                         b.description = description;
                     }
+                    if let Some(keep) = keep {
+                        self.board_keeping.insert(slug.clone(), keep);
+                    }
                     vec![AdminEvent::Ack("Board saved.".into())]
                 }
                 None => vec![AdminEvent::Failed("server error: NotFound".into())],
             },
+            AdminCommand::ListBoardKeeping { .. } => {
+                let boards = self
+                    .board_tree
+                    .iter()
+                    .filter(|b| b.kind == 2)
+                    .map(|b| {
+                        rabbithole_proto::board::BoardKept::new(
+                            b.slug.clone(),
+                            self.board_keeping.get(&b.slug).copied().unwrap_or(0),
+                            self.threads.iter().filter(|t| t.board == b.slug).count() as u64,
+                        )
+                    })
+                    .collect();
+                admin_events(&rabbithole_proto::board::BoardKeeping::new(boards))
+            }
             AdminCommand::MoveBoard { slug, after } => {
                 // The tree is what a console reads, so that is what moves;
                 // a board only moves among the ones under its own parent.

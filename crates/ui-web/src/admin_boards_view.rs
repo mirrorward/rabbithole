@@ -59,6 +59,18 @@ fn in_reading_order(tree: &[BoardNode]) -> Vec<(usize, BoardNode)> {
 pub fn BoardsPane() -> impl IntoView {
     let app = expect_context::<AppState>();
     app.load_boards();
+    // Asked on entry, and again each time this burrow is signed in to: a
+    // pane that outlives a dropped socket would otherwise sit waiting on
+    // an answer that died with it. The demo burrow never signs in, so it
+    // is asked once here.
+    let ready = move || app.focused_tracked().ready.get();
+    create_effect(move |was: Option<u64>| {
+        let now = ready();
+        if was.is_none() || was != Some(now) {
+            app.load_board_keeping();
+        }
+        now
+    });
     let adding = create_rw_signal(false);
     let open = create_rw_signal(None::<String>);
     let tree = move || {
@@ -264,13 +276,63 @@ fn BoardRow(node: BoardNode, depth: usize, open: RwSignal<Option<String>>) -> im
             }
         });
     };
+    // What this board keeps, as the burrow last said: a listing carries
+    // neither the limit nor how many threads there are.
+    let kept = move || app.admin.with(|a| a.board_keeping.clone());
+    let saved_keep = move || kept().board(&slug.get_value()).map(|(max, _)| max);
+    let keep = create_rw_signal(String::new());
+    // Filled in from the burrow until the operator types: a listing that
+    // lands while they are typing must not take back what they wrote.
+    let keep_touched = create_rw_signal(false);
+    // What was asked for and not yet confirmed. A refused save must leave
+    // the number the operator typed where they typed it, not quietly put
+    // the old one back.
+    let keep_sent = create_rw_signal(None::<u32>);
+    create_effect(move |_| {
+        let said = saved_keep();
+        let sent = keep_sent.get_untracked();
+        if sent.is_some() && sent == said {
+            // The burrow has what was asked for, so the field can follow
+            // the burrow again — unless something else has been typed
+            // since, which is still theirs to save.
+            keep_sent.set(None);
+            if keep.get_untracked().trim().parse::<u32>().ok() == sent {
+                keep_touched.set(false);
+            }
+        }
+        if !keep_touched.get_untracked() {
+            keep.set(said.map(|max| max.to_string()).unwrap_or_default());
+        }
+    });
+    let typed = move || keep.get().trim().to_string();
+    let typed_keep = move || typed().parse::<u32>().ok();
+    // A number, or nothing at all. Anything else is not quietly read as
+    // "leave it as it is".
+    let keep_problem = move || {
+        (!typed().is_empty() && typed_keep().is_none())
+            .then_some("A whole number, or 0 to keep every thread.")
+    };
+    // Only what the operator moved is sent: saving a title carries None,
+    // which leaves retention exactly as the burrow has it.
+    let keep_to_save = move || match typed_keep() {
+        Some(n) if Some(n) != saved_keep() => Some(n),
+        _ => None,
+    };
+    let keep_said = move || crate::admin::keeping_line(&kept(), &slug.get_value());
+    let keep_help = move || match keep_problem() {
+        Some(say) => say.to_string(),
+        None if typed().is_empty() && saved_keep().is_some() => {
+            format!("{} Left empty, it stays as it is.", keep_said())
+        }
+        None => keep_said(),
+    };
     let changed = {
         let (t, d) = (saved_title.clone(), saved_description.clone());
-        move || title.get().trim() != t || description.get().trim() != d
+        move || title.get().trim() != t || description.get().trim() != d || keep_to_save().is_some()
     };
     let can_save = {
         let changed = changed.clone();
-        move || changed() && !title.get().trim().is_empty()
+        move || changed() && !title.get().trim().is_empty() && keep_problem().is_none()
     };
     let shown_title = store_value(node.title.clone());
     // Where this board sits among its own, and what moving it means: up is
@@ -328,6 +390,25 @@ fn BoardRow(node: BoardNode, depth: usize, open: RwSignal<Option<String>>) -> im
                                 on:input=move |ev| description.set(event_target_value(&ev))
                             />
                         </label>
+                        <Show when=move || node.kind == KIND_BOARD fallback=|| ()>
+                            <label class="rh-adm-field">
+                                <span>"Threads to keep"</span>
+                                <input
+                                    class="rh-input"
+                                    type="number"
+                                    min="0"
+                                    max="100000"
+                                    prop:value=move || keep.get()
+                                    on:input=move |ev| {
+                                        keep_touched.set(true);
+                                        keep.set(event_target_value(&ev))
+                                    }
+                                />
+                                <span class="rh-adm-help">
+                                    {move || keep_help()}
+                                </span>
+                            </label>
+                        </Show>
                     </div>
                     <div class="rh-adm-acct-actions">
                         <button
@@ -378,11 +459,19 @@ fn BoardRow(node: BoardNode, depth: usize, open: RwSignal<Option<String>>) -> im
                                 let can_save = can_save.clone();
                                 move || !can_save()
                             }
-                            on:click=move |_| app.update_board(
-                                &slug.get_value(),
-                                &title.get(),
-                                &description.get(),
-                            )
+                            on:click=move |_| {
+                                let keep_arg = keep_to_save();
+                                app.update_board(
+                                    &slug.get_value(),
+                                    &title.get(),
+                                    &description.get(),
+                                    keep_arg,
+                                );
+                                match keep_arg {
+                                    Some(n) => keep_sent.set(Some(n)),
+                                    None => keep_touched.set(false),
+                                }
+                            }
                         >
                             "Save"
                         </button>

@@ -70,6 +70,11 @@ pub struct Session {
     pub role: RwSignal<u8>,
     pub caps: RwSignal<u64>,
     pub handle: RwSignal<String>,
+    /// How many times this session has signed in. A socket coming back is
+    /// not the same as being signed in on it, and a pane that asked this
+    /// burrow something before the drop has no answer coming: panes track
+    /// this and ask again.
+    pub ready: RwSignal<u64>,
     /// Whether this session is a guest: a handle with no account behind it.
     /// The server refuses a guest everything that is between accounts, so
     /// the DM view offers sign-in instead of asking and failing.
@@ -245,6 +250,7 @@ impl AppState {
             role: create_rw_signal(0),
             caps: create_rw_signal(0),
             handle: create_rw_signal(String::new()),
+            ready: create_rw_signal(0),
             live: create_rw_signal(false),
             server_theme: create_rw_signal(None),
             name: create_rw_signal(None),
@@ -499,6 +505,7 @@ impl AppState {
                 role: create_rw_signal(0),
                 caps: create_rw_signal(0),
                 handle: create_rw_signal(String::new()),
+                ready: create_rw_signal(0),
                 live: create_rw_signal(false),
                 server_theme: create_rw_signal(None),
                 name: create_rw_signal(None),
@@ -650,6 +657,7 @@ impl AppState {
         let my_role = self.focused().role;
         let my_caps = self.focused().caps;
         let my_login = self.focused().handle;
+        let session_ready = self.focused().ready;
         let presence = self.presence;
         let ws_sv = self.focused().ws;
         // Endpoint captured for both the "connected" toast/label and, on a
@@ -762,6 +770,10 @@ impl AppState {
                         caps,
                     } => {
                         authed.set(true);
+                        // A pane that is already open asked this burrow
+                        // before; whatever it asked for died with the old
+                        // socket, so say plainly that this is a new one.
+                        session_ready.update(|n| *n += 1);
                         my_role.set(*role);
                         my_caps.set(*caps);
                         my_login.set(screen_name.clone());
@@ -1489,6 +1501,7 @@ impl AppState {
                 role: create_rw_signal(0),
                 caps: create_rw_signal(0),
                 handle: create_rw_signal(String::new()),
+                ready: create_rw_signal(0),
                 live: create_rw_signal(false),
                 server_theme: create_rw_signal(None),
                 name: create_rw_signal(Some(demo.name.to_string())),
@@ -3161,16 +3174,44 @@ impl AppState {
             return;
         }
         let tag = tag.unwrap_or_default().to_string();
+        // A tag that names a burrow is only for that burrow. Sessions run
+        // side by side, each with its own socket, and the console models
+        // are the app's, not a session's: an answer that arrives after the
+        // operator has moved on would otherwise be read as this burrow's.
+        if let Some(at) = tag.strip_prefix("*board-keeping:") {
+            if at != self.focused_endpoint() {
+                return;
+            }
+        }
         // A search for an account is tagged (so a burrow too old to answer
         // it can say so), and its answer is the same account list the
         // plain listing gives.
         for event in events {
-            if let AdminEvent::AccountsListed { accounts, total } = event {
-                let (accounts, total) = (accounts.clone(), *total);
-                self.admin.update(|a| {
-                    a.accounts = accounts;
-                    a.account_total = total;
-                });
+            match event {
+                AdminEvent::AccountsListed { accounts, total } => {
+                    let (accounts, total) = (accounts.clone(), *total);
+                    self.admin.update(|a| {
+                        a.accounts = accounts;
+                        a.account_total = total;
+                    });
+                }
+                // What each board keeps is asked for with a tag, so a
+                // burrow too old to say can say that instead. This is the
+                // only place the map is written; the guard above has
+                // already established the answer is this burrow's.
+                AdminEvent::BoardKeepingListed(boards) => {
+                    let said = crate::admin::Keeping::said(boards);
+                    self.admin.update(|a| a.board_keeping = said);
+                }
+                // Said plainly rather than left looking like a burrow that
+                // keeps nothing.
+                AdminEvent::Failed(detail)
+                    if tag.starts_with("*board-keeping:") && detail.contains("Unsupported") =>
+                {
+                    self.admin
+                        .update(|a| a.board_keeping = crate::admin::Keeping::Cannot);
+                }
+                _ => {}
             }
         }
         // Listings land in the moderation model as they are.
@@ -3238,7 +3279,12 @@ impl AppState {
             crate::admin_people::Reload::Accounts => app.reload_accounts(),
             crate::admin_people::Reload::Classes => app.load_classes(),
             crate::admin_people::Reload::Invites => app.load_invites(),
-            crate::admin_people::Reload::Boards => app.load_boards(),
+            crate::admin_people::Reload::Boards => {
+                app.load_boards();
+                // What a board keeps is its own listing, and saving a board
+                // is usually how it changes.
+                app.load_board_keeping();
+            }
             crate::admin_people::Reload::Reports => app.load_reports(None),
             crate::admin_people::Reload::DenyHashes => app.load_deny_hashes(),
             crate::admin_people::Reload::Sessions => app.refresh_who(),
@@ -3629,13 +3675,24 @@ impl AppState {
         });
     }
 
-    /// Change what a board is called and says about itself.
-    pub fn update_board(&self, slug: &str, title: &str, description: &str) {
+    /// Change what a board is called, says about itself, and keeps.
+    pub fn update_board(&self, slug: &str, title: &str, description: &str, keep: Option<u32>) {
         self.dispatch_people(AdminCommand::UpdateBoard {
             slug: slug.to_string(),
             title: title.trim().to_string(),
             description: description.trim().to_string(),
+            keep,
         });
+    }
+
+    /// What every board keeps: the listing carries neither the limit nor
+    /// how many threads there are. What another burrow said about a board
+    /// of the same name is not this one's, so it goes first.
+    pub fn load_board_keeping(&self) {
+        let at = self.focused_endpoint();
+        self.admin
+            .update(|a| a.board_keeping = crate::admin::Keeping::Asking);
+        self.dispatch_people(AdminCommand::ListBoardKeeping { at });
     }
 
     /// Put a board where it should be read: straight after `after`, or

@@ -462,6 +462,57 @@ impl Message for BoardMove {
     const MESSAGE_TYPE: u16 = 17;
 }
 
+/// Ask what each board keeps. → [`BoardKeeping`]. Requires
+/// `BOARD_MODERATE`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardKeepingRequest;
+
+impl Message for BoardKeepingRequest {
+    const FAMILY: Family = Family::BOARD;
+    const MESSAGE_TYPE: u16 = 18;
+}
+
+/// One board's retention: how many threads it is allowed to keep, and how
+/// many it holds now.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardKept {
+    pub slug: String,
+    /// The newest this many threads are kept; `0` keeps all of them.
+    pub max_threads: u32,
+    /// How many threads it holds at the moment.
+    pub threads: u64,
+}
+
+impl BoardKept {
+    pub fn new(slug: impl Into<String>, max_threads: u32, threads: u64) -> Self {
+        Self {
+            slug: slug.into(),
+            max_threads,
+            threads,
+        }
+    }
+}
+
+/// What every board keeps. A board listing carries neither number, so this
+/// is how a console shows what it is about to change.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardKeeping {
+    pub boards: Vec<BoardKept>,
+}
+
+impl BoardKeeping {
+    pub fn new(boards: Vec<BoardKept>) -> Self {
+        Self { boards }
+    }
+}
+
+impl Message for BoardKeeping {
+    const FAMILY: Family = Family::BOARD;
+    const MESSAGE_TYPE: u16 = 19;
+}
+
 /// Push: a new post landed in a board (id + board; clients refetch as
 /// needed). Delivered to every session so unread counts stay live.
 #[non_exhaustive]

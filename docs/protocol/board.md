@@ -8,7 +8,7 @@ append-only signed post events, threading, read pointers, moderation.
 | 1/2 | BoardListRequest → BoardList | Request/Reply | tree nodes {slug, title, kind (0 cat/1 bundle/2 board), parent, unread} |
 | 3/4 | ThreadListRequest → ThreadList | Request/Reply | `board`, `limit` (clamped to 200); summaries {root PostView, replies, last_activity} newest first |
 | 5/6 | ThreadRequest → ThreadPosts | Request/Reply | `root`, `limit` (clamped to 1000); full thread (root + descendants, oldest first) |
-| 7/8 | PostCreate → PostReply | Request/Reply | `board`, optional `parent`, subject/body/mime; needs BOARD_POST |
+| 7/8 | PostCreate → PostReply | Request/Reply | `board`, optional `parent`, subject/body/mime; needs BOARD_POST. A slug matches case-insensitively, and the post is minted and stored under the board’s own spelling — a post kept under the caller’s casing would be invisible to that board’s threads, counts and retention |
 | 9/8 | PostEdit → PostReply | Request/Reply | author or BOARD_MODERATE |
 | 10 | PostDelete | Request | tombstone; author or BOARD_MODERATE |
 | 11 | MarkRead | Request | advance read pointer (`up_to_unix_ms`, 0 = now) |
@@ -16,6 +16,7 @@ append-only signed post events, threading, read pointers, moderation.
 | 15 | BoardUpdate | Request | BOARD_MODERATE: `slug`, `title`, `description`, `max_threads: Option<u32>` (`None` leaves retention as it is; a listing does not carry it) → empty ack. The slug is the board's identity and never changes |
 | 16 | BoardDelete | Request | BOARD_MODERATE: `slug` → empty ack. `BadRequest` while the board has posts, or boards inside it: posts are signed history, and a board is not taken from under them by accident |
 | 17 | BoardMove | Request | BOARD_MODERATE: `slug`, `after: Option<String>` → empty ack. Puts the board straight after `after` among the boards under the same parent, or first when there is none. A board is only moved among its own: `NotFound` for an unknown board, for `after` under another parent, or for a board after itself. Boards were read in slug order, so the only way to move one was to rename it — and a slug is the board's identity, which addresses and other burrows carry. A position counts only among the boards under one parent: a burrow is read as a tree — each board, then what is inside it — with ties falling back to the slug, and migration 0016 numbers each burrow's boards in the order it already read them. A board made later is read after the ones already there |
+| 18/19 | BoardKeepingRequest → BoardKeeping | Request/Reply | BOARD_MODERATE: `boards: [BoardKept]` — `slug`, `max_threads` (0 keeps all), `threads` (how many it holds now). A board listing carries neither, so retention could be set from a console and never shown there |
 | 14 | PostPosted | Push | `board`, `id`, `root` — broadcast so unread counts stay live |
 
 ## Signed events

@@ -54,6 +54,10 @@ pub struct AdminState {
     pub accounts: Vec<AccountEntry>,
     /// What an operator has typed to find one.
     pub account_find: String,
+    /// What each board keeps, once this burrow has said. A board listing
+    /// carries neither number, so until the answer lands the console knows
+    /// nothing — which is not the same as a burrow that cannot say.
+    pub board_keeping: Keeping,
     /// Total accounts across all pages.
     pub account_total: u64,
     /// Resolved config key/value pairs.
@@ -62,6 +66,67 @@ pub struct AdminState {
     pub last_invite: Option<InviteCode>,
     /// One-line status/error line for the console.
     pub status: String,
+}
+
+/// What the console knows about board retention on the burrow it is
+/// looking at. Asked and unanswered is its own state: saying "this burrow
+/// does not say" while the question is still in flight is a lie the
+/// operator would act on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Keeping {
+    /// Asked, no answer yet.
+    #[default]
+    Asking,
+    /// What the burrow said: `(threads kept, threads it holds now)` by slug.
+    Said(std::collections::BTreeMap<String, (u32, u64)>),
+    /// The burrow will not say — older than the question.
+    Cannot,
+}
+
+impl Keeping {
+    /// What this burrow said about one board, if it said anything.
+    pub fn board(&self, slug: &str) -> Option<(u32, u64)> {
+        match self {
+            Keeping::Said(boards) => boards.get(slug).copied(),
+            _ => None,
+        }
+    }
+
+    /// The listing, as the burrow gave it.
+    pub fn said(boards: &[rabbithole_proto::board::BoardKept]) -> Self {
+        Keeping::Said(
+            boards
+                .iter()
+                .map(|b| (b.slug.clone(), (b.max_threads, b.threads)))
+                .collect(),
+        )
+    }
+}
+
+/// What a board keeps, said for a person: the limit, and how many threads
+/// are there now.
+pub fn keeping_line(kept: &Keeping, slug: &str) -> String {
+    let kept = match kept {
+        Keeping::Asking => return "Asking this burrow what this board keeps\u{2026}".to_string(),
+        Keeping::Cannot => return "This burrow does not say what this board keeps.".to_string(),
+        said => said.board(slug),
+    };
+    let here = |now: u64| match now {
+        1 => "1 thread here now.".to_string(),
+        n => format!("{n} threads here now."),
+    };
+    match kept {
+        None => "This burrow did not mention this board.".to_string(),
+        Some((0, now)) => format!("Every thread is kept. {}", here(now)),
+        Some((1, now)) => format!(
+            "Only the newest thread is kept; the rest go as new ones start. {}",
+            here(now)
+        ),
+        Some((max, now)) => format!(
+            "The newest {max} threads are kept; the rest go as new ones start. {}",
+            here(now)
+        ),
+    }
 }
 
 impl AdminState {
@@ -93,6 +158,12 @@ impl AdminState {
             | AdminEvent::StationsListed(_)
             | AdminEvent::BackupMade(_)
             | AdminEvent::BackupChecked(_) => {}
+            // What boards keep has one write path, in
+            // [`crate::app::AppState::fold_admin_reply`], where the reply
+            // can be checked against the burrow it was asked of. Folding it
+            // here as well would put another burrow's answer in this
+            // burrow's console.
+            AdminEvent::BoardKeepingListed(_) => {}
             AdminEvent::ConfigApplied { applied_live } => {
                 self.status = if *applied_live {
                     "Config saved and applied live.".to_string()
@@ -224,5 +295,43 @@ mod tests {
         info.name = "Wonderland".into();
         s.apply(&AdminEvent::ThemeBundleApplied(info));
         assert_eq!(s.status, "Published theme Wonderland.");
+    }
+
+    #[test]
+    fn a_keeping_listing_is_not_folded_by_the_plain_reducer() {
+        // Every live session folds admin events into the one console model
+        // before anything checks which burrow answered. What boards keep is
+        // therefore written in one guarded place only, and must not be
+        // written here: see `AppState::fold_admin_reply`.
+        let mut s = AdminState::default();
+        s.apply(&AdminEvent::BoardKeepingListed(vec![
+            rabbithole_proto::board::BoardKept::new("b", 7, 3),
+        ]));
+        assert_eq!(s.board_keeping, Keeping::Asking);
+    }
+
+    #[test]
+    fn what_a_board_keeps_is_said_the_way_a_person_would() {
+        let said = |max, now| {
+            Keeping::Said(std::collections::BTreeMap::from([(
+                "b".to_string(),
+                (max, now),
+            )]))
+        };
+        assert_eq!(
+            keeping_line(&said(0, 1), "b"),
+            "Every thread is kept. 1 thread here now."
+        );
+        assert_eq!(
+            keeping_line(&said(0, 12), "b"),
+            "Every thread is kept. 12 threads here now."
+        );
+        assert!(keeping_line(&said(1, 3), "b").starts_with("Only the newest thread is kept"));
+        assert!(keeping_line(&said(50, 3), "b").starts_with("The newest 50 threads are kept"));
+        // Asked and unanswered, a burrow that cannot say, and one that
+        // answered without this board are three different things.
+        assert!(keeping_line(&Keeping::Asking, "b").starts_with("Asking"));
+        assert!(keeping_line(&Keeping::Cannot, "b").contains("does not say"));
+        assert!(keeping_line(&said(1, 1), "other").contains("did not mention"));
     }
 }
