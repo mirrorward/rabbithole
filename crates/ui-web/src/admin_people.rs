@@ -426,6 +426,11 @@ fn succeeded(kind: &str, subject: &str) -> (String, Reload) {
         "node-rename" => (format!("Renamed {subject}."), Reload::Folder),
         "node-move" => (format!("Moved {subject}."), Reload::Folder),
         "report-resolve" => ("Noted.".to_string(), Reload::Reports),
+        "held-add" => (
+            "Held back. Nobody else can see it until it is let through.".to_string(),
+            Reload::Nothing,
+        ),
+        "held-clear" => ("Let through.".to_string(), Reload::Nothing),
         "deny-add" => (
             "That hash is refused everywhere now.".to_string(),
             Reload::DenyHashes,
@@ -455,6 +460,23 @@ fn succeeded(kind: &str, subject: &str) -> (String, Reload) {
 fn refused(kind: &str, subject: &str, detail: &str) -> String {
     let code = |name: &str| detail.contains(name);
     match kind {
+        // Holding content back: the subject is `kind:hex`, no use in a
+        // sentence, so these say what happened rather than to what.
+        "held-clear" if code("NotFound") => {
+            "That was already let through — somebody got there first.".to_string()
+        }
+        "held-add" | "held-clear" | "held-list" if code("Forbidden") => {
+            "Holding content back is a moderator\u{2019}s to do.".to_string()
+        }
+        "held-add" if code("BadRequest") => {
+            "That is not something a burrow can hold back.".to_string()
+        }
+        "held-list" if code("Unsupported") => {
+            "This burrow is too old to say what it is holding back.".to_string()
+        }
+        "held-add" | "held-clear" | "held-list" => {
+            format!("The burrow did not take that: {detail}")
+        }
         "account-create" if code("AlreadyExists") => {
             format!("The login {subject} is taken, by an account or by someone\u{2019}s persona.")
         }
@@ -766,6 +788,31 @@ mod tests {
         assert_eq!(s.apply("*class-set:helpers", &ack), Reload::Classes);
         s.apply("*class-set:helpers", &failed("Forbidden"));
         assert!(s.notice.as_ref().unwrap().1.contains("do not hold"));
+
+        // Holding content back says what happened to it, not what happened
+        // to an account: the tag's subject is `kind:hex`, which is no use
+        // in a sentence.
+        assert_eq!(
+            s.apply("*held-add:2:7f7f", &ack),
+            Reload::Nothing,
+            "the list is asked for again by hand"
+        );
+        assert!(s.notice.as_ref().unwrap().1.contains("Held back"));
+        s.apply("*held-clear:2:7f7f", &failed("NotFound"));
+        assert!(
+            s.notice.as_ref().unwrap().1.contains("already let through"),
+            "{:?}",
+            s.notice
+        );
+        s.apply("*held-add:2:7f7f", &failed("Forbidden"));
+        assert!(s.notice.as_ref().unwrap().1.contains("moderator"));
+        s.apply("*held-list", &failed("Unsupported"));
+        assert!(s.notice.as_ref().unwrap().1.contains("too old"));
+        assert!(
+            !s.notice.as_ref().unwrap().1.contains("account"),
+            "{:?} reads as an account operation",
+            s.notice
+        );
 
         let listed = [AdminEvent::InvitesListed(vec![InviteEntry::new(
             "A", "ada", 9, None,

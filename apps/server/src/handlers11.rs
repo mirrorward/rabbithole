@@ -164,6 +164,38 @@ pub async fn handle(
         return Ok(true);
     }
 
+    if let Some(Ok(req)) = frame.decode::<padm::QuarantineListRequest>() {
+        moderators_only!();
+        match shared
+            .moderation
+            .held(i64::from(req.offset), i64::from(req.limit))
+            .await
+        {
+            Ok((rows, total)) => {
+                let held = rows
+                    .into_iter()
+                    .map(|r| {
+                        padm::HeldItem::new(
+                            r.subject_kind,
+                            r.subject_ref,
+                            r.reason,
+                            r.added_by,
+                            r.created_at,
+                        )
+                    })
+                    .collect();
+                let total = u64::try_from(total).unwrap_or_default();
+                conn.send(Frame::reply_to(
+                    frame,
+                    &padm::QuarantineList::new(held, total),
+                )?)
+                .await?
+            }
+            Err(e) => fail!(map_err(e)),
+        }
+        return Ok(true);
+    }
+
     // ---- Hash-deny list (moderators) ----------------------------------------
     if let Some(Ok(req)) = frame.decode::<padm::DenyHashAdd>() {
         moderators_only!();

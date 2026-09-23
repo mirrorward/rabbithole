@@ -1398,6 +1398,79 @@ impl Message for QuarantineClear {
     const MESSAGE_TYPE: u16 = 36;
 }
 
+/// Ask what is being held back for review, a page at a time (a burrow that
+/// has held back a spam run holds thousands). → [`QuarantineList`].
+/// Requires `MODERATE`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuarantineListRequest {
+    pub offset: u32,
+    /// Clamped by the burrow to 1..=200.
+    pub limit: u32,
+}
+
+impl QuarantineListRequest {
+    pub fn new(offset: u32, limit: u32) -> Self {
+        Self { offset, limit }
+    }
+}
+
+impl Message for QuarantineListRequest {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 61;
+}
+
+/// One thing held back for review: what it is, why, who held it, and when.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldItem {
+    /// One of [`subject_kind`].
+    pub subject_kind: u8,
+    pub subject_ref: Vec<u8>,
+    pub reason: String,
+    /// The moderator who held it back; empty when it was not recorded.
+    pub held_by: String,
+    pub at_unix: i64,
+}
+
+impl HeldItem {
+    pub fn new(
+        subject_kind: u8,
+        subject_ref: Vec<u8>,
+        reason: impl Into<String>,
+        held_by: impl Into<String>,
+        at_unix: i64,
+    ) -> Self {
+        Self {
+            subject_kind,
+            subject_ref,
+            reason: reason.into(),
+            held_by: held_by.into(),
+            at_unix,
+        }
+    }
+}
+
+/// A page of what is held back, oldest first, and how many there are in
+/// all.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuarantineList {
+    pub held: Vec<HeldItem>,
+    pub total: u64,
+}
+
+impl QuarantineList {
+    pub fn new(held: Vec<HeldItem>, total: u64) -> Self {
+        Self { held, total }
+    }
+}
+
+impl Message for QuarantineList {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 62;
+}
+
 /// Add a blake3 hash to the deny list: content with this hash is refused at
 /// upload finalize and attachment send. → empty ack. Requires `MODERATE`.
 #[non_exhaustive]

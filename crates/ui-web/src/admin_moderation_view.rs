@@ -20,11 +20,13 @@ use crate::state::SessionRow;
 pub fn ModerationPane() -> impl IntoView {
     let app = expect_context::<AppState>();
     app.load_reports(Some(report_state::OPEN));
+    app.load_held();
     app.load_deny_hashes();
     app.load_audit();
     app.refresh_who();
     view! {
         <Reports/>
+        <HeldBack/>
         <Sessions/>
         <Broadcast/>
         <DenyList/>
@@ -102,12 +104,104 @@ fn Reports() -> impl IntoView {
     }
 }
 
+/// What a moderator is holding back: content that reads as absent
+/// everywhere until it is let through. The burrow has honoured this on
+/// every surface since 0.260.0; this is where it is done and undone.
+#[component]
+fn HeldBack() -> impl IntoView {
+    let app = expect_context::<AppState>();
+    let held = move || app.moderation.with(|m| m.held.clone());
+    let unknown = move || app.moderation.with(|m| m.held_unknown);
+    // A page at a time: how many are not on it.
+    let more = move || {
+        app.moderation
+            .with(|m| m.held_total.saturating_sub(m.held.len() as u64))
+    };
+    let some_more = move || more() != 0;
+    view! {
+        <section class="rh-adm-group" aria-labelledby="rh-adm-held-h">
+            <div class="rh-adm-group-head">
+                <h3 class="rh-adm-group-h" id="rh-adm-held-h">
+                    "Held back"
+                    <span class="rh-adm-count">{move || held().len()}</span>
+                </h3>
+                <div class="rh-adm-group-tools">
+                    <button
+                        type="button"
+                        class="rh-btn ghost small"
+                        on:click=move |_| app.load_held()
+                    >
+                        "Refresh"
+                    </button>
+                </div>
+            </div>
+            <p class="rh-adm-group-blurb">
+                "Held content is not there as far as anybody else is concerned: not in a \
+                 listing, not over Hotline or news, not to another burrow. Let it through \
+                 when it turns out to be fine."
+            </p>
+            <div class="rh-adm-rows">
+                <For
+                    each=held
+                    key=|h| (h.subject_kind, h.subject_ref.clone())
+                    children=move |h| {
+                        let (kind, subject) = (h.subject_kind, h.subject_ref.clone());
+                        let line = moderation::held_line(&h);
+                        view! {
+                            <div class="rh-adm-row">
+                                <span class="rh-adm-row-line">{line}</span>
+                                <button
+                                    type="button"
+                                    class="rh-btn ghost small"
+                                    on:click=move |_| app.let_through(kind, subject.clone())
+                                >
+                                    "Let it through"
+                                </button>
+                            </div>
+                        }
+                    }
+                />
+                <Show when=move || held().is_empty() && !unknown() fallback=|| ()>
+                    <p class="rh-adm-empty">"Nothing is held back."</p>
+                </Show>
+                <Show when=unknown fallback=|| ()>
+                    <p class="rh-adm-empty">
+                        "This burrow is too old to say what it is holding back. It still holds \
+                         what it was told to; it cannot list it here."
+                    </p>
+                </Show>
+                <Show when=some_more fallback=|| ()>
+                    <p class="rh-adm-empty">
+                        {move || format!("And {} more, not shown.", more())}
+                    </p>
+                </Show>
+            </div>
+        </section>
+    }
+}
+
 #[component]
 fn ReportRow(report: ReportEntry) -> impl IntoView {
     let app = expect_context::<AppState>();
     let id = report.id;
     let note = create_rw_signal(String::new());
     let line = report_line(&report);
+    // Holding back what a report is about, from the report itself: the
+    // reason on the hold is the note, so the record says why.
+    let (kind, subject) = (report.subject_kind, report.subject_ref.clone());
+    let holdable = moderation::can_hold(kind);
+    let held = {
+        let subject = store_value(subject.clone());
+        move || {
+            subject.with_value(|s| {
+                app.moderation
+                    .with(|m| moderation::is_held(&m.held, kind, s))
+            })
+        }
+    };
+    let hold_subject = subject.clone();
+    let free_subject = subject;
+    let why = report.reason.clone();
     let mut meta = vec![
         format!("reported {}", when(report.created_at_unix)),
         format!("by account #{}", report.reporter_account),
@@ -130,6 +224,35 @@ fn ReportRow(report: ReportEntry) -> impl IntoView {
                 <p class="rh-adm-report-meta">{meta.join(" \u{00b7} ")}</p>
             </div>
             <div class="rh-adm-report-actions">
+                <Show when=move || holdable && !held() fallback=|| ()>
+                    <button
+                        type="button"
+                        class="rh-btn ghost small"
+                        on:click={
+                            let subject = hold_subject.clone();
+                            let why = why.clone();
+                            move |_| {
+                                let note = note.get();
+                                let reason = if note.trim().is_empty() { why.clone() } else { note };
+                                app.hold_back(kind, subject.clone(), &reason)
+                            }
+                        }
+                    >
+                        "Hold it back"
+                    </button>
+                </Show>
+                <Show when=move || holdable && held() fallback=|| ()>
+                    <button
+                        type="button"
+                        class="rh-btn ghost small"
+                        on:click={
+                            let subject = free_subject.clone();
+                            move |_| app.let_through(kind, subject.clone())
+                        }
+                    >
+                        "Let it through"
+                    </button>
+                </Show>
                 {actions
                     .iter()
                     .map(|(action, label)| {

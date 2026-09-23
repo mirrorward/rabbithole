@@ -36,9 +36,10 @@ use crate::admin::{
     ConfigSet, ConfigValue, DenyHashAdd, DenyHashList, DenyHashListRequest, DenyHashRemove,
     GatewayStatsReply, GatewayStatsRequest, InviteCode, InviteCreate, InviteList,
     InviteListRequest, InviteRevoke, Kick, OriginList, OriginListRequest, OriginPin, PeerApprove,
-    PeerList, PeerListRequest, PeerRevoke, QuarantineClear, QuarantineSet, ReportAck, ReportCreate,
-    ReportList, ReportListRequest, ReportResolve, SurfaceStatus, SurfaceStatusRequest,
-    ThemeBundleClear, ThemeBundleGet, ThemeBundleInfo, ThemeBundleSet,
+    PeerList, PeerListRequest, PeerRevoke, QuarantineClear, QuarantineList, QuarantineListRequest,
+    QuarantineSet, ReportAck, ReportCreate, ReportList, ReportListRequest, ReportResolve,
+    SurfaceStatus, SurfaceStatusRequest, ThemeBundleClear, ThemeBundleGet, ThemeBundleInfo,
+    ThemeBundleSet,
 };
 use crate::blob::{BlobData, BlobGet, BlobPut, BlobRef};
 use crate::board::{
@@ -193,6 +194,7 @@ wire_registry! {
     PeerListRequest, PeerList, PeerApprove, PeerRevoke, OriginListRequest, OriginList, OriginPin,
     BackupListRequest, BackupList, BackupCreate, BackupMade, BackupVerify, BackupVerified,
     BackupDelete,
+    QuarantineListRequest, QuarantineList,
     ReportCreate, ReportAck, ReportListRequest, ReportList, ReportResolve, QuarantineSet,
     QuarantineClear, DenyHashAdd, DenyHashRemove, DenyHashListRequest, DenyHashList, ThemeBundleSet,
     ThemeBundleClear, ThemeBundleGet, ThemeBundleInfo, GatewayStatsRequest, GatewayStatsReply,
@@ -216,7 +218,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 240;
+pub const EXPECTED: usize = 242;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

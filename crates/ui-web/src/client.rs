@@ -110,6 +110,8 @@ pub struct MockClient {
     admin_invites: Vec<rabbithole_proto::admin::InviteEntry>,
     admin_reports: Vec<ReportEntry>,
     admin_deny: Vec<DenyHashEntry>,
+    /// What the demo's moderator is holding back for review.
+    admin_held: Vec<rabbithole_proto::admin::HeldItem>,
     admin_audit: Vec<AuditEntry>,
     admin_peers: Vec<PeerEntry>,
     admin_origins: Vec<OriginEntry>,
@@ -288,6 +290,7 @@ impl MockClient {
             admin_invites: Self::seeded_invites(),
             admin_reports: Self::seeded_reports(),
             admin_deny: Vec::new(),
+            admin_held: Self::seeded_held(),
             admin_audit: Self::seeded_audit(),
             admin_peers: Self::seeded_peers(),
             admin_origins: Self::seeded_origins(),
@@ -860,6 +863,18 @@ impl MockClient {
             members,
             muted,
         )))
+    }
+
+    /// One thing held back, so the demo's moderation pane shows what a hold
+    /// looks like: the file a report is about.
+    fn seeded_held() -> Vec<rabbithole_proto::admin::HeldItem> {
+        vec![rabbithole_proto::admin::HeldItem::new(
+            rabbithole_proto::admin::subject_kind::FILE,
+            vec![0x5a; 32],
+            "reported: not what it says it is",
+            "rabbit",
+            0,
+        )]
     }
 
     /// A few wishes, so the demo's Wishing Well is a well and not a hole.
@@ -1561,6 +1576,39 @@ impl MockClient {
                         vec![AdminEvent::Ack("Report updated.".into())]
                     }
                     None => vec![AdminEvent::Failed("server error: NotFound".into())],
+                }
+            }
+            AdminCommand::ListHeld { .. } => {
+                let total = self.admin_held.len() as u64;
+                admin_events(&rabbithole_proto::admin::QuarantineList::new(
+                    self.admin_held.clone(),
+                    total,
+                ))
+            }
+            AdminCommand::Hold {
+                kind,
+                subject,
+                reason,
+            } => {
+                self.admin_held
+                    .retain(|h| h.subject_kind != kind || h.subject_ref != subject);
+                self.admin_held.push(rabbithole_proto::admin::HeldItem::new(
+                    kind,
+                    subject,
+                    reason,
+                    "rabbit",
+                    crate::clock::now_ms() / 1000,
+                ));
+                vec![AdminEvent::Ack("Held back for review.".into())]
+            }
+            AdminCommand::LetThrough { kind, subject } => {
+                let before = self.admin_held.len();
+                self.admin_held
+                    .retain(|h| h.subject_kind != kind || h.subject_ref != subject);
+                if self.admin_held.len() < before {
+                    vec![AdminEvent::Ack("Let through.".into())]
+                } else {
+                    vec![AdminEvent::Failed("server error: NotFound".into())]
                 }
             }
             AdminCommand::ListDenyHashes => {

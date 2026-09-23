@@ -3,7 +3,7 @@
 //! for each. DOM-free and host-tested.
 
 use rabbithole_proto::admin::{
-    report_action, report_state, subject_kind, AuditEntry, DenyHashEntry, ReportEntry,
+    report_action, report_state, subject_kind, AuditEntry, DenyHashEntry, HeldItem, ReportEntry,
 };
 
 /// What a report is about, as a sentence fragment.
@@ -218,8 +218,54 @@ pub struct ModerationState {
     pub total: u64,
     /// The hash-deny list.
     pub deny: Vec<DenyHashEntry>,
+    /// What a moderator is holding back for review: a page of it.
+    pub held: Vec<HeldItem>,
+    /// How many are held in all, page or no page.
+    pub held_total: u64,
+    /// Whether this burrow can say what it is holding at all: one from
+    /// before the list existed holds content and cannot list it, which is
+    /// not the same as holding nothing.
+    pub held_unknown: bool,
     /// The audit log, oldest first.
     pub audit: Vec<AuditEntry>,
+}
+
+/// What one held thing is, for its row: what kind, which one, and why it
+/// is being held.
+pub fn held_line(item: &HeldItem) -> String {
+    let why = item.reason.trim();
+    let who = item.held_by.trim();
+    let by = if who.is_empty() {
+        String::new()
+    } else {
+        format!(" (held by {who})")
+    };
+    if why.is_empty() {
+        format!(
+            "{} {}{by}",
+            subject_name(item.subject_kind),
+            subject_ref(item.subject_kind, &item.subject_ref)
+        )
+    } else {
+        format!(
+            "{} {} \u{2014} {why}{by}",
+            subject_name(item.subject_kind),
+            subject_ref(item.subject_kind, &item.subject_ref)
+        )
+    }
+}
+
+/// Whether what a report is about is being held back.
+pub fn is_held(held: &[HeldItem], kind: u8, subject: &[u8]) -> bool {
+    held.iter()
+        .any(|h| h.subject_kind == kind && h.subject_ref == subject)
+}
+
+/// Whether a report's subject is something a burrow can hold back: a post
+/// or a file. Holding a person is what disabling an account is for, and
+/// holding a direct message would hide it from the two people in it only.
+pub fn can_hold(kind: u8) -> bool {
+    matches!(kind, subject_kind::POST | subject_kind::FILE)
 }
 
 /// A deny entry's own description for its row.
@@ -409,5 +455,40 @@ mod tests {
         assert_eq!(deny_line(&denied), "denied by mo");
         let denied = DenyHashEntry::new([1; 32], "malware", "mo", 0);
         assert_eq!(deny_line(&denied), "malware (denied by mo)");
+    }
+
+    #[test]
+    fn what_is_held_back_says_what_and_why() {
+        let file = HeldItem::new(
+            subject_kind::FILE,
+            vec![0xcd; 32],
+            "under review",
+            "mo",
+            1_700_000_000,
+        );
+        let line = held_line(&file);
+        assert!(line.contains("a file"), "{line}");
+        assert!(
+            line.contains("under review") && line.contains("held by mo"),
+            "{line}"
+        );
+        // No reason given, and nobody recorded: still says what it is.
+        let bare = HeldItem::new(subject_kind::POST, vec![0xab; 32], "  ", "", 0);
+        let line = held_line(&bare);
+        assert!(line.starts_with("a post"), "{line}");
+        assert!(!line.contains("held by"), "{line}");
+
+        // A report's subject is matched against what is held.
+        let held = vec![file];
+        assert!(is_held(&held, subject_kind::FILE, &[0xcd; 32]));
+        assert!(!is_held(&held, subject_kind::FILE, &[0x01; 32]));
+        assert!(
+            !is_held(&held, subject_kind::POST, &[0xcd; 32]),
+            "kind counts"
+        );
+
+        // Only what a burrow can hold is offered.
+        assert!(can_hold(subject_kind::POST) && can_hold(subject_kind::FILE));
+        assert!(!can_hold(subject_kind::USER) && !can_hold(subject_kind::DM));
     }
 }

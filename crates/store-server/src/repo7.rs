@@ -217,6 +217,36 @@ impl QuarantineRepo<'_> {
         )
     }
 
+    /// A page of what is held, oldest first, and how many there are in all.
+    pub async fn page(
+        &self,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<QuarantineRow>, i64), StoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM quarantine ORDER BY created_at, subject_ref LIMIT ? OFFSET ?",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(self.0)
+        .await?;
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quarantine")
+            .fetch_one(self.0)
+            .await?;
+        Ok((
+            rows.iter()
+                .map(|r| QuarantineRow {
+                    subject_kind: r.get::<i64, _>("subject_kind") as u8,
+                    subject_ref: r.get("subject_ref"),
+                    reason: r.get("reason"),
+                    added_by: r.get("added_by"),
+                    created_at: r.get("created_at"),
+                })
+                .collect(),
+            total,
+        ))
+    }
+
     pub async fn all(&self) -> Result<Vec<QuarantineRow>, StoreError> {
         let rows = sqlx::query("SELECT * FROM quarantine ORDER BY created_at, subject_ref")
             .fetch_all(self.0)

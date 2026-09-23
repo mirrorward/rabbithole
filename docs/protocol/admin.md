@@ -29,6 +29,16 @@ written to the audit log. Any authorized client is an admin console.
 Types 30..40 are the Wave 13 moderation suite (reports, quarantine,
 hash-deny list); see `rabbithole-proto::admin`.
 
+### What is held back: types 61/62
+
+`QuarantineSet` (35) holds content back and `QuarantineClear` (36) lets it
+through; both were writable over the wire from Wave 13 and readable from
+nowhere, so a console could hold content and never say what was held.
+
+| type | name | direction | requires | payload |
+|------|------|-----------|----------|---------|
+| 61/62 | QuarantineListRequest → QuarantineList | Request/Reply | MODERATE | `offset`, `limit` (clamped to 1..=200) → `held: [HeldItem]`, oldest first — `subject_kind`, `subject_ref`, `reason`, `held_by` (the moderator's login), `at_unix` — and `total`, how many are held in all. A burrow that has held back a spam run holds thousands, so this pages rather than answering with all of them |
+
 ### Standing: who may change whom
 
 `ACCOUNT_ADMIN` says an operator may manage accounts, not *which*. Every account

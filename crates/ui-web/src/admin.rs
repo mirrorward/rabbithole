@@ -82,6 +82,7 @@ impl AdminState {
             | AdminEvent::SurfacesReported(_)
             | AdminEvent::InvitesListed(_)
             | AdminEvent::ReportsListed(..)
+            | AdminEvent::HeldListed(..)
             | AdminEvent::DenyHashesListed(_)
             | AdminEvent::AuditListed(_)
             | AdminEvent::PeersListed(_)

@@ -408,3 +408,69 @@ async fn every_operator_change_is_on_the_record() {
 
     burrow.shutdown().await;
 }
+
+/// What a moderator is holding back is a list they can read and act on:
+/// the console used to be able to hold nothing and see nothing held, while
+/// every surface honoured the holds. Moderators only.
+#[tokio::test]
+async fn what_is_held_back_is_listed_to_a_moderator_and_can_be_let_through() {
+    use rabbithole_proto::admin::{
+        subject_kind, QuarantineClear, QuarantineList, QuarantineListRequest, QuarantineSet,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(dir.path()).await;
+    let mut root = login(&burrow, "root").await;
+    let mut alice = login(&burrow, "alice").await;
+    let blob = [7u8; 32];
+
+    // Nothing held yet.
+    let held: QuarantineList = root
+        .request(&QuarantineListRequest::new(0, 50))
+        .await
+        .unwrap();
+    assert!(held.held.is_empty());
+    assert_eq!(held.total, 0);
+
+    // A moderator holds a file back, and the list says what and why.
+    root.request_ack(&QuarantineSet::new(
+        subject_kind::FILE,
+        blob.to_vec(),
+        "under review",
+    ))
+    .await
+    .unwrap();
+    let held: QuarantineList = root
+        .request(&QuarantineListRequest::new(0, 50))
+        .await
+        .unwrap();
+    assert_eq!(held.held.len(), 1);
+    assert_eq!(held.total, 1);
+    let item = &held.held[0];
+    assert_eq!(item.subject_kind, subject_kind::FILE);
+    assert_eq!(item.subject_ref, blob.to_vec());
+    assert_eq!(item.reason, "under review");
+    assert_eq!(item.held_by, "root", "who held it");
+    assert!(item.at_unix > 0, "and when");
+
+    // Nobody else reads it.
+    let refused = alice
+        .request::<_, QuarantineList>(&QuarantineListRequest::new(0, 50))
+        .await;
+    assert!(
+        matches!(refused, Err(ClientError::Refused(ErrorCode::Forbidden))),
+        "{refused:?}"
+    );
+
+    // Let through, and it is off the list.
+    root.request_ack(&QuarantineClear::new(subject_kind::FILE, blob.to_vec()))
+        .await
+        .unwrap();
+    let held: QuarantineList = root
+        .request(&QuarantineListRequest::new(0, 50))
+        .await
+        .unwrap();
+    assert!(held.held.is_empty());
+
+    burrow.shutdown().await;
+}

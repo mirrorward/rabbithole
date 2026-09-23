@@ -3118,6 +3118,18 @@ impl AppState {
                         m.reports = reports.clone();
                         m.total = *total;
                     }
+                    AdminEvent::HeldListed(list, total) => {
+                        m.held = list.clone();
+                        m.held_total = *total;
+                        m.held_unknown = false;
+                    }
+                    // A burrow from before the list existed holds content
+                    // and cannot say what: not the same as holding none.
+                    AdminEvent::Failed(detail)
+                        if tag == "*held-list" && detail.contains("Unsupported") =>
+                    {
+                        m.held_unknown = true;
+                    }
                     AdminEvent::DenyHashesListed(list) => m.deny = list.clone(),
                     AdminEvent::AuditListed(list) => m.audit = list.clone(),
                     _ => {}
@@ -3292,6 +3304,28 @@ impl AppState {
             action,
             note: note.trim().to_string(),
         });
+    }
+
+    /// What is being held back for review, from the top.
+    pub fn load_held(&self) {
+        self.dispatch_people(AdminCommand::ListHeld { offset: 0 });
+    }
+
+    /// Hold something back: it reads as absent everywhere until it is let
+    /// through. The list is asked for again, since nothing announces it.
+    pub fn hold_back(&self, kind: u8, subject: Vec<u8>, reason: &str) {
+        self.dispatch_people(AdminCommand::Hold {
+            kind,
+            subject,
+            reason: reason.trim().to_string(),
+        });
+        self.load_held();
+    }
+
+    /// Let held content through again.
+    pub fn let_through(&self, kind: u8, subject: Vec<u8>) {
+        self.dispatch_people(AdminCommand::LetThrough { kind, subject });
+        self.load_held();
     }
 
     /// The hash-deny list.

@@ -82,9 +82,10 @@ use rabbithole_proto::admin::{
     DenyHashAdd, DenyHashEntry, DenyHashList, DenyHashListRequest, DenyHashRemove,
     GatewayStatsReply, GatewayStatsRequest, InviteCode, InviteCreate, InviteEntry, InviteList,
     InviteListRequest, InviteRevoke, Kick, OriginEntry, OriginList, OriginListRequest, OriginPin,
-    PeerApprove, PeerEntry, PeerList, PeerListRequest, PeerRevoke, ReportEntry, ReportList,
-    ReportListRequest, ReportResolve, SurfaceInfo, SurfaceStatus, SurfaceStatusRequest,
-    ThemeBundleInfo, ThemeBundleSet,
+    PeerApprove, PeerEntry, PeerList, PeerListRequest, PeerRevoke, QuarantineClear, QuarantineList,
+    QuarantineListRequest, QuarantineSet, ReportEntry, ReportList, ReportListRequest,
+    ReportResolve, SurfaceInfo, SurfaceStatus, SurfaceStatusRequest, ThemeBundleInfo,
+    ThemeBundleSet,
 };
 use rabbithole_proto::board::{
     BoardCreate, BoardDelete, BoardList, BoardListRequest, BoardUpdate, PostCreate, PostDelete,
@@ -1849,6 +1850,19 @@ pub enum AdminCommand {
         /// What was done about it.
         note: String,
     },
+    /// What is being held back for review, from `offset`. → [`QuarantineList`].
+    ListHeld { offset: u32 },
+    /// Hold something back: it reads as absent everywhere until it is let
+    /// through. → empty ack.
+    Hold {
+        /// One of `subject_kind`.
+        kind: u8,
+        subject: Vec<u8>,
+        /// Why.
+        reason: String,
+    },
+    /// Let held content through again. → empty ack.
+    LetThrough { kind: u8, subject: Vec<u8> },
     /// The hash-deny list. → [`DenyHashList`].
     ListDenyHashes,
     /// Refuse a file by its content hash, wherever it is uploaded. → empty ack.
@@ -1998,6 +2012,9 @@ pub enum AdminEvent {
     /// The report queue arrived: the reports, and how many there are in all
     /// under the same filter.
     ReportsListed(Vec<ReportEntry>, u64),
+    /// A page of what is held back for review arrived, and how many there
+    /// are in all.
+    HeldListed(Vec<rabbithole_proto::admin::HeldItem>, u64),
     /// The hash-deny list arrived.
     DenyHashesListed(Vec<DenyHashEntry>),
     /// The audit log arrived, oldest first.
@@ -2087,6 +2104,13 @@ impl AdminCommand {
             AdminCommand::DeletePost { id } => format!("*post-delete:{id}"),
             AdminCommand::ListReports { .. } => "*reports".to_string(),
             AdminCommand::ResolveReport { id, .. } => format!("*report-resolve:{id}"),
+            AdminCommand::ListHeld { .. } => "*held-list".to_string(),
+            AdminCommand::Hold { kind, subject, .. } => {
+                format!("*held-add:{kind}:{}", hex::encode(subject))
+            }
+            AdminCommand::LetThrough { kind, subject } => {
+                format!("*held-clear:{kind}:{}", hex::encode(subject))
+            }
             AdminCommand::ListDenyHashes => "*deny-list".to_string(),
             AdminCommand::AddDenyHash { hash, .. } => format!("*deny-add:{}", hex::encode(hash)),
             AdminCommand::RemoveDenyHash { hash } => {
@@ -2117,6 +2141,10 @@ impl AdminCommand {
         })
     }
 }
+
+/// How many held things one look brings back. The burrow clamps to 200;
+/// a console shows a page and says how many more there are.
+pub const HELD_PAGE: u32 = 200;
 
 /// Map an [`AdminCommand`] to the ADMIN-family request [`Frame`] that carries
 /// it.
@@ -2202,6 +2230,20 @@ pub fn admin_command_to_frame(
             action,
             note,
         } => Frame::request(id, &ReportResolve::new(*report, *action, note.clone()))?,
+        AdminCommand::ListHeld { offset } => {
+            Frame::request(id, &QuarantineListRequest::new(*offset, HELD_PAGE))?
+        }
+        AdminCommand::Hold {
+            kind,
+            subject,
+            reason,
+        } => Frame::request(
+            id,
+            &QuarantineSet::new(*kind, subject.clone(), reason.clone()),
+        )?,
+        AdminCommand::LetThrough { kind, subject } => {
+            Frame::request(id, &QuarantineClear::new(*kind, subject.clone()))?
+        }
         AdminCommand::ListDenyHashes => Frame::request(id, &DenyHashListRequest)?,
         AdminCommand::AddDenyHash { hash, reason } => {
             Frame::request(id, &DenyHashAdd::new(*hash, reason.clone()))?
@@ -2308,6 +2350,9 @@ pub fn frame_to_admin_events(frame: &Frame) -> Vec<AdminEvent> {
     }
     if let Some(Ok(m)) = frame.decode::<ReportList>() {
         return vec![AdminEvent::ReportsListed(m.reports, m.total)];
+    }
+    if let Some(Ok(m)) = frame.decode::<QuarantineList>() {
+        return vec![AdminEvent::HeldListed(m.held, m.total)];
     }
     if let Some(Ok(m)) = frame.decode::<DenyHashList>() {
         return vec![AdminEvent::DenyHashesListed(m.entries)];

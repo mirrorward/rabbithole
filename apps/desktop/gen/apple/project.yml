@@ -51,7 +51,7 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        CFBundleShortVersionString: 0.262.0
+        CFBundleShortVersionString: 0.263.0
         CFBundleVersion: "0.191.0"
     entitlements:
       path: rabbithole-desktop_iOS/rabbithole-desktop_iOS.entitlements

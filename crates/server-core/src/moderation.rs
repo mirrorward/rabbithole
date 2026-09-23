@@ -24,8 +24,8 @@ use parking_lot::RwLock;
 use rabbithole_proto::admin::{report_action, subject_kind};
 use rabbithole_store_server::repo::AuditRepo;
 use rabbithole_store_server::repo7::{
-    DenyHashRow, DenyHashesRepo, QuarantineRepo, ReportRow, ReportsRepo, REPORT_DISMISSED,
-    REPORT_OPEN, REPORT_RESOLVED, REPORT_REVIEWING,
+    DenyHashRow, DenyHashesRepo, QuarantineRepo, QuarantineRow, ReportRow, ReportsRepo,
+    REPORT_DISMISSED, REPORT_OPEN, REPORT_RESOLVED, REPORT_REVIEWING,
 };
 use rabbithole_store_server::{SqlitePool, StoreError};
 
@@ -318,6 +318,19 @@ impl ModerationService {
 
     pub async fn deny_list(&self) -> Result<Vec<DenyHashRow>, ModerationError> {
         Ok(DenyHashesRepo(&self.pool).all().await?)
+    }
+
+    /// Everything held back for review, oldest first: what it is, why, who
+    /// held it and when. The in-memory mirror answers "is this held";
+    /// keeping a list is the store's job.
+    pub async fn held(
+        &self,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<QuarantineRow>, i64), ModerationError> {
+        Ok(QuarantineRepo(&self.pool)
+            .page(offset.max(0), limit.clamp(1, 200))
+            .await?)
     }
 }
 
