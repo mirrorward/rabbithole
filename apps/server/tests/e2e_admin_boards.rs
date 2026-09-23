@@ -185,3 +185,58 @@ async fn a_board_is_made_edited_and_removed_only_when_empty() {
         .all(|b| b.slug != "garden" && b.slug != "roses"));
     burrow.shutdown().await;
 }
+
+/// Boards sit where an operator puts them: the order is theirs to set,
+/// and a slug — which addresses and other burrows carry — never changes
+/// for it. Moderators only, among a board's own siblings.
+#[tokio::test]
+async fn boards_are_read_in_the_order_an_operator_puts_them() {
+    use rabbithole_proto::board::{BoardList, BoardListRequest, BoardMove};
+
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(dir.path()).await;
+    let mut mo = login(&burrow, "mo").await;
+    let mut alice = login(&burrow, "alice").await;
+
+    for slug in ["announcements", "general", "swaps"] {
+        let _: rabbithole_proto::board::BoardCreated =
+            mo.request(&BoardCreate::new(slug, slug, 2)).await.unwrap();
+    }
+    async fn order(c: &mut Client) -> Vec<String> {
+        let list: BoardList = c.request(&BoardListRequest).await.unwrap();
+        list.boards.into_iter().map(|b| b.slug).collect()
+    }
+    assert_eq!(
+        order(&mut mo).await,
+        ["announcements", "general", "swaps"],
+        "as they always were: by name"
+    );
+
+    // Swaps to the top, then after announcements.
+    mo.request_ack(&BoardMove::new("swaps", None))
+        .await
+        .unwrap();
+    assert_eq!(order(&mut mo).await, ["swaps", "announcements", "general"]);
+    mo.request_ack(&BoardMove::new("swaps", Some("announcements".into())))
+        .await
+        .unwrap();
+    assert_eq!(order(&mut mo).await, ["announcements", "swaps", "general"]);
+    // Everybody reads them in that order, not only the operator.
+    assert_eq!(
+        order(&mut alice).await,
+        ["announcements", "swaps", "general"]
+    );
+
+    // Not anybody's to arrange, and not a board that is not there.
+    refused(
+        alice.request_ack(&BoardMove::new("swaps", None)).await,
+        ErrorCode::Forbidden,
+    );
+    refused(
+        mo.request_ack(&BoardMove::new("nowhere", None)).await,
+        ErrorCode::NotFound,
+    );
+    assert_eq!(order(&mut mo).await, ["announcements", "swaps", "general"]);
+
+    burrow.shutdown().await;
+}

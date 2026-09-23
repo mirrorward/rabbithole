@@ -43,9 +43,9 @@ use crate::admin::{
 };
 use crate::blob::{BlobData, BlobGet, BlobPut, BlobRef};
 use crate::board::{
-    BoardCreate, BoardCreated, BoardDelete, BoardList, BoardListRequest, BoardUpdate, MarkRead,
-    PostCreate, PostDelete, PostEdit, PostPosted, PostReply, ThreadList, ThreadListRequest,
-    ThreadPosts, ThreadRequest,
+    BoardCreate, BoardCreated, BoardDelete, BoardList, BoardListRequest, BoardMove, BoardUpdate,
+    MarkRead, PostCreate, PostDelete, PostEdit, PostPosted, PostReply, ThreadList,
+    ThreadListRequest, ThreadPosts, ThreadRequest,
 };
 use crate::chat::{
     ChatHistory, ChatHistoryRequest, ChatMessage, ChatSend, RoomCreate, RoomInfoReply, RoomInvite,
@@ -164,7 +164,7 @@ wire_registry! {
     // ── Family 4: BOARD ──────────────────────────────────────────────────
     BoardListRequest, BoardList, ThreadListRequest, ThreadList, ThreadRequest, ThreadPosts,
     PostCreate, PostReply, PostEdit, PostDelete, MarkRead, BoardCreate, BoardCreated, PostPosted,
-    BoardUpdate, BoardDelete,
+    BoardUpdate, BoardDelete, BoardMove,
 
     // ── Family 5: FILE ───────────────────────────────────────────────────
     AreaListRequest, AreaList, FolderListRequest, NodeList, NodeGet, NodeReply, AreaCreate,
@@ -218,7 +218,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 244;
+pub const EXPECTED: usize = 245;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

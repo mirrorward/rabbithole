@@ -273,6 +273,26 @@ fn BoardRow(node: BoardNode, depth: usize, open: RwSignal<Option<String>>) -> im
         move || changed() && !title.get().trim().is_empty()
     };
     let shown_title = store_value(node.title.clone());
+    // Where this board sits among its own, and what moving it means: up is
+    // after whatever the one above it follows (or first), down is after the
+    // one below it.
+    let parent = store_value(node.parent.clone());
+    let siblings = move || {
+        app.focused().state.with(|s| {
+            s.board_tree
+                .iter()
+                .filter(|n| n.parent == parent.get_value())
+                .map(|n| n.slug.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    let place = move || {
+        let mine = slug.get_value();
+        let order = siblings();
+        order.iter().position(|s| *s == mine).map(|at| (at, order))
+    };
+    let can_up = move || place().is_some_and(|(at, _)| at > 0);
+    let can_down = move || place().is_some_and(|(at, order)| at + 1 < order.len());
     view! {
         <div class="rh-adm-acct" class:open=is_open>
             <button
@@ -310,6 +330,37 @@ fn BoardRow(node: BoardNode, depth: usize, open: RwSignal<Option<String>>) -> im
                         </label>
                     </div>
                     <div class="rh-adm-acct-actions">
+                        <button
+                            type="button"
+                            class="rh-btn ghost small"
+                            title="Move up"
+                            disabled=move || !can_up()
+                            on:click=move |_| {
+                                if let Some((at, order)) = place() {
+                                    // After whatever the one above follows.
+                                    let after = (at >= 2).then(|| order[at - 2].clone());
+                                    app.move_board(&slug.get_value(), after);
+                                }
+                            }
+                        >
+                            "Move up"
+                        </button>
+                        <button
+                            type="button"
+                            class="rh-btn ghost small"
+                            title="Move down"
+                            disabled=move || !can_down()
+                            on:click=move |_| {
+                                if let Some((at, order)) = place() {
+                                    app.move_board(
+                                        &slug.get_value(),
+                                        Some(order[at + 1].clone()),
+                                    );
+                                }
+                            }
+                        >
+                            "Move down"
+                        </button>
                         <button
                             type="button"
                             class="rh-btn ghost small rh-adm-danger"

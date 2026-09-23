@@ -109,6 +109,10 @@ const MIGRATIONS: &[&str] = &[
     // than re-deriving it.
     "ALTER TABLE transfer_queue ADD COLUMN mime TEXT NOT NULL DEFAULT '';
      ALTER TABLE transfer_queue ADD COLUMN comment TEXT NOT NULL DEFAULT '';",
+    // 0003 (0.265.0): the order a burrow reads its boards in. They were
+    // cached by slug, so an operator's arrangement was thrown away by the
+    // client that cached it.
+    "ALTER TABLE cached_boards ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Open (creating if needed) the local store and apply pending migrations.

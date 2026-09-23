@@ -3638,6 +3638,15 @@ impl AppState {
         });
     }
 
+    /// Put a board where it should be read: straight after `after`, or
+    /// first when there is none.
+    pub fn move_board(&self, slug: &str, after: Option<String>) {
+        self.dispatch_people(AdminCommand::MoveBoard {
+            slug: slug.to_string(),
+            after,
+        });
+    }
+
     /// Remove an empty board.
     pub fn delete_board(&self, slug: &str) {
         self.dispatch_people(AdminCommand::DeleteBoard {

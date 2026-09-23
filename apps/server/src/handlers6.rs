@@ -366,6 +366,32 @@ pub async fn handle(
         return Ok(true);
     }
 
+    if let Some(Ok(req)) = frame.decode::<pb::BoardMove>() {
+        if !ctx.allows(shared, "board", Caps::BOARD_MODERATE) {
+            fail!(ErrorCode::Forbidden);
+        }
+        match shared
+            .boards
+            .move_board(&req.slug, req.after.as_deref())
+            .await
+        {
+            Ok(()) => {
+                audit(
+                    shared,
+                    &ctx.login,
+                    "board-move",
+                    match &req.after {
+                        Some(after) => format!("{} after {after}", req.slug),
+                        None => format!("{} first", req.slug),
+                    },
+                );
+                conn.send(Frame::ack(frame)).await?;
+            }
+            Err(e) => fail!(map_err(e)),
+        }
+        return Ok(true);
+    }
+
     if let Some(Ok(req)) = frame.decode::<pb::BoardDelete>() {
         if !ctx.allows(shared, "board", Caps::BOARD_MODERATE) {
             fail!(ErrorCode::Forbidden);

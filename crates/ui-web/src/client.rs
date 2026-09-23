@@ -1569,6 +1569,37 @@ impl MockClient {
                 }
                 None => vec![AdminEvent::Failed("server error: NotFound".into())],
             },
+            AdminCommand::MoveBoard { slug, after } => {
+                // The tree is what a console reads, so that is what moves;
+                // a board only moves among the ones under its own parent.
+                let Some(at) = self.board_tree.iter().position(|b| b.slug == slug) else {
+                    return vec![AdminEvent::Failed("server error: NotFound".into())];
+                };
+                let parent = self.board_tree[at].parent.clone();
+                let to = match &after {
+                    None => self
+                        .board_tree
+                        .iter()
+                        .position(|b| b.parent == parent)
+                        .unwrap_or(at),
+                    Some(after) => {
+                        match self
+                            .board_tree
+                            .iter()
+                            .position(|b| &b.slug == after && b.parent == parent)
+                        {
+                            Some(i) => i + 1,
+                            None => {
+                                return vec![AdminEvent::Failed("server error: NotFound".into())]
+                            }
+                        }
+                    }
+                };
+                let node = self.board_tree.remove(at);
+                let to = if to > at { to - 1 } else { to };
+                self.board_tree.insert(to, node);
+                vec![AdminEvent::Ack("Moved.".into())]
+            }
             AdminCommand::DeleteBoard { slug } => {
                 let has_threads = self.threads_by_board(&slug);
                 let has_children = self
@@ -2216,6 +2247,35 @@ fn parent_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_demo_board_moves_where_it_is_put() {
+        use crate::wire::AdminCommand;
+        let mut c = MockClient::new();
+        let order = |c: &MockClient| {
+            c.board_tree()
+                .into_iter()
+                .map(|b| b.slug)
+                .collect::<Vec<_>>()
+        };
+        let before = order(&c);
+        let last = before.last().cloned().unwrap();
+        let ev = c.dispatch_admin(AdminCommand::MoveBoard {
+            slug: last.clone(),
+            after: None,
+        });
+        assert!(matches!(ev.as_slice(), [AdminEvent::Ack(_)]), "{ev:?}");
+        let after = order(&c);
+        assert_ne!(after, before, "the tree a console reads is what moved");
+        assert_eq!(after.len(), before.len());
+        // A board that is not there, and one that cannot follow a board
+        // under another parent.
+        let ev = c.dispatch_admin(AdminCommand::MoveBoard {
+            slug: "nowhere".into(),
+            after: None,
+        });
+        assert!(matches!(ev.as_slice(), [AdminEvent::Failed(_)]), "{ev:?}");
+    }
 
     #[test]
     fn a_demo_room_is_joined_once_however_often_it_is_shown() {

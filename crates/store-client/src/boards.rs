@@ -39,17 +39,20 @@ impl BoardCache<'_> {
     pub fn put_boards(&self, boards: &[BoardInfo], synced_at: i64) -> Result<(), StoreError> {
         let mut stmt = self.0.prepare_cached(
             "INSERT INTO cached_boards
-                 (slug, title, description, kind, parent_slug, unread, synced_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 (slug, title, description, kind, parent_slug, unread, ordinal, synced_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(slug) DO UPDATE SET
                  title = excluded.title,
                  description = excluded.description,
                  kind = excluded.kind,
                  parent_slug = excluded.parent_slug,
                  unread = excluded.unread,
+                 ordinal = excluded.ordinal,
                  synced_at = excluded.synced_at",
         )?;
-        for b in boards {
+        // The burrow hands them over in the order it reads them, which is
+        // its operator's to set; keeping it is this cache's job.
+        for (at, b) in boards.iter().enumerate() {
             stmt.execute(params![
                 b.slug,
                 b.title,
@@ -57,17 +60,19 @@ impl BoardCache<'_> {
                 b.kind as i64,
                 b.parent_slug,
                 b.unread as i64,
+                at as i64,
                 synced_at,
             ])?;
         }
         Ok(())
     }
 
-    /// The cached board tree, categories/bundles/boards intermixed, by slug.
+    /// The cached board tree, categories/bundles/boards intermixed, in the
+    /// order the burrow last read them out.
     pub fn boards(&self) -> Result<Vec<BoardInfo>, StoreError> {
         let mut stmt = self.0.prepare_cached(
             "SELECT slug, title, description, kind, parent_slug, unread
-             FROM cached_boards ORDER BY slug",
+             FROM cached_boards ORDER BY ordinal, slug",
         )?;
         let rows = stmt
             .query_map([], |r| {

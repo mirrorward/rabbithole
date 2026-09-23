@@ -88,8 +88,8 @@ use rabbithole_proto::admin::{
     ThemeBundleInfo, ThemeBundleSet,
 };
 use rabbithole_proto::board::{
-    BoardCreate, BoardDelete, BoardList, BoardListRequest, BoardUpdate, PostCreate, PostDelete,
-    ThreadList, ThreadListRequest, ThreadPosts, ThreadRequest,
+    BoardCreate, BoardDelete, BoardList, BoardListRequest, BoardMove, BoardUpdate, PostCreate,
+    PostDelete, ThreadList, ThreadListRequest, ThreadPosts, ThreadRequest,
 };
 use rabbithole_proto::chat::{ChatMessage, ChatSend};
 use rabbithole_proto::directory::{DirectoryResults, DirectorySearch, ProfileCard, ProfileGet};
@@ -1840,6 +1840,9 @@ pub enum AdminCommand {
         /// Its new description.
         description: String,
     },
+    /// Put a board straight after another among its own, or first when
+    /// there is no `after`. → empty ack.
+    MoveBoard { slug: String, after: Option<String> },
     /// Remove an empty board. → empty ack.
     DeleteBoard {
         /// Which board.
@@ -2111,6 +2114,7 @@ impl AdminCommand {
             AdminCommand::RevokeInvite { code } => format!("*invite-revoke:{code}"),
             AdminCommand::CreateBoard { slug, .. } => format!("*board-create:{slug}"),
             AdminCommand::UpdateBoard { slug, .. } => format!("*board-update:{slug}"),
+            AdminCommand::MoveBoard { slug, .. } => format!("*board-move:{slug}"),
             AdminCommand::DeleteBoard { slug } => format!("*board-delete:{slug}"),
             AdminCommand::DeletePost { id } => format!("*post-delete:{id}"),
             AdminCommand::ListReports { .. } => "*reports".to_string(),
@@ -2240,6 +2244,9 @@ pub fn admin_command_to_frame(
             id,
             &BoardUpdate::new(slug.clone(), title.clone(), description.clone(), None),
         )?,
+        AdminCommand::MoveBoard { slug, after } => {
+            Frame::request(id, &BoardMove::new(slug.clone(), after.clone()))?
+        }
         AdminCommand::DeleteBoard { slug } => Frame::request(id, &BoardDelete::new(slug.clone()))?,
         AdminCommand::ListReports { state } => {
             Frame::request(id, &ReportListRequest::new(*state, 0, 200))?

@@ -435,6 +435,33 @@ impl Message for BoardDelete {
     const MESSAGE_TYPE: u16 = 16;
 }
 
+/// Put a board straight after `after` among the boards under the same
+/// parent — or first, when there is no `after`. A board's slug is its
+/// identity, which addresses and other burrows carry, so moving one is
+/// about where it sits and nothing else. → empty ack. Requires
+/// `BOARD_MODERATE`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardMove {
+    pub slug: String,
+    /// The board it should follow; `None` puts it first.
+    pub after: Option<String>,
+}
+
+impl BoardMove {
+    pub fn new(slug: impl Into<String>, after: Option<String>) -> Self {
+        Self {
+            slug: slug.into(),
+            after,
+        }
+    }
+}
+
+impl Message for BoardMove {
+    const FAMILY: Family = Family::BOARD;
+    const MESSAGE_TYPE: u16 = 17;
+}
+
 /// Push: a new post landed in a board (id + board; clients refetch as
 /// needed). Delivered to every session so unread counts stay live.
 #[non_exhaustive]

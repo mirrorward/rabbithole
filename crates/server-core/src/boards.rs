@@ -145,6 +145,17 @@ impl BoardService {
             .await?)
     }
 
+    /// Put a board where an operator wants it read, among its own: after
+    /// `after`, or first when there is none. Its slug, which addresses and
+    /// other burrows carry, is untouched.
+    pub async fn move_board(&self, slug: &str, after: Option<&str>) -> Result<(), BoardError> {
+        if BoardsRepo(&self.pool).move_after(slug, after).await? {
+            Ok(())
+        } else {
+            Err(BoardError::NoSuchBoard)
+        }
+    }
+
     /// Change what a board is called, what it says about itself, and how many
     /// threads it keeps. Its slug is its identity and does not change.
     pub async fn update_board(

@@ -374,7 +374,7 @@ impl PeopleState {
                     // A stale list is the usual reason an action is refused.
                     reload = match kind {
                         "invite-revoke" => Reload::Invites,
-                        "board-update" | "board-delete" => Reload::Boards,
+                        "board-update" | "board-delete" | "board-move" => Reload::Boards,
                         "area-update" | "area-delete" => Reload::Areas,
                         "node-delete" | "node-describe" | "node-rename" | "node-move" => {
                             Reload::Folder
@@ -421,6 +421,7 @@ fn succeeded(kind: &str, subject: &str) -> (String, Reload) {
         "invite-revoke" => ("Withdrew the invitation.".to_string(), Reload::Invites),
         "board-create" => (format!("Made {subject}."), Reload::Boards),
         "board-update" => (format!("Saved {subject}."), Reload::Boards),
+        "board-move" => (format!("Moved {subject}."), Reload::Boards),
         "board-delete" => (format!("Removed {subject}."), Reload::Boards),
         "post-delete" => ("Removed the post.".to_string(), Reload::Thread),
         "area-create" => (format!("Made the {subject} area."), Reload::Areas),

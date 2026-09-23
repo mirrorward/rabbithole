@@ -511,37 +511,67 @@ impl WsClient {
         self.inner.borrow_mut().room_keeping_sink = Some(sink);
     }
 
+    /// Do something with the socket's own state: now when it is free, a
+    /// tick later when a reply is being handled.
+    ///
+    /// Asking for something from inside a reply is ordinary — a pane mounts
+    /// on news and asks for what it shows — and the borrow it needs is held
+    /// by whoever is handing that news out. Taking it anyway panics, and on
+    /// wasm the borrow is never given back, so every later send on that
+    /// socket dies silently. Waiting a tick costs nothing and cannot.
+    fn when_free(&self, f: impl FnOnce(&mut Inner) + 'static) {
+        if let Ok(mut b) = self.inner.try_borrow_mut() {
+            f(&mut b);
+            return;
+        }
+        let inner = self.inner.clone();
+        leptos::set_timeout(
+            move || {
+                if let Ok(mut b) = inner.try_borrow_mut() {
+                    f(&mut b);
+                }
+            },
+            std::time::Duration::ZERO,
+        );
+    }
+
     /// Ask a station something as a listener.
     pub fn dispatch_radio_ask(&self, ask: &crate::wire::RadioAsk) {
-        let mut b = self.inner.borrow_mut();
-        let id = b.next_request_id();
-        if let Ok(frame) = wire::radio_ask_to_frame(ask, id) {
-            if let Ok(bytes) = encode_frame(&frame) {
-                Self::write(&mut b, &bytes);
+        let ask = ask.clone();
+        self.when_free(move |b| {
+            let id = b.next_request_id();
+            if let Ok(frame) = wire::radio_ask_to_frame(&ask, id) {
+                if let Ok(bytes) = encode_frame(&frame) {
+                    Self::write(b, &bytes);
+                }
             }
-        }
+        });
     }
 
     /// Ask about rooms: list them, make one, go in, come out.
     pub fn dispatch_room(&self, command: &crate::wire::RoomCommand) {
-        let mut b = self.inner.borrow_mut();
-        let id = b.next_request_id();
-        if let Ok(frame) = wire::room_command_to_frame(command, id) {
-            if let Ok(bytes) = encode_frame(&frame) {
-                Self::write(&mut b, &bytes);
+        let command = command.clone();
+        self.when_free(move |b| {
+            let id = b.next_request_id();
+            if let Ok(frame) = wire::room_command_to_frame(&command, id) {
+                if let Ok(bytes) = encode_frame(&frame) {
+                    Self::write(b, &bytes);
+                }
             }
-        }
+        });
     }
 
     /// Ask the Wishing Well for something.
     pub fn dispatch_wish(&self, command: &crate::wire::WishCommand) {
-        let mut b = self.inner.borrow_mut();
-        let id = b.next_request_id();
-        if let Ok(frame) = wire::wish_command_to_frame(command, id) {
-            if let Ok(bytes) = encode_frame(&frame) {
-                Self::write(&mut b, &bytes);
+        let command = command.clone();
+        self.when_free(move |b| {
+            let id = b.next_request_id();
+            if let Ok(frame) = wire::wish_command_to_frame(&command, id) {
+                if let Ok(bytes) = encode_frame(&frame) {
+                    Self::write(b, &bytes);
+                }
             }
-        }
+        });
     }
 
     /// Register the board-list sink. The most recent registration wins.
@@ -552,11 +582,12 @@ impl WsClient {
     /// Ask the server for the board list; the reply arrives through the
     /// [`on_boards`](Self::on_boards) sink.
     pub fn request_boards(&self) {
-        let mut b = self.inner.borrow_mut();
-        let id = b.next_request_id();
-        if let Ok(bytes) = wire::board_list_request(id).and_then(|f| encode_frame(&f)) {
-            Self::write(&mut b, &bytes);
-        }
+        self.when_free(|b| {
+            let id = b.next_request_id();
+            if let Ok(bytes) = wire::board_list_request(id).and_then(|f| encode_frame(&f)) {
+                Self::write(b, &bytes);
+            }
+        });
     }
 
     /// Register the thread-list sink. The most recent registration wins.
@@ -732,38 +763,44 @@ impl WsClient {
     /// [`wire::admin_command_to_frame`] and write it to the open socket.
     /// Replies arrive asynchronously through the admin sink.
     pub fn dispatch_admin(&self, command: &AdminCommand) {
-        let mut b = self.inner.borrow_mut();
-        let id = b.next_request_id();
-        let pending = command.tag();
-        match wire::admin_command_to_frame(command, id) {
-            Ok(Some(frame)) => match encode_frame(&frame) {
-                Ok(bytes) => {
-                    b.pending_admin.borrow_mut().insert(id, pending);
-                    Self::write(&mut b, &bytes);
-                }
+        let command = command.clone();
+        self.when_free(move |b| {
+            let id = b.next_request_id();
+            let pending = command.tag();
+            match wire::admin_command_to_frame(&command, id) {
+                Ok(Some(frame)) => match encode_frame(&frame) {
+                    Ok(bytes) => {
+                        b.pending_admin.borrow_mut().insert(id, pending);
+                        Self::write(b, &bytes);
+                    }
+                    Err(err) => {
+                        b.emit_admin((pending, vec![AdminEvent::Failed(format!("encode: {err}"))]))
+                    }
+                },
+                Ok(None) => {}
                 Err(err) => {
-                    b.emit_admin((pending, vec![AdminEvent::Failed(format!("encode: {err}"))]))
+                    b.emit_admin((pending, vec![AdminEvent::Failed(format!("map: {err}"))]))
                 }
-            },
-            Ok(None) => {}
-            Err(err) => b.emit_admin((pending, vec![AdminEvent::Failed(format!("map: {err}"))])),
-        }
+            }
+        });
     }
 
     /// Drive one [`FileCommand`]: encode it via the host-tested
     /// [`wire::file_command_to_frame`] and write it to the open socket. Replies
     /// arrive asynchronously through the FILE-family sink.
     pub fn dispatch_file(&self, command: &FileCommand) {
-        let mut b = self.inner.borrow_mut();
-        let id = b.next_request_id();
-        match wire::file_command_to_frame(command, id) {
-            Ok(Some(frame)) => match encode_frame(&frame) {
-                Ok(bytes) => Self::write(&mut b, &bytes),
-                Err(err) => b.emit_file(FileEvent::Failed(format!("encode: {err}"))),
-            },
-            Ok(None) => {}
-            Err(err) => b.emit_file(FileEvent::Failed(format!("map: {err}"))),
-        }
+        let command = command.clone();
+        self.when_free(move |b| {
+            let id = b.next_request_id();
+            match wire::file_command_to_frame(&command, id) {
+                Ok(Some(frame)) => match encode_frame(&frame) {
+                    Ok(bytes) => Self::write(b, &bytes),
+                    Err(err) => b.emit_file(FileEvent::Failed(format!("encode: {err}"))),
+                },
+                Ok(None) => {}
+                Err(err) => b.emit_file(FileEvent::Failed(format!("map: {err}"))),
+            }
+        });
     }
 
     /// Send one request and await its reply, for flows that take several

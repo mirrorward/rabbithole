@@ -39,9 +39,17 @@ impl BoardsRepo<'_> {
         parent_slug: Option<&str>,
         max_threads: i64,
     ) -> Result<BoardRow, StoreError> {
+        // Last among its own: a new board is read after the ones already
+        // there, wherever the operator has since put them.
         sqlx::query(
-            "INSERT INTO boards (slug, title, description, kind, parent_slug, max_threads, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, unixepoch())",
+            "INSERT INTO boards
+                 (slug, title, description, kind, parent_slug, max_threads, position, created_at)
+             VALUES (
+                 ?, ?, ?, ?, ?, ?,
+                 (SELECT COALESCE(MAX(position) + 1, 0) FROM boards
+                   WHERE COALESCE(parent_slug, '') = COALESCE(?, '')),
+                 unixepoch()
+             )",
         )
         .bind(slug)
         .bind(title)
@@ -49,6 +57,7 @@ impl BoardsRepo<'_> {
         .bind(kind as i64)
         .bind(parent_slug)
         .bind(max_threads)
+        .bind(parent_slug)
         .execute(self.0)
         .await?;
         Ok(self.by_slug(slug).await?.expect("just inserted"))
@@ -118,13 +127,95 @@ impl BoardsRepo<'_> {
             > 0)
     }
 
+    /// Every board in reading order: each one where its operator put it
+    /// among its own, with what is inside it straight after it. A position
+    /// is only meaningful among siblings, so sorting the whole table by it
+    /// would deal one parent's children in between another's.
+    ///
+    /// A board whose parent is gone reads as a top-level one rather than
+    /// not at all: it is still somebody's board.
     pub async fn all(&self) -> Result<Vec<BoardRow>, StoreError> {
-        Ok(sqlx::query("SELECT * FROM boards ORDER BY slug")
-            .fetch_all(self.0)
-            .await?
-            .iter()
-            .map(row_to_board)
-            .collect())
+        Ok(sqlx::query(
+            "WITH RECURSIVE ordered(slug, path) AS (
+                 SELECT b.slug, printf('%08d/%s', b.position, b.slug)
+                   FROM boards b
+                  WHERE b.parent_slug IS NULL
+                     OR b.parent_slug NOT IN (SELECT slug FROM boards)
+                 UNION ALL
+                 SELECT b.slug, ordered.path || '/' || printf('%08d/%s', b.position, b.slug)
+                   FROM boards b
+                   JOIN ordered ON b.parent_slug = ordered.slug
+             )
+             SELECT boards.* FROM boards
+               JOIN ordered ON ordered.slug = boards.slug
+              ORDER BY ordered.path",
+        )
+        .fetch_all(self.0)
+        .await?
+        .iter()
+        .map(row_to_board)
+        .collect())
+    }
+
+    /// Put `slug` straight after `after` among the boards under the same
+    /// parent — or first, when there is no `after`. The others keep their
+    /// order; positions are renumbered from 0 so they never run out.
+    /// `Ok(false)` when either board is not there, or `after` sits under
+    /// another parent (a board is only moved among its own).
+    pub async fn move_after(&self, slug: &str, after: Option<&str>) -> Result<bool, StoreError> {
+        let mut tx = self.0.begin().await?;
+        // A slug is one slug in any case (the column is NOCASE), so the
+        // burrow's own spelling is what the list work below compares.
+        let found: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT slug, parent_slug FROM boards WHERE slug = ?")
+                .bind(slug)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((mine, parent)) = found else {
+            return Ok(false);
+        };
+        let slug = mine.as_str();
+        let mut after_slug: Option<String> = None;
+        if let Some(after) = after {
+            let theirs: Option<(String, Option<String>)> =
+                sqlx::query_as("SELECT slug, parent_slug FROM boards WHERE slug = ?")
+                    .bind(after)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            match theirs {
+                Some((after, theirs)) if theirs == parent && after != slug => {
+                    after_slug = Some(after)
+                }
+                _ => return Ok(false),
+            }
+        }
+        let after = after_slug.as_deref();
+        // The rest, in the order they are read now.
+        let siblings: Vec<String> = sqlx::query_scalar(
+            "SELECT slug FROM boards WHERE COALESCE(parent_slug, '') = COALESCE(?, '')
+             ORDER BY position, slug",
+        )
+        .bind(parent.as_deref())
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut order: Vec<String> = siblings.into_iter().filter(|s| s != slug).collect();
+        let at = match after {
+            None => 0,
+            Some(after) => match order.iter().position(|s| s == after) {
+                Some(i) => i + 1,
+                None => return Ok(false),
+            },
+        };
+        order.insert(at, slug.to_string());
+        for (i, s) in order.iter().enumerate() {
+            sqlx::query("UPDATE boards SET position = ? WHERE slug = ?")
+                .bind(i as i64)
+                .bind(s)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
     }
 }
 
@@ -550,6 +641,109 @@ mod tests {
         assert_eq!(
             posts.by_id(&[1; 32]).await.unwrap().unwrap().subject,
             "subject 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn boards_sit_where_they_are_put() {
+        let pool = open_in_memory().await.unwrap();
+        let boards = BoardsRepo(&pool);
+        for slug in ["alpha", "bravo", "charlie"] {
+            boards.create(slug, slug, "", 2, None, 0).await.unwrap();
+        }
+        boards
+            .create("alpha.one", "One", "", 2, Some("alpha"), 0)
+            .await
+            .unwrap();
+        let order = |rows: Vec<BoardRow>| -> Vec<String> {
+            rows.into_iter()
+                .filter(|b| b.parent_slug.is_none())
+                .map(|b| b.slug)
+                .collect()
+        };
+        // Until anybody moves one, they read as they always did.
+        assert_eq!(
+            order(boards.all().await.unwrap()),
+            ["alpha", "bravo", "charlie"]
+        );
+
+        // Last to first, and back to the middle.
+        assert!(boards.move_after("charlie", None).await.unwrap());
+        assert_eq!(
+            order(boards.all().await.unwrap()),
+            ["charlie", "alpha", "bravo"]
+        );
+        assert!(boards.move_after("charlie", Some("alpha")).await.unwrap());
+        assert_eq!(
+            order(boards.all().await.unwrap()),
+            ["alpha", "charlie", "bravo"]
+        );
+
+        // A board is moved among its own: not after one under another
+        // parent, not after itself, and not if it is not there.
+        assert!(!boards
+            .move_after("charlie", Some("alpha.one"))
+            .await
+            .unwrap());
+        assert!(!boards.move_after("charlie", Some("charlie")).await.unwrap());
+        assert!(!boards.move_after("nowhere", None).await.unwrap());
+        assert!(!boards.move_after("charlie", Some("nowhere")).await.unwrap());
+        assert_eq!(
+            order(boards.all().await.unwrap()),
+            ["alpha", "charlie", "bravo"],
+            "a refused move changes nothing"
+        );
+
+        // A slug is one slug in any case, so moving "CHARLIE" moves charlie
+        // rather than making a second place for a board of that name.
+        assert!(boards.move_after("CHARLIE", None).await.unwrap());
+        assert_eq!(
+            order(boards.all().await.unwrap()),
+            ["charlie", "alpha", "bravo"]
+        );
+        assert!(!boards.move_after("charlie", Some("CHARLIE")).await.unwrap());
+
+        // A board made now is read after the ones already there, wherever
+        // the operator has since put them.
+        boards
+            .create("delta", "delta", "", 2, None, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            order(boards.all().await.unwrap()),
+            ["charlie", "alpha", "bravo", "delta"]
+        );
+
+        // What is inside a board is read straight after it, whatever the
+        // positions happen to be: a position only means something among
+        // the boards that share a parent.
+        boards
+            .create("bravo.inner", "Inner", "", 2, Some("bravo"), 0)
+            .await
+            .unwrap();
+        boards
+            .create("charlie.inner", "Inner", "", 2, Some("charlie"), 0)
+            .await
+            .unwrap();
+        let all: Vec<String> = boards
+            .all()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|b| b.slug)
+            .collect();
+        assert_eq!(
+            all,
+            [
+                "charlie",
+                "charlie.inner",
+                "alpha",
+                "alpha.one",
+                "bravo",
+                "bravo.inner",
+                "delta"
+            ],
+            "each board, then what is inside it"
         );
     }
 
