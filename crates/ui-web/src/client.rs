@@ -1391,6 +1391,36 @@ impl MockClient {
                     .collect();
                 admin_events(&AccountList::new(page, total))
             }
+            AdminCommand::FindAccounts {
+                find,
+                offset,
+                limit,
+            } => {
+                let find = find.to_lowercase();
+                let matched: Vec<AccountEntry> = self
+                    .admin_accounts
+                    .iter()
+                    .filter(|a| a.login.to_lowercase().contains(&find))
+                    .cloned()
+                    .collect();
+                let total = matched.len() as u64;
+                let page = matched
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(limit as usize)
+                    .collect();
+                admin_events(&AccountList::new(page, total))
+            }
+            AdminCommand::DeleteAccount { login } => {
+                let before = self.admin_accounts.len();
+                self.admin_accounts
+                    .retain(|a| !a.login.eq_ignore_ascii_case(&login));
+                if self.admin_accounts.len() < before {
+                    vec![AdminEvent::Ack("Removed.".into())]
+                } else {
+                    vec![AdminEvent::Failed("server error: NotFound".into())]
+                }
+            }
             AdminCommand::SetAccount {
                 login,
                 role,

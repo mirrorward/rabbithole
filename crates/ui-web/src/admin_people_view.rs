@@ -55,10 +55,17 @@ fn Accounts() -> impl IntoView {
                     <input
                         class="rh-input rh-adm-filter"
                         type="search"
-                        aria-label="Filter accounts by login"
-                        placeholder="Filter"
+                        aria-label="Find an account by login"
+                        placeholder="Find"
                         prop:value=move || filter.get()
-                        on:input=move |ev| filter.set(event_target_value(&ev))
+                        on:input=move |ev| {
+                            let typed = event_target_value(&ev);
+                            filter.set(typed.clone());
+                            // What is loaded is narrowed as they type; a
+                            // burrow with more accounts than that is asked,
+                            // since the one they want may not be on this page.
+                            app.find_accounts(&typed);
+                        }
                     />
                     <button
                         type="button"
@@ -332,6 +339,13 @@ fn AccountRow(account: AccountEntry, open: RwSignal<Option<String>>) -> impl Int
                                         }
                                         .into_view()
                                     }}
+                                    <button
+                                        type="button"
+                                        class="rh-btn ghost small rh-adm-danger"
+                                        on:click=move |_| app.ask_remove_account(&login.get_value())
+                                    >
+                                        "Remove\u{2026}"
+                                    </button>
                                 </div>
                                 <Show when=move || resetting.get() fallback=|| ()>
                                     <form

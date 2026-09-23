@@ -74,18 +74,18 @@ use std::rc::Rc;
 
 use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::admin::{
-    AccountCreate, AccountEntry, AccountList, AccountListRequest, AccountPasswordSet, AccountSet,
-    AccountTotpReset, AuditEntry, AuditList, AuditListRequest, BackupCreate, BackupDelete,
-    BackupEntry, BackupList, BackupListRequest, BackupMade, BackupVerified, BackupVerify,
-    Broadcast, ClassEntry, ClassList, ClassListRequest, ClassSet, ConfigApplied,
-    ConfigDescribeRequest, ConfigDescription, ConfigGet, ConfigKeyInfo, ConfigSet, ConfigValue,
-    DenyHashAdd, DenyHashEntry, DenyHashList, DenyHashListRequest, DenyHashRemove,
-    GatewayStatsReply, GatewayStatsRequest, InviteCode, InviteCreate, InviteEntry, InviteList,
-    InviteListRequest, InviteRevoke, Kick, OriginEntry, OriginList, OriginListRequest, OriginPin,
-    PeerApprove, PeerEntry, PeerList, PeerListRequest, PeerRevoke, QuarantineClear, QuarantineList,
-    QuarantineListRequest, QuarantineSet, ReportEntry, ReportList, ReportListRequest,
-    ReportResolve, SurfaceInfo, SurfaceStatus, SurfaceStatusRequest, ThemeBundleInfo,
-    ThemeBundleSet,
+    AccountCreate, AccountDelete, AccountEntry, AccountFindRequest, AccountList,
+    AccountListRequest, AccountPasswordSet, AccountSet, AccountTotpReset, AuditEntry, AuditList,
+    AuditListRequest, BackupCreate, BackupDelete, BackupEntry, BackupList, BackupListRequest,
+    BackupMade, BackupVerified, BackupVerify, Broadcast, ClassEntry, ClassList, ClassListRequest,
+    ClassSet, ConfigApplied, ConfigDescribeRequest, ConfigDescription, ConfigGet, ConfigKeyInfo,
+    ConfigSet, ConfigValue, DenyHashAdd, DenyHashEntry, DenyHashList, DenyHashListRequest,
+    DenyHashRemove, GatewayStatsReply, GatewayStatsRequest, InviteCode, InviteCreate, InviteEntry,
+    InviteList, InviteListRequest, InviteRevoke, Kick, OriginEntry, OriginList, OriginListRequest,
+    OriginPin, PeerApprove, PeerEntry, PeerList, PeerListRequest, PeerRevoke, QuarantineClear,
+    QuarantineList, QuarantineListRequest, QuarantineSet, ReportEntry, ReportList,
+    ReportListRequest, ReportResolve, SurfaceInfo, SurfaceStatus, SurfaceStatusRequest,
+    ThemeBundleInfo, ThemeBundleSet,
 };
 use rabbithole_proto::board::{
     BoardCreate, BoardDelete, BoardList, BoardListRequest, BoardUpdate, PostCreate, PostDelete,
@@ -1734,6 +1734,15 @@ pub enum AdminCommand {
         base_mask: u64,
     },
     /// Page through accounts. → [`AccountList`].
+    /// The accounts whose login holds `find`. → [`AccountList`], the same
+    /// reply the listing gives, so it lands in the same place.
+    FindAccounts {
+        find: String,
+        offset: u32,
+        limit: u32,
+    },
+    /// Remove an account for good. → empty ack.
+    DeleteAccount { login: String },
     ListAccounts {
         /// Zero-based offset.
         offset: u32,
@@ -2094,6 +2103,8 @@ impl AdminCommand {
             }
             AdminCommand::ResetAccountTotp { login } => format!("*account-totp:{login}"),
             AdminCommand::SetAccount { login, .. } => format!("*account-set:{login}"),
+            AdminCommand::DeleteAccount { login } => format!("*account-delete:{login}"),
+            AdminCommand::FindAccounts { .. } => "*account-find".to_string(),
             AdminCommand::SetClass { name, .. } => format!("*class-set:{name}"),
             AdminCommand::ListInvites => "*invites".to_string(),
             AdminCommand::CreateInvite { .. } => "*invite-create".to_string(),
@@ -2159,6 +2170,14 @@ pub fn admin_command_to_frame(
         }
         AdminCommand::ListAccounts { offset, limit } => {
             Frame::request(id, &AccountListRequest::new(*offset, *limit))?
+        }
+        AdminCommand::FindAccounts {
+            find,
+            offset,
+            limit,
+        } => Frame::request(id, &AccountFindRequest::new(find.clone(), *offset, *limit))?,
+        AdminCommand::DeleteAccount { login } => {
+            Frame::request(id, &AccountDelete::new(login.clone()))?
         }
         AdminCommand::SetAccount {
             login,

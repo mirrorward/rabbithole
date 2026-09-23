@@ -483,3 +483,99 @@ async fn the_audit_log_is_read_over_the_wire_by_those_allowed_to() {
     );
     burrow.shutdown().await;
 }
+
+/// Removing an account for good: the standing order applies, a burrow
+/// keeps its last administrator, the person is signed out and gone, and
+/// what they wrote stays under the name they wrote it with.
+#[tokio::test]
+async fn an_account_can_be_removed_for_good_within_the_same_standing() {
+    use rabbithole_proto::admin::AccountDelete;
+    use rabbithole_proto::board::{BoardCreate, PostCreate};
+
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(dir.path()).await;
+    let mut root = login(&burrow, "root").await;
+    let mut ada = login(&burrow, "ada").await;
+    let mut alice = login(&burrow, "alice").await;
+
+    // Alice writes something before she goes.
+    root.request_ack(&BoardCreate::new("general", "General", 2))
+        .await
+        .unwrap();
+    alice
+        .request_ack(&PostCreate::new("general", "Hello", "I was here"))
+        .await
+        .unwrap();
+
+    // A moderator may not remove anybody.
+    let mut mo = login(&burrow, "mo").await;
+    refused(
+        mo.request_ack(&AccountDelete::new("alice")).await,
+        ErrorCode::Forbidden,
+    );
+    // Nor an admin their peer, nor themselves.
+    refused(
+        ada.request_ack(&AccountDelete::new("bea")).await,
+        ErrorCode::Forbidden,
+    );
+    refused(
+        ada.request_ack(&AccountDelete::new("ada")).await,
+        ErrorCode::Forbidden,
+    );
+    // Nor anybody an account that is not there.
+    refused(
+        ada.request_ack(&AccountDelete::new("nobody")).await,
+        ErrorCode::NotFound,
+    );
+
+    // An admin removes somebody below them: they are signed out and gone.
+    ada.request_ack(&AccountDelete::new("alice")).await.unwrap();
+    assert!(AccountsRepo(&burrow.shared.pool)
+        .by_login("alice")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        login_with(&burrow, "alice", PW).await.is_err(),
+        "a removed account cannot sign in"
+    );
+    // What she wrote stays, under the name she wrote it with.
+    let threads = rabbithole_store_server::repo4::PostsRepo(&burrow.shared.pool)
+        .threads("general", 50)
+        .await
+        .unwrap();
+    assert!(
+        threads.iter().any(|(p, _, _)| p.subject == "Hello"),
+        "her post is still there: {threads:?}"
+    );
+    assert!(
+        threads
+            .iter()
+            .any(|(p, _, _)| p.author.starts_with("alice")),
+        "under the name she wrote it with"
+    );
+
+    // Her name is hers still: nobody else can take the byline on what she
+    // wrote, by account or by persona.
+    refused(
+        ada.request_ack(&AccountCreate::new("alice", "pw-pw-pw-pw", 1))
+            .await,
+        ErrorCode::AlreadyExists,
+    );
+
+    // The last one who can keep the burrow stays, whoever asks. Disabled,
+    // they keep nothing, so they can go.
+    root.request_ack(&AccountDelete::new("bea")).await.unwrap();
+    let mut disable_ada = AccountSet::new("ada");
+    disable_ada.disabled = Some(true);
+    root.request_ack(&disable_ada).await.unwrap();
+    root.request_ack(&AccountDelete::new("ada")).await.unwrap();
+    refused(
+        root.request_ack(&AccountDelete::new("root")).await,
+        ErrorCode::Forbidden,
+    );
+
+    let audit = AuditRepo(&burrow.shared.pool).recent(50).await.unwrap();
+    assert!(audit.iter().any(|a| a.action == "account-delete"));
+    burrow.shutdown().await;
+}

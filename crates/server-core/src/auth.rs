@@ -136,7 +136,11 @@ impl AuthService {
         role: Role,
     ) -> Result<Account, AuthError> {
         let accounts = AccountsRepo(&self.pool);
+        // A name that belonged to somebody who was removed stays theirs:
+        // what they wrote carries it, and the burrow lets the person of
+        // that name change what they wrote.
         if accounts.by_login(login).await?.is_some()
+            || accounts.name_is_retired(login).await?
             || PersonasRepo(&self.pool)
                 .by_screen_name(login)
                 .await?

@@ -154,6 +154,127 @@ impl AccountsRepo<'_> {
         )
     }
 
+    /// How many accounts may administer the burrow: at `role` or above and
+    /// not disabled. A burrow with one of them is a burrow that cannot
+    /// lose them, or nobody could make another.
+    pub async fn keepers(&self, role: u8) -> Result<i64, StoreError> {
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM accounts WHERE role >= ? AND disabled = 0")
+                .bind(role as i64)
+                .fetch_one(self.0)
+                .await?,
+        )
+    }
+
+    /// The accounts whose login holds `find`, and how many do in all: a
+    /// burrow with thousands of them is not read a page at a time looking
+    /// for one person. Case is forgiven; `%` and `_` are literal.
+    pub async fn search(
+        &self,
+        find: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Account>, i64), StoreError> {
+        let pattern = format!(
+            "%{}%",
+            find.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let rows = sqlx::query(
+            "SELECT * FROM accounts WHERE login LIKE ? ESCAPE '\\' ORDER BY id LIMIT ? OFFSET ?",
+        )
+        .bind(&pattern)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(self.0)
+        .await?;
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM accounts WHERE login LIKE ? ESCAPE '\\'")
+                .bind(&pattern)
+                .fetch_one(self.0)
+                .await?;
+        Ok((rows.iter().map(row_to_account).collect(), total))
+    }
+
+    /// Remove an account for good, unless it is the last one that can keep
+    /// the burrow: at `keeper_role` or above and not disabled. What hangs
+    /// off the person goes with them (personas, sessions, two-factor, keys,
+    /// buddies, read marks); what they wrote does not, because a post and a
+    /// file keep the name they were written under. Their names are retired
+    /// so nobody can take the byline, and the invitations they handed out
+    /// that nobody used are withdrawn.
+    ///
+    /// All of it in one transaction, so two operators cannot each remove
+    /// the other's last keeper at the same moment. `Ok(false)` means there
+    /// was no such account, or that removing it would leave the burrow with
+    /// nobody to keep it.
+    pub async fn delete(&self, id: i64, keeper_role: u8) -> Result<bool, StoreError> {
+        let mut tx = self.0.begin().await?;
+        // The names to retire, while the rows are still there.
+        let login: Option<String> = sqlx::query_scalar("SELECT login FROM accounts WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(login) = login else {
+            return Ok(false);
+        };
+        let names: Vec<String> =
+            sqlx::query_scalar("SELECT screen_name FROM personas WHERE account_id = ?")
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?;
+        // Somebody else who can keep the burrow has to be left.
+        let others: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM accounts WHERE role >= ? AND disabled = 0 AND id <> ?",
+        )
+        .bind(keeper_role as i64)
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let is_keeper: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM accounts WHERE id = ? AND role >= ? AND disabled = 0",
+        )
+        .bind(id)
+        .bind(keeper_role as i64)
+        .fetch_one(&mut *tx)
+        .await?;
+        if is_keeper > 0 && others == 0 {
+            return Ok(false);
+        }
+        for name in std::iter::once(login.clone()).chain(names) {
+            sqlx::query(
+                "INSERT OR IGNORE INTO retired_names (name, was, at) VALUES (?, ?, unixepoch())",
+            )
+            .bind(&name)
+            .bind(&login)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query("DELETE FROM invites WHERE created_by = ? AND used_by IS NULL")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM accounts WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Whether `name` belonged to somebody who was removed: it is theirs on
+    /// everything they wrote, so nobody else takes it.
+    pub async fn name_is_retired(&self, name: &str) -> Result<bool, StoreError> {
+        Ok(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM retired_names WHERE name = ?")
+                .bind(name)
+                .fetch_one(self.0)
+                .await?
+                > 0,
+        )
+    }
+
     /// Apply admin edits; `Some` fields are changed. Returns whether the
     /// login existed.
     pub async fn admin_set(
@@ -452,6 +573,76 @@ mod tests {
             .create("ALICE", None, "Impostor", 1, None)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn an_account_can_be_found_by_part_of_its_login_and_removed_for_good() {
+        let pool = open_in_memory().await.unwrap();
+        let accounts = AccountsRepo(&pool);
+        for login in ["alice", "alicia", "bob", "100%pure"] {
+            accounts
+                .create(login, Some("$argon2id$fake"), login, 1, None)
+                .await
+                .unwrap();
+        }
+
+        // Part of a login, case forgiven, and how many match in all.
+        let (found, total) = accounts.search("ALI", 0, 10).await.unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(
+            found.iter().map(|a| a.login.as_str()).collect::<Vec<_>>(),
+            ["alice", "alicia"]
+        );
+        // A page of one, out of two.
+        let (page, total) = accounts.search("ali", 1, 1).await.unwrap();
+        assert_eq!((page.len(), total), (1, 2));
+        // The wildcards a person can type are letters here, not patterns.
+        let (any, total) = accounts.search("%", 0, 10).await.unwrap();
+        assert_eq!(total, 1, "only the account with a % in its name: {any:?}");
+        assert_eq!(accounts.search("_", 0, 10).await.unwrap().1, 0);
+
+        // Removing one takes what hangs off it (a persona) with it.
+        let bob = accounts.by_login("bob").await.unwrap().unwrap();
+        let personas = crate::repo2::PersonasRepo(&pool);
+        personas.create(bob.id, "bobcat", true).await.unwrap();
+        assert!(personas.by_screen_name("bobcat").await.unwrap().is_some());
+        assert!(accounts.delete(bob.id, 3).await.unwrap());
+        assert!(accounts.by_login("bob").await.unwrap().is_none());
+        assert!(
+            personas.by_screen_name("bobcat").await.unwrap().is_none(),
+            "what hung off the account goes with it"
+        );
+        assert!(!accounts.delete(bob.id, 3).await.unwrap(), "only once");
+        // Their names stay theirs: nobody takes the byline.
+        assert!(accounts.name_is_retired("bob").await.unwrap());
+        assert!(accounts.name_is_retired("BOBCAT").await.unwrap());
+        assert!(!accounts.name_is_retired("alice").await.unwrap());
+
+        // How many can keep the burrow: nobody here is an admin yet.
+        assert_eq!(accounts.keepers(3).await.unwrap(), 0);
+        let root = accounts
+            .create("root", Some("$argon2id$fake"), "root", 3, None)
+            .await
+            .unwrap();
+        assert_eq!(accounts.keepers(3).await.unwrap(), 1);
+        // The last one who can keep the burrow stays, whoever asks.
+        assert!(!accounts.delete(root.id, 3).await.unwrap());
+        assert!(accounts.by_login("root").await.unwrap().is_some());
+        let second = accounts
+            .create("second", Some("$argon2id$fake"), "second", 3, None)
+            .await
+            .unwrap();
+        assert!(
+            accounts.delete(root.id, 3).await.unwrap(),
+            "now there are two"
+        );
+        // A disabled one keeps nothing, so it can go even as the last.
+        accounts
+            .admin_set("second", None, None, Some(true))
+            .await
+            .unwrap();
+        assert_eq!(accounts.keepers(3).await.unwrap(), 0);
+        assert!(accounts.delete(second.id, 3).await.unwrap());
     }
 
     #[tokio::test]

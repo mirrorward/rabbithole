@@ -30,6 +30,31 @@ pub async fn list_accounts(
     Ok((rows, total))
 }
 
+/// The accounts whose login holds `find`, as the wire says them, and how
+/// many do in all.
+pub async fn find_accounts(
+    pool: &SqlitePool,
+    find: &str,
+    offset: i64,
+    limit: i64,
+) -> anyhow::Result<(Vec<padm::AccountEntry>, u64)> {
+    let class_names: std::collections::HashMap<i64, String> = ClassesRepo(pool)
+        .all()
+        .await?
+        .into_iter()
+        .map(|c| (c.id, c.name))
+        .collect();
+    let (found, total) = AccountsRepo(pool).search(find, offset, limit).await?;
+    let rows = found
+        .into_iter()
+        .map(|a| {
+            let class = a.class_id.and_then(|id| class_names.get(&id).cloned());
+            padm::AccountEntry::new(a.id, a.login, a.role, class, a.disabled)
+        })
+        .collect();
+    Ok((rows, total as u64))
+}
+
 /// Returns whether the login existed.
 pub async fn account_set(
     shared: &Shared,

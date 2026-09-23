@@ -52,6 +52,8 @@ pub struct AdminState {
     pub classes: Vec<ClassEntry>,
     /// The current page of accounts.
     pub accounts: Vec<AccountEntry>,
+    /// What an operator has typed to find one.
+    pub account_find: String,
     /// Total accounts across all pages.
     pub account_total: u64,
     /// Resolved config key/value pairs.

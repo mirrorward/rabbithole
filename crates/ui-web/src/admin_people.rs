@@ -385,7 +385,9 @@ impl PeopleState {
                         "peer-approve" | "peer-revoke" => Reload::Peers,
                         "origin-pin" => Reload::Origins,
                         "backup-delete" | "backup-verify" => Reload::Backups,
-                        "account-set" | "account-password" | "account-totp" => Reload::Accounts,
+                        "account-set" | "account-password" | "account-totp" | "account-delete" => {
+                            Reload::Accounts
+                        }
                         _ => Reload::Nothing,
                     };
                 }
@@ -411,6 +413,10 @@ fn succeeded(kind: &str, subject: &str) -> (String, Reload) {
             Reload::Nothing,
         ),
         "account-set" => (format!("Saved {subject}."), Reload::Accounts),
+        "account-delete" => (
+            format!("{subject} is gone. What they wrote stays."),
+            Reload::Accounts,
+        ),
         "class-set" => (format!("Saved the {subject} class."), Reload::Classes),
         "invite-revoke" => ("Withdrew the invitation.".to_string(), Reload::Invites),
         "board-create" => (format!("Made {subject}."), Reload::Boards),
@@ -485,6 +491,16 @@ fn refused(kind: &str, subject: &str, detail: &str) -> String {
             .to_string(),
         "account-create" if code("Forbidden") => {
             "You cannot hand out a role above your own.".to_string()
+        }
+        "account-find" if code("Unsupported") => "This burrow is too old to look through its \
+             accounts. What is shown is the page that is loaded."
+            .to_string(),
+        "account-find" => format!("The burrow did not look: {detail}"),
+        "account-delete" if code("Forbidden") => "You can only remove accounts below your own \
+             role, never your own, and a burrow keeps its last administrator."
+            .to_string(),
+        "account-delete" if code("NotFound") => {
+            format!("There is no account called {subject} any more.")
         }
         "account-password" if code("BadRequest") => {
             "A password needs at least 8 characters.".to_string()
@@ -788,6 +804,18 @@ mod tests {
         assert_eq!(s.apply("*class-set:helpers", &ack), Reload::Classes);
         s.apply("*class-set:helpers", &failed("Forbidden"));
         assert!(s.notice.as_ref().unwrap().1.contains("do not hold"));
+
+        // Removing an account says what goes and what stays, and why it
+        // was refused when the burrow keeps its last administrator.
+        assert_eq!(s.apply("*account-delete:carol", &ack), Reload::Accounts);
+        assert!(s.notice.as_ref().unwrap().1.contains("carol is gone"));
+        assert!(s.notice.as_ref().unwrap().1.contains("stays"));
+        s.apply("*account-delete:root", &failed("Forbidden"));
+        assert!(
+            s.notice.as_ref().unwrap().1.contains("last administrator"),
+            "{:?}",
+            s.notice
+        );
 
         // Holding content back says what happened to it, not what happened
         // to an account: the tag's subject is `kind:hex`, which is no use

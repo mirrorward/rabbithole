@@ -39,6 +39,13 @@ nowhere, so a console could hold content and never say what was held.
 |------|------|-----------|----------|---------|
 | 61/62 | QuarantineListRequest → QuarantineList | Request/Reply | MODERATE | `offset`, `limit` (clamped to 1..=200) → `held: [HeldItem]`, oldest first — `subject_kind`, `subject_ref`, `reason`, `held_by` (the moderator's login), `at_unix` — and `total`, how many are held in all. A burrow that has held back a spam run holds thousands, so this pages rather than answering with all of them |
 
+### Accounts: removing one, and finding one — types 63/64
+
+| type | name | direction | requires | payload |
+|------|------|-----------|----------|---------|
+| 63 | AccountDelete | Request | ACCOUNT_ADMIN | `login` → empty ack. The standing order applies (below your own role, never yourself), and a burrow keeps its last administrator: removing the only enabled account of Admin or above is `Forbidden`. The person is signed out everywhere first. What hangs off them goes by foreign key (personas, saved sign-ins, two-factor, account keys, buddies, blocks, read marks, key bundles); what they wrote does not, because a post and a file keep the name they were written under. The login is then free again. Audited as `account-delete` |
+| 64 | AccountFindRequest | Request | ACCOUNT_ADMIN | `find`, `offset`, `limit` (clamped to 1..=200) → [`AccountList`], the same reply the listing gives. Matches any part of a login, case forgiven; `%` and `_` are letters, not patterns |
+
 ### Standing: who may change whom
 
 `ACCOUNT_ADMIN` says an operator may manage accounts, not *which*. Every account

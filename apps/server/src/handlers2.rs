@@ -100,6 +100,8 @@ pub async fn handle(
         }
         if repo.by_screen_name(name).await?.is_some()
             || AccountsRepo(&shared.pool).by_login(name).await?.is_some()
+            // A removed person's name is still on what they wrote.
+            || AccountsRepo(&shared.pool).name_is_retired(name).await?
         {
             fail!(ErrorCode::AlreadyExists);
         }
@@ -375,6 +377,18 @@ pub async fn handle(
         let limit = req.limit.clamp(1, 200) as i64;
         let (rows, total) =
             crate::admin_store::list_accounts(&shared.pool, req.offset as i64, limit).await?;
+        reply!(&padm::AccountList::new(rows, total));
+        return Ok(true);
+    }
+
+    if let Some(Ok(req)) = frame.decode::<padm::AccountFindRequest>() {
+        if !ctx.allows(shared, "admin", Caps::ACCOUNT_ADMIN) {
+            fail!(ErrorCode::Forbidden);
+        }
+        let limit = req.limit.clamp(1, 200) as i64;
+        let (rows, total) =
+            crate::admin_store::find_accounts(&shared.pool, &req.find, req.offset as i64, limit)
+                .await?;
         reply!(&padm::AccountList::new(rows, total));
         return Ok(true);
     }

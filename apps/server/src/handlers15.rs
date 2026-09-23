@@ -182,6 +182,27 @@ pub async fn handle(
         return Ok(true);
     }
 
+    // Removing an account for good. The standing order applies, and a
+    // burrow keeps somebody who can keep it: the last enabled account that
+    // may administer is not removable, or nobody could make another.
+    if let Some(Ok(req)) = frame.decode::<padm::AccountDelete>() {
+        account_admins_only!();
+        let target = manageable!(&req.login);
+        sign_out_everywhere(shared, target.id, "account removed").await;
+        // The burrow keeps somebody who can keep it, and the store settles
+        // that in the same transaction as the removal: two operators cannot
+        // each take the other's last keeper at the same moment.
+        if !AccountsRepo(&shared.pool)
+            .delete(target.id, Role::Admin as u8)
+            .await?
+        {
+            fail!(ErrorCode::Forbidden);
+        }
+        audit(shared, &ctx.login, "account-delete", req.login);
+        conn.send(Frame::ack(frame)).await?;
+        return Ok(true);
+    }
+
     if let Some(Ok(req)) = frame.decode::<padm::AccountTotpReset>() {
         account_admins_only!();
         let target = manageable!(&req.login);

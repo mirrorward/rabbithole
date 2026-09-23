@@ -103,6 +103,10 @@ enum AuthMethod {
     Resume { token: String },
 }
 
+/// How many accounts one look at the People pane brings back. The burrow
+/// clamps to 200; searching asks it again rather than paging by hand.
+const ACCOUNT_PAGE: u32 = 100;
+
 /// Run `f` once the current call has unwound. A reply sink runs inside the
 /// transport's own borrow, so anything in it that wants to send again has to
 /// wait a tick. Off the browser there is no such borrow, and no event loop.
@@ -1385,6 +1389,7 @@ impl AppState {
         match ask.intent {
             ConfirmIntent::Leave(id) => self.disconnect(&id),
             ConfirmIntent::DisableAccount(login) => self.set_account_disabled(&login, true),
+            ConfirmIntent::RemoveAccount(login) => self.remove_account(&login),
             ConfirmIntent::ResetTotp(login) => self.reset_account_totp(&login),
             ConfirmIntent::RevokeInvite(code) => self.revoke_invite(&code),
             ConfirmIntent::DeleteBoard(slug) => self.delete_board(&slug),
@@ -2955,7 +2960,53 @@ impl AppState {
     pub fn load_accounts(&self) {
         self.dispatch_admin(AdminCommand::ListAccounts {
             offset: 0,
-            limit: 100,
+            limit: ACCOUNT_PAGE,
+        });
+    }
+
+    /// Find accounts by part of a login. The console narrows what it has
+    /// as the operator types, and asks the burrow as well, because what
+    /// they are looking for may not be on the page that is loaded — and
+    /// because a narrower search's answer is not an answer to a wider one.
+    pub fn find_accounts(&self, find: &str) {
+        let find = find.trim().to_string();
+        self.admin.update(|a| a.account_find = find.clone());
+        if find.is_empty() {
+            self.load_accounts();
+            return;
+        }
+        self.dispatch_people(AdminCommand::FindAccounts {
+            find,
+            offset: 0,
+            limit: ACCOUNT_PAGE,
+        });
+    }
+
+    /// The accounts again, as they were last asked for: the search that is
+    /// on, else the first page.
+    pub fn reload_accounts(&self) {
+        let find = self.admin.with_untracked(|a| a.account_find.clone());
+        if find.is_empty() {
+            self.load_accounts();
+        } else {
+            self.dispatch_people(AdminCommand::FindAccounts {
+                find,
+                offset: 0,
+                limit: ACCOUNT_PAGE,
+            });
+        }
+    }
+
+    /// Ask before removing an account: it cannot be undone.
+    pub fn ask_remove_account(&self, login: &str) {
+        self.confirm.set(Some(ConfirmAsk::remove_account(login)));
+    }
+
+    /// Remove an account for good. What to show afterwards is the answer's
+    /// to say (`Reload::Accounts`), which keeps the search that is on.
+    pub fn remove_account(&self, login: &str) {
+        self.dispatch_people(AdminCommand::DeleteAccount {
+            login: login.to_string(),
         });
     }
 
@@ -3110,6 +3161,18 @@ impl AppState {
             return;
         }
         let tag = tag.unwrap_or_default().to_string();
+        // A search for an account is tagged (so a burrow too old to answer
+        // it can say so), and its answer is the same account list the
+        // plain listing gives.
+        for event in events {
+            if let AdminEvent::AccountsListed { accounts, total } = event {
+                let (accounts, total) = (accounts.clone(), *total);
+                self.admin.update(|a| {
+                    a.accounts = accounts;
+                    a.account_total = total;
+                });
+            }
+        }
         // Listings land in the moderation model as they are.
         self.moderation.update(|m| {
             for event in events {
@@ -3172,7 +3235,7 @@ impl AppState {
         // Live, this runs inside the transport's borrow: reload a tick later.
         let app = *self;
         defer(move || match reload {
-            crate::admin_people::Reload::Accounts => app.load_accounts(),
+            crate::admin_people::Reload::Accounts => app.reload_accounts(),
             crate::admin_people::Reload::Classes => app.load_classes(),
             crate::admin_people::Reload::Invites => app.load_invites(),
             crate::admin_people::Reload::Boards => app.load_boards(),
@@ -4037,6 +4100,8 @@ pub enum ConfirmIntent {
     Leave(ServerId),
     /// Disable an account (by login). It is signed out at once.
     DisableAccount(String),
+    /// Remove an account for good.
+    RemoveAccount(String),
     /// Remove an account's two-factor enrolment.
     ResetTotp(String),
     /// Withdraw an unused invitation (by code).
@@ -4088,6 +4153,21 @@ impl ConfirmAsk {
                 .to_string(),
             action: "Disable".to_string(),
             intent: ConfirmIntent::DisableAccount(login.to_string()),
+        }
+    }
+
+    /// "Remove alice for good?"
+    pub fn remove_account(login: &str) -> Self {
+        ConfirmAsk {
+            title: format!("Remove {login} for good?"),
+            body: "They cannot sign in again, and their personas, saved sign-ins, two-factor, \
+                   buddies and any invitations nobody has used go with them. What they wrote \
+                   stays, under the name they wrote it with \u{2014} so their names are kept out \
+                   of use, and nobody can take the byline. This cannot be undone: disabling an \
+                   account is the way back."
+                .to_string(),
+            action: "Remove".to_string(),
+            intent: ConfirmIntent::RemoveAccount(login.to_string()),
         }
     }
 

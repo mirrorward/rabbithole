@@ -1471,6 +1471,57 @@ impl Message for QuarantineList {
     const MESSAGE_TYPE: u16 = 62;
 }
 
+/// Remove an account for good: the person can no longer sign in, and what
+/// hangs off them (personas, saved sign-ins, two-factor, keys, buddies,
+/// blocks, read marks) goes with them. What they wrote stays, under the
+/// name they wrote it with. → empty ack. Requires `ACCOUNT_ADMIN`, the
+/// standing order (below your own role, never yourself), and a burrow
+/// keeps its last administrator.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountDelete {
+    pub login: String,
+}
+
+impl AccountDelete {
+    pub fn new(login: impl Into<String>) -> Self {
+        Self {
+            login: login.into(),
+        }
+    }
+}
+
+impl Message for AccountDelete {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 63;
+}
+
+/// The accounts whose login holds `find`, a page at a time.
+/// → [`AccountList`]. Requires `ACCOUNT_ADMIN`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountFindRequest {
+    pub find: String,
+    pub offset: u32,
+    /// Clamped by the burrow to 1..=200.
+    pub limit: u32,
+}
+
+impl AccountFindRequest {
+    pub fn new(find: impl Into<String>, offset: u32, limit: u32) -> Self {
+        Self {
+            find: find.into(),
+            offset,
+            limit,
+        }
+    }
+}
+
+impl Message for AccountFindRequest {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 64;
+}
+
 /// Add a blake3 hash to the deny list: content with this hash is refused at
 /// upload finalize and attachment send. → empty ack. Requires `MODERATE`.
 #[non_exhaustive]
