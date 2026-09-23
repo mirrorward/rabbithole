@@ -608,6 +608,38 @@ impl Default for ServerConfig {
     }
 }
 
+/// A configured directory as the burrow will read it: relative paths hang
+/// off the data directory the way every surface resolves its own, and a
+/// data directory that is itself relative hangs off the working directory.
+/// Both sides have to end up absolute or `target/x` and `/here/target/x`
+/// read as different places. Lexical, not `canonicalize`, so a folder that
+/// does not exist yet still compares; the serving side canonicalizes, and
+/// it is the one that has to hold.
+fn resolve_against(base: &Path, p: &Path) -> PathBuf {
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base.join(p)
+    };
+    let joined = if joined.is_absolute() {
+        joined
+    } else {
+        std::env::current_dir().unwrap_or_default().join(joined)
+    };
+    // Fold away `.` and `a/..` so "data/../data" is one path, not two.
+    let mut out = PathBuf::new();
+    for part in joined.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("io: {0}")]
@@ -1041,7 +1073,40 @@ impl ServerConfig {
                 Ok(true)
             }
             "http_web_root" => {
-                self.http_web_root = PathBuf::from(value);
+                let root = PathBuf::from(value);
+                // Everything under the web root is served to anybody, with
+                // no session. The burrow's own directories hold its signing
+                // seed, its TLS key and its database: a web root that
+                // contains one, or sits inside one, would hand them out on
+                // request. The HTTP server refuses to serve them whatever
+                // this says ([`burrow::http`]); saying so here is how an
+                // operator finds out before their console looks fine and
+                // their keys are public.
+                if !root.as_os_str().is_empty() {
+                    // The data directory is resolved against the working
+                    // directory, the others against the data directory.
+                    let at = resolve_against(&self.data_dir, &root);
+                    let here = |dir: PathBuf| at.starts_with(&dir) || dir.starts_with(&at);
+                    if here(resolve_against(Path::new(""), &self.data_dir)) {
+                        return Err(ConfigError::BadValue {
+                            key: key.into(),
+                            detail: "the web root is served to anybody, and this one holds the \
+                                     burrow's own data folder (its signing key, its database). \
+                                     Point it at the built web files instead"
+                                .into(),
+                        });
+                    }
+                    if here(resolve_against(&self.data_dir, &self.backup_dir)) {
+                        return Err(ConfigError::BadValue {
+                            key: key.into(),
+                            detail: "the web root is served to anybody, and this one holds the \
+                                     snapshot folder, which holds copies of everything the \
+                                     burrow has. Point it at the built web files instead"
+                                .into(),
+                        });
+                    }
+                }
+                self.http_web_root = root;
                 Ok(true)
             }
             "nntp_enabled" => {
@@ -1196,7 +1261,23 @@ impl ServerConfig {
                         detail: "the backup folder cannot be empty".into(),
                     });
                 }
-                self.backup_dir = PathBuf::from(value.trim());
+                let dir = PathBuf::from(value.trim());
+                // A snapshot holds everything; the web root is served to
+                // anybody. They must not overlap, in either direction.
+                if !self.http_web_root.as_os_str().is_empty() {
+                    let dir_at = resolve_against(&self.data_dir, &dir);
+                    let root_at = resolve_against(&self.data_dir, &self.http_web_root);
+                    if dir_at.starts_with(&root_at) || root_at.starts_with(&dir_at) {
+                        return Err(ConfigError::BadValue {
+                            key: key.into(),
+                            detail: "snapshots hold everything the burrow has, and this folder \
+                                     is inside the one served to anybody. Put them somewhere \
+                                     the web root does not reach"
+                                .into(),
+                        });
+                    }
+                }
+                self.backup_dir = dir;
                 Ok(true)
             }
             "syndication_enabled" => {
@@ -1564,6 +1645,19 @@ pub fn is_secret_key(key: &str) -> bool {
 /// Settable, but not from a console: moving the data directory under a
 /// running burrow does nothing until a restart, and then starts an empty one.
 const CONSOLE_READ_ONLY: &[&str] = &["data_dir"];
+
+/// Whether a console may set `key` at all. The console is told this as a
+/// flag on every key, but a flag is a courtesy to a well-behaved client,
+/// not a rule: the burrow refuses these over the wire.
+///
+/// `data_dir` is the one that matters. It is what every other path is
+/// resolved against and what the HTTP server keeps to itself
+/// ([`burrow::http`]); moved from a console it would point those checks at
+/// an empty folder while the real one, with the signing key in it, stopped
+/// counting as private.
+pub fn is_console_read_only(key: &str) -> bool {
+    CONSOLE_READ_ONLY.contains(&key)
+}
 
 /// The shape of a config value, as an operator's console needs to know it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

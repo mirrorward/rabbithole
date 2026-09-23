@@ -91,6 +91,29 @@ async fn an_operator_makes_checks_and_removes_a_snapshot_from_the_console() {
     let list: BackupList = root.request(&BackupListRequest).await.unwrap();
     assert_eq!(list.snapshots, vec![made.snapshot.clone()]);
 
+    // A snapshot is the whole burrow: the database it copies holds every
+    // password hash and every private message. `VACUUM INTO` writes a fresh
+    // file at whatever the umask says, so it is kept to its owner on
+    // purpose rather than by luck.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let snap = dir.path().join("backups").join(&name);
+        let mode =
+            |p: std::path::PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode(snap.clone()),
+            0o700,
+            "the snapshot folder is the owner's"
+        );
+        assert_eq!(mode(snap.join("burrow.db")), 0o600, "so is the database");
+        assert_eq!(
+            mode(snap.join("identity").join("server_ed25519.seed")),
+            0o600,
+            "and the signing seed keeps what it had"
+        );
+    }
+
     let checked: BackupVerified = root.request(&BackupVerify::new(&name)).await.unwrap();
     assert!(checked.ok, "{checked:?}");
     assert_eq!(checked.detail, "ok");

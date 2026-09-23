@@ -525,6 +525,11 @@ pub async fn handle(
         if !ctx.allows(shared, "admin", Caps::CONFIG_ADMIN) {
             fail!(ErrorCode::Forbidden);
         }
+        // The console is told which keys it may not set; that is a courtesy
+        // to a well-behaved client, and this is the rule.
+        if rabbithole_server_core::config::is_console_read_only(&req.key) {
+            fail!(ErrorCode::Forbidden);
+        }
         match shared.config.set_key(&req.key, &req.value) {
             Ok(applied_live) => {
                 // The audit log is read by people. A credential is recorded

@@ -280,6 +280,102 @@ async fn traversal_is_refused_and_only_get_head_are_allowed() {
     b.shutdown().await;
 }
 
+/// The burrow never serves its own data directory, however the web root
+/// was arrived at. `http_web_root` is an ordinary config key that anybody
+/// with `CONFIG_ADMIN` can set live, and pointed at the data directory the
+/// static route would answer `GET /identity/server_ed25519.seed` for
+/// anybody at all: the burrow's signing key, with no session and nothing in
+/// the audit log. Set here through the config the server starts with, which
+/// is the way round no validation can catch.
+#[tokio::test]
+async fn the_burrows_own_folders_are_never_served() {
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let b = Burrow::start(ServerConfig {
+        // The whole data directory as the web root: what an operator gets
+        // by typing the wrong path, and what a stolen console session would
+        // choose on purpose. Set in the config the server starts with,
+        // which is the way round no validation can catch.
+        http_web_root: data.clone(),
+        backup_dir: "snapshots".into(),
+        ..http_config(&data)
+    })
+    .await
+    .unwrap();
+    let addr = b.http_addr.unwrap();
+
+    // The burrow minted its own identity on the way up; that is the file
+    // this test is about.
+    let seed_path = data.join("identity").join("server_ed25519.seed");
+    let seed = std::fs::read(&seed_path).expect("the burrow keeps a signing seed");
+    assert!(!seed.is_empty());
+    std::fs::create_dir_all(data.join("snapshots").join("snapshot-1")).unwrap();
+    std::fs::write(
+        data.join("snapshots").join("snapshot-1").join("burrow.db"),
+        b"a copy of everything",
+    )
+    .unwrap();
+
+    for path in [
+        "/identity/server_ed25519.seed",
+        "/identity/tls_key.der",
+        "/burrow.db",
+        "/snapshots/snapshot-1/burrow.db",
+    ] {
+        let (status, _, body) = request(addr, "GET", path).await;
+        assert_eq!(status, 404, "{path} was served");
+        assert!(body != seed, "{path} leaked the signing seed");
+    }
+    // And the same 404 as anything else missing: no existence distinctions.
+    let (missing, _, _) = request(addr, "GET", "/nothing-here").await;
+    assert_eq!(missing, 404);
+
+    b.shutdown().await;
+}
+
+/// The other half: an operator who tries to set the web root over the
+/// console is told why, rather than finding out later.
+#[test]
+fn a_web_root_over_the_burrows_own_folders_is_refused() {
+    let mut cfg = ServerConfig {
+        data_dir: "/srv/burrow/data".into(),
+        backup_dir: "/srv/burrow/snapshots".into(),
+        ..ServerConfig::default()
+    };
+    for bad in ["/srv/burrow/data", "/srv/burrow", "/srv/burrow/data/blobs"] {
+        assert!(
+            cfg.set_key("http_web_root", bad).is_err(),
+            "{bad} was accepted as a web root"
+        );
+    }
+    assert!(cfg
+        .set_key("http_web_root", "/srv/burrow/snapshots")
+        .is_err());
+    // A sibling that merely reads like one of them is fine.
+    assert!(cfg.set_key("http_web_root", "/srv/burrow-web").is_ok());
+    // A relative data directory is the same place as its absolute self: a
+    // burrow started with `--data-dir target/run` must still refuse the
+    // full path to it.
+    let here = std::env::current_dir().unwrap();
+    let mut relative = ServerConfig {
+        data_dir: "target/a-burrow".into(),
+        ..ServerConfig::default()
+    };
+    assert!(
+        relative
+            .set_key(
+                "http_web_root",
+                here.join("target/a-burrow").to_str().unwrap()
+            )
+            .is_err(),
+        "the same folder, written two ways, was accepted"
+    );
+    // And snapshots cannot be moved under the web root afterwards.
+    assert!(cfg.set_key("backup_dir", "/srv/burrow-web/snaps").is_err());
+    assert!(cfg.set_key("backup_dir", "/srv/burrow/snapshots").is_ok());
+}
+
 #[tokio::test]
 async fn web_root_serves_the_spa_shell_and_generated_manifest() {
     let work = tempfile::tempdir().unwrap();

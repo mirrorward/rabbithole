@@ -110,6 +110,30 @@ async fn a_saved_setting_is_in_the_file_and_a_password_is_never_read_back() {
         Err(ClientError::Refused(ErrorCode::BadRequest))
     ));
 
+    // The console is told which keys it may not set; the burrow enforces
+    // it rather than trusting the client. `data_dir` is what every other
+    // path resolves against and what the HTTP server keeps to itself: moved
+    // from a console, the real folder, signing key and all, would stop
+    // counting as the burrow's own.
+    let refused = root
+        .request::<_, ConfigApplied>(&ConfigSet::new("data_dir", "/tmp/somewhere-else"))
+        .await;
+    assert!(
+        matches!(refused, Err(ClientError::Refused(ErrorCode::Forbidden))),
+        "a console moved the data directory: {refused:?}"
+    );
+    // And the web root cannot be aimed at the burrow's own folders.
+    let refused = root
+        .request::<_, ConfigApplied>(&ConfigSet::new(
+            "http_web_root",
+            dir.path().to_str().unwrap(),
+        ))
+        .await;
+    assert!(
+        matches!(refused, Err(ClientError::Refused(ErrorCode::BadRequest))),
+        "the data folder was accepted as a web root: {refused:?}"
+    );
+
     // In the file, beside what the operator wrote there.
     let text = std::fs::read_to_string(dir.path().join("burrow.toml")).unwrap();
     assert!(text.contains("# the operator's own notes"), "{text}");

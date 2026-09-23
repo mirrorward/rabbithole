@@ -319,6 +319,9 @@ fn BoardRow(node: BoardNode, depth: usize, open: RwSignal<Option<String>>) -> im
         _ => None,
     };
     let keep_said = move || crate::admin::keeping_line(&kept(), &slug.get_value());
+    // A board is its own row, so the field's ids carry its slug.
+    let keep_id = store_value(format!("rh-adm-keep-{}", node.slug));
+    let keep_help_id = store_value(format!("rh-adm-keep-help-{}", node.slug));
     let keep_help = move || match keep_problem() {
         Some(say) => say.to_string(),
         None if typed().is_empty() && saved_keep().is_some() => {
@@ -391,23 +394,28 @@ fn BoardRow(node: BoardNode, depth: usize, open: RwSignal<Option<String>>) -> im
                             />
                         </label>
                         <Show when=move || node.kind == KIND_BOARD fallback=|| ()>
-                            <label class="rh-adm-field">
-                                <span>"Threads to keep"</span>
+                            <div class="rh-adm-field">
+                                // The help line describes the field; it is
+                                // not part of its name. Inside the label it
+                                // would be read out as one, every time.
+                                <label for=keep_id.get_value()>"Threads to keep"</label>
                                 <input
                                     class="rh-input"
                                     type="number"
                                     min="0"
                                     max="100000"
+                                    id=keep_id.get_value()
+                                    aria-describedby=keep_help_id.get_value()
                                     prop:value=move || keep.get()
                                     on:input=move |ev| {
                                         keep_touched.set(true);
                                         keep.set(event_target_value(&ev))
                                     }
                                 />
-                                <span class="rh-adm-help">
+                                <span class="rh-adm-help" id=keep_help_id.get_value()>
                                     {move || keep_help()}
                                 </span>
-                            </label>
+                            </div>
                         </Show>
                     </div>
                     <div class="rh-adm-acct-actions">

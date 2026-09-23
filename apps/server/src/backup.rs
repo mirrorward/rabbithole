@@ -118,11 +118,20 @@ pub async fn snapshot(shared: &Shared, dest: &Path) -> Result<SnapshotOutcome> {
     fs::create_dir_all(dest)
         .with_context(|| format!("creating backup destination {}", dest.display()))?;
     let snap = timestamped_subdir(dest)?;
+    // A snapshot is the whole burrow. The directory is the operator's
+    // alone before anything is written into it, so a copy never sits
+    // readable while it is being made.
+    owner_only_dir(&snap)?;
 
     // The database first, through SQLite's online-backup path.
     rabbithole_store_server::vacuum_into(&shared.pool, &snap.join("burrow.db"))
         .await
         .context("VACUUM INTO (online database backup)")?;
+    // `VACUUM INTO` writes a fresh file at whatever the umask says, which
+    // on an ordinary machine is readable by everyone: every password hash
+    // and every private message. The seed keeps 0600 because `fs::copy`
+    // carries the mode over; this one has no mode to carry.
+    owner_only_file(&snap.join("burrow.db"))?;
 
     // Everything else is plain (immutable or tiny) files: copy + hash off
     // the async runtime.
@@ -443,6 +452,33 @@ pub async fn check_snapshot(snapshot: PathBuf) -> Result<CheckOutcome> {
 
 /// Allocate `dest/snapshot-<utc-stamp>[-n]`, claiming it atomically with
 /// `create_dir` so two backups in the same second cannot collide.
+/// Make a directory the owner's alone (`0700`). A no-op off Unix, where
+/// the mode bits do not exist; the burrow says so rather than pretending.
+fn owner_only_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("keeping {} to its owner", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Make a file the owner's alone (`0600`).
+fn owner_only_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("keeping {} to its owner", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 fn timestamped_subdir(dest: &Path) -> Result<PathBuf> {
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let base = format!("snapshot-{stamp}");

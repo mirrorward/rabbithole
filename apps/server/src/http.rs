@@ -45,6 +45,15 @@
 //!
 //! # Security notes
 //!
+//! - **The burrow's own folders are never served** ([`private_dirs`]): the
+//!   data directory and the snapshot folder are refused whatever the web
+//!   root is set to, checked on the canonicalized path so a symlink into
+//!   them is refused too. `http_web_root` is an ordinary config key that
+//!   `CONFIG_ADMIN` sets live; pointed at the data directory, this route
+//!   would otherwise have answered `GET /identity/server_ed25519.seed` for
+//!   anybody at all, with no session and nothing in the audit log. The key
+//!   is also validated when it is set, and `data_dir` cannot be set from a
+//!   console at all — but this check is the one that holds when neither ran.
 //! - **Strict path sanitization** ([`sanitize_path`]): percent-decoding is
 //!   applied per segment *after* splitting on `/`, so an encoded slash can't
 //!   mint new segments; `..` (plain or encoded as `%2e%2e`), `.`,
@@ -466,7 +475,7 @@ async fn serve_static(req: &Request, shared: &Arc<Shared>, web_root: Option<&Pat
     } else {
         req.segments.iter().map(String::as_str).collect()
     };
-    match read_under_root(root, &rel).await {
+    match read_under_root(root, &rel, private_dirs(shared)).await {
         Some(bytes) => {
             let name = rel.last().unwrap_or(&"");
             Response::new(200, "OK", content_type_for(name).to_string(), bytes)
@@ -485,11 +494,30 @@ async fn serve_static(req: &Request, shared: &Arc<Shared>, web_root: Option<&Pat
     }
 }
 
+/// The directories this server must never serve out of, whatever the web
+/// root is set to: the burrow's own data directory — the signing seed, the
+/// TLS key, the database with every password hash, every blob — and
+/// wherever its snapshots go, which hold copies of all of it.
+///
+/// `http_web_root` is an ordinary config key, settable live by anyone with
+/// `CONFIG_ADMIN`, and nothing about a path says what is under it. Pointed
+/// at the data directory (or at any parent of it), the static route would
+/// answer `GET /identity/server_ed25519.seed` for anybody at all, with no
+/// session and nothing in the audit log. The web root is checked when it is
+/// set; this is the check that holds when it was not — a config file edited
+/// by hand, a flag on the command line, a directory that became private
+/// afterwards.
+fn private_dirs(shared: &Arc<Shared>) -> Vec<PathBuf> {
+    let cfg = shared.config.read();
+    vec![cfg.data_dir.clone(), crate::backup::backups_dir(&cfg)]
+}
+
 /// Read `rel` under `root`, refusing anything that escapes it: the joined
 /// path is canonicalized (resolving symlinks) and must still start with the
-/// canonicalized root, and must be a regular file — directories are 404
-/// (no listings). `None` = not served.
-async fn read_under_root(root: &Path, rel: &[&str]) -> Option<Vec<u8>> {
+/// canonicalized root, must be a regular file — directories are 404 (no
+/// listings) — and must not be inside any of `private` ([`private_dirs`]).
+/// `None` = not served.
+async fn read_under_root(root: &Path, rel: &[&str], private: Vec<PathBuf>) -> Option<Vec<u8>> {
     let mut path = root.to_path_buf();
     for part in rel {
         path.push(part); // parts are sanitized: no `..`, `/`, `\`, NUL
@@ -501,6 +529,16 @@ async fn read_under_root(root: &Path, rel: &[&str]) -> Option<Vec<u8>> {
         let canon = std::fs::canonicalize(&path).ok()?;
         if !canon.starts_with(&canon_root) {
             return None; // symlink escaped the root
+        }
+        // The burrow's own directories are never served, however the web
+        // root was arrived at. Component-wise, so a sibling named like a
+        // private directory is not mistaken for one.
+        for dir in &private {
+            if let Ok(canon_private) = std::fs::canonicalize(dir) {
+                if canon.starts_with(&canon_private) {
+                    return None;
+                }
+            }
         }
         if !std::fs::metadata(&canon).ok()?.is_file() {
             return None; // no directory listings

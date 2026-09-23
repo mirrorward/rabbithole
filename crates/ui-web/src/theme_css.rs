@@ -1062,7 +1062,7 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 .rh-adm-acct-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));gap:var(--rh-space-3) var(--rh-space-4);margin:0 0 var(--rh-space-3)}\
 .rh-adm-acct-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:var(--rh-space-2)}\
 .rh-adm-field{display:flex;flex-direction:column;gap:.3rem;min-width:0;font-size:var(--rh-font-sm)}\
-.rh-adm-field>span:first-child{font-weight:600}\
+.rh-adm-field>span:first-child,.rh-adm-field>label:first-child{font-weight:600}\
 .rh-adm-field small{color:var(--rh-muted);font-size:var(--rh-font-xs);line-height:1.4}\
 .rh-adm-field .rh-input,.rh-adm-field .rh-select{width:100%}\
 .rh-adm-inline{display:flex;gap:var(--rh-space-2);align-items:center}\
