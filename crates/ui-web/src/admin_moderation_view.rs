@@ -19,11 +19,12 @@ use crate::state::SessionRow;
 #[component]
 pub fn ModerationPane() -> impl IntoView {
     let app = expect_context::<AppState>();
-    app.load_reports(Some(report_state::OPEN));
-    app.load_held();
-    app.load_deny_hashes();
-    app.load_audit();
-    app.refresh_who();
+    app.each_sign_in(move || {
+        app.load_held();
+        app.load_deny_hashes();
+        app.load_audit();
+        app.refresh_who();
+    });
     view! {
         <Reports/>
         <HeldBack/>
@@ -49,6 +50,9 @@ fn when(unix: i64) -> String {
 fn Reports() -> impl IntoView {
     let app = expect_context::<AppState>();
     let filter = create_rw_signal(report_state::OPEN);
+    // Asked again after a reconnect for whichever state is being read, not
+    // the one the pane opened on.
+    app.each_sign_in(move || app.load_reports(Some(filter.get_untracked())));
     let reports = move || app.moderation.with(|m| m.reports.clone());
     let total = move || app.moderation.with(|m| m.total);
     view! {

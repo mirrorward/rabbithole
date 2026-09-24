@@ -325,6 +325,34 @@ impl AppState {
         self.focused()
     }
 
+    /// Ask the focused burrow for what a pane shows: now, and again each
+    /// time that burrow is signed in to.
+    ///
+    /// A pane that asks only when it opens keeps showing what was true
+    /// before a dropped socket, and anything it asked for died with that
+    /// socket. The first ask is made straight away, as a pane always has;
+    /// later ones are put off a tick, because a sign-in is announced from
+    /// inside the socket's own sink, where sending again panics and leaves
+    /// the socket borrowed for good.
+    ///
+    /// The demo burrow is never signed in to, so it is asked once.
+    pub fn each_sign_in(&self, ask: impl Fn() + 'static) {
+        let app = *self;
+        let ask = std::rc::Rc::new(ask);
+        create_effect(move |was: Option<u64>| {
+            let now = app.focused_tracked().ready.get();
+            match was {
+                None => ask(),
+                Some(before) if before != now => {
+                    let ask = ask.clone();
+                    defer(move || ask());
+                }
+                _ => {}
+            }
+            now
+        });
+    }
+
     /// The `files` signal of the session whose Transfers currently hold
     /// `transfer_id`, if any. Native swarm-progress events must route to the
     /// session that *started* the download — which may not be the focused one if

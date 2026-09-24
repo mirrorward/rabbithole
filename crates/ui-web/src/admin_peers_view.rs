@@ -18,8 +18,10 @@ use crate::app::{AppState, ConfirmAsk};
 #[component]
 pub fn PeersPane() -> impl IntoView {
     let app = expect_context::<AppState>();
-    app.load_peers();
-    app.load_origins();
+    app.each_sign_in(move || {
+        app.load_peers();
+        app.load_origins();
+    });
     view! {
         <Peers/>
         <Origins/>

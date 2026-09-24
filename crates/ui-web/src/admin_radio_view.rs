@@ -14,7 +14,7 @@ use crate::radio_admin::{area_line, left_out_line, listeners_line, station_line}
 #[component]
 pub fn StationsPanel() -> impl IntoView {
     let app = expect_context::<AppState>();
-    app.load_stations();
+    app.each_sign_in(move || app.load_stations());
     let stations = move || app.federation.with(|f| f.stations.clone());
     view! {
         <section class="rh-adm-group" aria-labelledby="rh-adm-stations-h">

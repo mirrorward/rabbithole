@@ -58,18 +58,9 @@ fn in_reading_order(tree: &[BoardNode]) -> Vec<(usize, BoardNode)> {
 #[component]
 pub fn BoardsPane() -> impl IntoView {
     let app = expect_context::<AppState>();
-    app.load_boards();
-    // Asked on entry, and again each time this burrow is signed in to: a
-    // pane that outlives a dropped socket would otherwise sit waiting on
-    // an answer that died with it. The demo burrow never signs in, so it
-    // is asked once here.
-    let ready = move || app.focused_tracked().ready.get();
-    create_effect(move |was: Option<u64>| {
-        let now = ready();
-        if was.is_none() || was != Some(now) {
-            app.load_board_keeping();
-        }
-        now
+    app.each_sign_in(move || {
+        app.load_boards();
+        app.load_board_keeping();
     });
     let adding = create_rw_signal(false);
     let open = create_rw_signal(None::<String>);

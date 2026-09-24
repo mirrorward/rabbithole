@@ -3050,7 +3050,7 @@ fn LoadFailed(
 pub fn Lobby() -> impl IntoView {
     let app = expect_context::<AppState>();
     let state = app.focused().state;
-    app.load_rooms();
+    app.each_sign_in(move || app.load_rooms());
     let draft = create_rw_signal(String::new());
     // Follow the newest line while the reader is at the bottom; offer a
     // "new messages" jump instead of yanking them out of history otherwise.
@@ -3610,7 +3610,7 @@ pub fn Composer(
 pub fn Boards() -> impl IntoView {
     let app = expect_context::<AppState>();
     let state = app.focused().state;
-    app.load_boards();
+    app.each_sign_in(move || app.load_boards());
 
     view! {
         <StatusBar/>
@@ -3945,9 +3945,13 @@ pub fn Dms() -> impl IntoView {
     let draft = create_rw_signal(String::new());
     // A guest gets the gate below, not a request the server will refuse.
     let is_guest = app.focused().is_guest;
-    if !is_guest.get_untracked() {
-        app.load_dms();
-    }
+    // Read when the ask is made, not when the pane opened: a sign-in is
+    // what says whether there is an account here to have DMs at all.
+    app.each_sign_in(move || {
+        if !is_guest.get_untracked() {
+            app.load_dms();
+        }
+    });
 
     // Follow the newest message unless the reader has scrolled up to history.
     let log = crate::scroll::ChatScroll::install(move || {
@@ -4195,7 +4199,7 @@ pub fn Dms() -> impl IntoView {
 pub fn Directory() -> impl IntoView {
     let app = expect_context::<AppState>();
     let state = app.focused().state;
-    app.load_members();
+    app.each_sign_in(move || app.load_members());
 
     view! {
         <StatusBar/>
@@ -4409,8 +4413,10 @@ const SAMPLE_ANSI: &[u8] =
 pub fn Files() -> impl IntoView {
     let app = expect_context::<AppState>();
     let files = app.focused().files;
-    app.load_areas();
-    app.load_upload_limits();
+    app.each_sign_in(move || {
+        app.load_areas();
+        app.load_upload_limits();
+    });
 
     view! {
         <StatusBar/>
@@ -5168,7 +5174,7 @@ pub fn Radio() -> impl IntoView {
     let app = expect_context::<AppState>();
     let radio = app.radio;
     let prefs = app.radio_prefs;
-    app.load_radio();
+    app.each_sign_in(move || app.load_radio());
 
     let stations = move || radio.with(|r| r.stations().cloned().collect::<Vec<_>>());
 
@@ -6375,7 +6381,7 @@ pub fn WishingWell() -> impl IntoView {
         in_reading_order, kind_label, status, status_label, votes_line, wish_line, KINDS,
     };
     let app = expect_context::<AppState>();
-    app.load_wishes(None);
+    app.each_sign_in(move || app.load_wishes(None));
     let state = move || app.focused_tracked().state.get().wishes;
     let wishes = move || in_reading_order(state().wishes);
     let showing = move || state().showing;
@@ -6618,7 +6624,7 @@ pub fn WishingWell() -> impl IntoView {
 #[component]
 pub fn ArtGallery() -> impl IntoView {
     let app = expect_context::<AppState>();
-    app.load_areas();
+    app.each_sign_in(move || app.load_areas());
     let files = move || app.focused().files.get();
     let areas = move || files().areas;
     let current = move || files().current_area;

@@ -16,7 +16,7 @@ use crate::app::{AppState, ConfirmAsk};
 #[component]
 pub fn AreasPane() -> impl IntoView {
     let app = expect_context::<AppState>();
-    app.load_areas();
+    app.each_sign_in(move || app.load_areas());
     let adding = create_rw_signal(false);
     let open = create_rw_signal(None::<String>);
     let areas = move || app.focused().files.with(|f| f.areas.clone());

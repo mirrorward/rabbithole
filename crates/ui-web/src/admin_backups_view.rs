@@ -12,7 +12,7 @@ use crate::app::{AppState, ConfirmAsk};
 #[component]
 pub fn BackupsPane() -> impl IntoView {
     let app = expect_context::<AppState>();
-    app.load_backups();
+    app.each_sign_in(move || app.load_backups());
     let backups = move || app.federation.with(|f| f.backups.clone());
     let dir = move || app.federation.with(|f| f.backups_dir.clone());
     let making = move || app.people.with(|p| p.is_busy("*backup-make"));

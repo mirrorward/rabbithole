@@ -12,7 +12,7 @@ browsers, telnet BBS clients, newsreaders, offline mail readers, and (yes) real
 classic Hotline clients. Servers federate over **Tunnels** and are discoverable
 through **Looking Glass** directories.
 
-**Status: 0.267.0 — waves 0–14 largely landed.** The native server and its
+**Status: 0.268.0 — waves 0–14 largely landed.** The native server and its
 surfaces are feature-complete for a public flagship; remaining work is 1.0
 hardening (E2EE wiring, cross-server flood-fill, GUI/mobile shells) and the
 post-1.0 Reticulum mesh. See [`TODO.md`](TODO.md) for the exact per-wave state.
@@ -33,7 +33,7 @@ recovery codes, multiple personas per account, and an ACL evaluator (roles +
 classes + capability bitmask, nearest-ancestor / deny-wins) governing every
 surface.
 
-| Subsystem | State at 0.267.0 |
+| Subsystem | State at 0.268.0 |
 |---|---|
 | **Accounts & identity** | Ed25519 identity keys, Argon2id passwords, hashed session tokens + resume, TOTP + recovery codes, key enrollment, registration gating (open/invite/closed) |
 | **Personas & presence** | Multiple personas per account, profiles/.plan/avatars+banners, buddy lists, presence states (away/idle/invisible), member directory + locate |

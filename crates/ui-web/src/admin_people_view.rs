@@ -18,7 +18,7 @@ use crate::components::copy_text_quiet;
 #[component]
 pub fn PeoplePane() -> impl IntoView {
     let app = expect_context::<AppState>();
-    app.load_invites();
+    app.each_sign_in(move || app.load_invites());
     view! {
         <Accounts/>
         <Classes/>
