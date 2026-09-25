@@ -58,16 +58,96 @@ jobs:
       - run: cargo audit
 
   wasm:
-    name: wasm (proto + core + ui-web)
+    name: web (WASM build + Chromium)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BURROW_BIN: ${{ github.workspace }}/target/debug/burrow
+      SPA_DIST: ${{ github.workspace }}/crates/ui-web/dist
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: e2e-web/package-lock.json
+      - name: Read the locked wasm-bindgen version
+        id: wasm-tools
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re, tomllib
+          with open("Cargo.lock", "rb") as source:
+              packages = tomllib.load(source)["package"]
+          versions = {p["version"] for p in packages if p["name"] == "wasm-bindgen"}
+          if len(versions) != 1:
+              raise SystemExit("expected exactly one wasm-bindgen version in Cargo.lock")
+          version = versions.pop()
+          if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version):
+              raise SystemExit("invalid wasm-bindgen version")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"version={version}", file=output)
+          PY
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.21.14
+      - name: Install the matching wasm-bindgen CLI
+        env:
+          BINDGEN_VERSION: ${{ steps.wasm-tools.outputs.version }}
+          RUSTFLAGS: ""
+        run: |
+          set -euo pipefail
+          mkdir -p e2e-web/artifacts
+          cargo install wasm-bindgen-cli --locked --version "$BINDGEN_VERSION" 2>&1 | tee e2e-web/artifacts/wasm-bindgen-install.log
+          test "$(wasm-bindgen --version)" = "wasm-bindgen $BINDGEN_VERSION"
       # These crates are compiled into the browser client; they must stay
       # wasm-clean (no tokio/net/fs in their default features).
-      - run: cargo check -p rabbithole-proto -p rabbithole-core --target wasm32-unknown-unknown
-      # The Leptos SPA must also build for the browser.
-      - run: cargo check -p rabbithole-ui-web --target wasm32-unknown-unknown
+      - run: cargo check --locked -p rabbithole-proto -p rabbithole-core --target wasm32-unknown-unknown
+      - name: Build the actual browser application
+        working-directory: crates/ui-web
+        env:
+          TRUNK_TOOLS_WASM_BINDGEN: ${{ steps.wasm-tools.outputs.version }}
+          TRUNK_SKIP_VERSION_CHECK: "true"
+        run: |
+          set -euo pipefail
+          mkdir -p ../../e2e-web/artifacts
+          trunk build --locked --public-url / 2>&1 | tee ../../e2e-web/artifacts/wasm-build.log
+      - name: Build the isolated test server
+        run: |
+          set -euo pipefail
+          mkdir -p e2e-web/artifacts
+          cargo build --locked -p burrow --bin burrow 2>&1 | tee e2e-web/artifacts/server-build.log
+      - name: Install locked browser test dependencies
+        working-directory: e2e-web
+        run: npm ci
+      - name: Install the Chromium revision pinned by Playwright
+        working-directory: e2e-web
+        run: ./node_modules/.bin/playwright install --with-deps chromium
+      - name: Run guest, theme, routes, and default-limit browser tests
+        working-directory: e2e-web
+        env:
+          BURROW_E2E_ROOT: ${{ runner.temp }}/rabbithole-e2e
+        run: |
+          set -euo pipefail
+          npm test 2>&1 | tee artifacts/browser-tests.log
+      - name: Stop any interrupted test fixtures
+        if: always()
+        working-directory: e2e-web
+        env:
+          BURROW_E2E_ROOT: ${{ runner.temp }}/rabbithole-e2e
+        run: node scripts/cleanup-fixtures.mjs
+      - name: Upload browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-browser-failure
+          path: |
+            e2e-web/test-results/
+            e2e-web/playwright-report/
+            e2e-web/artifacts/
+          retention-days: 14
+          if-no-files-found: ignore

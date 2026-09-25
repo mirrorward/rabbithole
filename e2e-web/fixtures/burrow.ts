@@ -1,6 +1,7 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -53,7 +54,11 @@ export class TestBurrow {
     const dist = resolve(process.env.SPA_DIST!);
     await access(binary);
     await access(join(dist, "index.html"));
-    const dataDir = await mkdtemp(join(tmpdir(), "rh-theme-e2e-"));
+    // CI provides an owned root so its final cleanup can find any fixture
+    // left behind by a terminated Playwright worker.
+    const fixtureRoot = resolve(process.env.BURROW_E2E_ROOT ?? tmpdir());
+    await mkdir(fixtureRoot, { recursive: true });
+    const dataDir = await mkdtemp(join(fixtureRoot, "rh-browser-e2e-"));
     const http = await unusedPort();
     let ws = await unusedPort();
     while (ws === http) ws = await unusedPort();
@@ -89,7 +94,6 @@ export class TestBurrow {
 
   async start(): Promise<void> {
     if (this.child) throw new Error("Test burrow is already running");
-    this.log = "";
     const child = spawn(this.binary, ["--data-dir", this.dataDir, "run"], {
       env: this.env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -102,8 +106,13 @@ export class TestBurrow {
       child.once("error", resolve);
     });
     for (const stream of [child.stdout, child.stderr]) {
-      stream?.on("data", (chunk) => { this.log = (this.log + chunk).slice(-32_000); });
+      stream?.on("data", (chunk) => {
+        this.log = (this.log + chunk).slice(-32_000);
+        // Preserve a bounded log if the worker is interrupted before attaching it.
+        try { writeFileSync(join(this.dataDir, "server.log"), this.log); } catch { /* teardown */ }
+      });
     }
+    if (child.pid) await writeFile(join(this.dataDir, "server.pid"), String(child.pid));
     const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
       if (spawnError || child.exitCode !== null) break;
@@ -141,6 +150,7 @@ export class TestBurrow {
     } finally {
       if (force) clearTimeout(force);
       this.child = undefined;
+      await rm(join(this.dataDir, "server.pid"), { force: true });
     }
   }
 

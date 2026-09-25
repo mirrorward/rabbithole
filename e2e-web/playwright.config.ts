@@ -2,22 +2,23 @@ import { defineConfig, devices } from "@playwright/test";
 
 // The RabbitHole web SPA is a Leptos/wasm app. It is built with `trunk build`
 // (output in `crates/ui-web/dist/`) and served by `burrow --http`. This harness
-// does not build artifacts. The smoke test drives an already-running burrow;
-// theme.spec.ts and routes.spec.ts launch isolated servers when artifact paths
-// are provided.
-// See README.md for both launch recipes.
+// does not build artifacts. Providing both artifact paths runs every suite
+// against isolated servers. The smoke test alone also supports a manual server.
 //
 // BASE_URL points at the running burrow HTTP surface (default matches the
-// README's `--http-addr`). PW_CHROMIUM overrides the browser binary; it
-// defaults to the Chromium pre-installed in this environment under
-// PLAYWRIGHT_BROWSERS_PATH, so `playwright install` is never needed.
+// README's manual example). PW_CHROMIUM overrides the browser binary;
+// otherwise Playwright resolves the revision installed for its locked package.
 const baseURL = process.env.BASE_URL ?? "http://127.0.0.1:8791";
 
-// Resolve the pre-installed Chromium. The environment ships it at
-// /opt/pw-browsers/chromium-<rev>/chrome-linux/chrome; PW_CHROMIUM lets CI or a
-// dev override it. When unset we let Playwright use its bundled resolution via
-// PLAYWRIGHT_BROWSERS_PATH (channel/executablePath both omitted).
+// Developers may reuse an existing Chromium; CI installs the pinned revision.
 const executablePath = process.env.PW_CHROMIUM || undefined;
+
+if (!!process.env.BURROW_BIN !== !!process.env.SPA_DIST) {
+  throw new Error("Provide both BURROW_BIN and SPA_DIST, or neither for manual smoke testing");
+}
+if (process.env.CI && (!process.env.BURROW_BIN || !process.env.SPA_DIST)) {
+  throw new Error("CI must provide BURROW_BIN and SPA_DIST; isolated browser tests must not be skipped");
+}
 
 export default defineConfig({
   testDir: "./tests",
@@ -25,7 +26,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: 0,
   workers: 1,
-  reporter: [["list"]],
+  reporter: [["list"], ["html", { open: "never" }]],
   timeout: 30_000,
   expect: { timeout: 15_000 },
   use: {

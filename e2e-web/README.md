@@ -1,153 +1,92 @@
-# RabbitHole web SPA — Playwright E2E smoke test
+# RabbitHole browser integration tests
 
-A real-browser end-to-end test of the RabbitHole web SPA (Leptos/wasm, in
-`crates/ui-web`) as served by the `burrow` server's embedded HTTP surface.
+These tests run the real Leptos/WASM application against real `burrow` servers
+in Chromium. CI builds both artifacts, installs the browser revision selected
+by the locked Playwright package, and runs all five tests.
 
-The test boots the actual wasm app in headless Chromium, asserts the
-connect/login view renders, performs a **guest login** through the real UI
-(fills the handle, clicks *Connect*), and asserts the app routes to the lobby.
+## Run the isolated suite
 
-The smoke test drives an already-running `burrow`. The three manual steps below
-are its recipe. The separate theme and route regression suites launch isolated servers
-from existing build artifacts; see its instructions at the end.
+Prerequisites: Unix, Rust with the `wasm32-unknown-unknown` target, Trunk
+**0.21.14**, and Node **22.13 or newer**. The server control socket is Unix-only;
+the account-preference fixture uses Node's built-in SQLite module.
 
-## Prerequisites
-
-- **Rust** with the `wasm32-unknown-unknown` target
-  (`rustup target add wasm32-unknown-unknown`).
-- **[`trunk`](https://trunkrs.dev/)** — `cargo install trunk --locked`. Trunk
-  auto-fetches a matching `wasm-bindgen-cli` on first build; if it reports a
-  version mismatch, install the version pinned in `Cargo.lock`
-  (`cargo install wasm-bindgen-cli --version <that-version> --locked`).
-- **Node 22** and npm.
-- **Chromium** for Playwright. In the standard dev/CI image it is
-  pre-installed under `PLAYWRIGHT_BROWSERS_PATH`; point `PW_CHROMIUM` at the
-  binary (see step 3). Otherwise run `npx playwright install chromium` once.
-
-## 1. Build the SPA
+From the repository root:
 
 ```sh
-cd crates/ui-web
-trunk build            # add --release for an optimized build; debug is fine
-```
-
-Output lands in `crates/ui-web/dist/` (gitignored). Note its absolute path for
-the next step.
-
-## 2. Run burrow serving that dist
-
-From the workspace root:
-
-```sh
-cargo build -p burrow
-
-DATA=$(mktemp -d)
-target/debug/burrow \
-  --data-dir "$DATA" \
-  --http \
-  --http-addr 127.0.0.1:8791 \
-  --web-root "$(pwd)/crates/ui-web/dist" \
-  run &
-```
-
-`--web-root`/`--http-addr` each imply `--http`. Confirm the SPA index is being
-served:
-
-```sh
-curl -sSf http://127.0.0.1:8791/ | grep -q '<title>RabbitHole</title>' && echo OK
-```
-
-The guest login in the test is a client-side connect (the connect view signs in
-with just a handle), so no account seeding is required for the smoke test. If
-you later add tests that need a password account:
-`target/debug/burrow --data-dir "$DATA" ctl account-create <login> <password>`.
-
-## 3. Install deps and run the test
-
-```sh
+cargo build --locked -p burrow --bin burrow
+(cd crates/ui-web && trunk build --locked --public-url /)
 cd e2e-web
-npm install            # set PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 to reuse a
-                       # pre-installed Chromium
+npm ci
+./node_modules/.bin/playwright install chromium
 
-# Point at the pre-installed Chromium (skip if you ran `playwright install`):
-export PW_CHROMIUM=/opt/pw-browsers/chromium-1194/chrome-linux/chrome
-
-# BASE_URL defaults to http://127.0.0.1:8791 (matches step 2). Override if you
-# ran burrow on a different address:
-# export BASE_URL=http://127.0.0.1:8791
-
-npm test               # == npx playwright test
-```
-
-### Configuration knobs
-
-| Env var       | Default                     | Purpose                                   |
-| ------------- | --------------------------- | ----------------------------------------- |
-| `BASE_URL`    | `http://127.0.0.1:8791`     | Where the running burrow serves the SPA.  |
-| `PW_CHROMIUM` | (Playwright's bundled path) | Absolute path to the Chromium binary.     |
-
-## What the test proves
-
-`tests/smoke.spec.ts` (single test):
-
-1. **The wasm app boots.** `index.html` ships an empty `<body>`; the connect
-   view's *Connect* button and `#rh-login-handle` input exist only after the
-   wasm mounts, so their visibility is the "app is alive" assertion.
-2. **A real interaction works.** It fills the handle field and clicks *Connect*.
-3. **Post-login routing works.** It asserts the primary nav
-   (`nav.rh-nav[aria-label="Primary"]`, only rendered once signed in), its
-   *Lobby* link, and the lobby compose box
-   (`aria-label="Message the lobby"`) all become visible.
-
-All waits are deterministic (`expect(...).toBeVisible()`); there are no fixed
-sleeps.
-
-## Signed-theme regression suite
-
-`tests/theme.spec.ts` boots the actual SPA against temporary local burrows. Build
-the SPA and `burrow` as above, install npm dependencies, then run from `e2e-web`:
-
-```sh
 BURROW_BIN="$(pwd)/../target/debug/burrow" \
 SPA_DIST="$(pwd)/../crates/ui-web/dist" \
-npm run test:theme
+npm test
 ```
 
-Set `PW_CHROMIUM` if reusing a browser installed outside Playwright's default
-location. The suite requires Unix (the server control socket is Unix-only) and
-Node **22.13 or newer** for the built-in SQLite fixture helper. It does not build
-artifacts or install browsers. Without both artifact variables, normal smoke
-runs skip these tests.
+Trunk needs a `wasm-bindgen` CLI matching the `wasm-bindgen` package version in
+`Cargo.lock`. It can resolve the matching helper itself. CI reads that exact
+version from the lockfile, installs it explicitly, checks the executable's
+version, and supplies `TRUNK_TOOLS_WASM_BINDGEN` to the build. Neither build
+enables the seeded `demo` feature.
 
-Each test seeds an account, binds HTTP/WebSocket listeners on random loopback
-ports, disables public discovery, and deletes its temporary data after stopping
-the servers. Its connection budget allows rapid asset reloads without testing
-production rate limits. Browser requests to external hosts are blocked. The opt-out test
-seeds the existing account preference in the temporary SQLite database; it does
-not assume a client-side opt-out control exists.
+`npm ci` uses `package-lock.json`; Playwright and its Chromium revision are
+pinned together. Set `PW_CHROMIUM` to an existing compatible browser executable
+to reuse a local installation instead of downloading one. Linux machines may
+also need `playwright install --with-deps chromium`, as used in CI.
 
-The assertions cover signed theme application after login, live publication and
-clear without navigating, High Contrast precedence, independent themes while
-switching burrows, background updates, reconnect after an offline theme change,
-session restoration after loading a fresh document, and server-side account opt-out. They inspect
-computed CSS variables and observe real protocol replies so a default palette
-shown before authentication cannot masquerade as a successful clear.
-Service workers are blocked to isolate socket/theme behavior from shell caching.
-The route suite below separately checks deep links and hard reloads.
+Providing `BURROW_BIN` and `SPA_DIST` starts isolated loopback servers with
+temporary databases and public discovery disabled. Each test stops its servers
+and removes its data in `finally`. Browser directory requests to external hosts
+are blocked. Service workers are disabled so cached shells cannot hide an HTTP
+or WebSocket failure. No credentials or tokens are recorded by protocol observers.
 
-## Deep-link and reload regression suite
+## What runs
 
-With the same built artifacts and browser configuration, run from `e2e-web`:
+| Command | Checks |
+| --- | --- |
+| `npm run test:smoke` | App mount, real guest sign-in (`AuthGuest`/`AuthOk`), connected lobby and composer. |
+| `npm run test:theme` | Signed theme loading, live publish/clear, High Contrast, multiple burrows, reconnect, session restoration, and account opt-out (two tests). |
+| `npm run test:routes` | Direct `/lobby`, actual hard reload and token resume, nested routes and real JS/WASM assets, missing-asset 404s. |
+| `npm run test:keepalive` | Initial app load and immediate reload with every production connection/request rate limit unchanged. |
+
+Theme and route fixtures use a generous connection budget to isolate their
+behavior. `keepalive.spec.ts` explicitly requests default limits and disables
+the browser cache through request interception; both document loads must fetch
+real assets without connection resets or HTTP errors. It introduces no pause
+or rate-budget reset between loads.
+
+The account opt-out test seeds the existing preference in its temporary database;
+it does not assume an absent client-side opt-out control exists. Route tests
+observe token resumption after reload without another password submission.
+
+## Manual guest smoke
+
+The guest smoke also supports an already-running server. Omit both artifact
+variables and provide its HTTP origin and WebSocket address:
 
 ```sh
-BURROW_BIN="$(pwd)/../target/debug/burrow" \
-SPA_DIST="$(pwd)/../crates/ui-web/dist" \
-npm run test:routes
+BASE_URL=http://127.0.0.1:8791 \
+WS_URL=ws://127.0.0.1:4654 \
+npm run test:smoke
 ```
 
-`tests/routes.spec.ts` reuses the isolated server fixture with service workers
-blocked. It opens `/lobby` directly in a fresh browser, verifies HTTP 200 and a
-mounted app, signs in through the password form, and performs a real hard reload.
-The test observes a token-resume request and successful authentication without
-another password request. It also boots nested routes with real JS/WASM assets
-and verifies missing assets remain 404 instead of receiving the HTML shell.
+`BASE_URL` defaults to `http://127.0.0.1:8791`; absent `WS_URL`, the form's
+address is used. The other suites skip when build artifacts are absent. CI
+rejects missing artifact variables before test discovery, so a passing CI job
+cannot silently omit its isolated browser tests.
+
+## Failure evidence and cleanup
+
+Playwright retains failure traces and screenshots in `test-results/`, and its
+HTML report in `playwright-report/` includes attached server/protocol diagnostics.
+Open it with `./node_modules/.bin/playwright show-report`. CI uploads those
+directories plus tool-install, WASM/server-build, and browser-test logs on failure.
+
+CI sets `BURROW_E2E_ROOT` to an owned temporary directory. Fixtures store their
+PID and a bounded server log there until disposal. An `always()` cleanup step
+checks Linux `/proc` against the exact executable and data-directory arguments
+before stopping any surviving fixture, preserving its log, and removing its
+temporary data. This is a backstop for interrupted workers; ordinary local
+tests clean up without it. `npm run cleanup` invokes that Linux-only backstop
+when both `BURROW_E2E_ROOT` and `BURROW_BIN` are set.
