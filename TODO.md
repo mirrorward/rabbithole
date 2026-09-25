@@ -138,8 +138,10 @@ where headless-verifiable, tested:
   (container is the single Tab stop; rows tabindex=-1; modifiers pass through),
   one 28px control height in the title bar, palette pop-in, pip pop on arrival
   only, fullscreen reclaims the title strip (with initial-state sync).
-  Deferred: focus recovery when a focused row is removed; board rows stay
-  individual Tab stops (router <A> takes no tabindex in leptos 0.6).
+  **RH-2 focus recovery**: a removed focused row moves to its nearest surviving
+  neighbor, or the empty list; filtering, explicit blur, focus handed to another
+  control, and route disposal never steal focus. A real-browser regression drives
+  the live Members list. Board rows still use individual Tab stops (RH-3).
 - **The rail is one icon family** — rings (home/brand), smiley (people), arrow-into-
   tray (transfers), bust (you), plus — same 20px box, same stroke, contact-sheeted.
 - **Native-feel pass** (50-agent audit, 20 confirmed findings) — real Tauri drag

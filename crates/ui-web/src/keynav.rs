@@ -6,8 +6,8 @@
 //! file table — is the definitive web-form experience, and it was the largest
 //! interaction gap left by the native-feel audit.
 //!
-//! The index arithmetic is pure and host-tested here; the wasm half only
-//! finds the rows inside the event's own list container and moves focus.
+//! The index arithmetic is pure and host-tested here; the wasm half finds
+//! rows inside their own list and recovers focus when a row disappears.
 //! Rows are real `<button>`/`<a>` elements, so Enter/Space activation and
 //! scroll-into-view-on-focus come from the platform for free.
 
@@ -35,6 +35,184 @@ pub fn next_index(current: Option<usize>, len: usize, key: &str) -> Option<usize
         "Home" => Some(0),
         "End" => Some(last),
         _ => None,
+    }
+}
+
+/// Find the nearest surviving neighbor after a focused row disappears.
+/// Prefer the next row on a tie, then the previous row at the end. Compare
+/// identities rather than reusing an index: several rows may disappear in
+/// the same render. If every row was replaced, keep the nearest position.
+pub fn recovery_index<T: PartialEq>(before: &[T], after: &[T], focused: &T) -> Option<usize> {
+    if after.is_empty() {
+        return None;
+    }
+    let current = before.iter().position(|row| row == focused)?;
+    for distance in 1..before.len() {
+        for candidate in [current.checked_add(distance), current.checked_sub(distance)] {
+            if let Some(next) = candidate
+                .and_then(|i| before.get(i))
+                .and_then(|row| after.iter().position(|remaining| remaining == row))
+            {
+                return Some(next);
+            }
+        }
+    }
+    Some(current.min(after.len() - 1))
+}
+
+/// Bind to a list's `node_ref` alongside its keydown handler. Focus tracking
+/// is independent of arrow navigation, so clicked/programmatically focused
+/// rows recover too. The observer and listeners share the mounted list's
+/// lifetime; disposal never focuses a replacement route or another list.
+pub fn track_removal<T: leptos::html::ElementDescriptor + Clone + 'static>(
+    _row_selector: &'static str,
+) -> leptos::NodeRef<T> {
+    let node = leptos::create_node_ref::<T>();
+    #[cfg(target_arch = "wasm32")]
+    leptos::create_render_effect(move |_| {
+        // Synchronous setup avoids a deferred effect running after the
+        // owning route has already been disposed during a burrow switch.
+        if let Some(list) = node.get() {
+            removal::install((*list.into_any()).clone(), _row_selector);
+        }
+    });
+    node
+}
+
+#[cfg(target_arch = "wasm32")]
+mod removal {
+    use std::{cell::RefCell, rc::Rc};
+
+    use leptos::{ev, on_cleanup, queue_microtask, window_event_listener};
+    use wasm_bindgen::{closure::Closure, JsCast};
+    use web_sys::{Element, HtmlElement, MutationObserver, MutationObserverInit};
+
+    struct FocusedRow {
+        focused: Element,
+        row: Element,
+        before: Vec<Element>,
+    }
+
+    fn rows(list: &HtmlElement, selector: &str) -> Vec<Element> {
+        let Ok(nodes) = list.query_selector_all(selector) else {
+            return Vec::new();
+        };
+        (0..nodes.length())
+            .filter_map(|i| nodes.get(i)?.dyn_into::<Element>().ok())
+            .collect()
+    }
+
+    fn snapshot(list: &HtmlElement, selector: &str, focused: Element) -> Option<FocusedRow> {
+        if !list.contains(Some(&focused)) {
+            return None;
+        }
+        let before = rows(list, selector);
+        let row = before
+            .iter()
+            .find(|row| row.contains(Some(&focused)))?
+            .clone();
+        Some(FocusedRow {
+            focused,
+            row,
+            before,
+        })
+    }
+
+    pub(super) fn install(list: HtmlElement, selector: &'static str) {
+        let Some(document) = list.owner_document() else {
+            return;
+        };
+        let tracked = Rc::new(RefCell::new(
+            document
+                .active_element()
+                .and_then(|active| snapshot(&list, selector, active)),
+        ));
+        let changed = {
+            let list = list.clone();
+            let document = document.clone();
+            let tracked = tracked.clone();
+            Closure::<dyn FnMut(js_sys::Array, MutationObserver)>::new(move |_, _| {
+                // Take the state before calling focus(), whose synchronous
+                // focus-in event must be free to record the replacement row.
+                let Some(previous) = tracked.borrow_mut().take() else {
+                    return;
+                };
+                if !list.is_connected() || !document.has_focus().unwrap_or(false) {
+                    return;
+                }
+                let active = document.active_element();
+                if let Some(current) = active.clone().and_then(|a| snapshot(&list, selector, a)) {
+                    *tracked.borrow_mut() = Some(current);
+                    return;
+                }
+                // A surviving focused row needs no recovery. Nor does a
+                // removal after focus was deliberately handed elsewhere.
+                if list.contains(Some(&previous.row))
+                    || active.as_ref().is_some_and(|a| {
+                        Some(a) != document.body().as_ref().map(|body| body.as_ref())
+                    })
+                {
+                    return;
+                }
+                let remaining = rows(&list, selector);
+                let replacement =
+                    super::recovery_index(&previous.before, &remaining, &previous.row)
+                        .and_then(|i| remaining[i].dyn_ref::<HtmlElement>())
+                        .unwrap_or(&list);
+                let _ = replacement.focus();
+            })
+        };
+        let Ok(observer) = MutationObserver::new(changed.as_ref().unchecked_ref()) else {
+            return;
+        };
+        let options = MutationObserverInit::new();
+        options.set_child_list(true);
+        options.set_subtree(true);
+        if observer.observe_with_options(&list, &options).is_err() {
+            return;
+        }
+        let focus_in = {
+            let list = list.clone();
+            let tracked = tracked.clone();
+            window_event_listener(ev::focusin, move |event| {
+                *tracked.borrow_mut() = event
+                    .target()
+                    .and_then(|target| target.dyn_into::<Element>().ok())
+                    .and_then(|target| snapshot(&list, selector, target));
+            })
+        };
+        let focus_out = {
+            let tracked = tracked.clone();
+            window_event_listener(ev::focusout, move |event| {
+                let Some(target) = event.target().and_then(|t| t.dyn_into::<Element>().ok()) else {
+                    return;
+                };
+                if event.related_target().is_some() {
+                    tracked.borrow_mut().take();
+                    return;
+                }
+                // Browsers differ on firing blur during removal. Check at
+                // the end of the render: explicit blur of a surviving row
+                // relinquishes focus, while detachment retains its snapshot.
+                let tracked = tracked.clone();
+                queue_microtask(move || {
+                    let mut state = tracked.borrow_mut();
+                    if state
+                        .as_ref()
+                        .is_some_and(|s| s.focused == target && s.row.is_connected())
+                    {
+                        state.take();
+                    }
+                });
+            })
+        };
+        on_cleanup(move || {
+            observer.disconnect();
+            focus_in.remove();
+            focus_out.remove();
+            tracked.borrow_mut().take();
+            drop(changed);
+        });
     }
 }
 
@@ -114,6 +292,30 @@ pub fn handle(_ev: &leptos::ev::KeyboardEvent, _row_selector: &str) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removal_prefers_the_nearest_survivor_and_empty_lists_have_no_row() {
+        let before = ["a", "b", "c", "d", "e"];
+        assert_eq!(
+            recovery_index(&before, &["a", "b", "d", "e"], &"c"),
+            Some(2)
+        );
+        assert_eq!(
+            recovery_index(&before, &["a", "b", "c", "d"], &"e"),
+            Some(3)
+        );
+        assert_eq!(
+            recovery_index(&before, &["b", "c", "d", "e"], &"a"),
+            Some(0)
+        );
+        assert_eq!(recovery_index(&before, &[], &"c"), None);
+        // An earlier removal changes positions without changing neighbors.
+        assert_eq!(recovery_index(&before, &["b", "d", "e"], &"c"), Some(1));
+        assert_eq!(recovery_index(&before, &["b", "e"], &"c"), Some(0));
+        // A keyed render may replace every element (for example on rename).
+        assert_eq!(recovery_index(&before, &["x", "y", "z"], &"b"), Some(1));
+        assert_eq!(recovery_index(&before, &["x"], &"e"), Some(0));
+    }
 
     #[test]
     fn arrows_walk_the_list_and_clamp_at_the_edges() {

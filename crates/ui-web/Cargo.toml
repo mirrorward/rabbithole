@@ -63,6 +63,11 @@ web-sys = { workspace = true, features = [
     # PWA install-readiness (`src/pwa.rs`): navigator.serviceWorker.register.
     "Navigator",
     "ServiceWorkerContainer",
+    # List focus recovery observes the real rendered rows, including updates
+    # that arrive while focus came from a click rather than an arrow key.
+    "MutationObserver",
+    "MutationObserverInit",
+    "FocusEvent",
     # Route-change focus management (`src/a11y.rs`):
     # document.getElementById(...).focus(), so keyboard and screen-reader
     # users land on the new view's <h1> after client-side navigation.

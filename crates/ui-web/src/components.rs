@@ -1655,6 +1655,7 @@ fn copy_text(text: &str, app: AppState) {
 /// chooses, Escape or a click anywhere else closes it.
 #[component]
 fn PresenceControl() -> impl IntoView {
+    let status_node = crate::keynav::track_removal(".rh-menu-item");
     use rabbithole_proto::presence::PresenceState;
     const CHOICES: [(PresenceState, &str, &str); 3] = [
         (PresenceState::Online, "Online", "rh-pres on"),
@@ -1726,6 +1727,7 @@ fn PresenceControl() -> impl IntoView {
                     class="rh-menu"
                     role="listbox"
                     aria-label="Your status"
+                    node_ref=status_node
                     on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-menu-item")
                 >
                     {CHOICES
@@ -2403,6 +2405,7 @@ fn BurrowBrowser(
     #[prop(into)] on_open: Callback<()>,
     #[prop(optional)] standalone: bool,
 ) -> impl IntoView {
+    let burrows_node = crate::keynav::track_removal(".rh-glass-row");
     use crate::servers::DirectorySource;
     let app = expect_context::<AppState>();
     let browsing = Browsing {
@@ -2569,6 +2572,7 @@ fn BurrowBrowser(
                 tabindex="0"
                 role="group"
                 aria-label="Burrows to connect to. Arrow keys move, Return connects."
+                node_ref=burrows_node
                 on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-glass-row")
             >
                 <Show when=move || adding.get() fallback=|| ()>
@@ -3606,6 +3610,7 @@ pub fn Composer(
 /// The board tree: every board links to its `/boards/:slug` reading view.
 #[component]
 pub fn Boards() -> impl IntoView {
+    let boards_node = crate::keynav::track_removal(".rh-board-link");
     let app = expect_context::<AppState>();
     let state = app.focused().state;
     app.each_sign_in(move || app.load_boards());
@@ -3633,7 +3638,7 @@ pub fn Boards() -> impl IntoView {
                         sub="This burrow hasn't opened any boards to post on."
                     />
                 </Show>
-                <ul class="rh-tree" tabindex="0" aria-label="Boards" on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-board-link")>
+                <ul class="rh-tree" tabindex="0" aria-label="Boards" node_ref=boards_node on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-board-link")>
                     <For
                         each=move || state.with(|s| s.boards.clone())
                         key=|b| b.slug.clone()
@@ -3667,6 +3672,7 @@ pub fn Boards() -> impl IntoView {
 /// A single board: its thread list plus an inline thread/post reading view.
 #[component]
 pub fn BoardView() -> impl IntoView {
+    let threads_node = crate::keynav::track_removal(".rh-thread-link");
     let app = expect_context::<AppState>();
     let state = app.focused().state;
     let params = use_params_map();
@@ -3755,7 +3761,7 @@ pub fn BoardView() -> impl IntoView {
                 // the main content — so it stays a narrow column with a dense
                 // two-line row (subject, then author · replies · activity)
                 // rather than a squeezed table.
-                <ul class="rh-tree rh-threadtable" tabindex="0" aria-label="Threads" on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-thread-link")>
+                <ul class="rh-tree rh-threadtable" tabindex="0" aria-label="Threads" node_ref=threads_node on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-thread-link")>
                     <For
                         each=move || state.with(|s| s.threads.clone())
                         key=|t| t.id.clone()
@@ -3938,6 +3944,7 @@ pub fn BoardView() -> impl IntoView {
 /// box. Sending appends locally via [`AppState::send_dm`].
 #[component]
 pub fn Dms() -> impl IntoView {
+    let conversations_node = crate::keynav::track_removal(".rh-dm-peer");
     let app = expect_context::<AppState>();
     let state = app.focused().state;
     let draft = create_rw_signal(String::new());
@@ -4025,7 +4032,7 @@ pub fn Dms() -> impl IntoView {
                         on:input=move |ev| new_peer.set(event_target_value(&ev))
                     />
                 </form>
-                <ul tabindex="0" aria-label="Conversations" on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-dm-peer")>
+                <ul tabindex="0" aria-label="Conversations" node_ref=conversations_node on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-dm-peer")>
                     <For
                         each=move || state.with(|s| s.dm_threads.clone())
                         key=|t| t.id.clone()
@@ -4195,6 +4202,7 @@ pub fn Dms() -> impl IntoView {
 /// member.
 #[component]
 pub fn Directory() -> impl IntoView {
+    let members_node = crate::keynav::track_removal(".rh-member-link");
     let app = expect_context::<AppState>();
     let state = app.focused().state;
     app.each_sign_in(move || app.load_members());
@@ -4248,7 +4256,7 @@ pub fn Directory() -> impl IntoView {
                         }
                     })}
                 </Show>
-                <ul class="rh-tree" tabindex="0" aria-label="Members" on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-member-link")>
+                <ul class="rh-tree" tabindex="0" aria-label="Members" node_ref=members_node on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-member-link")>
                     <For
                         each=move || state.with(|s| s.matching_members())
                         // Keyed by handle ALONE, with presence read reactively
@@ -4480,6 +4488,7 @@ fn AreaList() -> impl IntoView {
 /// child-node list.
 #[component]
 fn FolderBrowser() -> impl IntoView {
+    let files_node = crate::keynav::track_removal(".rh-file-link");
     let app = expect_context::<AppState>();
     let files = app.focused().files;
     // Type-to-filter state, and the rows that survive it. Folders always show:
@@ -4666,7 +4675,7 @@ fn FolderBrowser() -> impl IntoView {
         >
             <p class="rh-empty">"Nothing matches that filter."</p>
         </Show>
-        <ul class="rh-tree rh-filetable" tabindex="0" aria-label="Files" on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-file-link")>
+        <ul class="rh-tree rh-filetable" tabindex="0" aria-label="Files" node_ref=files_node on:keydown:undelegated=|ev| crate::keynav::handle(&ev, ".rh-file-link")>
             <For
                 each=visible
                 // A row shows its name and size: a rename must re-render it.
