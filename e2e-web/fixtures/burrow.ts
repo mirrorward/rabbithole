@@ -44,7 +44,11 @@ export class TestBurrow {
     }
   }
 
-  static async create(name: string, accent: string): Promise<TestBurrow> {
+  static async create(
+    name: string,
+    accent: string,
+    options: { rateLimits?: "default" | "generous" } = {},
+  ): Promise<TestBurrow> {
     const binary = resolve(process.env.BURROW_BIN!);
     const dist = resolve(process.env.SPA_DIST!);
     await access(binary);
@@ -62,10 +66,12 @@ export class TestBurrow {
       `http_addr = "127.0.0.1:${http}"`,
       `http_web_root = ${JSON.stringify(dist)}`,
       "announce_enabled = false",
-      // The embedded HTTP server opens one connection per asset. Immediate
-      // reloads exercise SPA behavior, not the production anti-abuse budget.
-      "ratelimit_conn_burst = 256",
-      "ratelimit_conn_per_min = 600",
+      // Theme/route tests isolate their behavior from anti-abuse budgets.
+      // The keepalive acceptance test leaves every production limit intact.
+      ...(options.rateLimits === "default" ? [] : [
+        "ratelimit_conn_burst = 256",
+        "ratelimit_conn_per_min = 600",
+      ]),
       `theme_accent = ${JSON.stringify(accent)}`,
       '[theme_tokens_shared]',
       '"--rh-radius" = "0.75rem"',

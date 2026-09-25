@@ -39,10 +39,13 @@
 //!
 //! Deliberately minimal and hand-rolled over a tokio `TcpStream`, in the
 //! same spirit as [`crate::syndication`]'s hand-rolled *client* (no new
-//! dependencies): `GET` and `HEAD` only (405 otherwise), one request per
-//! connection (`Connection: close` framing — no keep-alive state machine),
-//! a hard [`MAX_HEAD_BYTES`] cap on the request head, `Content-Length` on
-//! every response, and a `Content-Type` chosen by a small extension map.
+//! dependencies): `GET` and `HEAD` only (405 otherwise), with bounded,
+//! sequential HTTP/1.1 connection reuse. Pipelined requests retain their
+//! order. HTTP/1.0 and `Connection: close` requests close after one response.
+//! Request bodies and ambiguous framing are refused, closing the connection
+//! without processing trailing bytes. Each connection has an idle/head-read
+//! deadline, byte budget and request-count limit. Every response carries
+//! `Content-Length` and a `Content-Type` chosen by a small extension map.
 //! Connections pass the `conn` rate class at accept and a per-IP request
 //! budget (the `legacy` class) per request, like the other legacy surfaces.
 //!
@@ -68,7 +71,7 @@
 //!   including an index served as a client-route fallback.
 //! - **`HEAD` mirrors `GET`** — identical status and headers (including
 //!   `Content-Length`), no body. `HEAD` does not bump download counters.
-//! - **Close discipline**: responses end with an explicit FIN + bounded
+//! - **Close discipline**: completed connections end with an explicit FIN + bounded
 //!   drain to the peer's FIN (the [`crate::hotline`] `serve_htxf`
 //!   discipline), so buffered bytes are delivered rather than discarded by
 //!   an RST from a bare socket drop.
@@ -83,21 +86,31 @@ use rabbithole_blobs::BlobId;
 use rabbithole_server_core::files::{FileError, KIND_FILE};
 use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::Caps;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 use crate::fed_catalog::public_subject;
 use crate::Shared;
 
-/// Request head cap (request line + headers). Anything larger is a 400.
+/// Request head cap, including its terminating blank line. Larger = 400 + close.
 pub const MAX_HEAD_BYTES: usize = 8 * 1024;
 
-/// Whole-request deadline: read the head, do the work, write the response.
+/// Maximum completed requests on one connection, including errors.
+pub const MAX_CONNECTION_REQUESTS: usize = 100;
+
+/// Total incoming request-head bytes on one connection. Bodies are unsupported.
+pub const MAX_CONNECTION_BYTES: usize = 64 * 1024;
+
+/// Maximum idle time / time to finish a whole head, not reset by short reads.
+pub const KEEP_ALIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Per-response deadline: route the request and write the complete response.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Post-response drain deadline (see the module close-discipline note).
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_DRAIN_BYTES: u64 = 64 * 1024;
 
 /// Bind + serve the embedded HTTP surface. Returns the bound address (useful
 /// when the config asked for port 0) and the accept-loop task handle.
@@ -123,12 +136,7 @@ pub async fn spawn_http(
             let shared = shared.clone();
             let web_root = web_root.clone();
             tokio::spawn(async move {
-                let served = tokio::time::timeout(
-                    REQUEST_TIMEOUT,
-                    serve_conn(sock, &shared, web_root.as_deref(), peer.ip()),
-                )
-                .await;
-                if let Ok(Err(e)) = served {
+                if let Err(e) = serve_conn(sock, &shared, web_root.as_deref(), peer.ip()).await {
                     tracing::debug!(%peer, "http connection error: {e}");
                 }
             });
@@ -137,8 +145,9 @@ pub async fn spawn_http(
     Ok((local, handle))
 }
 
-/// One connection = one request. Reads a capped head, routes it, writes the
-/// response, then closes with the FIN + drain discipline.
+/// Serve requests in order, preserving bytes read ahead for the next head.
+/// Any framing refusal closes rather than trying to find another request in
+/// potentially body-bearing bytes (RFC 9112 section 9.3).
 async fn serve_conn(
     mut sock: TcpStream,
     shared: &Arc<Shared>,
@@ -146,46 +155,140 @@ async fn serve_conn(
     peer_ip: IpAddr,
 ) -> Result<()> {
     sock.set_nodelay(true).ok();
-    let response = match read_head(&mut sock).await? {
-        Some(head) => respond(&head, shared, web_root, peer_ip).await,
-        None => Response::text(400, "Bad Request", "request head too large or malformed\n"),
-    };
-    sock.write_all(&response.to_bytes()).await?;
-    // FIN, then drain to the peer's FIN so buffered bytes are delivered
-    // rather than discarded by an RST from a bare drop (serve_htxf rule).
-    let _ = sock.shutdown().await;
-    let mut sink = [0u8; 1024];
-    let drain = async {
-        while let Ok(n) = sock.read(&mut sink).await {
-            if n == 0 {
+    let mut pending = Vec::with_capacity(MAX_HEAD_BYTES);
+    let mut consumed = 0;
+    let result: Result<()> = async {
+        for count in 1..=MAX_CONNECTION_REQUESTS {
+            let read = read_head(
+                &mut sock,
+                &mut pending,
+                MAX_CONNECTION_BYTES - consumed,
+                KEEP_ALIVE_IDLE_TIMEOUT,
+            )
+            .await;
+            let (head, refusal) = match read {
+                Ok(HeadRead::Complete(head)) => {
+                    consumed += head.len() + 4;
+                    (head, None)
+                }
+                Ok(HeadRead::Closed) => break,
+                Ok(HeadRead::Rejected) => (
+                    std::mem::take(&mut pending),
+                    Some(Response::text(
+                        400,
+                        "Bad Request",
+                        "request head too large or incomplete\n",
+                    )),
+                ),
+                Err(e) => return Err(e.into()),
+                Ok(HeadRead::TimedOut) if pending.is_empty() => break, // quiet idle close
+                Ok(HeadRead::TimedOut) => (
+                    std::mem::take(&mut pending),
+                    Some(Response::text(
+                        408,
+                        "Request Timeout",
+                        "request head timed out\n",
+                    )),
+                ),
+            };
+            // Even a refused/rate-limited HEAD has no response body. Do this
+            // before parsing so malformed headers cannot break HEAD framing.
+            let head_only = head.split(|b| b.is_ascii_whitespace()).next() == Some(b"HEAD");
+            let reuse = tokio::time::timeout(REQUEST_TIMEOUT, async {
+                let mut keep_alive = false;
+                // Connection reuse must not bypass the per-IP request budget.
+                let mut response = if !shared.rate_allow(Scope::Ip(peer_ip), rl::LEGACY) {
+                    Response::text(429, "Too Many Requests", "rate limited; slow down\n")
+                } else if let Some(refusal) = refusal {
+                    refusal
+                } else {
+                    match parse_request(&head) {
+                        Ok(req) => {
+                            keep_alive = req.keep_alive
+                                && count < MAX_CONNECTION_REQUESTS
+                                && consumed < MAX_CONNECTION_BYTES;
+                            respond(&req, shared, web_root).await
+                        }
+                        Err(refusal) => refusal,
+                    }
+                };
+                response.head_only = head_only;
+                response.close = !keep_alive;
+                sock.write_all(&response.to_bytes()).await?;
+                Ok::<_, std::io::Error>(keep_alive)
+            })
+            .await??;
+            if !reuse {
                 break;
             }
         }
-    };
-    let _ = tokio::time::timeout(DRAIN_TIMEOUT, drain).await;
-    Ok(())
+        Ok(())
+    }
+    .await;
+    // FIN, then drain to the peer's FIN so buffered bytes are delivered
+    // rather than discarded by an RST. Both time and discarded bytes are
+    // bounded; drained bytes are never parsed or routed.
+    let _ = sock.shutdown().await;
+    let _ = tokio::time::timeout(
+        DRAIN_TIMEOUT,
+        tokio::io::copy(&mut sock.take(MAX_DRAIN_BYTES), &mut tokio::io::sink()),
+    )
+    .await;
+    result
 }
 
-/// Read the request head (through the blank line), capped at
-/// [`MAX_HEAD_BYTES`]. `Ok(None)` = over the cap or EOF before the blank
-/// line — answer 400. Any body after the head is ignored (GET/HEAD have
-/// none, and everything else is refused with 405 anyway).
-async fn read_head(sock: &mut TcpStream) -> Result<Option<Vec<u8>>> {
-    let mut head = Vec::with_capacity(1024);
+enum HeadRead {
+    Complete(Vec<u8>),
+    Closed,
+    Rejected,
+    TimedOut,
+}
+
+/// Retain pipelined bytes after one head. Never read beyond the per-head
+/// buffer cap or the connection's remaining incoming byte budget. A single
+/// deadline covers the whole head, so trickled bytes cannot keep it alive.
+async fn read_head(
+    sock: &mut (impl AsyncRead + Unpin),
+    pending: &mut Vec<u8>,
+    remaining: usize,
+    deadline: Duration,
+) -> std::io::Result<HeadRead> {
+    match tokio::time::timeout(deadline, read_head_inner(sock, pending, remaining)).await {
+        Ok(result) => result,
+        Err(_) => Ok(HeadRead::TimedOut),
+    }
+}
+
+async fn read_head_inner(
+    sock: &mut (impl AsyncRead + Unpin),
+    pending: &mut Vec<u8>,
+    remaining: usize,
+) -> std::io::Result<HeadRead> {
+    let limit = MAX_HEAD_BYTES.min(remaining);
     let mut buf = [0u8; 1024];
     loop {
-        if let Some(end) = find_subslice(&head, b"\r\n\r\n") {
-            head.truncate(end);
-            return Ok(Some(head));
+        if let Some(end) = find_subslice(pending, b"\r\n\r\n") {
+            let size = end + 4;
+            if size > limit {
+                return Ok(HeadRead::Rejected);
+            }
+            let head = pending[..end].to_vec();
+            pending.drain(..size);
+            return Ok(HeadRead::Complete(head));
         }
-        if head.len() >= MAX_HEAD_BYTES {
-            return Ok(None);
+        if pending.len() >= limit {
+            return Ok(HeadRead::Rejected);
         }
-        let n = sock.read(&mut buf).await?;
+        let take = buf.len().min(limit - pending.len());
+        let n = sock.read(&mut buf[..take]).await?;
         if n == 0 {
-            return Ok(None);
+            return Ok(if pending.is_empty() {
+                HeadRead::Closed
+            } else {
+                HeadRead::Rejected
+            });
         }
-        head.extend_from_slice(&buf[..n]);
+        pending.extend_from_slice(&buf[..n]);
     }
 }
 
@@ -201,6 +304,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// A parsed request line: method + raw path (query already stripped).
 struct Request {
     method: Method,
+    keep_alive: bool,
     /// Decoded, sanitized path segments (`/` = empty vec).
     segments: Vec<String>,
 }
@@ -211,29 +315,88 @@ enum Method {
     Head,
 }
 
-/// Route the request. Every outcome — including malformed requests — is a
-/// complete [`Response`]; `HEAD` gets the same status/headers as `GET` with
-/// the body dropped at serialization time.
-async fn respond(
-    head: &[u8],
-    shared: &Arc<Shared>,
-    web_root: Option<&Path>,
-    peer_ip: IpAddr,
-) -> Response {
-    // Per-IP request budget: the same coarse `legacy` class as the other
-    // legacy surfaces (telnet, Hotline, NNTP).
-    if !shared.rate_allow(Scope::Ip(peer_ip), rl::LEGACY) {
-        return Response::text(429, "Too Many Requests", "rate limited; slow down\n");
-    }
-    let text = String::from_utf8_lossy(head);
-    let request_line = text.split("\r\n").next().unwrap_or_default();
-    let mut parts = request_line.split_whitespace();
+/// Parse one complete, bodyless origin-form request. Strict whitespace and
+/// framing avoid disagreeing with a proxy about where the next request starts.
+/// A refusal always terminates the connection; no trailing bytes are executed.
+fn parse_request(head: &[u8]) -> std::result::Result<Request, Response> {
+    let bad = || {
+        Response::text(
+            400,
+            "Bad Request",
+            "malformed or unsupported request framing\n",
+        )
+    };
+    let text = std::str::from_utf8(head).map_err(|_| bad())?;
+    let mut lines = text.split("\r\n");
+    let mut parts = lines.next().unwrap_or_default().split(' ');
     let (Some(method), Some(target), Some(version)) = (parts.next(), parts.next(), parts.next())
     else {
-        return Response::text(400, "Bad Request", "malformed request line\n");
+        return Err(bad());
     };
-    if !version.starts_with("HTTP/1.") {
-        return Response::text(400, "Bad Request", "HTTP/1.x only\n");
+    if parts.next().is_some()
+        || method.is_empty()
+        || !method.bytes().all(is_token_byte)
+        || target.is_empty()
+        || target.bytes().any(|b| b.is_ascii_control() || b == b'#')
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+    {
+        return Err(bad());
+    }
+    let mut host = false;
+    let mut content_length = false;
+    let mut close = version == "HTTP/1.0";
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(bad());
+        };
+        if name.is_empty()
+            || !name.bytes().all(is_token_byte)
+            || value.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f)
+        {
+            return Err(bad());
+        }
+        let value = value.trim_matches([' ', '\t']);
+        if name.eq_ignore_ascii_case("host") {
+            if host
+                || value.is_empty()
+                || value
+                    .bytes()
+                    .any(|b| b.is_ascii_whitespace() || b",/\\?#@".contains(&b))
+            {
+                return Err(bad());
+            }
+            host = true;
+        } else if name.eq_ignore_ascii_case("content-length") {
+            // Reject duplicates even when equal. Only a single decimal zero
+            // is bodyless; signs, lists, overflow and positive lengths refuse.
+            if content_length || value.is_empty() || !value.bytes().all(|b| b == b'0') {
+                return Err(bad());
+            }
+            content_length = true;
+        } else if name.eq_ignore_ascii_case("transfer-encoding")
+            || name.eq_ignore_ascii_case("upgrade")
+        {
+            return Err(bad());
+        } else if name.eq_ignore_ascii_case("expect") {
+            return Err(Response::text(
+                417,
+                "Expectation Failed",
+                "request expectations are unsupported\n",
+            ));
+        } else if name.eq_ignore_ascii_case("connection") {
+            for option in value.split(',').map(|s| s.trim_matches([' ', '\t'])) {
+                if option.is_empty() || !option.bytes().all(is_token_byte) {
+                    return Err(bad());
+                }
+                close |= option.eq_ignore_ascii_case("close");
+                if option.eq_ignore_ascii_case("upgrade") {
+                    return Err(bad());
+                }
+            }
+        }
+    }
+    if version == "HTTP/1.1" && !host {
+        return Err(bad());
     }
     let method = match method {
         "GET" => Method::Get,
@@ -241,27 +404,36 @@ async fn respond(
         _ => {
             let mut r = Response::text(405, "Method Not Allowed", "GET and HEAD only\n");
             r.headers.push(("Allow".into(), "GET, HEAD".into()));
-            return r;
+            return Err(r);
         }
     };
     // Strip the query string; sanitize + decode the path.
     let raw_path = target.split('?').next().unwrap_or_default();
     let Some(segments) = sanitize_path(raw_path) else {
-        return Response::text(400, "Bad Request", "bad path\n");
+        return Err(Response::text(400, "Bad Request", "bad path\n"));
     };
-    let req = Request { method, segments };
+    Ok(Request {
+        method,
+        keep_alive: !close,
+        segments,
+    })
+}
 
-    let mut resp = match req.segments.first().map(String::as_str) {
+/// RFC token grammar for method names, header names and Connection options.
+fn is_token_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+}
+
+/// Route an already validated request. HEAD suppression is applied uniformly
+/// by the connection loop, including parser errors and rate-limit responses.
+async fn respond(req: &Request, shared: &Arc<Shared>, web_root: Option<&Path>) -> Response {
+    match req.segments.first().map(String::as_str) {
         // `/files` is the client page. Its descendants belong exclusively
         // to the authorized download handoff, never to the SPA fallback.
-        Some("files") if req.segments.len() > 1 => serve_file_download(&req, shared).await,
-        Some(".well-known") => serve_well_known(&req, shared),
-        _ => serve_static(&req, shared, web_root).await,
-    };
-    if req.method == Method::Head {
-        resp.head_only = true;
+        Some("files") if req.segments.len() > 1 => serve_file_download(req, shared).await,
+        Some(".well-known") => serve_well_known(req, shared),
+        _ => serve_static(req, shared, web_root).await,
     }
-    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +443,7 @@ async fn respond(
 /// Serve the signed [`crate::well_known`] descriptor as JSON. Only the exact
 /// `/.well-known/rabbithole/server` path answers; anything else under
 /// `/.well-known/` is a plain 404. Anonymous and unrate-gated beyond the
-/// per-IP `legacy` request budget already spent in [`respond`] — the document
+/// per-IP `legacy` request budget already spent in [`serve_conn`] — the document
 /// is public by design.
 fn serve_well_known(req: &Request, shared: &Arc<Shared>) -> Response {
     if req
@@ -437,7 +609,10 @@ async fn serve_file_download(req: &Request, shared: &Arc<Shared>) -> Response {
         Ok(Ok(b)) => b,
         _ => return not_found(),
     };
-    let mime = if served.mime.trim().is_empty() {
+    // MIME is stored from upload metadata. Never let control bytes turn its
+    // Content-Type into extra headers or a forged next pipelined response.
+    let mime = if served.mime.trim().is_empty() || served.mime.bytes().any(|b| b.is_ascii_control())
+    {
         content_type_for(&served.name).to_string()
     } else {
         served.mime.clone()
@@ -653,6 +828,7 @@ struct Response {
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     head_only: bool,
+    close: bool,
 }
 
 impl Response {
@@ -664,6 +840,7 @@ impl Response {
             headers: Vec::new(),
             body,
             head_only: false,
+            close: true,
         }
     }
 
@@ -677,15 +854,16 @@ impl Response {
         )
     }
 
-    /// Serialize head + (unless `head_only`) body. `Connection: close`
-    /// always — one request per connection keeps the framing trivial.
+    /// Serialize a self-delimiting response. HEAD keeps the GET length but
+    /// emits no body, so a following pipelined response starts immediately.
     fn to_bytes(&self) -> Vec<u8> {
         let mut head = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\n",
             self.status,
             self.reason,
             self.content_type,
             self.body.len(),
+            if self.close { "close" } else { "keep-alive" },
         );
         for (name, value) in &self.headers {
             head.push_str(name);
@@ -705,6 +883,66 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn idle_or_unfinished_heads_have_a_bounded_deadline() {
+        // A short test-only deadline exercises the production read path
+        // without waiting through its fifteen-second idle allowance.
+        for prefix in [b"".as_slice(), b"HEAD / HTTP/1.1\r\nHost: partial"] {
+            let (mut peer, mut reader) = tokio::io::duplex(64);
+            peer.write_all(prefix).await.unwrap();
+            let mut pending = Vec::new();
+            let result = read_head(
+                &mut reader,
+                &mut pending,
+                MAX_CONNECTION_BYTES,
+                Duration::from_millis(10),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(result, HeadRead::TimedOut));
+            assert_eq!(
+                pending, prefix,
+                "short reads remain available for HEAD/error handling"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn head_reader_preserves_pipeline_and_distinguishes_clean_eof() {
+        let first = b"GET / HTTP/1.1\r\nHost: test\r\n\r\n";
+        let second = b"HEAD /lobby HTTP/1.1\r\nHost: test\r\n\r\n";
+        let (mut peer, mut reader) = tokio::io::duplex(128);
+        peer.write_all(first).await.unwrap();
+        peer.write_all(second).await.unwrap();
+        peer.shutdown().await.unwrap();
+        let mut pending = Vec::new();
+        for expected in [first.as_slice(), second.as_slice()] {
+            let result = read_head(
+                &mut reader,
+                &mut pending,
+                MAX_CONNECTION_BYTES,
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+            let HeadRead::Complete(actual) = result else {
+                panic!("complete head expected")
+            };
+            assert_eq!(actual, expected[..expected.len() - 4]);
+        }
+        assert!(matches!(
+            read_head(
+                &mut reader,
+                &mut pending,
+                MAX_CONNECTION_BYTES,
+                Duration::from_secs(1)
+            )
+            .await
+            .unwrap(),
+            HeadRead::Closed
+        ));
+    }
 
     #[test]
     fn sanitize_accepts_normal_paths() {
