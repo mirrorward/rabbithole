@@ -63,7 +63,7 @@ export class TestBurrow {
       `http_web_root = ${JSON.stringify(dist)}`,
       "announce_enabled = false",
       // The embedded HTTP server opens one connection per asset. Immediate
-      // reloads exercise themes, not the production anti-abuse burst budget.
+      // reloads exercise SPA behavior, not the production anti-abuse budget.
       "ratelimit_conn_burst = 256",
       "ratelimit_conn_per_min = 600",
       `theme_accent = ${JSON.stringify(accent)}`,

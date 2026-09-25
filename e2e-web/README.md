@@ -8,7 +8,7 @@ connect/login view renders, performs a **guest login** through the real UI
 (fills the handle, clicks *Connect*), and asserts the app routes to the lobby.
 
 The smoke test drives an already-running `burrow`. The three manual steps below
-are its recipe. The separate theme regression suite launches isolated servers
+are its recipe. The separate theme and route regression suites launch isolated servers
 from existing build artifacts; see its instructions at the end.
 
 ## Prerequisites
@@ -132,5 +132,22 @@ switching burrows, background updates, reconnect after an offline theme change,
 session restoration after loading a fresh document, and server-side account opt-out. They inspect
 computed CSS variables and observe real protocol replies so a default palette
 shown before authentication cannot masquerade as a successful clear.
-Service workers are blocked to isolate socket/theme behavior from shell caching;
-fresh-document checks load `/`, since deep-link fallback belongs to the worker.
+Service workers are blocked to isolate socket/theme behavior from shell caching.
+The route suite below separately checks deep links and hard reloads.
+
+## Deep-link and reload regression suite
+
+With the same built artifacts and browser configuration, run from `e2e-web`:
+
+```sh
+BURROW_BIN="$(pwd)/../target/debug/burrow" \
+SPA_DIST="$(pwd)/../crates/ui-web/dist" \
+npm run test:routes
+```
+
+`tests/routes.spec.ts` reuses the isolated server fixture with service workers
+blocked. It opens `/lobby` directly in a fresh browser, verifies HTTP 200 and a
+mounted app, signs in through the password form, and performs a real hard reload.
+The test observes a token-resume request and successful authentication without
+another password request. It also boots nested routes with real JS/WASM assets
+and verifies missing assets remain 404 instead of receiving the HTML shell.

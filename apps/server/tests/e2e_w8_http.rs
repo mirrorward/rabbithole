@@ -12,9 +12,9 @@
 //!   the same plain 404 — no existence distinctions leak;
 //! - traversal attempts (plain and percent-encoded) are refused, and
 //!   non-GET/HEAD methods get 405;
-//! - with `http_web_root` configured the SPA shell is served (`/` =
-//!   `index.html`, typed assets, a generated `/manifest.webmanifest`, no
-//!   directory listings);
+//! - with `http_web_root` configured the SPA shell answers direct client
+//!   routes as well as `/`, while typed assets and generated manifests keep
+//!   their behavior, missing assets stay 404, and directories never list;
 //! - `/.well-known/rabbithole/server` returns the signed, self-certifying
 //!   discovery descriptor as JSON (verifies against the key it names, carries
 //!   the server name / advertised endpoints / feature tags), only the exact
@@ -126,8 +126,32 @@ async fn add_file(
 #[tokio::test]
 async fn public_download_serves_bytes_headers_and_counts() {
     let work = tempfile::tempdir().unwrap();
-    let b = Burrow::start(http_config(work.path())).await.unwrap();
+    let web = work.path().join("web");
+    std::fs::create_dir_all(web.join("files").join("warez")).unwrap();
+    std::fs::write(web.join("index.html"), "<html>the shell</html>").unwrap();
+    // Files in the web root must never shadow or bypass library downloads.
+    std::fs::write(
+        web.join("files/warez/cool demo.zip"),
+        "not the library file",
+    )
+    .unwrap();
+    std::fs::write(web.join("files/warez/static-only.zip"), "not public").unwrap();
+    let b = Burrow::start(ServerConfig {
+        http_web_root: web,
+        ..http_config(&work.path().join("data"))
+    })
+    .await
+    .unwrap();
     let addr = b.http_addr.expect("http enabled");
+
+    // Exactly `/files` is the client page, even with a static files folder.
+    let (status, headers, body) = request(addr, "GET", "/files").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        header(&headers, "content-type"),
+        Some("text/html; charset=utf-8")
+    );
+    assert_eq!(body, b"<html>the shell</html>");
 
     b.shared
         .files
@@ -172,6 +196,11 @@ async fn public_download_serves_bytes_headers_and_counts() {
     assert_eq!(status, 404, "no area listings");
     let (status, _, _) = request(addr, "GET", "/files/nope/x.zip").await;
     assert_eq!(status, 404);
+    let (status, _, _) = request(addr, "GET", "/files/warez/static-only.zip").await;
+    assert_eq!(
+        status, 404,
+        "download URLs never use static files or the shell"
+    );
 
     b.shutdown().await;
 }
@@ -179,7 +208,15 @@ async fn public_download_serves_bytes_headers_and_counts() {
 #[tokio::test]
 async fn dropbox_quarantined_and_denied_content_reads_as_missing() {
     let work = tempfile::tempdir().unwrap();
-    let b = Burrow::start(http_config(work.path())).await.unwrap();
+    let web = work.path().join("web");
+    std::fs::create_dir_all(&web).unwrap();
+    std::fs::write(web.join("index.html"), "<html>the shell</html>").unwrap();
+    let b = Burrow::start(ServerConfig {
+        http_web_root: web,
+        ..http_config(&work.path().join("data"))
+    })
+    .await
+    .unwrap();
     let addr = b.http_addr.unwrap();
 
     b.shared
@@ -253,6 +290,9 @@ async fn traversal_is_refused_and_only_get_head_are_allowed() {
         "/a%5Cb.txt",
         "/nul%00.txt",
         "/bad%zzescape",
+        "/lobby/../outside.txt",
+        "/people/%2e%2e",
+        "/boards/a%2Fb",
     ] {
         let (status, _, body) = request(addr, "GET", path).await;
         assert_eq!(status, 400, "{path} must be refused");
@@ -292,6 +332,7 @@ async fn the_burrows_own_folders_are_never_served() {
     let work = tempfile::tempdir().unwrap();
     let data = work.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("index.html"), "private index must not be served").unwrap();
     let b = Burrow::start(ServerConfig {
         // The whole data directory as the web root: what an operator gets
         // by typing the wrong path, and what a stolen console session would
@@ -322,6 +363,10 @@ async fn the_burrows_own_folders_are_never_served() {
         "/identity/tls_key.der",
         "/burrow.db",
         "/snapshots/snapshot-1/burrow.db",
+        "/index.html",
+        "/lobby",
+        "/boards/general",
+        "/files",
     ] {
         let (status, _, body) = request(addr, "GET", path).await;
         assert_eq!(status, 404, "{path} was served");
@@ -383,6 +428,8 @@ async fn web_root_serves_the_spa_shell_and_generated_manifest() {
     std::fs::create_dir_all(web.join("assets")).unwrap();
     std::fs::write(web.join("index.html"), "<html>the shell</html>").unwrap();
     std::fs::write(web.join("assets").join("app.js"), "console.log(1)").unwrap();
+    // An existing static file still wins at a name also owned by the router.
+    std::fs::write(web.join("about"), "operator's static about page").unwrap();
     let b = Burrow::start(ServerConfig {
         http_web_root: web,
         ..http_config(&work.path().join("data"))
@@ -405,6 +452,13 @@ async fn web_root_serves_the_spa_shell_and_generated_manifest() {
     assert_eq!(status, 200);
     assert_eq!(header(&headers, "content-type"), Some("text/javascript"));
     assert_eq!(body, b"console.log(1)");
+    let (status, headers, body) = request(addr, "GET", "/about").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        header(&headers, "content-type"),
+        Some("application/octet-stream")
+    );
+    assert_eq!(body, b"operator's static about page");
 
     // The web root ships no manifest, so one is generated from server config.
     let (status, headers, body) = request(addr, "GET", "/manifest.webmanifest").await;
@@ -419,10 +473,28 @@ async fn web_root_serves_the_spa_shell_and_generated_manifest() {
     assert_eq!(manifest["start_url"], "/");
 
     // No directory listings; unknown assets are 404; HEAD carries no body.
-    let (status, _, _) = request(addr, "GET", "/assets").await;
-    assert_eq!(status, 404, "directories never list");
-    let (status, _, _) = request(addr, "GET", "/nope.png").await;
-    assert_eq!(status, 404);
+    for path in [
+        "/assets",
+        "/nope.png",
+        "/assets/missing.js",
+        "/missing_bg.wasm",
+        "/missing.css",
+        "/api/status",
+        "/.well-known/missing",
+        "/unknown-page",
+        "/lobby/extra",
+        "/boards/general/extra",
+        "/people/alice/extra",
+        "/admin/theme/extra",
+    ] {
+        let (status, headers, body) = request(addr, "GET", path).await;
+        assert_eq!(status, 404, "{path} must not receive the shell");
+        assert_eq!(
+            header(&headers, "content-type"),
+            Some("text/plain; charset=utf-8")
+        );
+        assert_ne!(body, b"<html>the shell</html>");
+    }
     let (status, headers, body) = request(addr, "HEAD", "/").await;
     assert_eq!(status, 200);
     assert!(body.is_empty());
@@ -431,6 +503,127 @@ async fn web_root_serves_the_spa_shell_and_generated_manifest() {
         b"<html>the shell</html>".len().to_string()
     );
 
+    b.shutdown().await;
+}
+
+#[tokio::test]
+async fn direct_client_routes_serve_the_same_shell_for_get_and_head() {
+    let work = tempfile::tempdir().unwrap();
+    let web = work.path().join("web");
+    std::fs::create_dir_all(&web).unwrap();
+    let shell = b"<html>direct route shell</html>";
+    std::fs::write(web.join("index.html"), shell).unwrap();
+    let b = Burrow::start(ServerConfig {
+        http_web_root: web,
+        ..http_config(&work.path().join("data"))
+    })
+    .await
+    .unwrap();
+    let addr = b.http_addr.unwrap();
+
+    // Every registered route shape, including valid dotted parameters and
+    // the query/trailing-slash normalization performed before routing.
+    for path in [
+        "/",
+        "/about",
+        "/settings",
+        "/people",
+        "/people/alice.smith",
+        "/transfers",
+        "/you",
+        "/lobby",
+        "/boards",
+        "/boards/comp.lang.rust",
+        "/dms",
+        "/directory",
+        "/files",
+        "/radio",
+        "/servers",
+        "/art",
+        "/wishing-well",
+        "/admin",
+        "/admin/theme",
+        "/lobby?from=signin",
+        "/files/",
+        "/people/alice%20smith",
+        "/boards//general/",
+    ] {
+        let (get_status, get_headers, get_body) = request(addr, "GET", path).await;
+        assert_eq!(get_status, 200, "GET {path}");
+        assert_eq!(get_body, shell, "GET {path}");
+        assert_eq!(
+            header(&get_headers, "content-type"),
+            Some("text/html; charset=utf-8")
+        );
+        let (head_status, head_headers, head_body) = request(addr, "HEAD", path).await;
+        assert_eq!(head_status, get_status, "HEAD {path}");
+        assert_eq!(head_headers, get_headers, "HEAD {path} headers match GET");
+        assert!(head_body.is_empty(), "HEAD {path} has no body");
+    }
+    b.shutdown().await;
+}
+
+#[tokio::test]
+async fn client_routes_require_a_readable_index_file() {
+    let work = tempfile::tempdir().unwrap();
+    let web = work.path().join("web");
+    std::fs::create_dir_all(&web).unwrap();
+    let b = Burrow::start(ServerConfig {
+        http_web_root: web.clone(),
+        ..http_config(&work.path().join("data"))
+    })
+    .await
+    .unwrap();
+    let addr = b.http_addr.unwrap();
+    for index_is_directory in [false, true] {
+        if index_is_directory {
+            std::fs::create_dir(web.join("index.html")).unwrap();
+        }
+        for path in ["/", "/lobby", "/files", "/boards/general"] {
+            let (status, _, _) = request(addr, "GET", path).await;
+            assert_eq!(status, 404, "no readable index: {path}");
+        }
+    }
+    b.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn client_route_fallback_never_follows_an_unsafe_index_symlink() {
+    use std::os::unix::fs::symlink;
+    let work = tempfile::tempdir().unwrap();
+    let web = work.path().join("web");
+    let data = web.join("private-data");
+    let backups = web.join("private-backups");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&backups).unwrap();
+    let outside = work.path().join("outside.html");
+    let private = data.join("private.html");
+    let snapshot = backups.join("snapshot.html");
+    for target in [&outside, &private, &snapshot] {
+        std::fs::write(target, "must not be a public shell").unwrap();
+    }
+    // Set through startup config to exercise runtime checks even when the
+    // config setter's web-root validation was bypassed.
+    let b = Burrow::start(ServerConfig {
+        http_web_root: web.clone(),
+        backup_dir: backups,
+        ..http_config(&data)
+    })
+    .await
+    .unwrap();
+    let addr = b.http_addr.unwrap();
+    for target in [&outside, &private, &snapshot] {
+        symlink(target, web.join("index.html")).unwrap();
+        for path in ["/", "/lobby", "/files", "/people/alice"] {
+            for method in ["GET", "HEAD"] {
+                let (status, _, body) = request(addr, method, path).await;
+                assert_eq!(status, 404, "{method} {path}, index points at {target:?}");
+                assert_ne!(body, b"must not be a public shell");
+            }
+        }
+        std::fs::remove_file(web.join("index.html")).unwrap();
+    }
     b.shutdown().await;
 }
 
@@ -561,8 +754,10 @@ async fn http_surface_is_off_by_default_and_static_off_without_web_root() {
         .await
         .unwrap();
     let addr = b.http_addr.unwrap();
-    let (status, _, _) = request(addr, "GET", "/").await;
-    assert_eq!(status, 404, "no web root: no shell");
+    for path in ["/", "/lobby", "/files", "/boards/general"] {
+        let (status, _, _) = request(addr, "GET", path).await;
+        assert_eq!(status, 404, "no web root: no shell for {path}");
+    }
     let (status, _, _) = request(addr, "GET", "/manifest.webmanifest").await;
     assert_eq!(status, 404, "manifest belongs to the shell surface");
 

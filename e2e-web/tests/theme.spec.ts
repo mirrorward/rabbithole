@@ -6,8 +6,8 @@ import { TestBurrow } from "../fixtures/burrow";
 test.skip(!process.env.BURROW_BIN || !process.env.SPA_DIST,
   "Set BURROW_BIN and SPA_DIST to run the real-server theme regression tests");
 test.skip(process.platform === "win32", "The server's ctl surface is currently Unix-only");
-// Keep service-worker caching out of this socket/theme integration test. The
-// HTTP fixture serves '/' and the production worker owns deep-link fallback.
+// Keep service-worker caching out of this socket/theme integration test.
+// routes.spec.ts separately covers direct deep links and hard reloads.
 test.use({ colorScheme: "light", serviceWorkers: "block", actionTimeout: 15_000 });
 test.setTimeout(120_000);
 

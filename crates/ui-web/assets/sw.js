@@ -19,8 +19,8 @@
  *  - Navigations: network-first (the entry document is NOT content-hashed,
  *    so the network copy must win when reachable) with the cached shell
  *    document as the offline fallback. Unknown paths also fall back to the
- *    shell: the embedded server only maps "/", so this is what lets
- *    client-side routes (/lobby, /boards, ...) survive a reload.
+ *    shell for compatibility with older servers. Current servers also serve
+ *    supported client routes directly, without requiring a worker.
  *  - /files/ downloads: never touched — straight to the network, never
  *    cached, so a library file can never be served stale.
  */
@@ -77,7 +77,7 @@ async function shellDocument() {
 }
 
 /* Navigations: serve the network's real answer when it has one; otherwise
- * (offline, or the server's plain 404 for a client-side route) fall back to
+ * (offline, or an older server's 404 for a client-side route) fall back to
  * the shell document so the SPA router can take over. */
 async function navigate(request) {
   try {

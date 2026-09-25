@@ -27,10 +27,13 @@
 //! - **the SPA shell** — when `http_web_root` is set, files under it are
 //!   served at `/` (with `index.html` answering `/` itself), plus a
 //!   generated `/manifest.webmanifest` (name from the server config,
-//!   standalone display) when the web root doesn't provide one. This module
+//!   standalone display) when the web root doesn't provide one. Supported
+//!   client routes fall back to `index.html` for direct visits and reloads;
+//!   missing assets and unknown routes stay 404. This module
 //!   never builds the wasm bundle: serving whatever is in the directory is
 //!   the contract — point `http_web_root` at a `trunk build` output dir.
-//!   With `http_web_root` unset only the `/files/...` route answers.
+//!   With `http_web_root` unset the shell is unavailable; downloads and
+//!   discovery still answer.
 //!
 //! # The HTTP/1.1 server
 //!
@@ -58,9 +61,11 @@
 //!   applied per segment *after* splitting on `/`, so an encoded slash can't
 //!   mint new segments; `..` (plain or encoded as `%2e%2e`), `.`,
 //!   backslashes, NUL bytes and malformed escapes are all rejected with 400.
-//! - **No directory listings**: a path that resolves to a directory is 404.
-//! - **Symlink containment**: static paths are canonicalized and must stay
-//!   under the canonicalized web root; a symlink escaping the root is 404.
+//! - **No directory listings**: directories are never listed. A recognized
+//!   client route may instead serve the separately checked SPA index.
+//! - **Symlink containment**: every served static file is canonicalized and
+//!   must stay under the canonicalized web root and outside private folders,
+//!   including an index served as a client-route fallback.
 //! - **`HEAD` mirrors `GET`** — identical status and headers (including
 //!   `Content-Length`), no body. `HEAD` does not bump download counters.
 //! - **Close discipline**: responses end with an explicit FIN + bounded
@@ -247,7 +252,9 @@ async fn respond(
     let req = Request { method, segments };
 
     let mut resp = match req.segments.first().map(String::as_str) {
-        Some("files") => serve_file_download(&req, shared).await,
+        // `/files` is the client page. Its descendants belong exclusively
+        // to the authorized download handoff, never to the SPA fallback.
+        Some("files") if req.segments.len() > 1 => serve_file_download(&req, shared).await,
         Some(".well-known") => serve_well_known(&req, shared),
         _ => serve_static(&req, shared, web_root).await,
     };
@@ -463,8 +470,9 @@ fn disposition_name(name: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Serve the SPA shell out of the web root: `/` answers `index.html`,
-/// `/manifest.webmanifest` falls back to a generated one, everything else is
-/// a plain file lookup. No web root configured = 404 for all of it.
+/// `/manifest.webmanifest` falls back to a generated one, and known client
+/// routes fall back to `index.html`. Existing static files take precedence;
+/// unknown routes and missing assets stay 404. No web root = no shell.
 async fn serve_static(req: &Request, shared: &Arc<Shared>, web_root: Option<&Path>) -> Response {
     let not_found = || Response::text(404, "Not Found", "not found\n");
     let Some(root) = web_root else {
@@ -490,7 +498,47 @@ async fn serve_static(req: &Request, shared: &Arc<Shared>, web_root: Option<&Pat
                 web_manifest(&cfg.name, &cfg.theme_accent).into_bytes(),
             )
         }
+        None if is_client_route(&req.segments) => {
+            // Use the same containment/private-directory checks as assets.
+            // An index resolving outside the root or into private storage
+            // must not become a shell.
+            match read_under_root(root, &["index.html"], private_dirs(shared)).await {
+                Some(bytes) => {
+                    Response::new(200, "OK", content_type_for("index.html").to_string(), bytes)
+                }
+                None => not_found(),
+            }
+        }
         None => not_found(),
+    }
+}
+
+/// Non-root routes owned by the SPA router in `ui-web/src/app.rs`. Keep this
+/// list in step with that router, rather than treating every missing file as
+/// a navigation. Dynamic parameters can contain dots (board slugs and person
+/// handles do), so a file-extension heuristic would reject valid routes.
+fn is_client_route(segments: &[String]) -> bool {
+    match segments {
+        [page] => matches!(
+            page.as_str(),
+            "about"
+                | "settings"
+                | "people"
+                | "transfers"
+                | "you"
+                | "lobby"
+                | "boards"
+                | "dms"
+                | "directory"
+                | "files"
+                | "radio"
+                | "servers"
+                | "art"
+                | "wishing-well"
+                | "admin"
+        ),
+        [page, _] => matches!(page.as_str(), "people" | "boards" | "admin"),
+        _ => false,
     }
 }
 
