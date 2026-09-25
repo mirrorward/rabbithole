@@ -12,7 +12,8 @@
     "test:keepalive": "playwright test tests/keepalive.spec.ts",
     "test:chat": "playwright test tests/chat.spec.ts",
     "cleanup": "node scripts/cleanup-fixtures.mjs",
-    "test:keynav": "playwright test tests/keynav.spec.ts"
+    "test:keynav": "playwright test tests/keynav.spec.ts",
+    "test:pwa": "playwright test tests/pwa.spec.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1"

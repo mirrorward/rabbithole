@@ -4165,6 +4165,7 @@ pub fn App() -> impl IntoView {
                 {send_dialog()}
                 <WarrenSheet/>
                 <Toasts/>
+                <crate::pwa::PwaNotice/>
                 <div class="rh-shell">
                     <BurrowRail/>
                     <SideNav/>
@@ -4948,7 +4949,6 @@ pub fn mount() {
         {
             let _ = root.set_attribute("data-rh-version", env!("CARGO_PKG_VERSION"));
         }
-        crate::pwa::register_service_worker();
     }
     mount_to_body(App);
 }

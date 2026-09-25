@@ -63,6 +63,27 @@ rebind as their keys change. What waits for a restart is what every client
 arrives on (`quic_addr`, `ws_addr`), plus federation, port mapping, doors and
 the data directory.
 
+### Web app updates and offline visits
+
+Serve the complete Trunk output from `http_web_root`. In browsers with service
+worker support (HTTPS or localhost), RabbitHole saves the app document together
+with its referenced JS/WASM bundles. A partial deployment does not replace the
+last complete saved shell. Keep old hashed assets during deployment so existing
+tabs can continue loading their build.
+
+The app checks for updates on focus, connectivity changes, and periodically.
+An available update shows **Reload to update**; finish any unsent work before
+using it. Finding an update or another tab accepting one never reloads your tab.
+The check includes bundle changes even when `sw.js` itself has not changed.
+
+A **saved copy** notice means navigation actually used the cached app shell.
+App-host reachability is separate from each burrow's connection status; the
+notice clears when a check reaches the app again. **Check connection** retries
+without reloading. The cached shell does not provide offline chat, file
+transfers, or server actions. Downloads under `/files/` bypass the worker, as do
+API responses and other non-shell resources. Native desktop builds continue to
+exclude service workers and clear stale web caches.
+
 ### HTTP file downloads
 
 The optional HTTP listener (`http_enabled`, `http_addr`, `http_web_root`)

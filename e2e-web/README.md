@@ -38,8 +38,9 @@ also need `playwright install --with-deps chromium`, as used in CI.
 Providing `BURROW_BIN` and `SPA_DIST` starts isolated loopback servers with
 temporary databases and public discovery disabled. Each test stops its servers
 and removes its data in `finally`. Browser directory requests to external hosts
-are blocked. Service workers are disabled so cached shells cannot hide an HTTP
-or WebSocket failure. No credentials or tokens are recorded by protocol observers.
+are blocked. Service workers are disabled in the transport/theme/navigation suites so cached
+shells cannot hide an HTTP or WebSocket failure. The PWA suite explicitly enables
+real service workers and gives each fixture its own writable copy of the app. No credentials or tokens are recorded by protocol observers.
 
 ## What runs
 
@@ -50,6 +51,7 @@ or WebSocket failure. No credentials or tokens are recorded by protocol observer
 | `npm run test:routes` | Direct `/lobby`, actual hard reload and token resume, nested routes and real JS/WASM assets, missing-asset 404s. |
 | `npm run test:chat` | Recent chat history for a second client, room isolation, and reconnection. |
 | `npm run test:keynav` | Focus recovery in the real Members list after filtering, no focus stealing, and route disposal/remount. |
+| `npm run test:pwa` | Real service-worker updates, explicit reload, cached offline navigation, connection recovery, and native exclusion. |
 | `npm run test:keepalive` | Initial app load and immediate reload with every production connection/request rate limit unchanged. |
 
 Theme and route fixtures use a generous connection budget to isolate their

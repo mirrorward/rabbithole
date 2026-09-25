@@ -63,6 +63,9 @@ web-sys = { workspace = true, features = [
     # PWA install-readiness (`src/pwa.rs`): navigator.serviceWorker.register.
     "Navigator",
     "ServiceWorkerContainer",
+    "ServiceWorker",
+    "ServiceWorkerRegistration",
+    "ServiceWorkerState",
     # List focus recovery observes the real rendered rows, including updates
     # that arrive while focus came from a click rather than an arrow key.
     "MutationObserver",

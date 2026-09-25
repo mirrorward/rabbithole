@@ -291,6 +291,9 @@ pub const STYLESHEET: &str = "\
 html,body{margin:0;padding:0;height:100%}\
 body{overflow:hidden}\
 .rh-app{font-family:var(--rh-font-sans);font-size:var(--rh-font-size);line-height:1.5;color:var(--rh-text);background-color:var(--rh-bg);background-image:var(--rh-bg-image);height:100vh;height:100dvh;display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}\
+.rh-pwa-notice{flex:none;display:flex;align-items:center;justify-content:space-between;gap:var(--rh-space-3);padding:var(--rh-space-3) var(--rh-space-4);background:var(--rh-surface);border-bottom:1px solid color-mix(in srgb,var(--rh-text) 12%,transparent);font-size:var(--rh-font-sm)}\
+.rh-pwa-copy{min-width:0;overflow-wrap:anywhere}.rh-pwa-copy p{margin:0}.rh-pwa-copy p+p{margin-top:var(--rh-space-1)}.rh-pwa-actions{display:flex;flex:none;flex-wrap:wrap;gap:var(--rh-space-2)}.rh-pwa-actions .rh-btn{min-height:2.5rem}\
+@media(max-width:600px){.rh-pwa-notice{align-items:flex-start;flex-wrap:wrap;padding:var(--rh-space-3);font-size:1rem}.rh-pwa-actions{width:100%}.rh-pwa-actions .rh-btn{min-height:2.75rem}}\
 .rh-shell{flex:1;display:flex;min-height:0}\
 .rh-shell-main{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;overflow-y:auto}\
 .rh-rail{flex:none;width:3.4rem;display:flex;flex-direction:column;align-items:center;gap:var(--rh-space-2);padding:var(--rh-space-3) 0;background:var(--rh-surface-2);border-right:1px solid color-mix(in srgb,var(--rh-text) 8%,transparent)}\

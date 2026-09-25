@@ -48,10 +48,10 @@ export class TestBurrow {
   static async create(
     name: string,
     accent: string,
-    options: { rateLimits?: "default" | "generous" } = {},
+    options: { rateLimits?: "default" | "generous"; spaDist?: string } = {},
   ): Promise<TestBurrow> {
     const binary = resolve(process.env.BURROW_BIN!);
-    const dist = resolve(process.env.SPA_DIST!);
+    const dist = resolve(options.spaDist ?? process.env.SPA_DIST!);
     await access(binary);
     await access(join(dist, "index.html"));
     // CI provides an owned root so its final cleanup can find any fixture
