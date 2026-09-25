@@ -562,9 +562,20 @@ impl FollowupsRepo<'_> {
         Ok(())
     }
 
-    /// Mark a follow-up applied to the projection.
-    pub async fn mark_applied(&self, id: &[u8; 32]) -> Result<(), StoreError> {
-        sqlx::query("UPDATE board_followups SET applied = 1 WHERE event_id = ?")
+    /// Mark a follow-up applied now its target is present. The pending row
+    /// guessed its root from the target id; adopt the actual thread root and
+    /// canonical board so retention and federation use the same projection.
+    pub async fn mark_applied(
+        &self,
+        id: &[u8; 32],
+        board: &str,
+        root: &[u8; 32],
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE board_followups SET applied = 1, board_slug = ?, root_id = ? WHERE event_id = ?",
+        )
+            .bind(board)
+            .bind(root.as_slice())
             .bind(id.as_slice())
             .execute(self.0)
             .await?;
@@ -927,7 +938,7 @@ mod tests {
         assert_eq!(f.by_id(&[10; 32]).await.unwrap().unwrap().kind, 1);
 
         // Applying removes it from the pending set.
-        f.mark_applied(&[10; 32]).await.unwrap();
+        f.mark_applied(&[10; 32], "b", &[1; 32]).await.unwrap();
         let pending = f.pending_for(&[1; 32]).await.unwrap();
         assert_eq!(pending.len(), 1);
         assert!(f.by_id(&[10; 32]).await.unwrap().unwrap().applied);

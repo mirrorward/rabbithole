@@ -257,7 +257,7 @@ impl Interest {
         match self {
             Interest::None => false,
             Interest::All => true,
-            Interest::Boards(set) => set.contains(board),
+            Interest::Boards(set) => set.iter().any(|slug| slug.eq_ignore_ascii_case(board)),
         }
     }
 }
@@ -1021,7 +1021,7 @@ async fn handle_pull(
         } else {
             continue;
         };
-        if ev_board != req.board {
+        if !ev_board.eq_ignore_ascii_case(&req.board) {
             continue; // don't cross boards
         }
         let Ok(signed) = postcard::from_bytes::<SignedEvent>(&blob) else {
@@ -1118,7 +1118,9 @@ async fn ingest_fed_event(
         board: ev_board, ..
     } = &signed.body
     {
-        if ev_board != board {
+        // A relay names its canonical local projection; the signed body
+        // still carries the origin's spelling. Only ASCII case may differ.
+        if !ev_board.eq_ignore_ascii_case(board) {
             bail!("delivered post board mismatch");
         }
     }
@@ -1698,6 +1700,16 @@ pub fn persist_approved(shared: &Shared) -> Result<()> {
 #[cfg(test)]
 mod provenance_tests {
     use super::*;
+
+    #[test]
+    fn board_interest_uses_ascii_identity_without_crossing_boards() {
+        let interest = Interest::Boards(["Rabbit.General".into()].into_iter().collect());
+        assert!(interest.covers("rabbit.general"));
+        assert!(interest.covers("RABBIT.GENERAL"));
+        assert!(!interest.covers("rabbit.other"));
+        assert!(!interest.covers("rabbit.general.extra"));
+        assert!(!interest.covers("rabbıt.general"));
+    }
 
     #[test]
     fn relay_cannot_establish_an_unseen_origin() {

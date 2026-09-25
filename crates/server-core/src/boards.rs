@@ -293,6 +293,13 @@ impl BoardService {
         else {
             return Err(BoardError::Empty); // ingest() is for Post events
         };
+        // The signed event keeps the origin's spelling. Only its local
+        // projection uses the board's stored identity, as local posts do.
+        let board_slug = BoardsRepo(&self.pool)
+            .by_slug(board)
+            .await?
+            .ok_or(BoardError::NoSuchBoard)?
+            .slug;
         let blob = postcard::to_allocvec(event).expect("serializable");
         // A top-level post is its own root.
         let root_id = root.or(if parent.is_none() {
@@ -302,7 +309,7 @@ impl BoardService {
         });
         let row = PostRow {
             event_id: event.id,
-            board_slug: board.clone(),
+            board_slug,
             root_id,
             parent_id: *parent,
             author: event.author.clone(),
@@ -320,7 +327,7 @@ impl BoardService {
         // follow-ups with them.
         if parent.is_none() && max_threads > 0 {
             for old in PostsRepo(&self.pool)
-                .overflow_threads(board, max_threads)
+                .overflow_threads(&row.board_slug, max_threads)
                 .await?
             {
                 PostsRepo(&self.pool).delete_thread(&old).await?;
@@ -474,10 +481,15 @@ impl BoardService {
             // authorization gate re-runs at reconcile, dropping it if it
             // fails then).
             None => {
-                self.store_followup(event, board, target, target, kind, false)
+                let board = BoardsRepo(&self.pool)
+                    .by_slug(board)
+                    .await?
+                    .ok_or(BoardError::NoSuchBoard)?
+                    .slug;
+                self.store_followup(event, &board, target, target, kind, false)
                     .await?;
                 Ok(IngestOutcome::Pending {
-                    board: board.to_string(),
+                    board,
                     target,
                     kind,
                 })
@@ -574,7 +586,12 @@ impl BoardService {
             };
             if followup_authorized(&signed, &target_event) {
                 self.apply_followup(&signed.body).await?;
-                repo.mark_applied(&f.event_id).await?;
+                repo.mark_applied(
+                    &f.event_id,
+                    &post.board_slug,
+                    &post.root_id.unwrap_or(post.event_id),
+                )
+                .await?;
             } else {
                 repo.delete_one(&f.event_id).await?; // unauthorized: junk, drop
             }
@@ -762,6 +779,172 @@ mod tests {
             now,
             body,
         )
+    }
+
+    #[tokio::test]
+    async fn imported_case_variant_uses_local_projection_without_resigning() {
+        let svc = service().await;
+        let signed = event(
+            &[3; 32],
+            "remote",
+            1000,
+            EventBody::Post {
+                board: "RaBBiT.GeNeRaL".into(),
+                root: None,
+                parent: None,
+                subject: "Imported".into(),
+                body: "Signed remotely".into(),
+                mime: "text/plain".into(),
+            },
+        );
+        let bytes = postcard::to_allocvec(&signed).unwrap();
+        let IngestOutcome::Posted(row) = svc
+            .ingest_event(&signed, "RABBIT.GENERAL", 0)
+            .await
+            .unwrap()
+        else {
+            panic!("post projected")
+        };
+        assert_eq!(row.board_slug, "rabbit.general");
+        assert_eq!(row.event_blob, bytes);
+        assert_eq!(row.event_id, signed.id);
+        assert_eq!(row.author, "actor@remote");
+        let stored: SignedEvent = postcard::from_bytes(&row.event_blob).unwrap();
+        assert_eq!(stored.origin, "remote");
+        assert_eq!(stored.author_key, signed.author_key);
+        assert_eq!(stored.body, signed.body);
+        stored
+            .verify(&IdentityKey::from_seed(&[9; 32]).public().0)
+            .unwrap();
+
+        // Replaying the event cannot create a second differently-cased row.
+        svc.ingest_event(&signed, "rabbit.general", 0)
+            .await
+            .unwrap();
+        let threads = svc.threads("rabbit.general", 10).await.unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].0.event_id, signed.id);
+        assert_eq!(svc.unread(42, "rabbit.general").await.unwrap(), 1);
+        assert_eq!(
+            svc.keeping()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|(slug, _, _)| slug == "rabbit.general"),
+            Some(("rabbit.general".into(), 0, 1))
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_case_pending_reply_followups_share_retention_with_their_thread() {
+        let svc = service().await;
+        svc.create_board("rabbit.other", "Other", "", 2, None, 0)
+            .await
+            .unwrap();
+        let post = |board: &str, root, parent, at| {
+            event(
+                &[3; 32],
+                "remote",
+                at,
+                EventBody::Post {
+                    board: board.into(),
+                    root,
+                    parent,
+                    subject: "Thread".into(),
+                    body: "Original".into(),
+                    mime: "text/plain".into(),
+                },
+            )
+        };
+        let root = post("Rabbit.General", None, None, 1000);
+        let reply = post("RABBIT.GENERAL", Some(root.id), Some(root.id), 2000);
+        svc.ingest_event(&root, "rabbit.general", 1).await.unwrap();
+        let edit = event(
+            &[3; 32],
+            "remote",
+            3000,
+            EventBody::Edit {
+                target: reply.id,
+                subject: "Edited reply".into(),
+                body: "Corrected".into(),
+                mime: "text/plain".into(),
+            },
+        );
+        let pending = svc.ingest_event(&edit, "RaBbIt.GeNeRaL", 1).await.unwrap();
+        assert!(
+            matches!(pending, IngestOutcome::Pending { board, .. } if board == "rabbit.general")
+        );
+        let before = svc.followup_by_id(&edit.id).await.unwrap().unwrap();
+        assert_eq!(before.board_slug, "rabbit.general");
+        assert!(!before.applied);
+        assert_eq!(before.root_id, reply.id, "target root is not yet known");
+
+        let misnamed = event(
+            &[3; 32],
+            "remote",
+            3500,
+            EventBody::Edit {
+                target: reply.id,
+                subject: "Edited reply".into(),
+                body: "Corrected".into(),
+                mime: "text/plain".into(),
+            },
+        );
+        svc.ingest_event(&misnamed, "Rabbit.Other", 1)
+            .await
+            .unwrap();
+
+        svc.ingest_event(&reply, "rabbit.general", 1).await.unwrap();
+        let after = svc.followup_by_id(&edit.id).await.unwrap().unwrap();
+        assert!(after.applied);
+        assert_eq!(after.board_slug, "rabbit.general");
+        assert_eq!(after.root_id, root.id, "retention now owns this follow-up");
+        assert_eq!(after.event_blob, before.event_blob);
+        let reconciled = svc.followup_by_id(&misnamed.id).await.unwrap().unwrap();
+        assert_eq!(
+            reconciled.board_slug, "rabbit.general",
+            "the authorized target supplies identity"
+        );
+        assert_eq!(reconciled.root_id, root.id);
+        assert_eq!(
+            reconciled.event_blob,
+            postcard::to_allocvec(&misnamed).unwrap()
+        );
+        let projected = svc.post_by_id(&reply.id).await.unwrap().unwrap();
+        assert_eq!(projected.body, "Corrected");
+        assert_eq!(projected.event_blob, postcard::to_allocvec(&reply).unwrap());
+        assert_eq!(svc.threads("rabbit.general", 10).await.unwrap()[0].1, 1);
+        assert_eq!(svc.unread(42, "rabbit.general").await.unwrap(), 2);
+
+        // A present-target follow-up also uses the canonical projection.
+        let tomb = event(
+            &[3; 32],
+            "remote",
+            4000,
+            EventBody::Tombstone { target: reply.id },
+        );
+        assert!(matches!(
+            svc.ingest_event(&tomb, "RABBIT.GENERAL", 1).await.unwrap(),
+            IngestOutcome::Applied { board, .. } if board == "rabbit.general"
+        ));
+        assert_eq!(svc.unread(42, "rabbit.general").await.unwrap(), 1);
+        assert_eq!(
+            svc.followup_by_id(&tomb.id).await.unwrap().unwrap().root_id,
+            root.id
+        );
+
+        let newest = post("rAbBiT.gEnErAl", None, None, 5000);
+        svc.ingest_event(&newest, "rabbit.general", 1)
+            .await
+            .unwrap();
+        assert!(svc.post_by_id(&root.id).await.unwrap().is_none());
+        assert!(svc.post_by_id(&reply.id).await.unwrap().is_none());
+        assert!(svc.followup_by_id(&edit.id).await.unwrap().is_none());
+        assert!(svc.followup_by_id(&misnamed.id).await.unwrap().is_none());
+        assert!(svc.followup_by_id(&tomb.id).await.unwrap().is_none());
+        let remaining = svc.threads("rabbit.general", 10).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0.event_id, newest.id);
     }
 
     #[tokio::test]

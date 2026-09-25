@@ -328,6 +328,105 @@ async fn edit_and_tombstone_flood_multi_hop() {
     c.shutdown().await;
 }
 
+#[tokio::test]
+async fn mixed_case_signed_board_relays_under_each_local_canonical_projection() {
+    let work = tempfile::tempdir().unwrap();
+    let a = start("Warren A", &work.path().join("a"), &["RABBIT.GENERAL"]).await;
+    let b = start("Warren B", &work.path().join("b"), &["rAbBiT.GeNeRaL"]).await;
+    let c = start("Warren C", &work.path().join("c"), &["rabbit.general"]).await;
+    approve(&b, a.shared.server_key, "warren-a").await;
+    approve(&a, b.shared.server_key, "warren-b").await;
+    approve(&b, c.shared.server_key, "warren-c").await;
+    approve(&c, b.shared.server_key, "warren-b").await;
+    pin_origin(&a, "warren-c", c.shared.server_key).await;
+    connect(&a, &b).await;
+    connect(&b, &c).await;
+
+    let author = "cottontail@warren-c";
+    let event = rabbithole_server_core::events::mint(
+        author,
+        &IdentityKey::from_seed(blake3::hash(author.as_bytes()).as_bytes()),
+        "warren-c",
+        &IdentityKey::from_seed(&c.shared.server_signing_seed),
+        chrono::Utc::now().timestamp_millis(),
+        rabbithole_server_core::events::EventBody::Post {
+            board: "Rabbit.General".into(),
+            root: None,
+            parent: None,
+            subject: "Original spelling".into(),
+            body: "Signed once on C".into(),
+            mime: "text/plain".into(),
+        },
+    );
+    let original_bytes = postcard::to_allocvec(&event).unwrap();
+    c.shared.boards.ingest(&event, 0).await.unwrap();
+    let rx = a.shared.bus.subscribe();
+    // Simulate an older source advertising the signed spelling. B pulls it
+    // using that spelling, then advertises its canonical projection to A.
+    c.shared.bus.publish(ServerEvent::BoardPost {
+        board: "Rabbit.General".into(),
+        id: event.id,
+        root: Some(event.id),
+    });
+    assert!(
+        wait_ingested(rx, &a, event.id).await,
+        "case variants relay C → B → A"
+    );
+    for server in [&a, &b, &c] {
+        let row = server
+            .shared
+            .boards
+            .post_by_id(&event.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.board_slug, "rabbit.general");
+        assert_eq!(row.event_blob, original_bytes);
+        let signed: SignedEvent = postcard::from_bytes(&row.event_blob).unwrap();
+        assert_eq!(signed.origin, "warren-c");
+        assert_eq!(signed.author_key, event.author_key);
+        signed.verify(&c.shared.server_key).unwrap();
+        assert_eq!(
+            server
+                .shared
+                .boards
+                .threads("rabbit.general", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    let rx = a.shared.bus.subscribe();
+    let edit = edit_and_announce(&c, event.id, author, "Still the original author's post").await;
+    assert!(
+        wait_post(rx, &a, event.id, |p| p.edited
+            && p.body == "Still the original author's post")
+        .await
+    );
+    let source = c
+        .shared
+        .boards
+        .followup_by_id(&edit)
+        .await
+        .unwrap()
+        .unwrap();
+    let destination = a
+        .shared
+        .boards
+        .followup_by_id(&edit)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(destination.board_slug, "rabbit.general");
+    assert_eq!(destination.event_blob, source.event_blob);
+
+    a.shutdown().await;
+    b.shutdown().await;
+    c.shutdown().await;
+}
+
 /// A–B–C chain: a post authored on C floods through B to A, origin signature
 /// intact, with no direct A↔C relationship.
 #[tokio::test]

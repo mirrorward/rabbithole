@@ -24,7 +24,18 @@ append-only signed post events, threading, read pointers, moderation.
 Every post is a `SignedEvent` (server-core): `id = blake3(canonical
 EventCore)`, signed by both the author key and the origin server key.
 The store keeps the postcard-encoded signed blob as the **federation
-source of truth** plus a denormalized projection for querying. Edits and
+source of truth** plus a denormalized projection for querying. Imported posts
+and follow-ups use the matching local board's stored slug in that projection;
+the signed event retains its origin's spelling, signatures and content id.
+Federation board identity comparisons are ASCII case-insensitive, matching
+SQLite's local `NOCASE` identity; origin and key verification is unchanged.
+Migration 0018 reconciles existing projections for known local boards without
+rewriting signed blobs. It also repairs a follow-up's thread root when its
+stored target resolves to the same known board. Unknown-board and cross-board
+roots, application flags and content remain untouched; migration prunes
+nothing. Normal retention runs on the next top-level post.
+
+Edits and
 tombstones are follow-up events (`EventBody::Edit`/`Tombstone`), never
 mutations — Wave 9 floods all of these between servers unchanged.
 

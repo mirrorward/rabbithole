@@ -113,6 +113,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canonical_board_migration_repairs_projections_without_rewriting_history() {
+        use crate::repo4::{BoardsRepo, FollowupRow, FollowupsRepo, PostRow, PostsRepo};
+
+        let pool = open_in_memory().await.unwrap();
+        // Migration 18 changes data only. Removing its applied marker lets
+        // this fixture exercise the same upgrade path as an existing store.
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 18")
+            .execute(&pool)
+            .await
+            .unwrap();
+        BoardsRepo(&pool)
+            .create("Rabbit.General", "General", "", 2, None, 1)
+            .await
+            .unwrap();
+        let posts = PostsRepo(&pool);
+        let followups = FollowupsRepo(&pool);
+        for (id, board, parent) in [
+            (1, "RABBIT.GENERAL", None),
+            (2, "rabbit.general", Some([1; 32])),
+            (3, "Rabbit.General", None),
+            (4, "Unknown.Board", Some([77; 32])),
+        ] {
+            posts
+                .insert(&PostRow {
+                    event_id: [id; 32],
+                    board_slug: board.into(),
+                    root_id: Some(parent.unwrap_or([id; 32])),
+                    parent_id: parent,
+                    author: "remote author".into(),
+                    subject: format!("subject {id}"),
+                    body: format!("body {id}"),
+                    mime: "text/plain".into(),
+                    created_at: i64::from(id) * 1000,
+                    edited: false,
+                    tombstoned: false,
+                    event_blob: vec![id; 64],
+                })
+                .await
+                .unwrap();
+        }
+        posts
+            .apply_edit(&[1; 32], "edited", "kept", "text/markdown")
+            .await
+            .unwrap();
+        posts.apply_tombstone(&[2; 32]).await.unwrap();
+        sqlx::query("UPDATE posts SET author_key = X'1234', origin = 'remote' WHERE event_id = ?")
+            .bind([1u8; 32].as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (id, target, board, applied) in [
+            (10, 2, "RABBIT.GENERAL", true),
+            (11, 99, "rabbit.general", false),
+            (12, 2, "Unknown.Board", false),
+            (13, 4, "rabbit.general", false),
+        ] {
+            followups
+                .insert(&FollowupRow {
+                    event_id: [id; 32],
+                    target_id: [target; 32],
+                    root_id: [target; 32],
+                    board_slug: board.into(),
+                    kind: 1,
+                    origin: "remote".into(),
+                    applied,
+                    created_at: 9000,
+                    event_blob: vec![id; 64],
+                })
+                .await
+                .unwrap();
+        }
+        let mut expected_posts = Vec::new();
+        for id in 1..=4 {
+            let mut row = posts.by_id(&[id; 32]).await.unwrap().unwrap();
+            if id != 4 {
+                row.board_slug = "Rabbit.General".into();
+            }
+            expected_posts.push(row);
+        }
+        let mut expected_followups = Vec::new();
+        for id in 10..=13 {
+            let mut row = followups.by_id(&[id; 32]).await.unwrap().unwrap();
+            if id != 12 {
+                row.board_slug = "Rabbit.General".into();
+            }
+            if id == 10 {
+                row.root_id = [1; 32];
+            }
+            expected_followups.push(row);
+        }
+
+        migrate(&pool).await.unwrap();
+        migrate(&pool).await.unwrap();
+        // The repair itself also remains harmless if deliberately reapplied.
+        sqlx::raw_sql(include_str!(
+            "../migrations/0018_canonical_board_projection.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        for expected in expected_posts {
+            assert_eq!(
+                posts.by_id(&expected.event_id).await.unwrap(),
+                Some(expected)
+            );
+        }
+        for expected in expected_followups {
+            assert_eq!(
+                followups.by_id(&expected.event_id).await.unwrap(),
+                Some(expected)
+            );
+        }
+        let provenance: (Vec<u8>, String) =
+            sqlx::query_as("SELECT author_key, origin FROM posts WHERE event_id = ?")
+                .bind([1u8; 32].as_slice())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(provenance, (vec![0x12, 0x34], "remote".into()));
+        assert_eq!(
+            BoardsRepo(&pool).keeping().await.unwrap(),
+            vec![("Rabbit.General".into(), 1, 2)]
+        );
+        assert_eq!(posts.threads("Rabbit.General", 10).await.unwrap().len(), 2);
+        assert_eq!(posts.count_after("Rabbit.General", 0).await.unwrap(), 2);
+        // No history was pruned by upgrade; ordinary retention now sees the
+        // formerly invisible root and cascades to the repaired reply follow-up.
+        assert_eq!(
+            posts.overflow_threads("Rabbit.General", 1).await.unwrap(),
+            vec![[1; 32]]
+        );
+        posts.delete_thread(&[1; 32]).await.unwrap();
+        assert_eq!(followups.delete_for_root(&[1; 32]).await.unwrap(), 1);
+        assert!(followups.by_id(&[11; 32]).await.unwrap().is_some());
+        assert!(posts.by_id(&[4; 32]).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
     async fn open_on_disk_creates_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("burrow.db");
