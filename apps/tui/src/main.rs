@@ -10,7 +10,7 @@
 //! - **Radio** (Ctrl-N): the station list fed by the typed RADIO family
 //!   (see `radio` for the reducer), plus the playback **handoff**:
 //!   Enter/`p` derives a copyable `<base>/<station>` stream URL from a
-//!   session-local "radio base" (`b` to edit — only appearance is saved) and `o`
+//!   saved per-burrow "radio base" (`b` to edit, empty to clear) and `o`
 //!   launches `$RABBIT_PLAYER <url>` detached. The TUI hands playback off to
 //!   an external player and never decodes audio (see `handoff`).
 //! - **Server browser** (Ctrl-B): a Looking Glass tracker's status port over
@@ -78,9 +78,12 @@ struct Cli {
     guest: bool,
     #[arg(long)]
     name: Option<String>,
-    /// Appearance file (default: the platform config directory / rabbithole / tui.toml).
+    /// Settings file (default: the platform config directory / rabbithole / tui.toml).
     #[arg(long)]
     preferences: Option<std::path::PathBuf>,
+    /// Radio delivery base for this session (overrides this burrow's saved base).
+    #[arg(long, value_parser = handoff::parse_base)]
+    radio_base: Option<String>,
 }
 
 fn to_color(c: Rgb) -> Color {
@@ -114,10 +117,9 @@ struct App {
     status: Option<String>,
     /// Radio view: selected station index (clamped against the list).
     radio_selected: usize,
-    /// Radio view: the stream delivery base (`http://host:8000`).
-    /// **Session-local** — only appearance is persisted. This base is typed
-    /// per session (`b`) and forgotten on exit.
-    radio_base: String,
+    /// Effective stream delivery base, separate from saved settings so a
+    /// command-line override cannot leak into an appearance save.
+    radio_base: preferences::RadioBase,
     /// Radio view: the last derived (copyable) stream URL.
     radio_url: Option<String>,
     /// Radio view: the base-input buffer while editing (`b` … Enter/Esc).
@@ -190,6 +192,11 @@ async fn main() -> Result<()> {
         cli.preferences.or_else(preferences::default_path),
         preferences::terminal_mode(std::env::var("COLORFGBG").ok().as_deref()),
     );
+    let radio_base = preferences::RadioBase::load(
+        &client.server.server_key,
+        &appearance.preferences,
+        cli.radio_base.as_deref(),
+    )?;
     let mut app = App {
         lines: history.into_iter().map(|m| (m.from, m.text)).collect(),
         scroll: chatlog::Scroll::new(),
@@ -203,7 +210,7 @@ async fn main() -> Result<()> {
         view: View::Lobby,
         status: None,
         radio_selected: 0,
-        radio_base: String::new(),
+        radio_base,
         radio_url: None,
         base_edit: None,
         browser: browser::BrowserState::new(std::env::var(browser::TRACKER_ENV).ok()),
@@ -211,7 +218,7 @@ async fn main() -> Result<()> {
     };
     if let Some(warning) = appearance_warning {
         app.sys(warning);
-        app.status("Appearance settings unavailable · defaults for now · check --preferences FILE");
+        app.status("Settings need attention · see lobby · --preferences FILE");
     }
     app.sys(format!("— signed in as {} —", ok.screen_name));
     if !welcome.motd.is_empty() {
@@ -450,21 +457,31 @@ async fn handle_lobby_key(
 // ---------------------------------------------------------------------------
 
 fn handle_radio_key(app: &mut App, key: KeyEvent, ctrl: bool) {
+    if key.kind == crossterm::event::KeyEventKind::Release
+        || (key.kind == crossterm::event::KeyEventKind::Repeat
+            && (key.code == KeyCode::Enter
+                || (app.base_edit.is_none() && matches!(key.code, KeyCode::Char('b' | 'o')))))
+    {
+        return;
+    }
     // While the base is being edited, the input line owns the keyboard.
     if let Some(buf) = &mut app.base_edit {
         match key.code {
             KeyCode::Enter => {
                 let base = buf.trim().to_string();
+                if !base.is_empty() && !handoff::base_is_valid(&base) {
+                    app.status("Invalid base · use http:// or https:// with a host");
+                    return;
+                }
                 app.base_edit = None;
-                if base.is_empty() {
-                    app.radio_base.clear();
-                    app.status("radio base cleared");
-                } else if handoff::base_is_valid(&base) {
-                    app.radio_base = base;
-                    app.status("radio base set (session-only)");
-                } else {
-                    app.radio_base = base;
-                    app.status("saved, but base must be http:// or https:// with a host");
+                app.radio_url = None;
+                match app.radio_base.save(&mut app.appearance, &base) {
+                    Ok(()) if base.is_empty() => app.status("Radio base cleared for this burrow"),
+                    Ok(()) => app.status("Radio base saved for this burrow"),
+                    Err(err) => {
+                        app.sys(format!("Radio base is session only: {err:#}"));
+                        app.status("Radio not saved · b to retry · --preferences FILE");
+                    }
                 }
             }
             KeyCode::Esc => app.base_edit = None,
@@ -485,7 +502,7 @@ fn handle_radio_key(app: &mut App, key: KeyEvent, ctrl: bool) {
             let last = app.radio.stations().len().saturating_sub(1);
             app.radio_selected = (app.radio_selected + 1).min(last);
         }
-        KeyCode::Char('b') => app.base_edit = Some(app.radio_base.clone()),
+        KeyCode::Char('b') => app.base_edit = Some(app.radio_base.value().to_owned()),
         KeyCode::Enter | KeyCode::Char('p') => {
             derive_stream_url(app);
         }
@@ -499,6 +516,7 @@ fn handle_radio_key(app: &mut App, key: KeyEvent, ctrl: bool) {
 /// Derive `<base>/<station>` for the selected station into `radio_url`
 /// (the copyable line in the handoff pane). Returns whether a URL exists.
 fn derive_stream_url(app: &mut App) -> bool {
+    app.radio_url = None;
     let stations = app.radio.stations();
     if stations.is_empty() {
         app.status("no stations on the air");
@@ -506,11 +524,11 @@ fn derive_stream_url(app: &mut App) -> bool {
     }
     let sel = app.radio_selected.min(stations.len() - 1);
     let slug = stations[sel].station.clone();
-    if app.radio_base.trim().is_empty() {
+    if app.radio_base.value().is_empty() {
         app.status("set the radio base first: b, then e.g. http://host:8000");
         return false;
     }
-    match handoff::stream_url(&app.radio_base, &slug) {
+    match handoff::stream_url(app.radio_base.value(), &slug) {
         Some(url) => {
             app.radio_url = Some(url);
             app.status(format!(
@@ -823,14 +841,17 @@ fn draw_radio(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Style)
     // Handoff pane: base + derived URL + the no-decode note.
     let base_line = match &app.base_edit {
         Some(buf) => Line::from(Span::styled(format!("base> {buf}▌"), accent)),
-        None if app.radio_base.is_empty() => Line::from(Span::styled(
-            "base: (unset — press b · session-only)",
+        None if app.radio_base.value().is_empty() => Line::from(Span::styled(
+            format!(
+                "base: ({} · b to save for this burrow)",
+                app.radio_base.label()
+            ),
             muted,
         )),
         None => Line::from(vec![
             Span::styled("base: ", muted),
-            Span::styled(app.radio_base.clone(), accent),
-            Span::styled("  (session-only)", muted),
+            Span::styled(app.radio_base.value(), accent),
+            Span::styled(format!("  ({})", app.radio_base.label()), muted),
         ]),
     };
     let url_line = match &app.radio_url {
@@ -851,7 +872,7 @@ fn draw_radio(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Style)
         muted,
     ));
     let edit_hint = if app.base_edit.is_some() {
-        " handoff — editing base: Enter save · Esc cancel "
+        " base — Enter save · empty clears · Esc cancel "
     } else {
         " handoff (external player) "
     };
@@ -1071,20 +1092,23 @@ mod appearance_tests {
     use ratatui::backend::TestBackend;
 
     fn app(path: Option<std::path::PathBuf>) -> App {
+        let appearance = Appearance::load(path, None).0;
+        let radio_base =
+            preferences::RadioBase::load(&[1; 32], &appearance.preferences, None).unwrap();
         App {
             lines: vec![("Ada".into(), "Welcome to the burrow".into())],
             scroll: chatlog::Scroll::new(),
             chat_height: 0,
             online: vec!["Ada".into()],
             input: "unsent draft".into(),
-            appearance: Appearance::load(path, None).0,
+            appearance,
             server_theme: None,
             server_name: "Appearance fixture".into(),
             radio: radio::RadioState::default(),
             view: View::Lobby,
             status: None,
             radio_selected: 0,
-            radio_base: String::new(),
+            radio_base,
             radio_url: None,
             base_edit: None,
             browser: browser::BrowserState::new(None),
@@ -1115,7 +1139,7 @@ mod appearance_tests {
             for ch in ['r', 't'] {
                 let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
                 assert!(handle_appearance_key(&mut app, key));
-                let chosen = app.appearance.preferences;
+                let chosen = app.appearance.preferences.clone();
                 assert_eq!(
                     Appearance::load(Some(path.clone()), None).0.preferences,
                     chosen
@@ -1135,6 +1159,135 @@ mod appearance_tests {
         assert_eq!(app.appearance.preferences.mode, ModePreference::Auto);
     }
 
+    fn radio_key(app: &mut App, code: KeyCode) {
+        handle_radio_key(app, KeyEvent::new(code, KeyModifiers::NONE), false);
+    }
+
+    #[test]
+    fn radio_editor_saves_restarts_cancels_and_clears_without_stale_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tui.toml");
+        let mut state = app(Some(path.clone()));
+        state.view = View::Radio;
+        radio_key(&mut state, KeyCode::Char('b'));
+        state.base_edit = Some(" https://radio.example/ ".into());
+        state.radio_url = Some("https://old/live".into());
+        radio_key(&mut state, KeyCode::Enter);
+        assert!(state.base_edit.is_none());
+        assert!(state.radio_url.is_none());
+        assert_eq!(state.radio_base.value(), "https://radio.example");
+        assert_eq!(
+            state.status.as_deref(),
+            Some("Radio base saved for this burrow")
+        );
+        let (text, _) = render(&mut state, 80);
+        assert!(text.contains("https://radio.example  (saved)"), "{text}");
+        let original = std::fs::read_to_string(&path).unwrap();
+        let mut state = app(Some(path.clone()));
+        assert_eq!(state.radio_base.value(), "https://radio.example");
+        radio_key(&mut state, KeyCode::Char('b'));
+        state.base_edit = Some("ftp://invalid".into());
+        radio_key(&mut state, KeyCode::Enter);
+        assert_eq!(state.base_edit.as_deref(), Some("ftp://invalid"));
+        assert_eq!(state.radio_base.value(), "https://radio.example");
+        assert!(state.status.as_deref().unwrap().starts_with("Invalid base"));
+        radio_key(&mut state, KeyCode::Esc);
+        assert!(state.base_edit.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        radio_key(&mut state, KeyCode::Char('b'));
+        state.base_edit = Some(String::new());
+        state.radio_url = Some("https://radio.example/live".into());
+        radio_key(&mut state, KeyCode::Enter);
+        assert!(state.radio_url.is_none());
+        assert!(state.radio_base.value().is_empty());
+        assert!(app(Some(path)).radio_base.value().is_empty());
+        state.view = View::Radio;
+        let (text, _) = render(&mut state, 80);
+        assert!(text.contains("unset · b to save for this burrow"), "{text}");
+    }
+
+    #[test]
+    fn radio_session_override_stays_unsaved_when_appearance_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tui.toml");
+        let mut state = app(Some(path.clone()));
+        state
+            .radio_base
+            .save(&mut state.appearance, "http://saved")
+            .unwrap();
+        let cli = Cli::try_parse_from([
+            "rabbit-tui",
+            "ws://fixture",
+            "--guest",
+            "--radio-base",
+            " https://override/ ",
+        ])
+        .unwrap();
+        state.radio_base = preferences::RadioBase::load(
+            &[1; 32],
+            &state.appearance.preferences,
+            cli.radio_base.as_deref(),
+        )
+        .unwrap();
+        state.view = View::Radio;
+        assert!(handle_appearance_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)
+        ));
+        assert_eq!(state.radio_base.value(), "https://override");
+        assert_eq!(app(Some(path)).radio_base.value(), "http://saved");
+        let (text, _) = render(&mut state, 80);
+        assert!(text.contains("https://override  (session only)"), "{text}");
+        assert!(
+            Cli::try_parse_from(["rabbit-tui", "ws://fixture", "--radio-base", "ftp://bad"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn failed_radio_saves_show_recovery_and_release_does_not_save_an_edit() {
+        let mut state = app(None);
+        state.view = View::Radio;
+        state.base_edit = Some("http://radio".into());
+        handle_radio_key(
+            &mut state,
+            KeyEvent::new_with_kind(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                crossterm::event::KeyEventKind::Release,
+            ),
+            false,
+        );
+        assert!(state.base_edit.is_some());
+        assert!(state.radio_base.value().is_empty());
+        radio_key(&mut state, KeyCode::Enter);
+        assert_eq!(state.radio_base.value(), "http://radio");
+        assert_eq!(state.radio_base.label(), "session only");
+        let (text, _) = render(&mut state, 80);
+        assert!(text.contains("Radio not saved"), "{text}");
+        assert!(text.contains("b to retry"), "{text}");
+        assert!(text.contains("http://radio  (session only)"), "{text}");
+        radio_key(&mut state, KeyCode::Char('b'));
+        assert_eq!(state.base_edit.as_deref(), Some("http://radio"));
+        for letter in ['b', 'o'] {
+            handle_radio_key(
+                &mut state,
+                KeyEvent::new_with_kind(
+                    KeyCode::Char(letter),
+                    KeyModifiers::NONE,
+                    crossterm::event::KeyEventKind::Repeat,
+                ),
+                false,
+            );
+        }
+        assert_eq!(state.base_edit.as_deref(), Some("http://radiobo"));
+        let (text, _) = render(&mut state, 80);
+        assert!(
+            text.contains("Enter save · empty clears · Esc cancel"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn all_palettes_render_readable_choices_and_controls_at_eighty_columns() {
         let mut app = app(None);
@@ -1144,7 +1297,8 @@ mod appearance_tests {
                 ModePreference::Light,
                 ModePreference::Dark,
             ] {
-                app.appearance.preferences = preferences::Preferences { pack, mode };
+                app.appearance.preferences.pack = pack;
+                app.appearance.preferences.mode = mode;
                 for view in [View::Lobby, View::Radio, View::Browser] {
                     app.view = view;
                     let (text, buffer) = render(&mut app, 80);

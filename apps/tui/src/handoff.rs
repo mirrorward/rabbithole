@@ -15,9 +15,9 @@
 //!   zombies pile up. Failures come back as strings for the status line —
 //!   never a panic, never a crashed TUI.
 //!
-//! The **radio base** itself remains session-local: only appearance is saved.
-//! The base is typed per session (`b` in the radio view) and forgotten on exit;
-//! ui-web separately keeps its radio base in `localStorage` under `rh-radio`.
+//! The **radio base** is saved per burrow by `preferences` (`b` in Radio).
+//! `--radio-base` overrides it for one session until an explicit edit is saved.
+//! `$RABBIT_PLAYER` remains environment-only and is read on each handoff.
 
 use std::process::Stdio;
 
@@ -32,6 +32,16 @@ pub fn base_is_valid(base: &str) -> bool {
     base.strip_prefix("http://")
         .or_else(|| base.strip_prefix("https://"))
         .is_some_and(|rest| !rest.is_empty())
+}
+
+/// Validate and normalize an explicit base without changing the shared rules.
+/// Used by both the command-line override and the saved preference editor.
+pub fn parse_base(base: &str) -> Result<String, String> {
+    if base_is_valid(base) {
+        Ok(base.trim().trim_end_matches('/').to_owned())
+    } else {
+        Err("base must be http:// or https:// with a host".into())
+    }
 }
 
 /// Join the delivery `base` and a station slug into the stream URL the

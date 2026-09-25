@@ -1,7 +1,9 @@
-//! Local appearance only: never stores credentials, endpoints, or server themes.
+//! Local appearance and radio delivery bases, keyed by the burrow's server key.
+//! Never stores sign-in credentials, player commands, or server themes.
 //! Auto follows the startup COLORFGBG terminal hint where supported, otherwise
 //! dark. It does not infer the desktop OS theme or query/consume terminal input.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -9,6 +11,10 @@ use anyhow::{bail, Context, Result};
 use rabbithole_core::theme::{self, Mode, Palette, Rgb, ThemePack};
 use rabbithole_proto::welcome::ThemeBundle;
 use serde::{Deserialize, Serialize};
+
+use crate::handoff;
+
+const MAX_SETTINGS_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -72,11 +78,94 @@ impl ModePreference {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Preferences {
     pub pack: Pack,
     pub mode: ModePreference,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    radio_bases: BTreeMap<String, String>,
+}
+
+/// The effective base is deliberately separate from the saved preferences.
+/// A command-line override or failed save must not be written by Ctrl-T/R.
+pub struct RadioBase {
+    server_key: String,
+    value: String,
+    saved: bool,
+}
+
+impl RadioBase {
+    pub fn load(
+        server_key: &[u8; 32],
+        preferences: &Preferences,
+        session_override: Option<&str>,
+    ) -> Result<Self> {
+        let server_key = server_key
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let (value, saved) = match session_override {
+            Some(value) => (
+                handoff::parse_base(value).map_err(anyhow::Error::msg)?,
+                false,
+            ),
+            None => (
+                preferences
+                    .radio_bases
+                    .get(&server_key)
+                    .cloned()
+                    .unwrap_or_default(),
+                true,
+            ),
+        };
+        Ok(Self {
+            server_key,
+            value,
+            saved,
+        })
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn label(&self) -> &'static str {
+        match (self.value.is_empty(), self.saved) {
+            (true, true) => "unset",
+            (true, false) => "unset for this session",
+            (false, true) => "saved",
+            (false, false) => "session only",
+        }
+    }
+
+    /// Empty input removes only this burrow's saved base. Valid choices take
+    /// effect immediately; persistence is transactional, including on failure.
+    pub fn save(&mut self, settings: &mut Appearance, value: &str) -> Result<()> {
+        let value = if value.trim().is_empty() {
+            String::new()
+        } else {
+            handoff::parse_base(value).map_err(anyhow::Error::msg)?
+        };
+        self.value = value;
+        self.saved = false;
+        let mut candidate = settings.preferences.clone();
+        if self.value.is_empty() {
+            candidate.radio_bases.remove(&self.server_key);
+        } else {
+            candidate
+                .radio_bases
+                .insert(self.server_key.clone(), self.value.clone());
+        }
+        let path = settings
+            .path
+            .as_deref()
+            .context("no settings directory; use --preferences FILE")?;
+        write(path, &candidate).context("radio base not saved; check --preferences FILE")?;
+        settings.preferences = candidate;
+        self.saved = true;
+        Ok(())
+    }
 }
 
 pub struct Appearance {
@@ -89,18 +178,29 @@ impl Appearance {
     pub fn load(path: Option<PathBuf>, terminal_hint: Option<Mode>) -> (Self, Option<String>) {
         let (preferences, warning) = match path.as_deref() {
             Some(path) => match read(path) {
-                Ok(preferences) => (preferences, None),
+                Ok(mut preferences) => {
+                    let before = preferences.radio_bases.len();
+                    preferences.radio_bases.retain(|key, value| {
+                        // Only identities produced from HelloAck are usable.
+                        let valid_key = key.len() == 64
+                            && key.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
+                        valid_key && handoff::base_is_valid(value)
+                    });
+                    let warning = (before != preferences.radio_bases.len()).then(||
+                        "Ignored invalid saved radio bases; use b in Radio to save a valid base.".into());
+                    (preferences, warning)
+                },
                 Err(_) => (
                     Preferences::default(),
                     Some(format!(
-                        "Could not read appearance settings at {}; using defaults. Check the file or choose --preferences FILE.",
+                        "Could not read settings at {}; using defaults. Check the file or choose --preferences FILE.",
                         path.display()
                     )),
                 ),
             },
             None => (
                 Preferences::default(),
-                Some("No appearance settings directory; choices last this session. Use --preferences FILE to save them.".into()),
+                Some("No settings directory; choices last this session. Use --preferences FILE to save them.".into()),
             ),
         };
         (
@@ -186,25 +286,28 @@ fn read(path: &Path) -> Result<Preferences> {
         Err(err) => return Err(err.into()),
     };
     let mut text = String::new();
-    file.take(4097).read_to_string(&mut text)?;
-    if text.len() > 4096 {
-        bail!("appearance settings exceed 4 KiB");
+    file.take((MAX_SETTINGS_BYTES + 1) as u64)
+        .read_to_string(&mut text)?;
+    if text.len() > MAX_SETTINGS_BYTES {
+        bail!("settings exceed 64 KiB");
     }
     Ok(toml::from_str(&text)?)
 }
 
 fn write(path: &Path, preferences: &Preferences) -> Result<()> {
+    let text = toml::to_string(preferences)?;
+    if text.len() > MAX_SETTINGS_BYTES {
+        bail!("settings exceed 64 KiB; shorten or clear a radio base");
+    }
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary.write_all(toml::to_string(preferences)?.as_bytes())?;
+    temporary.write_all(text.as_bytes())?;
     temporary.as_file().sync_all()?;
-    temporary
-        .persist(path)
-        .context("save appearance settings")?;
+    temporary.persist(path).context("save settings")?;
     Ok(())
 }
 
@@ -258,7 +361,8 @@ mod tests {
                 ModePreference::Light,
                 ModePreference::Dark,
             ] {
-                appearance.preferences = Preferences { pack, mode };
+                appearance.preferences.pack = pack;
+                appearance.preferences.mode = mode;
                 assert!(appearance.save_status().ends_with("· saved"));
                 let (restored, warning) = Appearance::load(Some(path.clone()), Some(Mode::Dark));
                 assert!(warning.is_none());
@@ -283,7 +387,7 @@ mod tests {
         for text in [
             "pack = [".to_owned(),
             "mode = 'unknown'".to_owned(),
-            "#".repeat(4097),
+            "#".repeat(MAX_SETTINGS_BYTES + 1),
         ] {
             std::fs::write(&path, &text).unwrap();
             let (appearance, warning) = Appearance::load(Some(path.clone()), None);
@@ -336,11 +440,178 @@ mod tests {
     }
 
     #[test]
+    fn appearance_only_files_migrate_and_burrows_restore_and_clear_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tui.toml");
+        let old = "pack = 'retro'\nmode = 'light'\n";
+        std::fs::write(&path, old).unwrap();
+        let (mut settings, warning) = Appearance::load(Some(path.clone()), None);
+        assert!(warning.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+        let mut first = RadioBase::load(&[1; 32], &settings.preferences, None).unwrap();
+        assert_eq!(first.value(), "");
+        first
+            .save(&mut settings, " http://radio-a:8000/// ")
+            .unwrap();
+        let mut second = RadioBase::load(&[2; 32], &settings.preferences, None).unwrap();
+        assert_eq!(
+            second.value(),
+            "",
+            "another identity must not inherit the base"
+        );
+        second.save(&mut settings, "https://radio-b").unwrap();
+        let (mut restored, warning) = Appearance::load(Some(path.clone()), None);
+        assert!(warning.is_none());
+        assert_eq!(restored.preferences.pack, Pack::Retro);
+        assert_eq!(restored.preferences.mode, ModePreference::Light);
+        let mut first = RadioBase::load(&[1; 32], &restored.preferences, None).unwrap();
+        assert_eq!(first.value(), "http://radio-a:8000");
+        assert_eq!(first.label(), "saved");
+        first.save(&mut restored, "  ").unwrap();
+        let (restored, _) = Appearance::load(Some(path.clone()), None);
+        assert_eq!(
+            RadioBase::load(&[1; 32], &restored.preferences, None)
+                .unwrap()
+                .value(),
+            ""
+        );
+        assert_eq!(
+            RadioBase::load(&[2; 32], &restored.preferences, None)
+                .unwrap()
+                .value(),
+            "https://radio-b"
+        );
+        assert_eq!(restored.preferences.pack, Pack::Retro);
+        assert_eq!(restored.preferences.mode, ModePreference::Light);
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(!text.contains("radio-a"));
+        assert!(!text.contains("player"));
+    }
+
+    #[test]
+    fn session_override_and_failed_save_never_leak_into_appearance_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tui.toml");
+        let (mut settings, _) = Appearance::load(Some(path.clone()), None);
+        let mut base = RadioBase::load(&[1; 32], &settings.preferences, None).unwrap();
+        base.save(&mut settings, "http://saved").unwrap();
+        let mut base =
+            RadioBase::load(&[1; 32], &settings.preferences, Some("https://override/")).unwrap();
+        assert_eq!(base.value(), "https://override");
+        assert_eq!(base.label(), "session only");
+        settings.preferences.pack = Pack::HighContrast;
+        assert!(settings.save_status().ends_with("saved"));
+        let restored = read(&path).unwrap();
+        assert_eq!(
+            RadioBase::load(&[1; 32], &restored, None).unwrap().value(),
+            "http://saved"
+        );
+        assert_eq!(restored.pack, Pack::HighContrast);
+        // A failed save remains effective but must not silently become saved
+        // when a later appearance choice succeeds.
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, "preserve").unwrap();
+        settings.path = Some(blocked.join("tui.toml"));
+        assert!(base.save(&mut settings, "https://failed").is_err());
+        assert_eq!(base.value(), "https://failed");
+        assert_eq!(base.label(), "session only");
+        settings.path = Some(path.clone());
+        settings.preferences.mode = ModePreference::Light;
+        assert!(settings.save_status().ends_with("saved"));
+        let restored = read(&path).unwrap();
+        assert_eq!(
+            RadioBase::load(&[1; 32], &restored, None).unwrap().value(),
+            "http://saved"
+        );
+        assert_eq!(restored.mode, ModePreference::Light);
+        base.save(&mut settings, "https://failed").unwrap();
+        assert_eq!(base.label(), "saved");
+        settings.path = None;
+        assert!(base.save(&mut settings, "").is_err());
+        assert_eq!(base.value(), "");
+        assert_eq!(base.label(), "unset for this session");
+        assert_eq!(
+            RadioBase::load(&[1; 32], &read(&path).unwrap(), None)
+                .unwrap()
+                .value(),
+            "https://failed"
+        );
+        settings.path = Some(path.clone());
+        base.save(&mut settings, "").unwrap();
+        assert_eq!(
+            RadioBase::load(&[1; 32], &read(&path).unwrap(), None)
+                .unwrap()
+                .value(),
+            ""
+        );
+        assert_eq!(std::fs::read_to_string(blocked).unwrap(), "preserve");
+    }
+
+    #[test]
+    fn invalid_saved_bases_are_ignored_without_losing_valid_appearance_or_burrows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tui.toml");
+        let text = format!("pack = 'retro'\nmode = 'dark'\n[radio_bases]\n'{}' = 'ftp://invalid'\n'{}' = 'https://valid'\n'not-a-server-key' = 'http://wrong'\n", "01".repeat(32), "02".repeat(32));
+        std::fs::write(&path, &text).unwrap();
+        let (settings, warning) = Appearance::load(Some(path.clone()), None);
+        assert!(warning
+            .unwrap()
+            .contains("Ignored invalid saved radio bases"));
+        assert_eq!(settings.preferences.pack, Pack::Retro);
+        assert_eq!(settings.preferences.mode, ModePreference::Dark);
+        assert_eq!(settings.preferences.radio_bases.len(), 1);
+        assert_eq!(
+            RadioBase::load(&[1; 32], &settings.preferences, None)
+                .unwrap()
+                .value(),
+            ""
+        );
+        assert_eq!(
+            RadioBase::load(&[2; 32], &settings.preferences, None)
+                .unwrap()
+                .value(),
+            "https://valid"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            text,
+            "loading does not rewrite settings"
+        );
+        assert!(RadioBase::load(&[2; 32], &settings.preferences, Some("ftp://wrong")).is_err());
+    }
+
+    #[test]
+    fn invalid_edits_preserve_the_last_base_and_oversized_saves_preserve_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tui.toml");
+        let (mut settings, _) = Appearance::load(Some(path.clone()), None);
+        let mut base = RadioBase::load(&[1; 32], &settings.preferences, None).unwrap();
+        base.save(&mut settings, "https://saved").unwrap();
+        let original = std::fs::read_to_string(&path).unwrap();
+        assert!(base.save(&mut settings, "ftp://invalid").is_err());
+        assert_eq!(base.value(), "https://saved");
+        assert_eq!(base.label(), "saved");
+        let huge = format!("https://{}", "a".repeat(MAX_SETTINGS_BYTES));
+        assert!(base.save(&mut settings, &huge).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(settings.preferences.radio_bases.len(), 1);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        base.save(&mut settings, "http://shorter").unwrap();
+        assert_eq!(
+            RadioBase::load(&[1; 32], &read(&path).unwrap(), None)
+                .unwrap()
+                .value(),
+            "http://shorter"
+        );
+    }
+
+    #[test]
     fn palettes_keep_text_contrast_and_high_contrast_ignores_server_accent() {
         let (mut appearance, _) = Appearance::load(None, None);
         for pack in [Pack::Clean, Pack::Retro, Pack::HighContrast] {
             for mode in [ModePreference::Light, ModePreference::Dark] {
-                appearance.preferences = Preferences { pack, mode };
+                appearance.preferences.pack = pack;
+                appearance.preferences.mode = mode;
                 let base = appearance.palette(None);
                 for color in [base.text, base.muted, base.accent] {
                     assert!(

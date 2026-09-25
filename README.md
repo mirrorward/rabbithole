@@ -178,7 +178,27 @@ indices 0–6 and 8 select Dark; 7 and 9–15 select Light. Missing, malformed, 
 extended-color hints fall back to Dark. This is a terminal hint, not live OS
 appearance detection; choose Light or Dark manually for a customized terminal
 palette. High Contrast keeps its own colors even when a burrow publishes an
-accent. Appearance settings contain no credentials or server addresses.
+accent. The preference file also holds the radio delivery settings below;
+sign-in passwords, session tokens, and player commands are not saved there.
+
+## Terminal radio
+
+Open Radio with **Ctrl-N**. Press **b** to edit the delivery base, then Enter
+to save it for this burrow; an empty value clears it, and Esc cancels the edit.
+Saved bases follow the burrow's identity and stay separate from other burrows.
+They share the appearance preference file and its `--preferences FILE` override.
+If saving fails, the valid new base works for this session and the status line
+reports that it was not saved.
+
+`--radio-base https://radio.example.org` overrides the saved base for this
+session. Changing appearance does not save that override; saving with **b** then
+Enter does. Without an override or saved base, the address starts unset.
+
+Select a station and press Enter or **p** to show its URL. **o** opens it using
+`RABBIT_PLAYER`, for example `RABBIT_PLAYER="mpv --no-video"`. This environment
+setting is read when opening the player and is never saved. Arguments are split
+on whitespace and the URL is appended as one argument, without a shell. With
+an unset or blank `RABBIT_PLAYER`, the URL remains available to copy.
 
 ## Development
 
