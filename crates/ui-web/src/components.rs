@@ -3646,10 +3646,9 @@ pub fn Boards() -> impl IntoView {
                             let href = format!("/boards/{}", b.slug);
                             view! {
                                 <li class="rh-tree-item">
-                                    // (Router <A> takes no tabindex in leptos 0.6, so board rows stay
-                                    // individual Tab stops — a board list is a handful of rows, not a
-                                    // forty-row file table, so the cost is small. Arrows still work.)
-                                    <A href=href class="rh-board-link rh-row">
+                                    // Forward the attribute to the router's real anchor: the list
+                                    // owns Tab entry and arrows focus links without changing navigation.
+                                    <A href=href class="rh-board-link rh-row" attr:tabindex="-1">
                                         <span class="rh-row-icon" inner_html=crate::icons::section_icon("/boards")></span>
                                         <span class="rh-row-main">
                                             <span class="rh-board-name">{b.name}</span>

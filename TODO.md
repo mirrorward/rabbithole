@@ -141,7 +141,8 @@ where headless-verifiable, tested:
   **RH-2 focus recovery**: a removed focused row moves to its nearest surviving
   neighbor, or the empty list; filtering, explicit blur, focus handed to another
   control, and route disposal never steal focus. A real-browser regression drives
-  the live Members list. Board rows still use individual Tab stops (RH-3).
+  the live Members list. **RH-3**: Boards also has one Tab stop; arrows traverse
+  its real links, with Enter, pointer and modified-click navigation preserved.
 - **The rail is one icon family** — rings (home/brand), smiley (people), arrow-into-
   tray (transfers), bust (you), plus — same 20px box, same stroke, contact-sheeted.
 - **Native-feel pass** (50-agent audit, 20 confirmed findings) — real Tauri drag

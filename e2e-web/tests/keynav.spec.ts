@@ -136,3 +136,118 @@ test("dynamic lists recover removed rows without stealing focus", async ({ conte
     await test.info().attach("keynav-server-log", { body: server.logs(), contentType: "text/plain" });
   }
 });
+
+test("board links share one Tab stop and retain native link activation", async ({ context, page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await context.route("**/*", (route) => {
+    const host = new URL(route.request().url()).hostname;
+    return ["127.0.0.1", "localhost", "[::1]"].includes(host) ? route.continue() : route.abort();
+  });
+  const server = await TestBurrow.create("Board Keyboard", "a34700");
+  try {
+    for (const [slug, title] of [
+      ["a-first", "First board"],
+      ["b-second", "Second board"],
+      ["c-third", "Third board"],
+    ]) {
+      await server.ctl("board-create", slug, title);
+    }
+    await page.goto(server.httpURL);
+    await page.locator("#rh-login-server").fill(server.wsURL);
+    await page.locator("#rh-login-handle").fill("theme-viewer");
+    await page.locator("#rh-login-password").fill("theme-e2e-password");
+    await page.locator('.rh-login button[type="submit"]').click();
+    await expect(page.locator(".rh-header .rh-title-text")).toHaveText(server.name);
+    await page.locator('.rh-subnav a[href="/boards"]').click();
+
+    const list = page.getByRole("list", { name: "Boards", exact: true });
+    const links = list.getByRole("link");
+    await expect(links).toHaveCount(3);
+    await expect(links.locator(".rh-board-name")).toHaveText(["First board", "Second board", "Third board"]);
+    const first = links.nth(0);
+    const middle = links.nth(1);
+    const last = links.nth(2);
+    await expect(first).toHaveAttribute("href", "/boards/a-first");
+    await expect(middle).toHaveAttribute("href", "/boards/b-second");
+    await expect(last).toHaveAttribute("href", "/boards/c-third");
+
+    // Bound the real rendered list with ordinary controls so browser chrome
+    // cannot become the next stop. Do not replace rows or simulate Tab focus.
+    await list.evaluate((element) => {
+      for (const [where, label] of [
+        ["beforebegin", "Before board list"],
+        ["afterend", "After board list"],
+      ] as const) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        element.insertAdjacentElement(where, button);
+      }
+    });
+    const before = page.getByRole("button", { name: "Before board list", exact: true });
+    const after = page.getByRole("button", { name: "After board list", exact: true });
+    await before.focus();
+    await page.keyboard.press("Tab");
+    await expect(list).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(after).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(list).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(before).toBeFocused();
+
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("ArrowDown");
+    await expect(first).toBeFocused();
+    await page.keyboard.press("ArrowUp");
+    await expect(first).toBeFocused();
+    await page.keyboard.press("End");
+    await expect(last).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(last).toBeFocused();
+    await page.keyboard.press("Home");
+    await expect(first).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(middle).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(after).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(list).toBeFocused();
+    await page.keyboard.press("ArrowUp");
+    await expect(last).toBeFocused();
+
+    // Enter and an ordinary click still use the router, without a document
+    // reload. The links keep their href and ordinary new-tab behavior too.
+    let documentRequests = 0;
+    page.on("request", (request) => {
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) documentRequests += 1;
+    });
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(`${server.httpURL}/boards/c-third`);
+    await expect(page.getByRole("heading", { name: "Third board", exact: true })).toBeVisible();
+    await page.getByRole("link", { name: "All boards", exact: true }).click();
+    await expect(links).toHaveCount(3);
+    await middle.click();
+    await expect(page).toHaveURL(`${server.httpURL}/boards/b-second`);
+    await expect(page.getByRole("heading", { name: "Second board", exact: true })).toBeVisible();
+    await page.getByRole("link", { name: "All boards", exact: true }).click();
+    await expect(links).toHaveCount(3);
+
+    // Modifier-created tabs need not retain an opener, so observe the browser
+    // context's new page rather than requiring a script-style popup event.
+    const openedTab = context.waitForEvent("page").then((tab) => ({ tab, initialURL: tab.url() }));
+    await first.click({ modifiers: ["ControlOrMeta"] });
+    const { tab, initialURL } = await openedTab;
+    // Inspect the initial URL: the new app can subsequently restore its
+    // saved session's view, which is independent of this link's target.
+    expect(initialURL).toBe(`${server.httpURL}/boards/a-first`);
+    await expect(page).toHaveURL(`${server.httpURL}/boards`);
+    await tab.close();
+    expect(documentRequests).toBe(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await server.dispose();
+    await test.info().attach("board-keynav-server-log", { body: server.logs(), contentType: "text/plain" });
+  }
+});

@@ -50,7 +50,7 @@ real service workers and gives each fixture its own writable copy of the app. No
 | `npm run test:theme` | Signed theme loading, live publish/clear, High Contrast, multiple burrows, reconnect, session restoration, and account opt-out (two tests). |
 | `npm run test:routes` | Direct `/lobby`, actual hard reload and token resume, nested routes and real JS/WASM assets, missing-asset 404s. |
 | `npm run test:chat` | Recent chat history for a second client, room isolation, and reconnection. |
-| `npm run test:keynav` | Focus recovery in the real Members list after filtering, no focus stealing, and route disposal/remount. |
+| `npm run test:keynav` | Focus recovery in Members after filtering, no focus stealing, route disposal/remount, and Boards Tab order with arrow, Enter, pointer and modified-click navigation. |
 | `npm run test:pwa` | Real service-worker updates, explicit reload, cached offline navigation, connection recovery, and native exclusion. |
 | `npm run test:keepalive` | Initial app load and immediate reload with every production connection/request rate limit unchanged. |
 
