@@ -418,6 +418,7 @@ pub fn user_status_file() -> Option<std::path::PathBuf> {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn git_toplevel() -> Option<std::path::PathBuf> {
     let out = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])

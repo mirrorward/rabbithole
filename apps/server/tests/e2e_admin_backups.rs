@@ -156,13 +156,25 @@ async fn an_operator_makes_checks_and_removes_a_snapshot_from_the_console() {
         ErrorCode::NotFound,
     );
 
-    let audit = AuditRepo(&burrow.shared.pool).recent(50).await.unwrap();
-    assert!(audit
-        .iter()
-        .any(|row| row.actor == "root" && row.action == "backup" && row.detail.contains(&name)));
-    assert!(audit
-        .iter()
-        .any(|row| row.actor == "root" && row.action == "backup-delete" && row.detail == name));
+    // Audit writes are spawned independently of the request acknowledgement.
+    // Wait for both records, without assuming the database task has run yet.
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let audit = AuditRepo(&burrow.shared.pool).recent(50).await.unwrap();
+            let created = audit.iter().any(|row| {
+                row.actor == "root" && row.action == "backup" && row.detail.contains(&name)
+            });
+            let deleted = audit.iter().any(|row| {
+                row.actor == "root" && row.action == "backup-delete" && row.detail == name
+            });
+            if created && deleted {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("backup creation and deletion audit records should be persisted within 3 seconds");
 
     burrow.shutdown().await;
 }

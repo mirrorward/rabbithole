@@ -291,9 +291,7 @@ fn a_tag_appended_after_the_audio_does_not_cost_the_last_frame() {
     let junk = with(b"\x01\x02\x03\x04\x05");
     let found = flac::frames(&junk);
     assert!(found.len() < truth.len(), "{found:?}");
-    assert!(found
-        .iter()
-        .all(|f| f.offset + f.len <= REFERENCE.len() - 1));
+    assert!(found.iter().all(|f| f.offset + f.len < REFERENCE.len()));
 }
 
 /// The number a frame carries, decoded here rather than by the code under
