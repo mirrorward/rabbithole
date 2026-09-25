@@ -234,14 +234,23 @@ test("board links share one Tab stop and retain native link activation", async (
     await page.getByRole("link", { name: "All boards", exact: true }).click();
     await expect(links).toHaveCount(3);
 
-    // Modifier-created tabs need not retain an opener, so observe the browser
-    // context's new page rather than requiring a script-style popup event.
-    const openedTab = context.waitForEvent("page").then((tab) => ({ tab, initialURL: tab.url() }));
-    await first.click({ modifiers: ["ControlOrMeta"] });
-    const { tab, initialURL } = await openedTab;
-    // Inspect the initial URL: the new app can subsequently restore its
-    // saved session's view, which is independent of this link's target.
-    expect(initialURL).toBe(`${server.httpURL}/boards/a-first`);
+    // A new-tab event can arrive at about:blank, and the SPA may later restore
+    // a different view. Capture each document's initial URL before app scripts
+    // run, then wait through any blank document for the actual board navigation.
+    const targetURL = `${server.httpURL}/boards/a-first`;
+    await context.addInitScript(() => {
+      Object.defineProperty(window, "__rhDocumentStartURL", { value: location.href });
+    });
+    const [tab] = await Promise.all([
+      // Native modifier-created tabs need not retain a script-style opener.
+      context.waitForEvent("page"),
+      first.click({ modifiers: ["ControlOrMeta"] }),
+    ]);
+    await tab.waitForFunction(
+      (url) => Reflect.get(window, "__rhDocumentStartURL") === url,
+      targetURL,
+      { timeout: 15_000 },
+    );
     await expect(page).toHaveURL(`${server.httpURL}/boards`);
     await tab.close();
     expect(documentRequests).toBe(0);
