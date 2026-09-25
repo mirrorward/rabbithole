@@ -5758,6 +5758,7 @@ fn RadioPlayerPanel() -> impl IntoView {
     let app = expect_context::<AppState>();
     let prefs = app.radio_prefs;
     let radio = app.radio;
+    let playback = app.radio_playback;
 
     // The station on show: the one picked, else whatever is on the air, so
     // the pane is never blank while something is playing.
@@ -5848,17 +5849,30 @@ fn RadioPlayerPanel() -> impl IntoView {
                     class="rh-btn"
                     disabled=move || !ready()
                     on:click=move |_| {
-                        // Nothing picked yet: Listen tunes in to what is on show.
-                        if prefs.with_untracked(|p| p.station.is_none()) {
-                            if let Some(s) = shown() {
-                                app.select_station(&s.station);
+                        use crate::playback::PlaybackStatus;
+                        match playback.get_untracked() {
+                            PlaybackStatus::Blocked | PlaybackStatus::Failed => app.retry_radio(),
+                            PlaybackStatus::Starting | PlaybackStatus::Playing => app.set_radio_enabled(false),
+                            PlaybackStatus::Idle => {
+                                if let Some(station) = shown() {
+                                    app.select_station(&station.station);
+                                }
+                                app.set_radio_enabled(true);
                             }
                         }
-                        app.set_radio_enabled(!prefs.get_untracked().enabled)
                     }
                 >
-                    {move || if enabled() && ready() { "Stop" } else { "Listen" }}
+                    {move || match playback.get() {
+                        crate::playback::PlaybackStatus::Starting => "Cancel",
+                        crate::playback::PlaybackStatus::Playing => "Stop",
+                        crate::playback::PlaybackStatus::Blocked => "Start listening",
+                        crate::playback::PlaybackStatus::Failed => "Retry playback",
+                        crate::playback::PlaybackStatus::Idle => "Listen",
+                    }}
                 </button>
+                <Show when=move || enabled() && playback.get().needs_retry() fallback=|| ()>
+                    <button class="rh-btn ghost" on:click=move |_| app.set_radio_enabled(false)>"Stop"</button>
+                </Show>
                 <button
                     class="rh-btn ghost"
                     disabled=move || !ready()
@@ -5884,6 +5898,11 @@ fn RadioPlayerPanel() -> impl IntoView {
                     {move || format!("{}%", volume_pct())}
                 </span>
             </fieldset>
+            <Show when=move || ready() && playback.get() != crate::playback::PlaybackStatus::Idle fallback=|| ()>
+                <p class="rh-hint" role="status" aria-live="polite" data-radio-playback>
+                    {move || playback.get().message()}
+                </p>
+            </Show>
             {move || reason().map(|why| view! { <p class="rh-hint">{why}</p> })}
             <h3 class="rh-player-heading">"Recently played"</h3>
             <Show

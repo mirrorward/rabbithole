@@ -36,6 +36,8 @@ export class TestBurrow {
     readonly httpURL: string,
     readonly wsURL: string,
     private readonly binary: string,
+    readonly radioURL?: string,
+    readonly radioSourceURL?: string,
   ) {
     this.env = { ...process.env, RUST_LOG: "warn" };
     // Local development overrides must not redirect a test to another data
@@ -48,7 +50,7 @@ export class TestBurrow {
   static async create(
     name: string,
     accent: string,
-    options: { rateLimits?: "default" | "generous"; spaDist?: string } = {},
+    options: { rateLimits?: "default" | "generous"; spaDist?: string; radio?: boolean } = {},
   ): Promise<TestBurrow> {
     const binary = resolve(process.env.BURROW_BIN!);
     const dist = resolve(options.spaDist ?? process.env.SPA_DIST!);
@@ -62,7 +64,12 @@ export class TestBurrow {
     const http = await unusedPort();
     let ws = await unusedPort();
     while (ws === http) ws = await unusedPort();
-    const burrow = new TestBurrow(name, dataDir, `http://127.0.0.1:${http}`, `ws://127.0.0.1:${ws}`, binary);
+    let radio = options.radio ? await unusedPort() : undefined;
+    while (radio === http || radio === ws) radio = await unusedPort();
+    let source = options.radio ? await unusedPort() : undefined;
+    while (source !== undefined && [http, ws, radio].includes(source)) source = await unusedPort();
+    const burrow = new TestBurrow(name, dataDir, `http://127.0.0.1:${http}`, `ws://127.0.0.1:${ws}`, binary,
+      radio ? `http://127.0.0.1:${radio}` : undefined, source ? `http://127.0.0.1:${source}` : undefined);
     await writeFile(join(dataDir, "burrow.toml"), [
       `name = ${JSON.stringify(name)}`,
       'quic_addr = "127.0.0.1:0"',
@@ -71,6 +78,9 @@ export class TestBurrow {
       `http_addr = "127.0.0.1:${http}"`,
       `http_web_root = ${JSON.stringify(dist)}`,
       "announce_enabled = false",
+      ...(radio ? ["radio_enabled = true", `radio_addr = "127.0.0.1:${radio}"`,
+        "radio_source_enabled = true", `radio_source_addr = "127.0.0.1:${source}"`,
+        'radio_source_password = "radio-e2e-password"'] : []),
       // Theme/route tests isolate their behavior from anti-abuse budgets.
       // The keepalive acceptance test leaves every production limit intact.
       ...(options.rateLimits === "default" ? [] : [

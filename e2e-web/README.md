@@ -51,6 +51,7 @@ real service workers and gives each fixture its own writable copy of the app. No
 | `npm run test:routes` | Direct `/lobby`, actual hard reload and token resume, nested routes and real JS/WASM assets, missing-asset 404s. |
 | `npm run test:chat` | Recent chat history for a second client, room isolation, and reconnection. |
 | `npm run test:keynav` | Focus recovery in Members after filtering, no focus stealing, route disposal/remount, and Boards Tab order with arrow, Enter, pointer and modified-click navigation. |
+| `npm run test:radio` | Radio playback refusal, explicit retry, stream errors, and stale outcomes after station changes or stopping. |
 | `npm run test:pwa` | Real service-worker updates, explicit reload, cached offline navigation, connection recovery, and native exclusion. |
 | `npm run test:keepalive` | Initial app load and immediate reload with every production connection/request rate limit unchanged. |
 
@@ -63,6 +64,15 @@ or rate-budget reset between loads.
 The account opt-out test seeds the existing preference in its temporary database;
 it does not assume an absent client-side opt-out control exists. Route tests
 observe token resumption after reload without another password submission.
+
+The radio fixture uses authenticated source ingestion and metadata on a real
+burrow for station discovery, with generated WAV audio served from an isolated
+HTTP endpoint. The playback-refusal case deliberately injects `NotAllowedError`;
+it verifies client recovery without claiming to exercise Chromium’s autoplay
+policy. Retry uses the native media decoder and advancing playback time, and a
+real HTTP 503 verifies stream-failure recovery. Delayed promises and old media
+events are separately injected to verify that obsolete attempts cannot change
+the current player. The radio engine and encoders are outside these tests.
 
 ## Manual guest smoke
 

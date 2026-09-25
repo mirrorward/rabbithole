@@ -236,6 +236,8 @@ pub struct AppState {
     /// The user's radio player preferences (enable/volume/mute/station plus
     /// the Icecast delivery address), persisted to `localStorage`.
     pub radio_prefs: RwSignal<RadioPrefs>,
+    /// What the audio element actually did, distinct from saved listening intent.
+    pub radio_playback: RwSignal<crate::playback::PlaybackStatus>,
     /// Where downloads go, in the desktop shell (which owns the preference).
     /// `None` in a browser tab, where the browser decides.
     pub download_prefs: RwSignal<Option<crate::save::DownloadPrefs>>,
@@ -267,6 +269,7 @@ impl AppState {
             ws: store_value(crate::ws::WsClient::new()),
             client: store_value(MockClient::new()),
         };
+        let radio_playback = create_rw_signal(crate::playback::PlaybackStatus::Idle);
         Self {
             sessions: create_rw_signal(vec![(ServerId::local(), session)]),
             focused_id: create_rw_signal(ServerId::local()),
@@ -314,10 +317,13 @@ impl AppState {
             custom_pack: create_rw_signal(None),
             radio: create_rw_signal(RadioState::default()),
             radio_prefs: create_rw_signal(initial_radio_prefs()),
+            radio_playback,
             radio_covers: create_rw_signal(Default::default()),
             download_prefs: create_rw_signal(None),
             #[cfg(target_arch = "wasm32")]
-            player: store_value(crate::player::RadioPlayer::new()),
+            player: store_value(crate::player::RadioPlayer::with_status(move |status| {
+                radio_playback.try_set(status);
+            })),
         }
     }
 
@@ -3944,6 +3950,15 @@ impl AppState {
         self.radio_prefs
             .update(|p| p.station = Some(station.to_string()));
         self.radio_prefs_changed();
+    }
+
+    /// Retry a refused or failed stream directly from a user gesture.
+    pub fn retry_radio(&self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let prefs = self.radio_prefs.get_untracked();
+            self.player.update_value(|player| player.retry(&prefs));
+        }
     }
 
     /// Persist the preferences and reconcile the audio element (both are

@@ -116,6 +116,7 @@ pub mod net;
 pub mod notify;
 pub mod packs;
 pub mod palette;
+pub mod playback;
 pub mod probe;
 pub mod pwa;
 pub mod radio;
