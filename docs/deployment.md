@@ -63,6 +63,33 @@ rebind as their keys change. What waits for a restart is what every client
 arrives on (`quic_addr`, `ws_addr`), plus federation, port mapping, doors and
 the data directory.
 
+### HTTP file downloads
+
+The optional HTTP listener (`http_enabled`, `http_addr`, `http_web_root`)
+serves the built web client and guest-visible `/files/<area>/<path>` downloads.
+Regular static files and those downloads support one byte range per GET:
+`Range: bytes=100-199`, `bytes=100-`, or `bytes=-100`. A successful range returns
+`206 Partial Content` with `Content-Range`, `Accept-Ranges: bytes`, and the
+selected byte count in `Content-Length`. An end past EOF is clipped; a start
+past EOF returns `416 Range Not Satisfiable` with `Content-Range: bytes */SIZE`.
+
+Range processing happens after the ordinary path, guest-access, drop-box,
+quarantine and denied-hash checks. A partial file download counts as one GET;
+HEAD and refused ranges do not increment the download count. Responses remain
+framed correctly when several requests share an HTTP/1.1 connection.
+
+The listener deliberately supports a bounded subset of
+[HTTP range requests](https://www.rfc-editor.org/rfc/rfc9110.html#section-14):
+
+- HEAD ignores Range and reports the complete representation without a body.
+- Unknown range units and ranges on empty files are ignored (full `200`).
+- Malformed or overflowing byte ranges, repeated Range fields and multipart
+  ranges are rejected with `400` after authorization.
+- `If-Range` falls back to a complete `200` response: the listener does not
+  advertise validators with which to establish an unchanged representation.
+- Generated manifests, the server descriptor and client-route HTML fallbacks
+  remain complete responses; actual files, including `index.html`, can be ranged.
+
 ### Public WebSocket access
 
 The built-in WebSocket listener is plaintext and defaults to

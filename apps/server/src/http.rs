@@ -49,6 +49,15 @@
 //! Connections pass the `conn` rate class at accept and a per-IP request
 //! budget (the `legacy` class) per request, like the other legacy surfaces.
 //!
+//! File downloads and actual static assets support one byte range on GET.
+//! Closed, open-ended and suffix ranges return 206; unsatisfiable ranges
+//! return 416. Malformed, oversized, overflowing, repeated or multipart byte
+//! ranges return 400, only after the ordinary path/access checks succeed.
+//! Per RFC 9110 section 14.2, HEAD, unknown range units and empty content
+//! ignore Range and return the normal full response. With no validators
+//! advertised, If-Range conservatively selects the full response (section
+//! 13.1.5). Generated documents and SPA shell navigation ignore Range too.
+//!
 //! # Security notes
 //!
 //! - **The burrow's own folders are never served** ([`private_dirs`]): the
@@ -305,6 +314,8 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 struct Request {
     method: Method,
     keep_alive: bool,
+    range: RangeRequest,
+    if_range: bool,
     /// Decoded, sanitized path segments (`/` = empty vec).
     segments: Vec<String>,
 }
@@ -313,6 +324,37 @@ struct Request {
 enum Method {
     Get,
     Head,
+}
+
+/// One small range expression, bounded independently of the HTTP head. Keep
+/// invalidity until resource lookup so a range cannot reveal a hidden length.
+#[derive(Default)]
+enum RangeRequest {
+    #[default]
+    Absent,
+    Bytes(String),
+    UnknownUnit,
+    Invalid,
+}
+
+const MAX_RANGE_SPEC_BYTES: usize = 128;
+
+impl RangeRequest {
+    fn from_header(value: &str) -> Self {
+        let Some((unit, spec)) = value.split_once('=') else {
+            return Self::Invalid;
+        };
+        if unit.is_empty() || !unit.bytes().all(is_token_byte) {
+            return Self::Invalid;
+        }
+        if !unit.eq_ignore_ascii_case("bytes") {
+            return Self::UnknownUnit;
+        }
+        if spec.len() > MAX_RANGE_SPEC_BYTES || spec.contains(',') {
+            return Self::Invalid;
+        }
+        Self::Bytes(spec.trim_matches([' ', '\t']).to_string())
+    }
 }
 
 /// Parse one complete, bodyless origin-form request. Strict whitespace and
@@ -345,6 +387,8 @@ fn parse_request(head: &[u8]) -> std::result::Result<Request, Response> {
     let mut host = false;
     let mut content_length = false;
     let mut close = version == "HTTP/1.0";
+    let mut range = RangeRequest::Absent;
+    let mut if_range = false;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             return Err(bad());
@@ -383,6 +427,15 @@ fn parse_request(head: &[u8]) -> std::result::Result<Request, Response> {
                 "Expectation Failed",
                 "request expectations are unsupported\n",
             ));
+        } else if name.eq_ignore_ascii_case("range") {
+            range = match range {
+                RangeRequest::Absent => RangeRequest::from_header(value),
+                _ => RangeRequest::Invalid,
+            };
+        } else if name.eq_ignore_ascii_case("if-range") {
+            // We do not advertise an ETag or Last-Modified validator. Never
+            // splice a possibly changed representation into a client's copy.
+            if_range = true;
         } else if name.eq_ignore_ascii_case("connection") {
             for option in value.split(',').map(|s| s.trim_matches([' ', '\t'])) {
                 if option.is_empty() || !option.bytes().all(is_token_byte) {
@@ -415,6 +468,8 @@ fn parse_request(head: &[u8]) -> std::result::Result<Request, Response> {
     Ok(Request {
         method,
         keep_alive: !close,
+        range,
+        if_range,
         segments,
     })
 }
@@ -590,20 +645,6 @@ async fn serve_file_download(req: &Request, shared: &Arc<Shared>) -> Response {
     if shared.moderation.file_quarantined(Some(&blob_id)) || shared.moderation.is_denied(&blob_id) {
         return not_found();
     }
-    // Count the download (this is the byte-serving hop the telnet slice
-    // deferred counting to) — but only for GET: HEAD serves no bytes.
-    let served = if req.method == Method::Get {
-        match shared.files.record_download(node.id).await {
-            Ok(s) => s,
-            Err(FileError::NoSuchNode) => return not_found(),
-            Err(e) => {
-                tracing::warn!("http download counter failed: {e}");
-                return Response::text(500, "Internal Server Error", "try again later\n");
-            }
-        }
-    } else {
-        target.clone()
-    };
     let blobs = shared.blobs.clone();
     let bytes = match tokio::task::spawn_blocking(move || blobs.get(&BlobId(blob_id))).await {
         Ok(Ok(b)) => b,
@@ -611,21 +652,122 @@ async fn serve_file_download(req: &Request, shared: &Arc<Shared>) -> Response {
     };
     // MIME is stored from upload metadata. Never let control bytes turn its
     // Content-Type into extra headers or a forged next pipelined response.
-    let mime = if served.mime.trim().is_empty() || served.mime.bytes().any(|b| b.is_ascii_control())
+    let mime = if target.mime.trim().is_empty() || target.mime.bytes().any(|b| b.is_ascii_control())
     {
-        content_type_for(&served.name).to_string()
+        content_type_for(&target.name).to_string()
     } else {
-        served.mime.clone()
+        target.mime.clone()
     };
-    let mut resp = Response::new(200, "OK", mime, bytes);
+    // Range selection follows authorization and verified blob reading. Count
+    // successful full/partial GETs once, never HEAD or a rejected range.
+    let mut resp = file_response(req, mime, bytes);
+    if resp.status >= 400 {
+        return resp;
+    }
+    if req.method == Method::Get {
+        match shared.files.record_download(node.id).await {
+            Ok(_) => {}
+            Err(FileError::NoSuchNode) => return not_found(),
+            Err(e) => {
+                tracing::warn!("http download counter failed: {e}");
+                return Response::text(500, "Internal Server Error", "try again later\n");
+            }
+        }
+    }
     resp.headers.push((
         "Content-Disposition".into(),
         format!(
             "attachment; filename=\"{}\"",
-            disposition_name(&served.name)
+            disposition_name(&target.name)
         ),
     ));
     resp
+}
+
+enum RangeError {
+    Invalid,
+    Unsatisfiable,
+}
+
+/// Resolve one inclusive wire range into a bounded, end-exclusive slice.
+/// RFC 9110 sections 14.1.2 / 14.2: only GET has range semantics, and an
+/// unknown unit or zero-length representation may use the full response.
+fn selected_range(req: &Request, len: usize) -> Result<Option<std::ops::Range<usize>>, RangeError> {
+    if req.method != Method::Get || req.if_range || len == 0 {
+        return Ok(None);
+    }
+    let spec = match &req.range {
+        RangeRequest::Absent | RangeRequest::UnknownUnit => return Ok(None),
+        RangeRequest::Invalid => return Err(RangeError::Invalid),
+        RangeRequest::Bytes(spec) => spec,
+    };
+    let Some((first, last)) = spec.split_once('-') else {
+        return Err(RangeError::Invalid);
+    };
+    let decimal = |value: &str| -> Result<u64, RangeError> {
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(RangeError::Invalid);
+        }
+        value.parse().map_err(|_| RangeError::Invalid)
+    };
+    let len64 = len as u64;
+    if first.is_empty() {
+        let suffix = decimal(last)?;
+        if suffix == 0 {
+            return Err(RangeError::Unsatisfiable);
+        }
+        return Ok(Some(len64.saturating_sub(suffix) as usize..len));
+    }
+    let first = decimal(first)?;
+    let last = if last.is_empty() {
+        None
+    } else {
+        Some(decimal(last)?)
+    };
+    if last.is_some_and(|last| last < first) {
+        return Err(RangeError::Invalid);
+    }
+    if first >= len64 {
+        return Err(RangeError::Unsatisfiable);
+    }
+    // Clip before adding one, so a u64::MAX end cannot overflow. Cast only
+    // values already bounded by a real in-memory representation length.
+    let end = last.unwrap_or(len64 - 1).min(len64 - 1) + 1;
+    Ok(Some(first as usize..end as usize))
+}
+
+/// Build a self-delimiting full, partial or refused file response. Selection
+/// never amplifies the requested range into allocations or multipart work.
+fn file_response(req: &Request, mime: String, mut bytes: Vec<u8>) -> Response {
+    let len = bytes.len();
+    let mut response = match selected_range(req, len) {
+        Ok(None) => Response::new(200, "OK", mime, bytes),
+        Ok(Some(range)) => {
+            let content_range = format!("bytes {}-{}/{len}", range.start, range.end - 1);
+            bytes.truncate(range.end);
+            bytes.drain(..range.start);
+            let mut response = Response::new(206, "Partial Content", mime, bytes);
+            response
+                .headers
+                .push(("Content-Range".into(), content_range));
+            response
+        }
+        Err(RangeError::Invalid) => {
+            Response::text(400, "Bad Request", "one valid byte range is required\n")
+        }
+        Err(RangeError::Unsatisfiable) => {
+            let mut response =
+                Response::text(416, "Range Not Satisfiable", "range not satisfiable\n");
+            response
+                .headers
+                .push(("Content-Range".into(), format!("bytes */{len}")));
+            response
+        }
+    };
+    response
+        .headers
+        .push(("Accept-Ranges".into(), "bytes".into()));
+    response
 }
 
 /// A `Content-Disposition` filename token: quotes, backslashes and control
@@ -661,7 +803,11 @@ async fn serve_static(req: &Request, shared: &Arc<Shared>, web_root: Option<&Pat
     match read_under_root(root, &rel, private_dirs(shared)).await {
         Some(bytes) => {
             let name = rel.last().unwrap_or(&"");
-            Response::new(200, "OK", content_type_for(name).to_string(), bytes)
+            if req.segments.is_empty() {
+                Response::new(200, "OK", content_type_for(name).to_string(), bytes)
+            } else {
+                file_response(req, content_type_for(name).to_string(), bytes)
+            }
         }
         // The PWA manifest is generated when the web root doesn't ship one.
         None if rel == ["manifest.webmanifest"] => {
