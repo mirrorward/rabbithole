@@ -3279,14 +3279,9 @@ pub fn Lobby() -> impl IntoView {
                     </Show>
                     <ul class="rh-lines">
                         <For
-                            // Rows carry a `head` flag: the first line of a
-                            // sender's burst shows the name + time, follow-ups
-                            // render as bare grouped lines. A row's head-ness
-                            // depends only on the (immutable) previous line,
-                            // so within a room the index is a sound key. The
-                            // room is part of it: another room's line 0 is
-                            // another line, and reusing the row showed the
-                            // room you had left.
+                            // Group headers depend on the preceding line.
+                            // Backfill can change both the line at an index
+                            // and whether that line opens a sender's burst.
                             each=move || {
                                 let said = lines();
                                 let at = room();
@@ -3304,7 +3299,10 @@ pub fn Lobby() -> impl IntoView {
                                     })
                                     .collect::<Vec<_>>()
                             }
-                            key=|(at, i, _, _)| (at.clone(), *i)
+                            // Backfill can prepend or reorder rows. Include
+                            // content so an existing index never freezes the
+                            // old line in place after a history merge.
+                            key=|(at, i, line, head)| (at.clone(), *i, line.clone(), *head)
                             children=move |(_, _, line, head)| view! {
                                 <li class=if head { "rh-line rh-line-head" } else { "rh-line rh-line-cont" }>
                                     // The speaker's warren mark opens each burst,

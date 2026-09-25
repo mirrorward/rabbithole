@@ -2,7 +2,7 @@
 
 These tests run the real Leptos/WASM application against real `burrow` servers
 in Chromium. CI builds both artifacts, installs the browser revision selected
-by the locked Playwright package, and runs all five tests.
+by the locked Playwright package, and runs the complete suite.
 
 ## Run the isolated suite
 
@@ -48,6 +48,7 @@ or WebSocket failure. No credentials or tokens are recorded by protocol observer
 | `npm run test:smoke` | App mount, real guest sign-in (`AuthGuest`/`AuthOk`), connected lobby and composer. |
 | `npm run test:theme` | Signed theme loading, live publish/clear, High Contrast, multiple burrows, reconnect, session restoration, and account opt-out (two tests). |
 | `npm run test:routes` | Direct `/lobby`, actual hard reload and token resume, nested routes and real JS/WASM assets, missing-asset 404s. |
+| `npm run test:chat` | Recent chat history for a second client, room isolation, and reconnection. |
 | `npm run test:keepalive` | Initial app load and immediate reload with every production connection/request rate limit unchanged. |
 
 Theme and route fixtures use a generous connection budget to isolate their

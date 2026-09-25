@@ -697,6 +697,7 @@ impl AppState {
         let my_caps = self.focused().caps;
         let my_login = self.focused().handle;
         let session_ready = self.focused().ready;
+        let session_seen = self.focused().seen;
         let presence = self.presence;
         let ws_sv = self.focused().ws;
         // Endpoint captured for both the "connected" toast/label and, on a
@@ -785,20 +786,6 @@ impl AppState {
                                     // the socket is up, and then it is a
                                     // burrow with one room in it, for ever.
                                     c.dispatch_room(&crate::wire::RoomCommand::List);
-                                    // …and back into the room being read, if
-                                    // it is not the lobby: a connection that
-                                    // dropped left it, and everything said
-                                    // there would be refused. Then how it is
-                                    // kept, for the same reason as the list.
-                                    let here = state.with_untracked(|s| s.room().to_string());
-                                    if here != crate::client::LOBBY {
-                                        c.dispatch_room(&crate::wire::RoomCommand::Join {
-                                            room: here.clone(),
-                                        });
-                                    }
-                                    c.dispatch_room(&crate::wire::RoomCommand::Keeping {
-                                        room: here,
-                                    });
                                     // This burrow inherits the user's current status.
                                     c.set_presence(presence.get_untracked(), None);
                                 });
@@ -812,6 +799,21 @@ impl AppState {
                         caps,
                     } => {
                         authed.set(true);
+                        // Authentication automatically joins the lobby. Other
+                        // rooms must accept a fresh join on this socket before
+                        // the transport requests their private scrollback.
+                        wasm_bindgen_futures::spawn_local(async move {
+                            ws_sv.with_value(|c| {
+                                c.request_chat_history(crate::client::LOBBY);
+                                let here = state.with_untracked(|s| s.room().to_string());
+                                if here != crate::client::LOBBY {
+                                    c.dispatch_room(&crate::wire::RoomCommand::Join {
+                                        room: here.clone(),
+                                    });
+                                }
+                                c.dispatch_room(&crate::wire::RoomCommand::Keeping { room: here });
+                            });
+                        });
                         // A pane that is already open asked this burrow
                         // before; whatever it asked for died with the old
                         // socket, so say plainly that this is a new one.
@@ -842,7 +844,24 @@ impl AppState {
                             crate::native::connect_native(&ep, token);
                         }
                     }
-                    Event::ChatMessage { from, text, .. } => {
+                    Event::ChatMessage {
+                        room,
+                        from,
+                        text,
+                        at_unix_ms,
+                    } => {
+                        let mut fresh = false;
+                        state.update(|s| {
+                            fresh = s.push_chat(crate::state::ChatLine {
+                                room: room.clone(),
+                                from: from.clone(),
+                                text: text.clone(),
+                                at_unix_ms: *at_unix_ms,
+                            });
+                        });
+                        if !fresh {
+                            return;
+                        }
                         // Someone spoke. If the window isn't focused (and it
                         // wasn't us), raise an OS notification — the loudest
                         // level of the unread story, above the rail badge and
@@ -890,7 +909,9 @@ impl AppState {
                     }
                     _ => {}
                 }
-                state.update(|s| s.apply(&event));
+                if !matches!(event, Event::ChatMessage { .. }) {
+                    state.update(|s| s.apply(&event));
+                }
             }));
             ws.on_conn(std::rc::Rc::new(move |c| {
                 // Toast the drop edge exactly once (Online → Reconnecting);
@@ -907,7 +928,12 @@ impl AppState {
                         );
                     });
                 }
-                state.update(|s| s.set_conn(c));
+                state.update(|s| {
+                    if c != crate::conn::ConnState::Online {
+                        s.chat_history.reset();
+                    }
+                    s.set_conn(c);
+                });
             }));
             ws.on_front_page(std::rc::Rc::new(move |widgets| {
                 state.update(|s| s.front_page = widgets)
@@ -950,6 +976,14 @@ impl AppState {
                         app.requests_answered(session, answer);
                     }
                 }
+            }));
+            ws.on_chat_history(std::rc::Rc::new(move |(room, lines)| {
+                let mut added = 0;
+                state.update(|s| added = s.merge_chat_history(&room, lines));
+                // Backfilled lines do not become unread notifications on an
+                // unfocused burrow. Preserve any genuinely new live count.
+                let total = state.with_untracked(|s| s.messages.len());
+                session_seen.update(|seen| *seen = seen.saturating_add(added).min(total));
             }));
             ws.on_rooms(std::rc::Rc::new(move |rooms| {
                 state.update(|s| {
@@ -2357,6 +2391,13 @@ impl AppState {
         // as the first, and says nothing to anybody about it.
         if name != crate::client::LOBBY {
             self.room_command(crate::wire::RoomCommand::Join { room: name });
+        } else {
+            #[cfg(target_arch = "wasm32")]
+            if self.focused().live.get_untracked() {
+                self.focused()
+                    .ws
+                    .with_value(|c| c.request_chat_history(&name));
+            }
         }
     }
 

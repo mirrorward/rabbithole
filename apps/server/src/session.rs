@@ -753,7 +753,12 @@ pub(crate) fn push_for_event(
             }
             Frame::push(&rabbithole_proto::welcome::ThemeChanged).ok()
         }
-        ServerEvent::Chat { room, from, text } => {
+        ServerEvent::Chat {
+            room,
+            from,
+            text,
+            at_unix_ms,
+        } => {
             // Lobby chat is for everyone (including offline-replay); other
             // rooms deliver to members only.
             if room != rabbithole_server_core::LOBBY && !shared.chat.is_member(room, viewer_session)
@@ -764,7 +769,7 @@ pub(crate) fn push_for_event(
                 room.clone(),
                 from.clone(),
                 text.clone(),
-                chrono::Utc::now().timestamp_millis(),
+                *at_unix_ms,
             ))
             .ok()
         }

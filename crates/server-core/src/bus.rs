@@ -35,6 +35,8 @@ pub enum ServerEvent {
         room: String,
         from: String,
         text: String,
+        /// The original stored timestamp, shared by live and replayed pushes.
+        at_unix_ms: i64,
     },
     /// A session's visible identity changed (persona switch, avatar…).
     SessionChanged {
@@ -196,10 +198,17 @@ mod tests {
             room: "lobby".into(),
             from: "alice".into(),
             text: "hi".into(),
+            at_unix_ms: 123,
         });
         for rx in [&mut a, &mut b] {
             match rx.recv().await.unwrap() {
-                ServerEvent::Chat { room, from, text } => {
+                ServerEvent::Chat {
+                    room,
+                    from,
+                    text,
+                    at_unix_ms,
+                } => {
+                    assert_eq!(at_unix_ms, 123);
                     assert_eq!(
                         (room.as_str(), from.as_str(), text.as_str()),
                         ("lobby", "alice", "hi")

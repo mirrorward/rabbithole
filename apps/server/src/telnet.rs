@@ -1826,7 +1826,7 @@ where
             event = rx.recv() => {
                 use tokio::sync::broadcast::error::RecvError;
                 match event {
-                    Ok(ServerEvent::Chat { room: r, from, text })
+                    Ok(ServerEvent::Chat { room: r, from, text, .. })
                         if r.eq_ignore_ascii_case(room) =>
                     {
                         t.write_str(&format!("<{from}> {text}\n")).await?;

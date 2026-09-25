@@ -10,6 +10,7 @@
     "test:theme": "playwright test tests/theme.spec.ts",
     "test:routes": "playwright test tests/routes.spec.ts",
     "test:keepalive": "playwright test tests/keepalive.spec.ts",
+    "test:chat": "playwright test tests/chat.spec.ts",
     "cleanup": "node scripts/cleanup-fixtures.mjs"
   },
   "devDependencies": {

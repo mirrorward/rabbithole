@@ -83,7 +83,39 @@ async fn guest_login_chat_and_who_over_quic() {
 
     // History has it too.
     let history = bob.chat_history("lobby", 10).await.unwrap();
-    assert!(history.iter().any(|m| m.text == "curiouser and curiouser"));
+    let stored = history
+        .iter()
+        .find(|m| m.text == "curiouser and curiouser")
+        .unwrap();
+    assert_eq!(
+        stored.at_unix_ms, m.at_unix_ms,
+        "live and history identify the same line"
+    );
+
+    // A bus event can wait behind a request or be replayed much later. The
+    // transport must preserve its original time rather than stamp delivery.
+    burrow
+        .shared
+        .bus
+        .publish(rabbithole_server_core::ServerEvent::Chat {
+            room: "lobby".into(),
+            from: "Alice (guest)".into(),
+            text: "delayed line".into(),
+            at_unix_ms: 1_700_000_000_123,
+        });
+    let delayed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = bob.next_push().await.unwrap().expect("push");
+            if let Some(Ok(line)) = frame.decode::<ChatMessage>() {
+                if line.text == "delayed line" {
+                    break line;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(delayed.at_unix_ms, 1_700_000_000_123);
 
     burrow.shutdown().await;
 }

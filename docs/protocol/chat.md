@@ -1,7 +1,7 @@
 # RHP Chat Family (2)
 
-Status: **Wave 1** — the single public lobby (`"lobby"`). Multiple,
-ad-hoc, and private rooms arrive in Wave 2 using these same messages.
+Status: **Waves 1, 2.2b and 13** — the public lobby (`"lobby"`), public
+and private rooms, and moderation use the messages below.
 
 ## Messages
 
@@ -16,6 +16,11 @@ ad-hoc, and private rooms arrive in Wave 2 using these same messages.
 
 - Sending requires `CHAT_SEND` on resource `chat/<room>` and an accepted
   agreement; reading history requires `CHAT_READ`.
+- A stored line keeps the same `at_unix_ms` in history, live pushes and
+  replay. The server makes timestamps strictly increasing within each room,
+  advancing by one millisecond when wall-clock time has not advanced. This
+  preserves order and distinguishes repeated identical messages without
+  changing the wire format.
 - The sender receives their own line back as a `ChatMessage` push — the
   push is the confirmation of broadcast order (the ack only confirms
   acceptance).
@@ -43,6 +48,21 @@ ad-hoc, and private rooms arrive in Wave 2 using these same messages.
 to member sessions (the lobby is everyone). Public-room scrollback is
 open; private scrollback requires membership. Rooms are in-memory
 (lobby permanent; persistence of operator rooms is future work).
+
+## Shared web and desktop scrollback
+
+After sign-in or reconnect, the client requests the lobby's latest 500 lines.
+Opening another room requests history only after the server accepts the join
+(or creation); returning to the lobby fetches it again. The server's existing
+`CHAT_READ` and private-room membership checks apply to every request.
+
+Replies carry no room field, so the client correlates each request id with its
+room and socket generation. Old-socket and unrelated-room replies are ignored.
+History merges with live messages in timestamp order, preserving repeated
+messages and consuming delayed pushes already included in the snapshot.
+Backfilled lines do not trigger new-message sounds, notifications or unread
+badges. Rooms and their history remain in memory on the server; this does not
+add persistence across server restarts.
 
 ## Moderation: mute + slow-mode (Wave 13)
 

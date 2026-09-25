@@ -53,6 +53,7 @@ use web_sys::{BinaryType, CloseEvent, Event as WebEvent, MessageEvent, WebSocket
 use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::{decode_frame, encode_frame, Frame, FrameKind, RequestId};
 
+use crate::chat_history::{HistoryRequests, RoomRequest};
 use crate::conn::{backoff_delay, ConnState};
 use crate::server_theme::{ServerOverlay, ThemeCache, ThemeUpdate};
 use crate::theme_sync::{ThemeReplyAction, ThemeSync};
@@ -106,6 +107,8 @@ pub type WishSink = Rc<dyn Fn(rabbithole_proto::wish::WishView)>;
 /// The burrow's rooms, and single rooms as they change.
 pub type RoomsSink = Rc<dyn Fn(Vec<rabbithole_proto::chat::RoomInfo>)>;
 pub type RoomSink = Rc<dyn Fn(rabbithole_proto::chat::RoomInfo)>;
+/// A correlated room history reply, bound to this transport's session.
+pub type ChatHistorySink = Rc<dyn Fn((String, Vec<crate::state::ChatLine>))>;
 /// A station's answer to a listener: its queue, what can be asked for, or
 /// which ask it refused.
 pub type RadioRequestsSink = Rc<dyn Fn(crate::wire::RadioAnswer)>;
@@ -177,6 +180,8 @@ struct Inner {
     wish_sink: Option<WishSink>,
     rooms_sink: Option<RoomsSink>,
     room_sink: Option<RoomSink>,
+    chat_history_sink: Option<ChatHistorySink>,
+    history_requests: RefCell<HistoryRequests>,
     radio_requests_sink: Option<RadioRequestsSink>,
     room_keeping_sink: Option<RoomKeepingSink>,
     front_page_sink: Option<FrontPageSink>,
@@ -363,6 +368,8 @@ impl WsClient {
                 wish_sink: None,
                 rooms_sink: None,
                 room_sink: None,
+                chat_history_sink: None,
+                history_requests: RefCell::new(HistoryRequests::default()),
                 radio_requests_sink: None,
                 room_keeping_sink: None,
                 front_page_sink: None,
@@ -516,6 +523,39 @@ impl WsClient {
         self.inner.borrow_mut().room_sink = Some(sink);
     }
 
+    /// History has its own sink: old lines must not sound like new pushes.
+    pub fn on_chat_history(&mut self, sink: ChatHistorySink) {
+        self.inner.borrow_mut().chat_history_sink = Some(sink);
+    }
+
+    /// Fetch only on the authenticated socket that asked. Repeated reads of
+    /// the same room coalesce while its previous request remains in flight.
+    pub fn request_chat_history(&self, room: &str) {
+        let room = room.to_string();
+        // A connection transition may render a pane while Inner is mutably
+        // borrowed. Its authenticated refresh will retry the read/open.
+        let Ok(current) = self.inner.try_borrow() else {
+            return;
+        };
+        let generation = current.generation;
+        drop(current);
+        self.when_free(move |b| {
+            if !b.alive || b.generation != generation {
+                return;
+            }
+            let id = b.next_request_id();
+            if let Ok(bytes) = wire::chat_history_request(&room, id).and_then(|f| encode_frame(&f))
+            {
+                if b.history_requests
+                    .borrow_mut()
+                    .begin(generation, id, RoomRequest::History(room))
+                {
+                    Self::write(b, &bytes);
+                }
+            }
+        });
+    }
+
     /// A station's answers to this listener.
     pub fn on_radio_requests(&mut self, sink: RadioRequestsSink) {
         self.inner.borrow_mut().radio_requests_sink = Some(sink);
@@ -566,10 +606,40 @@ impl WsClient {
     /// Ask about rooms: list them, make one, go in, come out.
     pub fn dispatch_room(&self, command: &crate::wire::RoomCommand) {
         let command = command.clone();
+        // A connection transition may render a pane while Inner is mutably
+        // borrowed. Its authenticated refresh will retry the read/open.
+        let Ok(current) = self.inner.try_borrow() else {
+            return;
+        };
+        let generation = current.generation;
+        drop(current);
         self.when_free(move |b| {
+            if b.generation != generation {
+                return;
+            }
             let id = b.next_request_id();
             if let Ok(frame) = wire::room_command_to_frame(&command, id) {
                 if let Ok(bytes) = encode_frame(&frame) {
+                    let opening = match &command {
+                        crate::wire::RoomCommand::Join { room } => Some(room),
+                        crate::wire::RoomCommand::Create { name, .. } => Some(name),
+                        crate::wire::RoomCommand::Leave { room } => {
+                            b.history_requests.borrow_mut().forget(room);
+                            None
+                        }
+                        _ => None,
+                    };
+                    if let Some(room) = opening {
+                        if !b.alive
+                            || !b.history_requests.borrow_mut().begin(
+                                generation,
+                                id,
+                                RoomRequest::Open(room.clone()),
+                            )
+                        {
+                            return;
+                        }
+                    }
                     Self::write(b, &bytes);
                 }
             }
@@ -959,6 +1029,40 @@ impl WsClient {
         false
     }
 
+    /// Consume only a reply correlated on this socket. A join refusal never
+    /// triggers a history request; an empty history still has its origin room.
+    fn chat_history_frame(inner: &Rc<RefCell<Inner>>, b: &Inner, frame: &Frame) -> bool {
+        let request = b.history_requests.borrow_mut().take(b.generation, frame);
+        match request {
+            Some(RoomRequest::History(room)) => {
+                if let Some(lines) = wire::frame_to_chat_history(frame, &room) {
+                    if let Some(sink) = &b.chat_history_sink {
+                        sink((room, lines));
+                    }
+                } else if let Some(code) = frame.error {
+                    b.emit(Event::CommandFailed {
+                        detail: format!("could not load #{room} history: {code:?}"),
+                    });
+                }
+                true
+            }
+            Some(RoomRequest::Open(room)) => {
+                if let Some(joined) = wire::frame_to_room(frame) {
+                    if joined.name.to_lowercase() == room.trim().to_lowercase() {
+                        b.history_requests.borrow_mut().joined(&joined.name);
+                        let client = Self {
+                            inner: inner.clone(),
+                        };
+                        client.request_chat_history(&joined.name);
+                    }
+                }
+                // Preserve ordinary room-list and error handling for joins.
+                false
+            }
+            None => false,
+        }
+    }
+
     /// Write `bytes` to the socket, surfacing failures on the api-event sink.
     fn write(b: &mut Inner, bytes: &[u8]) {
         match &b.ws {
@@ -1027,6 +1131,7 @@ impl WsClient {
             let mut b = inner.borrow_mut();
             b.generation = b.generation.wrapping_add(1);
             Self::reset_theme(&b);
+            b.history_requests.borrow_mut().reset(b.generation);
             b.generation
         };
 
@@ -1088,6 +1193,9 @@ impl WsClient {
                             let _ = resolve.call1(&JsValue::NULL, &copy);
                             return;
                         }
+                        if Self::chat_history_frame(&inner, &b, &frame) {
+                            return;
+                        }
                         if Self::theme_frame(&inner, &b, &frame) {
                             return;
                         }
@@ -1123,6 +1231,7 @@ impl WsClient {
                         }
                         for event in wire::frame_to_events(&frame) {
                             if matches!(event, Event::Authenticated { .. }) {
+                                b.history_requests.borrow_mut().authenticated();
                                 Self::clear_theme(&b);
                                 let queued = b.theme_sync.borrow_mut().authenticated(generation);
                                 if queued {
@@ -1166,6 +1275,9 @@ impl WsClient {
                             b.emit_front_page(widgets);
                         }
                         if let Some(answer) = wire::frame_to_room_keeping(&frame) {
+                            if let wire::RoomKeepingAnswer::Removed { room, .. } = &answer {
+                                b.history_requests.borrow_mut().forget(room);
+                            }
                             if let Some(sink) = &b.room_keeping_sink {
                                 sink(answer);
                             }
@@ -1274,6 +1386,7 @@ impl WsClient {
                     b.ws = None;
                     Self::release_calls(&b);
                     Self::reset_theme(&b);
+                    b.history_requests.borrow_mut().reset(b.generation);
                     b.want_connected
                 };
                 if want {
@@ -1417,6 +1530,7 @@ impl EventClient for WsClient {
                 b.alive = false;
                 b.want_connected = false;
                 Self::reset_theme(&b);
+                b.history_requests.borrow_mut().reset(b.generation);
                 if let Some(ws) = &b.ws {
                     // `Disconnected`/`Offline` are emitted by the close callback.
                     let _ = ws.close();

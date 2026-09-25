@@ -36,6 +36,7 @@ pub struct ChatLine {
     pub room: String,
     pub from: String,
     pub text: String,
+    /// Stable across live/history/replay and strictly increasing per room.
     pub at_unix_ms: i64,
 }
 
@@ -642,19 +643,28 @@ impl ChatService {
                 room: room.name.clone(),
                 from: sender.screen_name.to_string(),
                 text: text.to_string(),
-                at_unix_ms: chrono::Utc::now().timestamp_millis(),
+                // The wire has no message id. Preserve a stable ordering even
+                // for same-millisecond sends or a wall-clock correction so
+                // clients can reconcile history with delayed live pushes.
+                at_unix_ms: next_chat_timestamp(
+                    room.history.back().map(|line| line.at_unix_ms),
+                    chrono::Utc::now().timestamp_millis(),
+                ),
             };
             if room.history.len() == SCROLLBACK {
                 room.history.pop_front();
             }
             room.history.push_back(line.clone());
+            // Publish under the same lock as the append: concurrent senders
+            // must produce live pushes in the same order as scrollback.
+            self.bus.publish(ServerEvent::Chat {
+                room: line.room.clone(),
+                from: line.from.clone(),
+                text: line.text.clone(),
+                at_unix_ms: line.at_unix_ms,
+            });
             line
         };
-        self.bus.publish(ServerEvent::Chat {
-            room: line.room.clone(),
-            from: line.from.clone(),
-            text: line.text.clone(),
-        });
         Ok(line)
     }
 
@@ -678,6 +688,12 @@ impl ChatService {
     }
 }
 
+fn next_chat_timestamp(previous: Option<i64>, wall_clock_ms: i64) -> i64 {
+    previous.map_or(wall_clock_ms, |last| {
+        wall_clock_ms.max(last.saturating_add(1))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,6 +714,45 @@ mod tests {
             is_moderator: false,
             screen_name,
         }
+    }
+
+    #[test]
+    fn chat_timestamps_order_same_tick_sends_and_clock_corrections() {
+        assert_eq!(next_chat_timestamp(None, 100), 100);
+        assert_eq!(next_chat_timestamp(Some(100), 100), 101);
+        assert_eq!(next_chat_timestamp(Some(101), 80), 102);
+        assert_eq!(next_chat_timestamp(Some(102), 150), 150);
+    }
+
+    #[test]
+    fn history_and_broadcast_keep_identical_messages_with_distinct_timestamps() {
+        let chat = service();
+        let mut rx = chat.bus.subscribe();
+        for _ in 0..3 {
+            chat.send(LOBBY, sender(1, 10, "alice"), "same line", 0)
+                .unwrap();
+        }
+        let history = chat.history(LOBBY, 1, 10).unwrap();
+        assert_eq!(history.len(), 3);
+        assert!(history
+            .windows(2)
+            .all(|w| w[0].at_unix_ms < w[1].at_unix_ms));
+        for line in history {
+            let ServerEvent::Chat {
+                room,
+                from,
+                text,
+                at_unix_ms,
+            } = rx.try_recv().unwrap()
+            else {
+                panic!("expected chat event");
+            };
+            assert_eq!(
+                (room, from, text, at_unix_ms),
+                (line.room, line.from, line.text, line.at_unix_ms)
+            );
+        }
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

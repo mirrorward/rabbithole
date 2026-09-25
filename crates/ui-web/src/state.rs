@@ -42,7 +42,7 @@ pub struct ArtOpen {
 }
 
 /// One rendered line of chat scrollback.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChatLine {
     /// Which room it was said in. A burrow has more than the lobby, and a
     /// line from one must not appear in another.
@@ -376,8 +376,10 @@ pub struct UiState {
     /// The burrow's post-auth welcome (message of the day + optional agreement),
     /// shown as a non-modal sheet until dismissed/accepted. `None` once handled.
     pub welcome: Option<Welcome>,
-    /// Chat scrollback for the lobby, oldest first.
+    /// Chat scrollback across this burrow's rooms, oldest first.
     pub messages: Vec<ChatLine>,
+    /// Live/history overlap belongs to this session and is reset on redial.
+    pub chat_history: crate::chat_history::HistoryOverlap,
     /// Users currently present in the room, with their presence state.
     pub who: Vec<Presence>,
     /// Every session on the burrow, for the moderation pane.
@@ -476,7 +478,7 @@ impl UiState {
                 text,
                 at_unix_ms,
             } => {
-                self.messages.push(ChatLine {
+                self.push_chat(ChatLine {
                     room: room.clone(),
                     from: from.clone(),
                     text: text.clone(),
@@ -514,6 +516,16 @@ impl UiState {
         }
     }
 
+    /// Backfill does not emit notifications or live unread counts.
+    pub fn merge_chat_history(&mut self, room: &str, lines: Vec<ChatLine>) -> usize {
+        self.chat_history.merge(&mut self.messages, room, lines)
+    }
+
+    /// Whether this is a new live line rather than a queued history overlap.
+    pub fn push_chat(&mut self, line: ChatLine) -> bool {
+        self.chat_history.push(&mut self.messages, line)
+    }
+
     /// The scrollback of one room, oldest first.
     pub fn messages_in(&self, room: &str) -> Vec<&ChatLine> {
         self.messages
@@ -530,6 +542,7 @@ impl UiState {
             text: text.to_string(),
             at_unix_ms: crate::clock::now_ms(),
         });
+        self.messages.sort_by_key(|line| line.at_unix_ms);
     }
 
     /// Set the transport connection state (driven by the transport's

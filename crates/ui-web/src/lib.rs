@@ -97,6 +97,7 @@ pub mod app;
 pub mod art;
 pub mod avatar;
 pub mod bookmarks;
+pub mod chat_history;
 pub mod client;
 pub mod clock;
 pub mod components;

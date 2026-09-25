@@ -153,6 +153,18 @@ async fn private_rooms_invite_flow_and_reaping() {
         Err(ClientError::Refused(ErrorCode::Forbidden))
     ));
 
+    alice
+        .chat_send("conspiracy", "earlier private line")
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            bob.chat_history("conspiracy", 500).await,
+            Err(ClientError::Refused(ErrorCode::NotFound))
+        ),
+        "private history is hidden before invitation"
+    );
+
     // Invite: bob gets the push, sees the room, joins, chats.
     alice.room_invite("conspiracy", "bob").await.unwrap();
     let frame = wait_push_named("bob-invited", &mut bob, |f| {
@@ -167,7 +179,17 @@ async fn private_rooms_invite_flow_and_reaping() {
         .unwrap()
         .iter()
         .any(|r| r.name == "conspiracy"));
+    assert!(
+        matches!(
+            bob.chat_history("conspiracy", 500).await,
+            Err(ClientError::Refused(ErrorCode::NotFound))
+        ),
+        "an invitation alone does not grant private scrollback"
+    );
     bob.room_join("conspiracy").await.unwrap();
+    let earlier = bob.chat_history("conspiracy", 500).await.unwrap();
+    assert_eq!(earlier.len(), 1);
+    assert_eq!(earlier[0].text, "earlier private line");
     bob.chat_send("conspiracy", "the walrus was paul")
         .await
         .unwrap();

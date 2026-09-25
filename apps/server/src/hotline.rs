@@ -3187,7 +3187,9 @@ fn user_broadcast(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> T
 /// invites are filtered by membership/recipient, of course).
 fn project_event(shared: &Shared, active: &Active, event: &ServerEvent) -> Option<Vec<u8>> {
     match event {
-        ServerEvent::Chat { room, from, text } => {
+        ServerEvent::Chat {
+            room, from, text, ..
+        } => {
             // Classic chat lines are a single formatted string: "\r nick:  msg".
             let line = format!("\r{from}:  {text}");
             let mut fields = Vec::with_capacity(2);

@@ -32,7 +32,8 @@
 //!   The core [`Event`] enum has no roster variant, so — like the FILE/notice
 //!   families — the transport surfaces these through dedicated sinks.
 //! - **chat (family 2):** [`ChatSend`] outbound and the [`ChatMessage`] push
-//!   inbound (→ [`Event::ChatMessage`]).
+//!   inbound (→ [`Event::ChatMessage`]), plus correlated room scrollback via
+//!   [`chat_history_request`]/[`frame_to_chat_history`].
 //! - **radio (family 9) + notices (family 0):** [`frame_to_notice_route`]
 //!   decodes an inbound push through a *local* [`NoticeRoute`] vocabulary
 //!   (the core [`Event`] enum has no notice variant, like the FILE/ADMIN
@@ -62,9 +63,9 @@
 //!   [`post_create`] (the ordered connection lets a following
 //!   `thread_list_request` see the committed post). Reply threading and the DM
 //!   family (3) still have no mapping.
-//! - [`AuthOk`]/[`Welcome`] carry no api [`Event`] counterpart, so a successful
-//!   sign-in emits nothing until the api grows an auth-success event; the
-//!   history back-fill a client would issue after auth is likewise deferred.
+//!
+//! [`AuthOk`]/[`Welcome`] map to authentication/welcome events; room history
+//! is fetched after authentication and accepted room joins through its own sink.
 //!
 //! [`AuthResume`]: rabbithole_proto::session::AuthResume
 //! [`AuthOk`]: rabbithole_proto::session::AuthOk
@@ -92,7 +93,7 @@ use rabbithole_proto::board::{
     BoardListRequest, BoardMove, BoardUpdate, PostCreate, PostDelete, ThreadList,
     ThreadListRequest, ThreadPosts, ThreadRequest,
 };
-use rabbithole_proto::chat::{ChatMessage, ChatSend};
+use rabbithole_proto::chat::{ChatHistory, ChatHistoryRequest, ChatMessage, ChatSend};
 use rabbithole_proto::directory::{DirectoryResults, DirectorySearch, ProfileCard, ProfileGet};
 use rabbithole_proto::dm::{
     DmHistory, DmHistoryRequest, DmReceived, DmSend, DmThreads, DmThreadsRequest,
@@ -430,6 +431,40 @@ pub fn frame_to_posts(frame: &Frame) -> Option<Vec<crate::state::Post>> {
                 body: p.body,
                 at_unix_ms: p.created_at_unix_ms,
                 removed: p.tombstoned,
+            })
+            .collect(),
+    )
+}
+
+/// Ask for the server's bounded recent room history, newest last.
+pub fn chat_history_request(room: &str, id: RequestId) -> Result<Frame, ProtoError> {
+    Frame::request(
+        id,
+        &ChatHistoryRequest::new(room, crate::chat_history::HISTORY_LIMIT as u32),
+    )
+}
+
+/// Decode only a successful reply, bound to the room from its request. An
+/// empty reply is valid; a payload claiming any other room is rejected whole.
+pub fn frame_to_chat_history(frame: &Frame, room: &str) -> Option<Vec<crate::state::ChatLine>> {
+    if frame.kind != rabbithole_proto::FrameKind::Reply || frame.error.is_some() {
+        return None;
+    }
+    let history = frame.decode::<ChatHistory>()?.ok()?;
+    if history.messages.len() > crate::chat_history::HISTORY_LIMIT
+        || history.messages.iter().any(|line| line.room != room)
+    {
+        return None;
+    }
+    Some(
+        history
+            .messages
+            .into_iter()
+            .map(|line| crate::state::ChatLine {
+                room: line.room,
+                from: line.from,
+                text: line.text,
+                at_unix_ms: line.at_unix_ms,
             })
             .collect(),
     )
@@ -3902,5 +3937,59 @@ mod tests {
                 secs: 0
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod chat_history_tests {
+    use super::*;
+    use rabbithole_proto::{decode_frame, encode_frame, ErrorCode, FrameKind};
+
+    #[test]
+    fn chat_history_round_trips_with_bounded_request_and_repeated_lines() {
+        let request = chat_history_request("music", RequestId(71)).unwrap();
+        let request = decode_frame(&encode_frame(&request).unwrap()).unwrap();
+        assert_eq!(request.id, RequestId(71));
+        assert_eq!(
+            request.decode::<ChatHistoryRequest>().unwrap().unwrap(),
+            ChatHistoryRequest::new("music", 500)
+        );
+        let line = ChatMessage::new("music", "rabbit", "again", 123);
+        let reply = Frame::reply_to(&request, &ChatHistory::new(vec![line.clone(), line])).unwrap();
+        let reply = decode_frame(&encode_frame(&reply).unwrap()).unwrap();
+        let lines = frame_to_chat_history(&reply, "music").unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], lines[1]);
+        assert!(
+            frame_to_events(&reply).is_empty(),
+            "backfill must not become live notifications"
+        );
+    }
+
+    #[test]
+    fn chat_history_empty_is_valid_but_wrong_room_kind_error_and_malformed_are_not() {
+        let request = chat_history_request("lobby", RequestId(72)).unwrap();
+        let empty = Frame::reply_to(&request, &ChatHistory::default()).unwrap();
+        assert_eq!(frame_to_chat_history(&empty, "lobby"), Some(vec![]));
+        let wrong = Frame::reply_to(
+            &request,
+            &ChatHistory::new(vec![ChatMessage::new("private", "rabbit", "secret", 1)]),
+        )
+        .unwrap();
+        assert_eq!(frame_to_chat_history(&wrong, "lobby"), None);
+        let refused = Frame::error_reply(&request, ErrorCode::NotFound);
+        assert_eq!(frame_to_chat_history(&refused, "lobby"), None);
+        let mut malformed = empty.clone();
+        malformed.payload.0 = vec![255];
+        assert_eq!(frame_to_chat_history(&malformed, "lobby"), None);
+        let mut push = empty;
+        push.kind = FrameKind::Push;
+        assert_eq!(frame_to_chat_history(&push, "lobby"), None);
+        let oversized = Frame::reply_to(
+            &request,
+            &ChatHistory::new(vec![ChatMessage::new("lobby", "rabbit", "hi", 1); 501]),
+        )
+        .unwrap();
+        assert_eq!(frame_to_chat_history(&oversized, "lobby"), None);
     }
 }
