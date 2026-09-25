@@ -47,7 +47,7 @@
 //! decoder returns a structured error ([`frame::FrameError::Incomplete`] is
 //! distinguished from corruption so streaming callers can wait for more
 //! input). `unsafe` is forbidden crate-wide; dependencies are `thiserror`,
-//! `hmac`, and `md-5`.
+//! `hmac`, `md-5`, `sha2`, and `subtle`.
 
 #![forbid(unsafe_code)]
 

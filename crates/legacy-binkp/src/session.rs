@@ -44,8 +44,8 @@
 //!   only whole-file offset-0 transfers are driven.
 //! - **`MD` mode & dupe handling**: `OPT MD`/multi-batch dedupe, `NR` mode
 //!   negotiation, and the `CRYPT` option are parsed-through but not acted on.
-//! - **Crashmail / poll semantics**, `M_BSY` retry scheduling, and password
-//!   comparison hardening (constant-time) live in the transport slice.
+//! - **Crashmail / poll semantics** and `M_BSY` retry scheduling live in the
+//!   transport slice.
 //! - **Pipelining**: one outstanding outbound file at a time; a second
 //!   inbound `M_FILE` before the first completes is treated as unexpected.
 //!
@@ -55,6 +55,8 @@
 
 use std::collections::VecDeque;
 
+use sha2::{Digest, Sha256};
+use subtle::{Choice, ConstantTimeEq};
 use thiserror::Error;
 
 use crate::address::Address;
@@ -191,6 +193,12 @@ pub struct Session {
     addresses: Vec<Address>,
     system_info: Vec<String>,
     password: String,
+    /// Fixed-size expected values, computed before handling peer input so
+    /// authentication comparisons cannot reveal password length or prefixes.
+    password_hash: [u8; 32],
+    cram_password_hash: Option<[u8; 32]>,
+    /// Empty and dash passwords explicitly configure an unsecured session.
+    unsecured: bool,
     /// Answering side: the challenge we advertise.
     challenge: Option<Vec<u8>>,
     /// Originating side: the challenge parsed out of the peer's `M_NUL`.
@@ -209,12 +217,21 @@ pub struct Session {
 impl Session {
     /// Create a session for `role` with the given configuration.
     pub fn new(role: Role, config: SessionConfig) -> Self {
+        let unsecured = config.password.is_empty() || config.password == "-";
+        let password_hash = Sha256::digest(config.password.as_bytes()).into();
+        let cram_password_hash = config.challenge.as_ref().map(|challenge| {
+            let expected = cram_md5_response(config.password.as_bytes(), challenge);
+            Sha256::digest(expected.as_bytes()).into()
+        });
         Session {
             role,
             phase: Phase::Greeting,
             addresses: config.addresses,
             system_info: config.system_info,
             password: config.password,
+            password_hash,
+            cram_password_hash,
+            unsecured,
             challenge: config.challenge,
             peer_challenge: None,
             peer_addresses: Vec::new(),
@@ -494,7 +511,7 @@ impl Session {
 
     /// The `M_PWD` value to send (originating side).
     fn password_value(&self) -> String {
-        if self.password.is_empty() || self.password == "-" {
+        if self.unsecured {
             return "-".to_string();
         }
         match &self.peer_challenge {
@@ -505,17 +522,19 @@ impl Session {
 
     /// Verify a received `M_PWD` (answering side).
     fn verify_password(&self, pw: &str) -> bool {
-        if self.password.is_empty() || self.password == "-" {
-            return true; // unsecured session accepts anything
-        }
-        if let Some(chal) = &self.challenge {
-            let expected = cram_md5_response(self.password.as_bytes(), chal);
-            if pw == expected {
-                return true;
-            }
-        }
-        // Plaintext fallback (deferred hardening: constant-time compare).
-        pw == self.password
+        // Hash only peer-controlled input here. Comparing fixed-size digests
+        // avoids the unequal-length shortcut in slice constant-time equality.
+        // Hash the exact CRAM wire string rather than decoding it: lowercase
+        // hex and the prefix remain just as strict as the original equality.
+        let received: [u8; 32] = Sha256::digest(pw.as_bytes()).into();
+        let plaintext = self.password_hash.ct_eq(&received);
+        let cram = self
+            .cram_password_hash
+            .as_ref()
+            .map_or(Choice::from(0), |expected| expected.ct_eq(&received));
+        // Plaintext fallback remains valid even when a challenge was offered.
+        // Evaluate both comparisons and combine Choices without short-circuiting.
+        bool::from(plaintext | cram | Choice::from(u8::from(self.unsecured)))
     }
 }
 
@@ -657,6 +676,111 @@ mod tests {
             .unwrap();
         assert!(matches!(actions.last(), Some(Action::Aborted(_))));
         assert_eq!(s.phase(), Phase::Failed);
+    }
+
+    /// Exercise the public handshake, including its observable success/failure
+    /// actions, rather than calling the comparison helper directly.
+    fn assert_answering_auth(
+        password: &str,
+        challenge: Option<&[u8]>,
+        received: &str,
+        succeeds: bool,
+    ) {
+        let mut session = Session::answering(SessionConfig {
+            addresses: vec![addr(2)],
+            password: password.into(),
+            challenge: challenge.map(<[u8]>::to_vec),
+            ..Default::default()
+        });
+        assert!(!session.start().contains(&Action::Authenticated));
+        assert!(session
+            .advance(Event::Command(Command::Adr(vec![addr(1)])))
+            .unwrap()
+            .is_empty());
+        let actions = session
+            .advance(Event::Command(Command::Pwd(received.into())))
+            .unwrap();
+        if succeeds {
+            assert_eq!(session.phase(), Phase::Transfer);
+            assert!(actions.contains(&Action::Authenticated));
+            assert!(sent_commands(&actions).contains(&&Command::Ok("secure".into())));
+            assert!(!actions.iter().any(|a| matches!(a, Action::Aborted(_))));
+        } else {
+            assert_eq!(session.phase(), Phase::Failed);
+            assert_eq!(
+                actions,
+                vec![
+                    Action::SendCommand(Command::Err("bad password".into())),
+                    Action::Aborted("bad password".into()),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn answering_preserves_plaintext_fallback_and_exact_bytes() {
+        let challenge = [1, 2, 3, 4];
+        for offered in [None, Some(challenge.as_slice())] {
+            // A CRAM-looking literal password is still a valid plaintext
+            // fallback; neither case folding nor Unicode normalization applies.
+            for password in ["secret", "sëcret🦊", "CRAM-MD5-not-a-digest"] {
+                assert_answering_auth(password, offered, password, true);
+            }
+            for wrong in [
+                "", "-", "secre", "secret!", "Secret", "xecret", "secxet", "secrex",
+            ] {
+                assert_answering_auth("secret", offered, wrong, false);
+            }
+            assert_answering_auth("sëcret🦊", offered, "se\u{308}cret🦊", false);
+            assert_answering_auth("sëcret🦊", offered, "sëcret🦉", false);
+            // Long values must not be truncated or accepted by matching prefixes.
+            let long = "s".repeat(4096);
+            assert_answering_auth(&long, offered, &long, true);
+            assert_answering_auth(&long, offered, &long[..4095], false);
+            assert_answering_auth(&long, offered, &format!("{long}s"), false);
+        }
+    }
+
+    #[test]
+    fn answering_cram_requires_exact_response_for_password_and_challenge() {
+        let challenge = [1, 2, 3, 4];
+        let response = cram_md5_response(b"secret", &challenge);
+        assert_answering_auth("secret", Some(&challenge), &response, true);
+        assert_answering_auth("secret", None, &response, false);
+
+        let uppercase = response.to_uppercase();
+        assert_ne!(uppercase, response);
+        let mut rejected = vec![
+            String::new(),
+            "CRAM-MD5-00".into(),
+            "CRAM-MD5-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".into(),
+            response[..response.len() - 1].into(),
+            format!("{response}0"),
+            uppercase,
+            cram_md5_response(b"wrong", &challenge),
+            cram_md5_response(b"secret", &[4, 3, 2, 1]),
+        ];
+        for index in [0, response.len() / 2, response.len() - 1] {
+            let mut changed = response.as_bytes().to_vec();
+            changed[index] = if changed[index] == b'0' { b'1' } else { b'0' };
+            rejected.push(String::from_utf8(changed).unwrap());
+        }
+        for wrong in rejected {
+            assert_answering_auth("secret", Some(&challenge), &wrong, false);
+        }
+    }
+
+    #[test]
+    fn answering_unsecured_sessions_accept_any_password() {
+        let challenge = [1, 2, 3, 4];
+        for password in ["", "-"] {
+            for offered in [None, Some(challenge.as_slice())] {
+                for received in ["", "-", "arbitrary🦊", "CRAM-MD5-invalid"] {
+                    assert_answering_auth(password, offered, received, true);
+                }
+                assert_answering_auth(password, offered, &"x".repeat(4096), true);
+            }
+        }
     }
 
     #[test]

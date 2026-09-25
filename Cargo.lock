@@ -2878,6 +2878,8 @@ version = "0.268.0"
 dependencies = [
  "hmac",
  "md-5",
+ "sha2",
+ "subtle",
  "thiserror 2.0.18",
 ]
 

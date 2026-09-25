@@ -11,3 +11,5 @@ publish.workspace = true
 thiserror.workspace = true
 hmac.workspace = true
 md-5.workspace = true
+sha2.workspace = true
+subtle.workspace = true
