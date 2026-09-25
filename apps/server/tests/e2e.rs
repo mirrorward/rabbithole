@@ -141,16 +141,51 @@ async fn password_login_resume_and_replay_over_ws() {
     assert_eq!(ok.role, Role::User as u8);
     c1.expect_welcome().await.unwrap();
     let cursor = c1.replay_cursor;
+    assert!(cursor > 0, "the Welcome established a replay cursor");
     let token = ok.token.clone();
     c1.close().await;
 
+    // Closing the client does not await server-side session cleanup. The
+    // offline recorder skips online accounts, so establish that Alice really
+    // is away before publishing the line intended for her replay log.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let online = burrow.shared.presence.snapshot();
+        if !online.iter().any(|entry| entry.account_id == ok.account_id) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Alice's closed session is still present after 5s: {online:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
     // While alice is away, someone chats (pushes stamped into her log).
     let mut guest = Client::connect(&ws, None, None, "e2e", "0").await.unwrap();
-    guest.auth_guest(None).await.unwrap();
+    let guest_ok = guest.auth_guest(None).await.unwrap();
     guest.expect_welcome().await.unwrap();
     guest.chat_send("lobby", "missed line").await.unwrap();
-    // Give the (async, best-effort) offline-replay recorder a beat to stamp.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // The acknowledgement does not await the best-effort offline recorder.
+    // Resume only once this exact line is stamped after Alice's cursor;
+    // otherwise a late recorder could see her online again and skip it.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let recorded = loop {
+        let pending = burrow.shared.pushlog.since(ok.account_id, cursor);
+        if let Some(frame) = pending.iter().find(|frame| {
+            matches!(frame.decode::<ChatMessage>(), Some(Ok(line))
+                if line.room == "lobby"
+                    && line.from == guest_ok.screen_name
+                    && line.text == "missed line")
+        }) {
+            break frame.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the missed lobby line was not recorded after cursor {cursor} within 5s: {pending:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
 
     // Resume: AuthOk.resumed, and the missed chat line is replayed.
     let mut c2 = Client::connect(&ws, None, None, "e2e", "0").await.unwrap();
@@ -167,6 +202,7 @@ async fn password_login_resume_and_replay_over_ws() {
             .expect("push");
         if let Some(Ok(m)) = frame.decode::<ChatMessage>() {
             if m.text == "missed line" {
+                assert_eq!(frame, recorded, "replay preserves the stamped chat frame");
                 saw_missed = true;
                 break;
             }
