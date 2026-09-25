@@ -8,7 +8,7 @@ use rabbithole_proto::admin::{
 };
 use rabbithole_proto::ErrorCode;
 use rabbithole_server_core::{Role, ServerConfig};
-use rabbithole_store_server::repo::AuditRepo;
+use rabbithole_store_server::repo::{AuditRepo, AuditRow};
 
 async fn start(dir: &std::path::Path) -> Burrow {
     let path = dir.join("burrow.toml");
@@ -39,6 +39,28 @@ async fn login(burrow: &Burrow, user: &str) -> Client {
     c.auth_password(user, "pw-pw-pw").await.unwrap();
     c.expect_welcome().await.unwrap();
     c
+}
+
+async fn wait_for_audit(burrow: &Burrow, actor: &str, expected: &[(&str, &str)]) -> Vec<AuditRow> {
+    let mut rows = Vec::new();
+    let persisted = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            rows = AuditRepo(&burrow.shared.pool).recent(100).await.unwrap();
+            if expected.iter().all(|(action, detail)| {
+                rows.iter()
+                    .any(|row| row.actor == actor && row.action == *action && row.detail == *detail)
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        persisted.is_ok(),
+        "audit records for {actor} did not persist within 3 seconds; expected {expected:?}, observed {rows:?}"
+    );
+    rows
 }
 
 #[tokio::test]
@@ -156,8 +178,17 @@ async fn a_saved_setting_is_in_the_file_and_a_password_is_never_read_back() {
         .iter()
         .all(|e| !e.value.contains("hunter2")));
 
-    // The audit log says it changed, and not what to.
-    let audit = AuditRepo(&burrow.shared.pool).recent(50).await.unwrap();
+    // The acknowledgement does not await the spawned audit writes. Wait for
+    // both persisted records before checking their contents and redaction.
+    let audit = wait_for_audit(
+        &burrow,
+        "root",
+        &[
+            ("config-set", "motd=Mind the gap"),
+            ("config-set", "radio_source_password=(set)"),
+        ],
+    )
+    .await;
     let lines: Vec<String> = audit.iter().map(|a| a.detail.clone()).collect();
     assert!(lines.iter().any(|l| l == "motd=Mind the gap"), "{lines:?}");
     assert!(
@@ -396,8 +427,27 @@ async fn every_operator_change_is_on_the_record() {
         .unwrap();
     root.request_ack(&AreaDelete::new("attic")).await.unwrap();
 
-    // The audit log is written from a task of its own, so give it a moment.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Some handlers spawn their audit writes. Wait for every operation,
+    // including both area creations, before reading the log over the wire.
+    let denied_hash = hex::encode([7u8; 32]);
+    let resolved_report = format!("#{} dealt with", report.id);
+    wait_for_audit(
+        &burrow,
+        "root",
+        &[
+            ("board-create", "talk"),
+            ("post-delete", "Hello in talk"),
+            ("area-create", "shelf"),
+            ("area-update", "shelf"),
+            ("area-create", "attic"),
+            ("area-delete", "attic"),
+            ("folder-create", "papers in shelf"),
+            ("deny-hash-add", &denied_hash),
+            ("deny-hash-remove", &denied_hash),
+            ("report-resolve", &resolved_report),
+        ],
+    )
+    .await;
     let log: AuditList = root.request(&AuditListRequest::new(100)).await.unwrap();
     let actions: Vec<&str> = log.entries.iter().map(|e| e.action.as_str()).collect();
     for want in [
