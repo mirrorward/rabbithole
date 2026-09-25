@@ -165,6 +165,21 @@ A fully-commented flagship configuration — legacy surfaces, federation, radio,
 rate limits, and the HTTP/PWA surface all shown — lives in
 [`examples/flagship-burrow.toml`](examples/flagship-burrow.toml).
 
+## Terminal appearance
+
+In `rabbit-tui`, **Ctrl-R** cycles Clean, Retro, and High Contrast; **Ctrl-T**
+cycles Auto, Light, and Dark. Choices apply immediately and are saved in
+`rabbithole/tui.toml` under the platform configuration directory. Use
+`--preferences FILE` to choose another location. A save failure is reported
+in the status line; the selected appearance still lasts for the session.
+
+Auto reads the terminal's `COLORFGBG` hint at startup: standard ANSI background
+indices 0–6 and 8 select Dark; 7 and 9–15 select Light. Missing, malformed, or
+extended-color hints fall back to Dark. This is a terminal hint, not live OS
+appearance detection; choose Light or Dark manually for a customized terminal
+palette. High Contrast keeps its own colors even when a burrow publishes an
+accent. Appearance settings contain no credentials or server addresses.
+
 ## Development
 
 ```console

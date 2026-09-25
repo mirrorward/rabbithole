@@ -2761,12 +2761,16 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "dirs",
  "looking-glass",
  "rabbithole-core",
  "rabbithole-directory",
  "rabbithole-proto",
  "ratatui",
+ "serde",
+ "tempfile",
  "tokio",
+ "toml",
 ]
 
 [[package]]

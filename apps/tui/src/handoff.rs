@@ -15,11 +15,9 @@
 //!   zombies pile up. Failures come back as strings for the status line —
 //!   never a panic, never a crashed TUI.
 //!
-//! The **radio base** itself is session-local: this crate has no settings
-//! file or config persistence yet, so the base is typed per session (`b` in
-//! the radio view) and forgotten on exit — the UI says so. When the TUI
-//! grows a config store, persist the base there (ui-web keeps the same value
-//! in `localStorage` under `rh-radio`).
+//! The **radio base** itself remains session-local: only appearance is saved.
+//! The base is typed per session (`b` in the radio view) and forgotten on exit;
+//! ui-web separately keeps its radio base in `localStorage` under `rh-radio`.
 
 use std::process::Stdio;
 

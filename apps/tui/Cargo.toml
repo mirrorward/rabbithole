@@ -20,6 +20,10 @@ clap.workspace = true
 tokio.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+dirs.workspace = true
+serde.workspace = true
+toml.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 # Embedded Looking Glass for the #[ignore]d server-browser smoke test only

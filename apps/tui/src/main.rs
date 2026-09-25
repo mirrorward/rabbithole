@@ -1,7 +1,7 @@
 //! `rabbit-tui` — the RabbitHole terminal client.
 //!
 //! Wave 2 v1: connect + authenticate, then a live lobby with a who-list
-//! sidebar, an input line, and light/dark theming (Ctrl-T) driven by the
+//! sidebar, an input line, and saved appearance (Ctrl-T/R) driven by the
 //! shared `rabbithole-core` theme tokens (server accent applied when the
 //! server publishes a verified bundle).
 //!
@@ -10,8 +10,7 @@
 //! - **Radio** (Ctrl-N): the station list fed by the typed RADIO family
 //!   (see `radio` for the reducer), plus the playback **handoff**:
 //!   Enter/`p` derives a copyable `<base>/<station>` stream URL from a
-//!   session-local "radio base" (`b` to edit — this crate has no settings
-//!   persistence yet, so the base lives for the session only) and `o`
+//!   session-local "radio base" (`b` to edit — only appearance is saved) and `o`
 //!   launches `$RABBIT_PLAYER <url>` detached. The TUI hands playback off to
 //!   an external player and never decodes audio (see `handoff`).
 //! - **Server browser** (Ctrl-B): a Looking Glass tracker's status port over
@@ -20,7 +19,7 @@
 //!   category filter, `h` fetches a health sparkline. Uptime is always
 //!   labelled tracker-observed (verifiable, not authoritative).
 //!
-//! Keys: Enter send · Ctrl-T light/dark · Ctrl-R retro theme · Ctrl-N radio ·
+//! Keys: Enter send · Ctrl-T Auto/Light/Dark · Ctrl-R Clean/Retro/High Contrast · Ctrl-N radio ·
 //! Ctrl-B servers · Ctrl-C quit (Esc backs out of a view, quits the lobby).
 //! Lines starting with `/go <word>` teleport (a room join or a printed
 //! target).
@@ -34,6 +33,7 @@
 mod browser;
 mod chatlog;
 mod handoff;
+mod preferences;
 mod radio;
 
 use std::io::Stdout;
@@ -46,7 +46,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use rabbithole_core::theme::{self, Mode, Palette, Rgb, ThemePack};
+use rabbithole_core::theme::{Palette, Rgb};
 use rabbithole_core::Client;
 use rabbithole_proto::chat::ChatMessage;
 use rabbithole_proto::presence::{UserJoined, UserLeft};
@@ -78,6 +78,9 @@ struct Cli {
     guest: bool,
     #[arg(long)]
     name: Option<String>,
+    /// Appearance file (default: the platform config directory / rabbithole / tui.toml).
+    #[arg(long)]
+    preferences: Option<std::path::PathBuf>,
 }
 
 fn to_color(c: Rgb) -> Color {
@@ -102,8 +105,7 @@ struct App {
     chat_height: usize,
     online: Vec<String>,
     input: String,
-    pack: ThemePack,
-    mode: Mode,
+    appearance: preferences::Appearance,
     server_theme: Option<rabbithole_proto::welcome::ThemeBundle>,
     server_name: String,
     radio: radio::RadioState,
@@ -113,8 +115,8 @@ struct App {
     /// Radio view: selected station index (clamped against the list).
     radio_selected: usize,
     /// Radio view: the stream delivery base (`http://host:8000`).
-    /// **Session-local** — the TUI has no settings persistence yet, so this
-    /// is typed per session (`b`) and forgotten on exit.
+    /// **Session-local** — only appearance is persisted. This base is typed
+    /// per session (`b`) and forgotten on exit.
     radio_base: String,
     /// Radio view: the last derived (copyable) stream URL.
     radio_url: Option<String>,
@@ -127,7 +129,7 @@ struct App {
 
 impl App {
     fn palette(&self) -> Palette {
-        theme::resolve(self.pack, self.mode, self.server_theme.as_ref())
+        self.appearance.palette(self.server_theme.as_ref())
     }
 
     fn sys(&mut self, text: impl Into<String>) {
@@ -184,14 +186,17 @@ async fn main() -> Result<()> {
         .collect();
     let history = client.chat_history("lobby", 50).await.unwrap_or_default();
 
+    let (appearance, appearance_warning) = preferences::Appearance::load(
+        cli.preferences.or_else(preferences::default_path),
+        preferences::terminal_mode(std::env::var("COLORFGBG").ok().as_deref()),
+    );
     let mut app = App {
         lines: history.into_iter().map(|m| (m.from, m.text)).collect(),
         scroll: chatlog::Scroll::new(),
         chat_height: 0,
         online,
         input: String::new(),
-        pack: ThemePack::Clean,
-        mode: Mode::Dark,
+        appearance,
         server_theme,
         server_name: client.server.server_name.clone(),
         radio: radio::RadioState::default(),
@@ -204,6 +209,10 @@ async fn main() -> Result<()> {
         browser: browser::BrowserState::new(std::env::var(browser::TRACKER_ENV).ok()),
         should_quit: false,
     };
+    if let Some(warning) = appearance_warning {
+        app.sys(warning);
+        app.status("Appearance settings unavailable · defaults for now · check --preferences FILE");
+    }
     app.sys(format!("— signed in as {} —", ok.screen_name));
     if !welcome.motd.is_empty() {
         app.sys(welcome.motd.clone());
@@ -307,24 +316,13 @@ async fn handle_key(
     key: KeyEvent,
 ) -> Result<()> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    // Global chords first: quit, theming, view toggles.
+    if handle_appearance_key(app, key) {
+        return Ok(());
+    }
+    // Global chords first: quit and view toggles.
     match key.code {
         KeyCode::Char('c') if ctrl => {
             app.should_quit = true;
-            return Ok(());
-        }
-        KeyCode::Char('t') if ctrl => {
-            app.mode = match app.mode {
-                Mode::Dark => Mode::Light,
-                Mode::Light => Mode::Dark,
-            };
-            return Ok(());
-        }
-        KeyCode::Char('r') if ctrl => {
-            app.pack = match app.pack {
-                ThemePack::Retro => ThemePack::Clean,
-                _ => ThemePack::Retro,
-            };
             return Ok(());
         }
         KeyCode::Char('n') if ctrl => {
@@ -350,6 +348,30 @@ async fn handle_key(
         View::Browser => handle_browser_key(app, fetch_tx, key, ctrl),
     }
     Ok(())
+}
+
+/// Appearance chords apply once per press, including terminals that send key
+/// release events. They work in every view without touching a compose buffer.
+fn handle_appearance_key(app: &mut App, key: KeyEvent) -> bool {
+    if !key.modifiers.contains(KeyModifiers::CONTROL)
+        || !matches!(key.code, KeyCode::Char('t' | 'r'))
+    {
+        return false;
+    }
+    if key.kind != crossterm::event::KeyEventKind::Press {
+        return true;
+    }
+    match key.code {
+        KeyCode::Char('t') => {
+            app.appearance.preferences.mode = app.appearance.preferences.mode.next();
+        }
+        KeyCode::Char('r') => {
+            app.appearance.preferences.pack = app.appearance.preferences.pack.next();
+        }
+        _ => unreachable!(),
+    }
+    app.status(app.appearance.save_status());
+    true
 }
 
 async fn handle_lobby_key(
@@ -439,7 +461,7 @@ fn handle_radio_key(app: &mut App, key: KeyEvent, ctrl: bool) {
                     app.status("radio base cleared");
                 } else if handoff::base_is_valid(&base) {
                     app.radio_base = base;
-                    app.status("radio base set (session-only — no config file yet)");
+                    app.status("radio base set (session-only)");
                 } else {
                     app.radio_base = base;
                     app.status("saved, but base must be http:// or https:// with a host");
@@ -744,7 +766,7 @@ fn draw_lobby(f: &mut Frame, app: &mut App, area: Rect, accent: Style, muted: St
         Paragraph::new(format!("> {}", app.input)).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" say (Enter) · Ctrl-N radio · Ctrl-B servers · Ctrl-T/R theme · Esc quit ")
+                .title(" Enter send · ^N radio · ^B servers · ^T mode · ^R pack ")
                 .border_style(muted),
         ),
         rows[1],
@@ -802,7 +824,7 @@ fn draw_radio(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Style)
     let base_line = match &app.base_edit {
         Some(buf) => Line::from(Span::styled(format!("base> {buf}▌"), accent)),
         None if app.radio_base.is_empty() => Line::from(Span::styled(
-            "base: (unset — press b · session-only, the TUI has no config file yet)",
+            "base: (unset — press b · session-only)",
             muted,
         )),
         None => Line::from(vec![
@@ -1015,7 +1037,11 @@ fn draw_browser(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Styl
 /// Status bar: a transient action/error message when present, else the
 /// radio now-playing segment — always beside the server name.
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: Style) {
-    let width = area.width as usize;
+    let label = app.appearance.label();
+    let label_width = (label.chars().count() + 2) as u16;
+    let columns =
+        Layout::horizontal([Constraint::Min(20), Constraint::Length(label_width)]).split(area);
+    let width = columns[0].width as usize;
     let (seg, seg_style) = match &app.status {
         Some(msg) => (msg.clone(), accent),
         None => match radio::status_segment(&app.radio, width.saturating_sub(3)) {
@@ -1028,6 +1054,125 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect, accent: Style, muted: S
             Span::styled(format!(" {seg} "), seg_style),
             Span::styled(format!("· {}", app.server_name), muted),
         ])),
-        area,
+        columns[0],
     );
+    f.render_widget(
+        Paragraph::new(label)
+            .style(muted)
+            .alignment(ratatui::layout::Alignment::Right),
+        columns[1],
+    );
+}
+
+#[cfg(test)]
+mod appearance_tests {
+    use super::*;
+    use preferences::{Appearance, ModePreference, Pack};
+    use ratatui::backend::TestBackend;
+
+    fn app(path: Option<std::path::PathBuf>) -> App {
+        App {
+            lines: vec![("Ada".into(), "Welcome to the burrow".into())],
+            scroll: chatlog::Scroll::new(),
+            chat_height: 0,
+            online: vec!["Ada".into()],
+            input: "unsent draft".into(),
+            appearance: Appearance::load(path, None).0,
+            server_theme: None,
+            server_name: "Appearance fixture".into(),
+            radio: radio::RadioState::default(),
+            view: View::Lobby,
+            status: None,
+            radio_selected: 0,
+            radio_base: String::new(),
+            radio_url: None,
+            base_edit: None,
+            browser: browser::BrowserState::new(None),
+            should_quit: false,
+        }
+    }
+
+    fn render(app: &mut App, width: u16) -> (String, ratatui::buffer::Buffer) {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text = buffer
+            .content
+            .chunks(width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        (text, buffer)
+    }
+
+    #[test]
+    fn appearance_chords_persist_once_per_press_from_every_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tui.toml");
+        let mut app = app(Some(path.clone()));
+        for view in [View::Lobby, View::Radio, View::Browser] {
+            app.view = view;
+            for ch in ['r', 't'] {
+                let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
+                assert!(handle_appearance_key(&mut app, key));
+                let chosen = app.appearance.preferences;
+                assert_eq!(
+                    Appearance::load(Some(path.clone()), None).0.preferences,
+                    chosen
+                );
+                for kind in [
+                    crossterm::event::KeyEventKind::Repeat,
+                    crossterm::event::KeyEventKind::Release,
+                ] {
+                    assert!(handle_appearance_key(&mut app, KeyEvent { kind, ..key }));
+                    assert_eq!(app.appearance.preferences, chosen);
+                }
+                assert_eq!(app.input, "unsent draft");
+                assert_eq!(app.view, view);
+            }
+        }
+        assert_eq!(app.appearance.preferences.pack, Pack::Clean);
+        assert_eq!(app.appearance.preferences.mode, ModePreference::Auto);
+    }
+
+    #[test]
+    fn all_palettes_render_readable_choices_and_controls_at_eighty_columns() {
+        let mut app = app(None);
+        for pack in [Pack::Clean, Pack::Retro, Pack::HighContrast] {
+            for mode in [
+                ModePreference::Auto,
+                ModePreference::Light,
+                ModePreference::Dark,
+            ] {
+                app.appearance.preferences = preferences::Preferences { pack, mode };
+                for view in [View::Lobby, View::Radio, View::Browser] {
+                    app.view = view;
+                    let (text, buffer) = render(&mut app, 80);
+                    assert!(
+                        text.contains(&app.appearance.label()),
+                        "{pack:?}/{mode:?}/{view:?}\n{text}"
+                    );
+                    assert!(buffer
+                        .content
+                        .iter()
+                        .all(|cell| cell.bg == to_color(app.palette().background)));
+                    if view == View::Lobby {
+                        assert!(text.contains("^T mode · ^R pack"), "{text}");
+                        assert!(text.contains("unsent draft"));
+                    }
+                }
+            }
+        }
+        app.appearance.preferences.pack = Pack::HighContrast;
+        app.appearance.preferences.mode = ModePreference::Auto;
+        app.status(app.appearance.save_status());
+        let (text, _) = render(&mut app, 80);
+        assert!(text.contains("Appearance not saved"), "{text}");
+        assert!(
+            text.contains("High Contrast · Auto Dark fallback"),
+            "{text}"
+        );
+        // Tiny terminals may clip, but must still render without panicking.
+        render(&mut app, 30);
+    }
 }
