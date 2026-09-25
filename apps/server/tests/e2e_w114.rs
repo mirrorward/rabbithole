@@ -69,6 +69,29 @@ async fn read_head(sock: &mut TcpStream) -> (String, Vec<u8>) {
     }
 }
 
+/// Keep the initial response body and read until enough complete FLAC frames
+/// have arrived. One deadline covers all reads, regardless of TCP chunk sizes.
+async fn read_flac_frames(
+    sock: &mut TcpStream,
+    heard: &mut Vec<u8>,
+    want: usize,
+) -> Vec<rabbithole_radio::flac::Frame> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut chunk = [0u8; 4096];
+        loop {
+            let frames = rabbithole_radio::flac::frames(heard);
+            if frames.len() >= want {
+                break frames;
+            }
+            let n = sock.read(&mut chunk).await.expect("socket readable");
+            assert!(n > 0, "FLAC stream ended before {want} complete frames");
+            heard.extend_from_slice(&chunk[..n]);
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{want} complete FLAC frames should arrive within 5 seconds"))
+}
+
 #[tokio::test]
 async fn source_pushes_and_listener_receives_with_metadata_at_boundary() {
     let work = tempfile::tempdir().unwrap();
@@ -949,9 +972,12 @@ async fn a_library_of_flac_files_streams_as_a_flac_station() {
     // STREAMINFO, said once for the whole night, and then the file's
     // frames — not the file, which would put a second set of headers in
     // the middle of the stream at every track and stop a decoder dead.
-    let mut more = read_at_least(&mut listener, 256).await;
-    heard.append(&mut more);
     let info = rabbithole_radio::flac::playable(REFERENCE_FLAC).unwrap();
+    let theirs = rabbithole_radio::flac::frames(REFERENCE_FLAC);
+    // TCP may split a cycle or coalesce several. Read complete frames, counting
+    // the body read_head already received, under one deadline. Deliberately
+    // collect two cycles so extra rotation data is always part of this check.
+    let frames = read_flac_frames(&mut listener, &mut heard, theirs.len() * 2).await;
     let head = rabbithole_radio::flac::stream_headers(
         info.sample_rate,
         info.channels,
@@ -967,17 +993,33 @@ async fn a_library_of_flac_files_streams_as_a_flac_station() {
         1,
         "and does not say it again"
     );
-    // And what follows is the audio of that file, frame for frame: the
-    // same bytes, renumbered to carry on from where the mount is.
-    let frames = rabbithole_radio::flac::frames(&heard);
-    let theirs = rabbithole_radio::flac::frames(REFERENCE_FLAC);
-    assert_eq!(frames.len(), theirs.len(), "{frames:?}");
+    // And the first complete cycle is the audio of that file, frame for frame:
+    // the same bytes, renumbered to carry on from where the mount is. Further
+    // cycles received in the same read are valid ongoing station output.
+    let first_cycle = &frames[..theirs.len()];
     assert_eq!(frames[0].offset, head.len(), "audio, straight after");
+    assert!(
+        frames
+            .windows(2)
+            .all(|w| w[0].offset + w[0].len == w[1].offset),
+        "complete frames stay back to back across rotations"
+    );
     assert_eq!(
-        frames.iter().map(|f| u64::from(f.samples)).sum::<u64>(),
+        first_cycle
+            .iter()
+            .map(|f| u64::from(f.samples))
+            .sum::<u64>(),
         info.total_samples
     );
-    for (ours, theirs) in frames.iter().zip(&theirs) {
+    for (ours, theirs) in first_cycle.iter().zip(&theirs) {
+        assert_eq!(
+            ours.samples, theirs.samples,
+            "the frame keeps its sample count"
+        );
+        assert_eq!(
+            ours.sample_rate, theirs.sample_rate,
+            "the sample rate stays put"
+        );
         assert_eq!(
             &heard[ours.offset + ours.header..ours.offset + ours.len - 2],
             &REFERENCE_FLAC[theirs.offset + theirs.header..theirs.offset + theirs.len - 2],
@@ -1058,22 +1100,13 @@ async fn a_flac_station_carries_on_across_a_track_change() {
     // Both 8 kHz tracks, which is every frame of that file twice.
     let info = rabbithole_radio::flac::playable(EIGHT_K).unwrap();
     let theirs = rabbithole_radio::flac::frames(EIGHT_K);
-    let want = rabbithole_radio::flac::stream_headers(
-        info.sample_rate,
-        info.channels,
-        info.bits_per_sample,
-    )
-    .len()
-        + theirs.iter().map(|f| f.len + 2).sum::<usize>() * 2;
-    let mut more = read_at_least(&mut listener, want).await;
-    heard.append(&mut more);
+    let frames = read_flac_frames(&mut listener, &mut heard, theirs.len() * 2).await;
 
     assert_eq!(
         heard.windows(4).filter(|w| *w == b"fLaC").count(),
         1,
         "one set of headers for the whole stream"
     );
-    let frames = rabbithole_radio::flac::frames(&heard);
     assert!(
         frames.len() >= theirs.len() * 2,
         "both tracks, as frames: {} of {}",
@@ -1118,23 +1151,29 @@ async fn a_flac_station_carries_on_across_a_track_change() {
     );
     assert_eq!(
         numbers[theirs.len()],
-        info.total_samples,
+        numbers[0] + info.total_samples,
         "the second song starts where the first one ended"
     );
 
-    // And the operator can see why the odd one out is silent.
-    let status = burrow::radio::station_status(&burrow.shared);
-    let station = status
-        .iter()
-        .find(|s| s.station == "lossless")
-        .expect("the station");
-    let left = station
-        .left_out
-        .iter()
-        .find(|l| l.title == "c-other.flac")
-        .expect("said out loud");
+    // Receiving the second song does not mean the pump has examined the
+    // incompatible third track yet. Wait for that specific diagnostic.
+    let reason = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(reason) = burrow::radio::station_status(&burrow.shared)
+                .iter()
+                .find(|s| s.station == "lossless")
+                .and_then(|s| s.left_out.iter().find(|l| l.title == "c-other.flac"))
+                .map(|left| left.reason.clone())
+            {
+                break reason;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the incompatible track should be reported within 5 seconds");
     assert_eq!(
-        left.reason,
+        reason,
         "not what this station is sending (audio/flac, 8000 Hz, mono, 16 bit)"
     );
 
