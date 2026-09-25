@@ -1639,6 +1639,11 @@ mod tests {
                 self.0.have().await
             }
             async fn bao(&self, offset: u64, len: u64) -> Result<Vec<crate::BaoPiece>, PeerError> {
+                // The lending phase can land one unit, but cannot finish the
+                // file before the test observes progress and cancels it.
+                if !self.1 && offset != 0 {
+                    std::future::pending::<()>().await;
+                }
                 self.0.bao(offset, len).await
             }
             fn shareable(&self) -> bool {
@@ -1646,19 +1651,39 @@ mod tests {
             }
         }
         let dest = dir.path().join("half.out");
-        // A lending source carries the first units, and the fetch is
-        // dropped before the file is whole.
+        // Cancel only after a verified borrowed unit lands. A fixed delay can
+        // expire before any disk work finishes on a slower CI runner.
         {
             let sources: Vec<Arc<dyn RangeSource>> = vec![Arc::new(Lending(lender.clone(), false))];
-            let fetch = fetch_swarm_from(&sources, lender.root, lender.size, &dest, None, None);
-            let _ = tokio::time::timeout(Duration::from_millis(60), fetch).await;
+            let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
+            let mut fetch = Box::pin(fetch_swarm_from(
+                &sources,
+                lender.root,
+                lender.size,
+                &dest,
+                Some(progress),
+                None,
+            ));
+            let landed = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    unit = updates.recv() => unit.expect("the fetch reports its first unit"),
+                    result = &mut fetch => panic!("partial fetch finished before cancellation: {result:?}"),
+                }
+            })
+            .await
+            .expect("the first borrowed unit lands before the safety deadline");
+            assert_eq!(landed.offset, 0);
+            assert_eq!(landed.done_units, 1);
+            assert_eq!(landed.total_units, 4);
+            // Dropping the actual future stops its worker and flushes the
+            // partial resume record before it is inspected below.
+            drop(fetch);
         }
         let record =
             load_rhstate(&rhstate_path(&dest), &lender.root, lender.size).expect("a resume record");
-        assert!(!record.done.is_empty(), "something landed");
+        assert_eq!(record.done, vec![0], "exactly the first unit landed");
         assert_eq!(
-            record.borrowed.len(),
-            record.done.len(),
+            record.borrowed, record.done,
             "and all of it was lent: {record:?}"
         );
 
@@ -1678,6 +1703,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert_eq!(report.per_source[0].1, 3, "only missing units were fetched");
         assert!(report.borrowed, "the lent units are remembered");
         assert!(!seeds.holds_whole(&lender.root));
         assert!(seeds.have(&lender.root).is_none());
