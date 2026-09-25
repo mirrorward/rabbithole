@@ -5,6 +5,7 @@
 | 42/43 | WelcomeScreenRequest → WelcomeScreen | Request/Reply | ordered `widgets`: Motd, UnreadDms, OnlineNow{count,sample}, Featured{title,body}, Ticker |
 | 44/45 | ThemeGet → ThemeReply | Request/Reply | signed bundle (`NotFound` if none configured **or the account opted out**) |
 | 46/47 | KeywordGo → KeywordTarget | Request/Reply | `word` → {Room \| User \| Url \| Unknown, target} |
+| 48 | ThemeChanged | Push | empty; re-fetch ThemeGet for this session |
 | 57 | ThemePrefGet | Request | → ThemePrefState (accounts only) |
 | 58 | ThemePrefSet | Request | `disable_server_theme: bool` → ThemePrefState (accounts only) |
 | 59 | ThemePrefState | Reply | `disable_server_theme: bool` |
@@ -26,11 +27,25 @@ before anything is served. The per-account `ThemePrefSet` opt-out is the
 user safety valve: with it set, `ThemeGet` answers `NotFound` and the
 client renders its default tokens.
 
-Safety rails (client side, in `rabbithole-core::theme`): a server bundle
-only overrides the **accent** and supplies art — never the structural
-palette — and the accent is dropped if it falls below 3:1 contrast against
-the active background. Server theming layers on top of the user's
-light/dark + theme-pack (Clean / Retro / High Contrast) choice.
+Peers advertise `server-theme-updates` in `Hello`/`HelloAck` to negotiate
+live refreshes. Already-connected authenticated clients that offered this
+capability receive the empty `ThemeChanged` push after a successful
+operator theme update or clear (including theme configuration changes).
+A successful `ThemePrefSet` notifies every live
+session of that account only. On receipt, clients re-fetch `ThemeGet` for
+the originating session, verify the signed reply, and remove its server
+theme on `NotFound`. The push carries no theme data and does not bypass
+account preferences. It is ephemeral; clients fetch current theme state
+after each fresh authentication or reconnect. Clients that do not offer
+the capability receive no new push type.
+
+The core palette helper (`rabbithole-core::theme`) applies only an accent
+that meets its contrast rail. The shared web/desktop renderer additionally
+layers structured tokens over the user's pack and light/dark choice. Its
+`ThemeCache` independently verifies signatures and the closed token grammar,
+rejects bundles larger than 128 KiB, and caches by content hash within one
+connection only. Reconnect resets the signing-key binding and cached theme.
+High Contrast retains its local colors and geometry.
 
 ## Keyword resolution order
 

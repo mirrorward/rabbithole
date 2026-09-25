@@ -111,6 +111,7 @@ pub async fn run_session(
 
     // ---- AwaitHello / AwaitAuth ----------------------------------------
     let mut negotiated: Option<ProtocolVersion> = None;
+    let mut theme_updates = false;
     // The client's *claimed* portable identity key from the handshake, the
     // random challenge nonce we issued for it, and the key once it has PROVED
     // possession (a valid KeyProof signature over the nonce). Only the *verified*
@@ -139,6 +140,9 @@ pub async fn run_session(
             match ProtocolVersion::negotiate(PROTOCOL_VERSION, hello.version) {
                 Some(v) => {
                     negotiated = Some(v);
+                    theme_updates = hello
+                        .capabilities
+                        .contains(rabbithole_proto::hello::caps::SERVER_THEME_UPDATES);
                     client_pubkey = hello.client_pubkey;
                     // If the client offered an identity key, challenge it to prove
                     // possession: a random nonce it must sign (see the KeyProof
@@ -159,6 +163,9 @@ pub async fn run_session(
                             rabbithole_proto::Capability::new(rabbithole_proto::hello::caps::GUEST),
                             rabbithole_proto::Capability::new(
                                 rabbithole_proto::hello::caps::KEY_AUTH,
+                            ),
+                            rabbithole_proto::Capability::new(
+                                rabbithole_proto::hello::caps::SERVER_THEME_UPDATES,
                             ),
                         ]),
                         cfg.name,
@@ -439,11 +446,15 @@ pub async fn run_session(
                             break;
                         }
                         Ok(ev) => {
+                            if matches!(&ev, ServerEvent::ThemeChanged { .. }) && !theme_updates {
+                                continue;
+                            }
                             if let Some(push) = push_for_event(&ev, &shared, ctx.role, ctx.account_id, ctx.session_id) {
-                                // A pull's progress is for whoever is watching
-                                // now: kept out of the replay log, where it
-                                // would crowd out what a reconnect needs.
-                                let passing = matches!(
+                                // Progress and theme invalidations are for
+                                // whoever is watching now. A reconnect fetches
+                                // its current theme, so do not fill the replay
+                                // log with obsolete invalidations.
+                                let passing = matches!(&ev, ServerEvent::ThemeChanged { .. }) || matches!(
                                     &ev,
                                     ServerEvent::PullStatus { status, .. }
                                         if status.state == rabbithole_proto::filelib::pull_state::RUNNING
@@ -733,6 +744,15 @@ pub(crate) fn push_for_event(
 ) -> Option<Frame> {
     let viewer_is_mod = viewer_role >= Role::Moderator;
     match event {
+        ServerEvent::ThemeChanged { account } => {
+            // Only live authenticated sessions receive this invalidation;
+            // the offline replay recorder uses session 0. Preference changes
+            // must not refresh or reveal activity to other accounts.
+            if viewer_session == 0 || account.is_some_and(|id| id != viewer_account) {
+                return None;
+            }
+            Frame::push(&rabbithole_proto::welcome::ThemeChanged).ok()
+        }
         ServerEvent::Chat { room, from, text } => {
             // Lobby chat is for everyone (including offline-replay); other
             // rooms deliver to members only.

@@ -128,6 +128,20 @@ impl Message for ThemeReply {
     const MESSAGE_TYPE: u16 = 45;
 }
 
+/// Push: the theme available to this session may have changed. Fetch
+/// [`ThemeGet`] again and verify the signed reply before applying it;
+/// `NotFound` clears the prior theme. The notification carries no bundle
+/// and respects account opt-out through the subsequent fetch. Sent only when
+/// both peers advertise `server-theme-updates`; older clients keep fetching
+/// at sign-in without receiving this new push type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ThemeChanged;
+
+impl Message for ThemeChanged {
+    const FAMILY: Family = Family::SESSION;
+    const MESSAGE_TYPE: u16 = 48;
+}
+
 /// Keyword teleport (the AOL `/go` primitive). → [`KeywordTarget`].
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +252,19 @@ impl Message for ThemePrefState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_changed_is_an_empty_session_push() {
+        let frame = crate::Frame::push(&ThemeChanged).unwrap();
+        assert_eq!(frame.kind, crate::FrameKind::Push);
+        assert_eq!(frame.family, Family::SESSION);
+        assert_eq!(frame.message_type, 48);
+        assert!(frame.payload.0.is_empty());
+        assert_eq!(
+            frame.decode::<ThemeChanged>().unwrap().unwrap(),
+            ThemeChanged
+        );
+    }
 
     #[test]
     fn theme_bundle_roundtrips_with_tokens() {

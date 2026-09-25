@@ -16,7 +16,7 @@ use rabbithole_net::Connection;
 use rabbithole_proto::admin as padm;
 use rabbithole_proto::{ErrorCode, Frame};
 use rabbithole_server_core::theme::{self, ThemeError, ThemeLimits};
-use rabbithole_server_core::Caps;
+use rabbithole_server_core::{Caps, ServerEvent};
 use rabbithole_store_server::repo::AuditRepo;
 
 use crate::session::SessionCtx;
@@ -106,6 +106,7 @@ pub async fn handle(
                     .config
                     .update(|c| theme::write_to_config(&applied, c, now, &ctx.login));
                 persist_theme(shared);
+                notify_theme_changed(shared);
                 audit(
                     shared,
                     &ctx.login,
@@ -128,6 +129,7 @@ pub async fn handle(
         config_admins_only!();
         shared.config.update(theme::clear_config);
         persist_theme(shared);
+        notify_theme_changed(shared);
         audit(shared, &ctx.login, "theme-clear", String::new());
         conn.send(Frame::ack(frame)).await?;
         return Ok(true);
@@ -140,6 +142,22 @@ pub async fn handle(
     }
 
     Ok(false)
+}
+
+/// Invalidate connected clients' theme snapshots. They fetch the signed
+/// bundle themselves, preserving each account's server-theme preference.
+pub(crate) fn notify_theme_changed(shared: &Shared) {
+    shared
+        .bus
+        .publish(ServerEvent::ThemeChanged { account: None });
+}
+
+/// The legacy config paths can also change a theme (including the fallback
+/// bundle name). Unrelated settings do not cause theme refreshes.
+pub(crate) fn notify_theme_config_changed(shared: &Shared, key: &str) {
+    if key == "name" || rabbithole_server_core::config::THEME_KEYS.contains(&key) {
+        notify_theme_changed(shared);
+    }
 }
 
 /// Write the theme fields back to the config file. The theme is already live

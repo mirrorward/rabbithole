@@ -93,6 +93,10 @@ pub enum ServerEvent {
     },
     /// An operator notice for every session.
     Notice { text: String, from: String },
+    /// Theme availability changed. `None` refreshes this burrow's connected
+    /// sessions; `Some` refreshes only that account after a preference change.
+    /// Clients fetch the signed bundle through their own opt-out gate.
+    ThemeChanged { account: Option<i64> },
     /// A notice for moderators only (e.g. "a new report was filed").
     /// Surfaces deliver it solely to sessions holding moderator rank.
     ModNotice { text: String },

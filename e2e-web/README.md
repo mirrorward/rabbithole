@@ -7,9 +7,9 @@ The test boots the actual wasm app in headless Chromium, asserts the
 connect/login view renders, performs a **guest login** through the real UI
 (fills the handle, clicks *Connect*), and asserts the app routes to the lobby.
 
-This harness does **not** build or launch the SPA or the server for you — it
-drives an already-running `burrow`. The three manual steps below are the whole
-recipe.
+The smoke test drives an already-running `burrow`. The three manual steps below
+are its recipe. The separate theme regression suite launches isolated servers
+from existing build artifacts; see its instructions at the end.
 
 ## Prerequisites
 
@@ -101,3 +101,36 @@ npm test               # == npx playwright test
 
 All waits are deterministic (`expect(...).toBeVisible()`); there are no fixed
 sleeps.
+
+## Signed-theme regression suite
+
+`tests/theme.spec.ts` boots the actual SPA against temporary local burrows. Build
+the SPA and `burrow` as above, install npm dependencies, then run from `e2e-web`:
+
+```sh
+BURROW_BIN="$(pwd)/../target/debug/burrow" \
+SPA_DIST="$(pwd)/../crates/ui-web/dist" \
+npm run test:theme
+```
+
+Set `PW_CHROMIUM` if reusing a browser installed outside Playwright's default
+location. The suite requires Unix (the server control socket is Unix-only) and
+Node **22.13 or newer** for the built-in SQLite fixture helper. It does not build
+artifacts or install browsers. Without both artifact variables, normal smoke
+runs skip these tests.
+
+Each test seeds an account, binds HTTP/WebSocket listeners on random loopback
+ports, disables public discovery, and deletes its temporary data after stopping
+the servers. Its connection budget allows rapid asset reloads without testing
+production rate limits. Browser requests to external hosts are blocked. The opt-out test
+seeds the existing account preference in the temporary SQLite database; it does
+not assume a client-side opt-out control exists.
+
+The assertions cover signed theme application after login, live publication and
+clear without navigating, High Contrast precedence, independent themes while
+switching burrows, background updates, reconnect after an offline theme change,
+session restoration after loading a fresh document, and server-side account opt-out. They inspect
+computed CSS variables and observe real protocol replies so a default palette
+shown before authentication cannot masquerade as a successful clear.
+Service workers are blocked to isolate socket/theme behavior from shell caching;
+fresh-document checks load `/`, since deep-link fallback belongs to the worker.

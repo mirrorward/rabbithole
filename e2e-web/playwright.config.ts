@@ -2,8 +2,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 // The RabbitHole web SPA is a Leptos/wasm app. It is built with `trunk build`
 // (output in `crates/ui-web/dist/`) and served by `burrow --http`. This harness
-// does NOT build or launch anything itself: it drives an already-running burrow.
-// See README.md for the launch recipe.
+// does not build artifacts. The smoke test drives an already-running burrow;
+// theme.spec.ts launches isolated servers when artifact paths are provided.
+// See README.md for both launch recipes.
 //
 // BASE_URL points at the running burrow HTTP surface (default matches the
 // README's `--http-addr`). PW_CHROMIUM overrides the browser binary; it

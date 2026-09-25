@@ -144,8 +144,10 @@ pub trait EventClient {
 
 /// Build the [`Hello`] request frame that opens every RHP session.
 pub fn hello_request(id: RequestId, pubkey: Option<[u8; 32]>) -> Result<Frame, ProtoError> {
-    let hello =
-        Hello::new(CLIENT_NAME, CLIENT_VERSION, CapabilitySet::default()).with_pubkey(pubkey);
+    let capabilities = CapabilitySet(vec![rabbithole_proto::hello::Capability::new(
+        rabbithole_proto::hello::caps::SERVER_THEME_UPDATES,
+    )]);
+    let hello = Hello::new(CLIENT_NAME, CLIENT_VERSION, capabilities).with_pubkey(pubkey);
     Frame::request(id, &hello)
 }
 
@@ -2779,6 +2781,9 @@ mod tests {
         let hello = frame.decode::<Hello>().unwrap().unwrap();
         assert_eq!(hello.client_name, CLIENT_NAME);
         assert_eq!(hello.client_pubkey, Some([5; 32]));
+        assert!(hello
+            .capabilities
+            .contains(rabbithole_proto::hello::caps::SERVER_THEME_UPDATES));
         // No-key handshake is still valid (guest / no local identity).
         assert_eq!(
             hello_request(RequestId(1), None)

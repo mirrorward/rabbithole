@@ -41,7 +41,7 @@ pub fn root_style(pack: ThemePack, mode: Mode) -> String {
 /// 2. otherwise a **server theme overlay** (PLAN §9.11) whenever the burrow
 ///    ships one, layered on top of the built-in `pack` — the operator's
 ///    accent/metric tokens nudge the chosen pack without replacing it. A
-///    burrow's theme is how that place looks, so it always applies; the user's
+///    High Contrast keeps its local palette and geometry; otherwise the user's
 ///    pack is the app's default for where a burrow supplies nothing;
 /// 3. otherwise the plain built-in `pack`.
 ///
@@ -53,6 +53,7 @@ pub fn resolve_root_style(
     pack: ThemePack,
     mode: Mode,
 ) -> String {
+    let server = server.filter(|_| pack != ThemePack::HighContrast);
     match (custom, server) {
         (Some(tokens), _) => tokens.style_for(mode),
         (None, Some(overlay)) => overlay.over(&PackTokens::builtin(pack)).style_for(mode),
@@ -1537,6 +1538,20 @@ mod tests {
             .find(|d| d.starts_with("--rh-shadow-2:"))
             .unwrap();
         assert!(style.contains(shadow), "unnamed tokens keep the pack value");
+    }
+
+    #[test]
+    fn high_contrast_keeps_local_colors_and_geometry() {
+        let mut server = ServerOverlay::default();
+        server.light.insert("--rh-text".into(), "#dddddd".into());
+        server.dark.insert("--rh-bg".into(), "#222222".into());
+        server.shared.insert("--rh-font-size".into(), "8px".into());
+        for mode in MODES {
+            assert_eq!(
+                resolve_root_style(None, Some(&server), ThemePack::HighContrast, mode),
+                root_style(ThemePack::HighContrast, mode)
+            );
+        }
     }
 
     #[test]

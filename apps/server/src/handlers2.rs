@@ -553,6 +553,7 @@ pub async fn handle(
                 // console hears back, a surface this key belongs to is up, or
                 // the reason it is not is on record.
                 crate::surfaces::reconcile(shared).await;
+                crate::handlers12::notify_theme_config_changed(shared, &req.key);
                 reply!(&padm::ConfigApplied::new(applied_live));
             }
             // A value the key refuses is the asker's mistake. A config file

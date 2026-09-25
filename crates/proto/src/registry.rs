@@ -94,8 +94,8 @@ use crate::transfer::{
     TransferResume, TransferTicket, UploadFinish,
 };
 use crate::welcome::{
-    KeywordGo, KeywordTarget, ThemeGet, ThemePrefGet, ThemePrefSet, ThemePrefState, ThemeReply,
-    WelcomeScreen, WelcomeScreenRequest,
+    KeywordGo, KeywordTarget, ThemeChanged, ThemeGet, ThemePrefGet, ThemePrefSet, ThemePrefState,
+    ThemeReply, WelcomeScreen, WelcomeScreenRequest,
 };
 use crate::wish::{
     WishCreate, WishList, WishListRequest, WishReply, WishSetStatus, WishUpdated, WishVote,
@@ -138,7 +138,7 @@ wire_registry! {
     Hello, HelloAck, KeyProof, PullSessionOpen,
     AuthPassword, AuthGuest, AuthResume, AuthOk, Register,
     Ping, Pong, AgreementAccept, Welcome, ServerNotice,
-    WelcomeScreenRequest, WelcomeScreen, ThemeGet, ThemeReply, KeywordGo, KeywordTarget,
+    WelcomeScreenRequest, WelcomeScreen, ThemeGet, ThemeReply, ThemeChanged, KeywordGo, KeywordTarget,
     PersonaListRequest, PersonaCreate, PersonaUpdate, PersonaDelete, PersonaSwitch, PersonaList,
     PersonaReply,
     ThemePrefGet, ThemePrefSet, ThemePrefState,
@@ -218,7 +218,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 247;
+pub const EXPECTED: usize = 248;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

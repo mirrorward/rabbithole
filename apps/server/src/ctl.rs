@@ -117,6 +117,7 @@ async fn dispatch(shared: &Arc<Shared>, req: &Value) -> Result<Value, String> {
             // Start, stop or rebind whatever surface this key belongs to,
             // before answering: "applied" should mean it.
             crate::surfaces::reconcile(shared).await;
+            crate::handlers12::notify_theme_config_changed(shared, &key);
             Ok(json!({"applied_live": live}))
         }
         "account-create" => {
@@ -365,6 +366,7 @@ async fn dispatch(shared: &Arc<Shared>, req: &Value) -> Result<Value, String> {
                 .config
                 .update(rabbithole_server_core::theme::clear_config);
             crate::handlers12::persist_theme(shared);
+            crate::handlers12::notify_theme_changed(shared);
             audit("theme-clear", String::new());
             Ok(json!({"cleared": true}))
         }

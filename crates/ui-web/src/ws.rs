@@ -54,6 +54,8 @@ use rabbithole_core::api::{Command, Event};
 use rabbithole_proto::{decode_frame, encode_frame, Frame, FrameKind, RequestId};
 
 use crate::conn::{backoff_delay, ConnState};
+use crate::server_theme::{ServerOverlay, ThemeCache, ThemeUpdate};
+use crate::theme_sync::{ThemeReplyAction, ThemeSync};
 use crate::wire::{
     self, AdminCommand, AdminEvent, EventClient, EventSink, FileCommand, FileEvent, NoticeRoute,
     PresenceDelta,
@@ -83,6 +85,8 @@ pub type WhoSink = Rc<dyn Fn(Vec<crate::state::Presence>)>;
 
 /// Receives the burrow's front page (welcome-screen widgets) once per session.
 pub type FrontPageSink = Rc<dyn Fn(Vec<rabbithole_proto::welcome::WelcomeWidget>)>;
+/// A verified theme for this socket's session, or a request to clear it.
+pub type ThemeSink = Rc<dyn Fn(Option<ServerOverlay>)>;
 /// A sink the transport pushes live roster deltas into (join/leave), keeping
 /// the presence list fresh between full [`WhoSink`] snapshots.
 pub type PresenceSink = Rc<dyn Fn(PresenceDelta)>;
@@ -162,6 +166,9 @@ struct Inner {
     /// The burrow's server identity key, from its handshake: what another
     /// burrow is told to send files to.
     server_key: std::cell::Cell<Option<[u8; 32]>>,
+    theme_sink: Option<ThemeSink>,
+    theme_cache: RefCell<ThemeCache>,
+    theme_sync: RefCell<ThemeSync>,
     notice_sink: Option<NoticeSink>,
     who_sink: Option<WhoSink>,
     sessions_sink: Option<SessionsSink>,
@@ -345,6 +352,9 @@ impl WsClient {
                 pending_admin: RefCell::new(std::collections::HashMap::new()),
                 pending_calls: RefCell::new(std::collections::HashMap::new()),
                 server_key: std::cell::Cell::new(None),
+                theme_sink: None,
+                theme_cache: RefCell::new(ThemeCache::default()),
+                theme_sync: RefCell::new(ThemeSync::default()),
                 notice_sink: None,
                 who_sink: None,
                 sessions_sink: None,
@@ -419,6 +429,11 @@ impl WsClient {
     /// Register the front-page sink (the burrow's welcome screen).
     pub fn on_front_page(&mut self, sink: FrontPageSink) {
         self.inner.borrow_mut().front_page_sink = Some(sink);
+    }
+
+    /// Bind theme updates to the session that owns this transport.
+    pub fn on_theme(&mut self, sink: ThemeSink) {
+        self.inner.borrow_mut().theme_sink = Some(sink);
     }
 
     /// Ask the burrow for its front page — sent once the session is authenticated.
@@ -860,6 +875,90 @@ impl WsClient {
         }
     }
 
+    fn emit_theme(b: &Inner, update: ThemeUpdate) {
+        if let ThemeUpdate::Apply(overlay) = update {
+            if let Some(sink) = &b.theme_sink {
+                sink(overlay);
+            }
+        }
+    }
+
+    fn clear_theme(b: &Inner) {
+        let update = b.theme_cache.borrow_mut().clear();
+        Self::emit_theme(b, update);
+    }
+
+    /// A connection boundary forgets both the verifier key and pending fetch.
+    fn reset_theme(b: &Inner) {
+        b.server_key.set(None);
+        b.theme_cache.borrow_mut().reset(None);
+        b.theme_sync.borrow_mut().reset(b.generation);
+        Self::emit_theme(b, ThemeUpdate::Apply(None));
+    }
+
+    /// Sinks run under an immutable Inner borrow. Send in a microtask and
+    /// re-check the generation there, so reconnect cannot inherit queued work.
+    fn queue_theme_request(inner: &Rc<RefCell<Inner>>, generation: u64) {
+        let inner = inner.clone();
+        spawn_local(async move {
+            let mut b = inner.borrow_mut();
+            if b.generation != generation || !b.alive {
+                return;
+            }
+            let id = b.next_request_id();
+            if !b.theme_sync.borrow_mut().begin(generation, id) {
+                return;
+            }
+            let sent = Frame::request(id, &rabbithole_proto::welcome::ThemeGet)
+                .ok()
+                .and_then(|frame| encode_frame(&frame).ok())
+                .is_some_and(|bytes| {
+                    b.ws.as_ref().is_some_and(|ws| {
+                        ws.ready_state() == WS_OPEN && ws.send_with_u8_array(&bytes).is_ok()
+                    })
+                });
+            if !sent {
+                b.theme_sync.borrow_mut().reply(generation, id);
+                Self::clear_theme(&b);
+            }
+        });
+    }
+
+    /// Theme replies (including errors) belong only to the correlated fetch;
+    /// a stale reply never reaches the general error/toast reducers.
+    fn theme_frame(inner: &Rc<RefCell<Inner>>, b: &Inner, frame: &Frame) -> bool {
+        use rabbithole_proto::welcome::{ThemeChanged, ThemeReply};
+        if frame.kind == FrameKind::Reply {
+            let action = b.theme_sync.borrow_mut().reply(b.generation, frame.id);
+            if let Some(action) = action {
+                match action {
+                    ThemeReplyAction::Apply => {
+                        let update = match (frame.error, frame.decode::<ThemeReply>()) {
+                            (None, Some(Ok(reply))) => b.theme_cache.borrow_mut().accept(&reply),
+                            _ => b.theme_cache.borrow_mut().clear(),
+                        };
+                        Self::emit_theme(b, update);
+                    }
+                    ThemeReplyAction::Refetch => Self::queue_theme_request(inner, b.generation),
+                    ThemeReplyAction::Discard => {}
+                }
+                return true;
+            }
+            // An unsolicited/duplicate theme is never a source of trusted CSS.
+            if frame.decode::<ThemeReply>().is_some() {
+                return true;
+            }
+        }
+        if frame.kind == FrameKind::Push && matches!(frame.decode::<ThemeChanged>(), Some(Ok(_))) {
+            let queued = b.theme_sync.borrow_mut().invalidate(b.generation);
+            if queued {
+                Self::queue_theme_request(inner, b.generation);
+            }
+            return true;
+        }
+        false
+    }
+
     /// Write `bytes` to the socket, surfacing failures on the api-event sink.
     fn write(b: &mut Inner, bytes: &[u8]) {
         match &b.ws {
@@ -924,11 +1023,21 @@ impl WsClient {
         };
         ws.set_binary_type(BinaryType::Arraybuffer);
 
+        let generation = {
+            let mut b = inner.borrow_mut();
+            b.generation = b.generation.wrapping_add(1);
+            Self::reset_theme(&b);
+            b.generation
+        };
+
         // open → reset backoff, go Online, (re)send Hello.
         let on_open = {
             let inner = inner.clone();
             Closure::<dyn FnMut(WebEvent)>::new(move |_evt: WebEvent| {
                 let mut b = inner.borrow_mut();
+                if b.generation != generation || !b.want_connected {
+                    return;
+                }
                 b.reconnect_attempt = 0;
                 b.alive = true;
                 b.emit_conn(ConnState::Online);
@@ -960,6 +1069,9 @@ impl WsClient {
                 };
                 let bytes = Uint8Array::new(&buf).to_vec();
                 let b = inner.borrow();
+                if b.generation != generation || !b.alive {
+                    return;
+                }
                 match decode_frame(&bytes) {
                     Ok(frame) => {
                         // A reply an async flow is awaiting is its alone. Only
@@ -976,6 +1088,9 @@ impl WsClient {
                             let _ = resolve.call1(&JsValue::NULL, &copy);
                             return;
                         }
+                        if Self::theme_frame(&inner, &b, &frame) {
+                            return;
+                        }
                         // Proof of possession: if the handshake ack challenged our
                         // identity key, sign the nonce and return a KeyProof so the
                         // burrow surfaces the key as *verified*. Fire-and-forget
@@ -983,6 +1098,9 @@ impl WsClient {
                         // needed, so it's safe under the immutable borrow.
                         if let Some(key) = wire::hello_ack_server_key(&frame) {
                             b.server_key.set(Some(key));
+                            b.theme_cache.borrow_mut().reset(Some(key));
+                            b.theme_sync.borrow_mut().handshake(generation);
+                            Self::emit_theme(&b, ThemeUpdate::Apply(None));
                         }
                         if let Some(nonce) = wire::hello_ack_challenge(&frame) {
                             if let Some(ws) = &b.ws {
@@ -1004,6 +1122,13 @@ impl WsClient {
                             }
                         }
                         for event in wire::frame_to_events(&frame) {
+                            if matches!(event, Event::Authenticated { .. }) {
+                                Self::clear_theme(&b);
+                                let queued = b.theme_sync.borrow_mut().authenticated(generation);
+                                if queued {
+                                    Self::queue_theme_request(&inner, generation);
+                                }
+                            }
                             b.emit(event);
                         }
                         for event in wire::frame_to_file_events(&frame) {
@@ -1142,9 +1267,13 @@ impl WsClient {
             Closure::<dyn FnMut(CloseEvent)>::new(move |evt: CloseEvent| {
                 let want = {
                     let mut b = inner.borrow_mut();
+                    if b.generation != generation {
+                        return;
+                    }
                     b.alive = false;
                     b.ws = None;
                     Self::release_calls(&b);
+                    Self::reset_theme(&b);
                     b.want_connected
                 };
                 if want {
@@ -1169,7 +1298,11 @@ impl WsClient {
         let on_error = {
             let inner = inner.clone();
             Closure::<dyn FnMut(WebEvent)>::new(move |_evt: WebEvent| {
-                inner.borrow().emit(Event::CommandFailed {
+                let b = inner.borrow();
+                if b.generation != generation || !b.want_connected {
+                    return;
+                }
+                b.emit(Event::CommandFailed {
                     detail: "websocket error".to_string(),
                 });
             })
@@ -1178,7 +1311,6 @@ impl WsClient {
 
         {
             let mut b = inner.borrow_mut();
-            b.generation = b.generation.wrapping_add(1);
             b.ws = Some(ws);
             b._on_open = Some(on_open);
             b._on_message = Some(on_message);
@@ -1284,6 +1416,7 @@ impl EventClient for WsClient {
                 let mut b = self.inner.borrow_mut();
                 b.alive = false;
                 b.want_connected = false;
+                Self::reset_theme(&b);
                 if let Some(ws) = &b.ws {
                     // `Disconnected`/`Offline` are emitted by the close callback.
                     let _ = ws.close();

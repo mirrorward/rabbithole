@@ -8,6 +8,7 @@ use rabbithole_identity::keys::IdentityKey;
 use rabbithole_net::Connection;
 use rabbithole_proto::welcome as pw;
 use rabbithole_proto::{ErrorCode, Frame};
+use rabbithole_server_core::ServerEvent;
 use rabbithole_store_server::repo2::PersonasRepo;
 use rabbithole_store_server::repo3::{set_theme_server_disabled, theme_server_disabled, DmsRepo};
 
@@ -147,6 +148,9 @@ pub async fn handle(
             return Ok(true);
         }
         set_theme_server_disabled(&shared.pool, ctx.account_id, req.disable_server_theme).await?;
+        shared.bus.publish(ServerEvent::ThemeChanged {
+            account: Some(ctx.account_id),
+        });
         reply!(&pw::ThemePrefState::new(req.disable_server_theme));
         return Ok(true);
     }

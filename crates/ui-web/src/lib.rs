@@ -135,6 +135,8 @@ pub mod state;
 pub mod syndication_admin;
 pub mod theme_css;
 pub mod theme_editor;
+#[cfg(any(target_arch = "wasm32", test))]
+mod theme_sync;
 pub mod toasts;
 pub mod upload;
 pub mod wire;

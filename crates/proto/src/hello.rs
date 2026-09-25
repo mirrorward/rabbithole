@@ -52,6 +52,8 @@ pub mod caps {
     pub const KEY_AUTH: &str = "key-auth";
     /// Server allows guest sign-in.
     pub const GUEST: &str = "guest";
+    /// Peer can refresh a session's signed theme after a `ThemeChanged` push.
+    pub const SERVER_THEME_UPDATES: &str = "server-theme-updates";
 }
 
 /// First frame from the connecting peer.

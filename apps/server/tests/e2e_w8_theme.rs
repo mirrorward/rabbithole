@@ -5,10 +5,14 @@
 
 use burrow::Burrow;
 use rabbithole_core::{Client, ClientError};
-use rabbithole_proto::admin::{ThemeBundleClear, ThemeBundleGet, ThemeBundleInfo, ThemeBundleSet};
+use rabbithole_proto::admin::{
+    ConfigApplied, ConfigSet, ThemeBundleClear, ThemeBundleGet, ThemeBundleInfo, ThemeBundleSet,
+};
 use rabbithole_proto::blob::{BlobPurpose, BlobPut, BlobRef};
-use rabbithole_proto::welcome::{ThemeBundle, ThemePrefGet, ThemePrefSet, ThemePrefState};
-use rabbithole_proto::ErrorCode;
+use rabbithole_proto::welcome::{
+    ThemeBundle, ThemeChanged, ThemePrefGet, ThemePrefSet, ThemePrefState,
+};
+use rabbithole_proto::{Capability, CapabilitySet, ErrorCode, Hello, HelloAck};
 use rabbithole_server_core::{Role, ServerConfig};
 
 fn test_config(dir: &std::path::Path) -> ServerConfig {
@@ -22,6 +26,10 @@ fn test_config(dir: &std::path::Path) -> ServerConfig {
 }
 
 async fn login(burrow: &Burrow, user: &str) -> Client {
+    login_with_updates(burrow, user, true).await
+}
+
+async fn login_with_updates(burrow: &Burrow, user: &str, updates: bool) -> Client {
     let mut c = Client::connect(
         &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
         None,
@@ -31,6 +39,23 @@ async fn login(burrow: &Burrow, user: &str) -> Client {
     )
     .await
     .unwrap();
+    if updates {
+        // The general core client doesn't consume live theme updates. This
+        // fixture explicitly offers the optional capability before auth.
+        let ack: HelloAck = c
+            .request(&Hello::new(
+                "e2e-theme-updates",
+                "0",
+                CapabilitySet(vec![Capability::new(
+                    rabbithole_proto::hello::caps::SERVER_THEME_UPDATES,
+                )]),
+            ))
+            .await
+            .unwrap();
+        assert!(ack
+            .capabilities
+            .contains(rabbithole_proto::hello::caps::SERVER_THEME_UPDATES));
+    }
     c.auth_password(user, "pw-pw-pw").await.unwrap();
     c.expect_welcome().await.unwrap();
     c
@@ -67,6 +92,189 @@ fn good_bundle() -> ThemeBundle {
 
 fn encode(bundle: &ThemeBundle) -> Vec<u8> {
     postcard::to_allocvec(bundle).unwrap()
+}
+
+async fn next_theme_change(client: &mut Client) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let push = client
+                .next_push()
+                .await
+                .unwrap()
+                .expect("session stays open");
+            if let Some(changed) = push.decode::<ThemeChanged>() {
+                changed.unwrap();
+                assert!(push.payload.0.is_empty(), "the push carries no theme bytes");
+                break;
+            }
+        }
+    })
+    .await
+    .expect("connected client should receive a theme invalidation");
+}
+
+async fn no_theme_change(client: &mut Client) {
+    let result = tokio::time::timeout(std::time::Duration::from_millis(150), async {
+        loop {
+            let push = client
+                .next_push()
+                .await
+                .unwrap()
+                .expect("session stays open");
+            assert!(
+                push.decode::<ThemeChanged>().is_none(),
+                "unrelated/refused operation must not invalidate this session's theme"
+            );
+        }
+    })
+    .await;
+    assert!(
+        result.is_err(),
+        "session should remain open without a theme change"
+    );
+}
+
+/// Already-connected clients refresh on publish and clear; the notification
+/// never bypasses the account opt-out gate or substitutes unsigned theme data.
+#[tokio::test]
+async fn connected_clients_refresh_on_publish_and_clear() {
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(dir.path()).await;
+    let mut root = login(&burrow, "root").await;
+    let mut alice = login(&burrow, "alice").await;
+    let mut bob = login(&burrow, "bob").await;
+    let _: ThemePrefState = bob.request(&ThemePrefSet::new(true)).await.unwrap();
+    next_theme_change(&mut bob).await;
+
+    let _: ThemeBundleInfo = root
+        .request(&ThemeBundleSet::new(encode(&good_bundle()), vec![]))
+        .await
+        .unwrap();
+    next_theme_change(&mut alice).await;
+    next_theme_change(&mut bob).await;
+    // Client::theme verifies the fetched signature against HelloAck.server_key.
+    let served = alice.theme().await.unwrap().expect("signed theme served");
+    assert_eq!(served.name, "Wonderland");
+    assert_eq!(served.tokens_light, good_bundle().tokens_light);
+    assert!(
+        bob.theme().await.unwrap().is_none(),
+        "opt-out remains enforced"
+    );
+
+    root.request_ack(&ThemeBundleClear).await.unwrap();
+    next_theme_change(&mut alice).await;
+    next_theme_change(&mut bob).await;
+    assert!(
+        alice.theme().await.unwrap().is_none(),
+        "clear takes effect live"
+    );
+    assert!(bob.theme().await.unwrap().is_none());
+    burrow.shutdown().await;
+}
+
+/// New notifications remain silent for an older peer that did not offer the
+/// capability; its existing on-demand ThemeGet continues working.
+#[tokio::test]
+async fn clients_without_the_capability_do_not_receive_theme_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(dir.path()).await;
+    let mut root = login(&burrow, "root").await;
+    let mut old_client = login_with_updates(&burrow, "alice", false).await;
+    let _: ThemeBundleInfo = root
+        .request(&ThemeBundleSet::new(encode(&good_bundle()), vec![]))
+        .await
+        .unwrap();
+    no_theme_change(&mut old_client).await;
+    assert!(old_client.theme().await.unwrap().is_some());
+    root.request_ack(&ThemeBundleClear).await.unwrap();
+    no_theme_change(&mut old_client).await;
+    assert!(old_client.theme().await.unwrap().is_none());
+    burrow.shutdown().await;
+}
+
+/// A preference refresh reaches every session of that account, and nobody
+/// else. A second sign-in must not retain the old theme after an opt-out.
+#[tokio::test]
+async fn preference_changes_only_refresh_the_same_accounts_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(dir.path()).await;
+    let mut root = login(&burrow, "root").await;
+    let _: ThemeBundleInfo = root
+        .request(&ThemeBundleSet::new(encode(&good_bundle()), vec![]))
+        .await
+        .unwrap();
+    let mut alice = login(&burrow, "alice").await;
+    let mut bob = login(&burrow, "bob").await;
+    let mut other_bob = login(&burrow, "bob").await;
+
+    for disabled in [true, false] {
+        let _: ThemePrefState = bob.request(&ThemePrefSet::new(disabled)).await.unwrap();
+        next_theme_change(&mut bob).await;
+        next_theme_change(&mut other_bob).await;
+        assert_eq!(other_bob.theme().await.unwrap().is_none(), disabled);
+        no_theme_change(&mut alice).await;
+        assert!(alice.theme().await.unwrap().is_some());
+    }
+    burrow.shutdown().await;
+}
+
+/// Both operator surfaces invalidate after a successful mutation. Refused
+/// bundles/config values and unrelated settings neither change nor refresh it.
+#[tokio::test]
+async fn ctl_and_admin_config_changes_refresh_without_signalling_refusals() {
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(dir.path()).await;
+    let mut root = login(&burrow, "root").await;
+    let mut alice = login(&burrow, "alice").await;
+    let response = burrow::ctl::handle(
+        &burrow.shared,
+        &serde_json::json!({"cmd": "config-set", "key": "theme_accent", "value": "2b63d8"}),
+    )
+    .await;
+    assert_eq!(response["ok"], true);
+    next_theme_change(&mut alice).await;
+    assert_eq!(
+        alice.theme().await.unwrap().unwrap().accent_rgb,
+        Some([0x2b, 0x63, 0xd8])
+    );
+
+    let _: ConfigApplied = root
+        .request(&ConfigSet::new("theme_name", "New Wonderland"))
+        .await
+        .unwrap();
+    next_theme_change(&mut alice).await;
+    assert_eq!(alice.theme().await.unwrap().unwrap().name, "New Wonderland");
+
+    assert!(matches!(
+        alice.request_ack(&ThemeBundleClear).await,
+        Err(ClientError::Refused(ErrorCode::Forbidden))
+    ));
+    assert!(matches!(
+        root.request::<_, ThemeBundleInfo>(&ThemeBundleSet::new(vec![255], vec![]))
+            .await,
+        Err(ClientError::Refused(ErrorCode::BadRequest))
+    ));
+    let refused = burrow::ctl::handle(
+        &burrow.shared,
+        &serde_json::json!({"cmd": "config-set", "key": "theme_accent", "value": "no-color"}),
+    )
+    .await;
+    assert_eq!(refused["ok"], false);
+    let _: ConfigApplied = root
+        .request(&ConfigSet::new("motd", "unrelated"))
+        .await
+        .unwrap();
+    no_theme_change(&mut alice).await;
+    let unchanged = alice.theme().await.unwrap().unwrap();
+    assert_eq!(unchanged.name, "New Wonderland");
+    assert_eq!(unchanged.accent_rgb, Some([0x2b, 0x63, 0xd8]));
+
+    let cleared =
+        burrow::ctl::handle(&burrow.shared, &serde_json::json!({"cmd": "theme-clear"})).await;
+    assert_eq!(cleared["ok"], true);
+    next_theme_change(&mut alice).await;
+    assert!(alice.theme().await.unwrap().is_none());
+    burrow.shutdown().await;
 }
 
 /// Admin applies a bundle (art travels as blob refs, v1-style); a fresh

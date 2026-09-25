@@ -181,7 +181,7 @@ impl EditorState {
 }
 
 /// Colour tokens the server will accept (plus `--rh-bg-image` only as `none`).
-const SERVER_COLOR_VARS: &[&str] = &[
+pub(crate) const SERVER_COLOR_VARS: &[&str] = &[
     "--rh-bg",
     "--rh-surface",
     "--rh-text",
@@ -191,7 +191,7 @@ const SERVER_COLOR_VARS: &[&str] = &[
 ];
 
 /// Shared metric tokens the server will accept.
-const SERVER_LENGTH_VARS: &[&str] = &[
+pub(crate) const SERVER_LENGTH_VARS: &[&str] = &[
     "--rh-space-1",
     "--rh-space-2",
     "--rh-space-3",

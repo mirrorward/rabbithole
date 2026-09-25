@@ -5,7 +5,8 @@
   "description": "Playwright end-to-end smoke test for the RabbitHole web SPA served by `burrow --http`.",
   "type": "module",
   "scripts": {
-    "test": "playwright test"
+    "test": "playwright test",
+    "test:theme": "playwright test tests/theme.spec.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0"

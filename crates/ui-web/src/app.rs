@@ -99,6 +99,14 @@ pub struct Session {
     client: StoredValue<MockClient>,
 }
 
+impl Session {
+    /// The transport captures this session at registration time. Receiving a
+    /// theme while another burrow is focused must only change its owner.
+    fn set_server_theme(self, overlay: Option<ServerOverlay>) {
+        self.server_theme.set(overlay);
+    }
+}
+
 /// How a live session authenticates: a fresh password sign-in, or resuming a
 /// prior session with a persisted bearer token (auto-reconnect on load).
 #[cfg(target_arch = "wasm32")]
@@ -612,13 +620,12 @@ impl AppState {
     pub fn apply_server_theme(&self, bundle: &ThemeBundle) {
         let overlay = ServerOverlay::from_bundle(bundle);
         self.focused()
-            .server_theme
-            .set((!overlay.is_empty()).then_some(overlay));
+            .set_server_theme((!overlay.is_empty()).then_some(overlay));
     }
 
     /// Drop the current server theme (e.g. on disconnect).
     pub fn clear_server_theme(&self) {
-        self.focused().server_theme.set(None);
+        self.focused().set_server_theme(None);
     }
 
     /// The connected server's theme name, if it ships one — labels the opt-out
@@ -630,9 +637,12 @@ impl AppState {
     }
 
     /// Load the mock's seeded server theme bundle so the overlay + opt-out are
-    /// demonstrable in dev (the real transport delivers this in the welcome
-    /// frame). Mirrors [`AppState::load_radio`].
+    /// demonstrable in dev. Live transports fetch and verify their own signed
+    /// theme after authentication. Mirrors [`AppState::load_radio`].
     pub fn load_server_theme(&self) {
+        if self.focused().live.get_untracked() {
+            return;
+        }
         let bundle = self
             .focused()
             .client
@@ -675,6 +685,7 @@ impl AppState {
         // so the offline demo and any other burrows stay put. Everything below
         // then binds to the new session via `self.focused()`.
         self.ensure_session(&endpoint);
+        let theme_session = self.focused();
         let state = self.focused().state;
         let toasts = self.toasts;
         let radio = self.radio;
@@ -723,6 +734,9 @@ impl AppState {
                 .unwrap_or_else(|| server_label(&ServerId(who_endpoint_label.clone())))
         };
         self.focused().ws.update_value(|ws| {
+            ws.on_theme(std::rc::Rc::new(move |overlay| {
+                theme_session.set_server_theme(overlay);
+            }));
             ws.on_event(std::rc::Rc::new(move |event| {
                 match &event {
                     Event::Connected { server_name, .. } => {
@@ -4059,12 +4073,11 @@ pub fn App() -> impl IntoView {
 
     let style = move || {
         let (pack, mode) = (app.theme.get().pack, app.mode());
-        // A burrow's theme is how that place looks and always applies; the
-        // user's pack and light/dark choice are the app's own defaults, used
-        // where the burrow supplies nothing. The editor's live preview still
-        // layers above both.
+        // A verified burrow theme layers over the user's defaults where the
+        // selected pack permits it. The editor's live preview layers above
+        // both; account opt-out is honored by the server's ThemeGet response.
         app.custom_pack.with(|custom| {
-            app.focused()
+            app.focused_tracked()
                 .server_theme
                 .with(|server| resolve_root_style(custom.as_ref(), server.as_ref(), pack, mode))
         })
@@ -4897,4 +4910,55 @@ pub fn mount() {
         crate::pwa::register_service_worker();
     }
     mount_to_body(App);
+}
+
+#[cfg(test)]
+mod theme_session_tests {
+    use super::*;
+
+    fn overlay(name: &str) -> ServerOverlay {
+        let mut bundle = ThemeBundle::new(name);
+        bundle.accent_rgb = Some([40, 80, 120]);
+        ServerOverlay::from_bundle(&bundle)
+    }
+
+    #[test]
+    fn captured_theme_sink_updates_its_burrow_after_focus_changes() {
+        let runtime = create_runtime();
+        let app = AppState::new();
+        let first = app.focused();
+        let second = AppState::new().focused();
+        let first_id = ServerId("wss://first.example/ws".into());
+        let second_id = ServerId("wss://second.example/ws".into());
+        app.sessions
+            .set(vec![(first_id.clone(), first), (second_id.clone(), second)]);
+        let first_sink = move |theme| first.set_server_theme(theme);
+        let second_sink = move |theme| second.set_server_theme(theme);
+        app.focus(&second_id);
+        second_sink(Some(overlay("Second")));
+        first_sink(Some(overlay("First")));
+        assert_eq!(app.server_theme_name().as_deref(), Some("Second"));
+        first_sink(None);
+        assert_eq!(app.server_theme_name().as_deref(), Some("Second"));
+        app.focus(&first_id);
+        assert_eq!(app.server_theme_name(), None);
+        first_sink(Some(overlay("First reconnected")));
+        assert_eq!(
+            app.server_theme_name().as_deref(),
+            Some("First reconnected")
+        );
+        runtime.dispose();
+    }
+
+    #[test]
+    fn mock_theme_loading_cannot_replace_a_live_verified_overlay() {
+        let runtime = create_runtime();
+        let app = AppState::new();
+        let session = app.focused();
+        session.live.set(true);
+        session.set_server_theme(Some(overlay("Verified")));
+        app.load_server_theme();
+        assert_eq!(app.server_theme_name().as_deref(), Some("Verified"));
+        runtime.dispose();
+    }
 }
