@@ -112,3 +112,10 @@ live OS appearance, High Contrast, and nested text-editing keys in the real SPA.
 The audio case uses native Web Audio nodes with explicitly injected resume
 refusal/pending promises for recovery and route-disposal coverage; it does not
 claim to reproduce a browser's autoplay policy.
+
+## Desktop navigation bridge
+
+`tests/native-menu.spec.ts` runs the compiled SPA and native shim with an injected
+Tauri IPC boundary. It checks menu navigation, palette dismissal, fragment
+history, reload and fullscreen events. The separate Node shim suite runs in CI.
+These checks do not claim native AppKit/WKWebView event delivery.

@@ -1933,6 +1933,13 @@ pub fn CommandPalette() -> impl IntoView {
     // no composer binds a modified digit.
     #[cfg(target_arch = "wasm32")]
     {
+        // A native menu action does not pass through this component's key
+        // handler. Close the palette before its destination (even the current
+        // one) or history entry is shown, without synthesizing editing keys.
+        let native_navigation = window_event_listener_untyped("rh-native-navigation", move |_| {
+            open.set(false);
+        });
+        on_cleanup(move || native_navigation.remove());
         let jump = use_navigate();
         let handle = window_event_listener(leptos::ev::keydown, move |ev| {
             if !(ev.meta_key() || ev.ctrl_key()) {

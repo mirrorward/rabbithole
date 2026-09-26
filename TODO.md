@@ -4,6 +4,8 @@
 appearance, persistent chat typography/density/timestamps, global server-theme
 opt-out and High Contrast protection; configurable chime voices, volume and
 preview. List navigation leaves nested input editing keys alone.
+macOS View/Go/Help menus target only the main window, with app-local history;
+native menu actions dismiss the command palette and preserve skip-link history.
 
 > Distilled from `PLAN.md` (read that first — it has the specs, rationale, and
 > dependency graph). Check items off as they land. Waves must respect the

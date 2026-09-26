@@ -94,6 +94,10 @@ timestamps, profile icons in chat, reduced motion, and three chime voices with
 volume and preview. Changes are remembered on this device. System appearance
 follows light/dark changes live; High Contrast keeps its own palette.
 
+On macOS, the **Go** menu exposes app destinations and Back/Forward; **View →
+Appearance** opens personal settings. Settings and navigation always target the
+main window, leaving About in its own window.
+
 ## Surfaces & default ports
 
 Native transports and rate limiting are the only things on out of the box;

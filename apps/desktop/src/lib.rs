@@ -16,10 +16,8 @@
 //! inside Tauri; the plain web build has neither) and, when native, routes
 //! downloads to the in-process swarm core instead of the WebSocket transport.
 //!
-//! This slice is the IPC *hello-world*: a `ping` command + a `test://tick` event,
-//! self-tested by the init script so `cargo tauri dev` + the webview devtools
-//! console prove the round-trip end-to-end. The real swarm command/event surface
-//! (wrapping [`swarm::run_swarm_download`]) is the next slice.
+//! Native menus use the same SPA destinations and history as the web client.
+//! The bridge also keeps fullscreen chrome and navigation availability in sync.
 
 /// The Tauri command + event surface wrapping the swarm core.
 pub mod downloads;
@@ -28,113 +26,18 @@ pub mod seeding;
 pub mod swarm;
 pub mod transfers;
 
-/// Injected before the SPA loads: expose a minimal native bridge over Tauri's
-/// low-level internals (present regardless of `withGlobalTauri`), then self-test
-/// invoke + listen so the round-trip is visible in the devtools console.
-const NATIVE_SHIM: &str = r#"
-(function () {
-  var I = window.__TAURI_INTERNALS__;
-  // Stamped at compile time from the workspace manifest + git SHA, so the
-  // About window reports the build that is actually running.
-  window.__RH_BUILD__ = { version: '__RH_VERSION__', sha: '__RH_SHA__' };
-  window.__RH_IS_NATIVE__ = !!I;
-  if (!I) { return; }
-  window.__RH_NATIVE__ = {
-    invoke: function (cmd, args) { return I.invoke(cmd, args || {}); },
-    listen: function (event, cb) {
-      return I.invoke('plugin:event|listen', {
-        event: event,
-        target: { kind: 'Any' },
-        handler: I.transformCallback(function (e) { cb(e); })
-      });
-    }
-  };
-  // Self-test — visible in the Tauri webview devtools console.
-  window.__RH_NATIVE__.invoke('ping', { name: 'slice-3' })
-    .then(function (r) { console.log('[rh-native] invoke ping ->', r); })
-    .catch(function (e) { console.error('[rh-native] invoke ping FAILED', e); });
-  // Layout + build forensics: report what the webview is ACTUALLY rendering.
-  // This is the only reliable window into the webview from the outside — the
-  // desktop app has no remote devtools, and screenshots keep lying (stale
-  // caches, capture offsets). Logged by `ping` to stderr.
-  window.addEventListener('load', function () {
-    setTimeout(function () {
-      try {
-        var d = document.documentElement;
-        var app = document.querySelector('.rh-app');
-        var r = app && app.getBoundingClientRect();
-        var hr = d.getBoundingClientRect();
-        var scripts = Array.prototype.map.call(document.scripts, function (s) {
-          return (s.src || '').split('/').pop();
-        }).filter(Boolean);
-        var diag = {
-          v: d.getAttribute('data-rh-version') || 'UNSTAMPED (pre-0.178 or stale cache)',
-          iw: window.innerWidth, ih: window.innerHeight,
-          dpr: window.devicePixelRatio,
-          vv: window.visualViewport ? {
-            w: window.visualViewport.width, h: window.visualViewport.height,
-            scale: window.visualViewport.scale
-          } : null,
-          html: { w: hr.width, h: hr.height, x: hr.x, y: hr.y },
-          app: r ? { w: r.width, h: r.height, x: r.x, y: r.y } : null,
-          native_class: !!(app && app.classList.contains('native')),
-          scripts: scripts,
-          href: location.href
-        };
-        window.__RH_NATIVE__.invoke('ping', { name: 'diag ' + JSON.stringify(diag) });
-      } catch (err) {
-        window.__RH_NATIVE__.invoke('ping', { name: 'diag FAILED ' + String(err) });
-      }
-    }, 2500);
-  });
-  // No browser context menu over app chrome: "Reload Page" floating over a
-  // sidebar is the loudest possible web-page tell. Editable fields and the
-  // selectable content regions keep their menus — Copy and Look Up on a
-  // message are features, not tells.
-  window.addEventListener('contextmenu', function (e) {
-    var t = e.target;
-    if (t && t.closest &&
-        t.closest('input, textarea, [contenteditable], .rh-rich, .rh-line, .rh-post, pre, code')) {
-      return;
-    }
-    e.preventDefault();
-  }, { capture: true });
-  window.__RH_NATIVE__.listen('rh://navigate', function (e) {
-    var to = e && e.payload;
-    if (typeof to === 'string' && to.charAt(0) === '/') {
-      // The SPA owns routing; dispatching popstate after pushState is how a
-      // history-router hears about a navigation it didn't initiate.
-      window.history.pushState({}, '', to);
-      window.dispatchEvent(new PopStateEvent('popstate'));
-    }
-  });
-  window.__RH_NATIVE__.listen('rh://fullscreen', function (e) {
-    document.documentElement.classList.toggle('rh-fullscreen', !!(e && e.payload));
-  });
-  // Transitions come from events; the STARTING state has to be asked for —
-  // events are not replayed, and a reload while fullscreen resets the class.
-  window.__RH_NATIVE__.invoke('fullscreen_state')
-    .then(function (fs) {
-      document.documentElement.classList.toggle('rh-fullscreen', !!fs);
-    })
-    .catch(function () {});
-  window.__RH_NATIVE__.listen('test://tick', function (e) {
-    console.log('[rh-native] event test://tick ->', e && e.payload);
-    // Invoke a Rust callback so the event (Rust->JS) round-trip is observable
-    // from the `cargo tauri dev` terminal, not just the webview console.
-    window.__RH_NATIVE__.invoke('tick_ack', { payload: String(e && e.payload) });
-  })
-    .then(function () { console.log('[rh-native] listening for test://tick'); })
-    .catch(function (e) { console.error('[rh-native] listen FAILED', e); });
-})();
-"#;
+/// Injected before the SPA loads: the minimal bridge, native navigation, and
+/// fullscreen state. The auxiliary About window only needs build metadata.
+const NATIVE_SHIM: &str = include_str!("native-shim.js");
 
-/// The init script with the build stamps substituted in. A constant can't
-/// carry them, and the About window's whole job is reporting them accurately.
-fn native_shim() -> String {
+fn native_shim(main_window: bool) -> String {
     NATIVE_SHIM
         .replace("__RH_VERSION__", env!("RH_VERSION"))
         .replace("__RH_SHA__", env!("RH_GIT_SHA"))
+        .replace(
+            "__RH_MAIN_WINDOW__",
+            if main_window { "true" } else { "false" },
+        )
 }
 
 /// Fetch a Looking Glass tracker's `INDEX` listing over its status port.
@@ -172,18 +75,6 @@ fn tracker_status_addr() -> String {
     rabbithole_directory::fetch::tracker_addr(rabbithole_directory::TRACKER_HOST)
 }
 
-/// A trivial command proving JS→Rust invoke works. Logs on the Rust side so the
-/// round-trip is observable from the `cargo tauri dev` terminal (not just the
-/// webview devtools console).
-#[tauri::command]
-fn ping(name: String) -> String {
-    eprintln!("[rh-bridge] ping received from webview: name={name:?} — JS→Rust invoke works");
-    format!("pong: {name}")
-}
-
-/// The webview calls this from its `test://tick` listener, so the Rust→JS event
-/// delivery (and the `listen` subscription over `core:event`) is confirmed from
-/// the terminal, closing the bridge round-trip in both directions.
 /// The webview asks for the CURRENT fullscreen state at startup. The
 /// `rh://fullscreen` events only fire on transitions (inside the Resized
 /// handler), so a window restored fullscreen at launch — or a webview reload
@@ -194,61 +85,53 @@ fn fullscreen_state(window: tauri::WebviewWindow) -> bool {
     window.is_fullscreen().unwrap_or(false)
 }
 
+/// Only the main webview owns the native history affordances.
 #[tauri::command]
-fn tick_ack(payload: String) {
-    eprintln!("[rh-bridge] tick_ack from webview: event payload={payload:?} — Rust→JS event delivery works");
+fn navigation_state(window: tauri::WebviewWindow, back: bool, forward: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::Manager;
+        if window.label() != "main" {
+            return;
+        }
+        if let Some(menu) = window.app_handle().menu() {
+            if let Some(go) = menu.get("go").and_then(|item| item.as_submenu().cloned()) {
+                for (id, enabled) in [("back", back), ("forward", forward)] {
+                    if let Some(item) = go.get(id).and_then(|item| item.as_menuitem().cloned()) {
+                        let _ = item.set_enabled(enabled);
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, back, forward);
 }
+
+/// The order and accelerators match the shared SPA's burrow sidebar.
+#[cfg(target_os = "macos")]
+const BURROW_MENU_ROUTES: &[(&str, &str)] = &[
+    ("Lobby", "/lobby"),
+    ("Boards", "/boards"),
+    ("DMs", "/dms"),
+    ("Directory", "/directory"),
+    ("Files", "/files"),
+    ("Radio", "/radio"),
+    ("Art", "/art"),
+    ("Wishes", "/wishing-well"),
+];
 
 /// The macOS application menu.
 ///
-/// Tauri's default menu names the app submenu and its About item after the
-/// *binary* — "About rabbithole-desktop" — which is a build artifact's name,
-/// not the app's. Building the menu by hand fixes that and buys two things
-/// the default can't: a **Settings…** item on ⌘, (the macOS convention, which
-/// every Mac user reaches for), and an About panel with something in it.
-///
-/// Building a custom menu replaces the whole default, so Edit and Window are
-/// re-created here in full. Dropping them would silently cost ⌘C/⌘V in an app
-/// full of text fields — a much worse regression than the wrong app name.
+/// Keep standard editing/window actions alongside visible destinations. Menu
+/// accelerators match the SPA shortcuts; no extra global key listener is needed.
 #[cfg(target_os = "macos")]
 fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{
-        AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
-    };
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 
-    let about = AboutMetadataBuilder::new()
-        .name(Some("RabbitHole"))
-        .version(Some(env!("RH_VERSION")))
-        .copyright(Some("© Mirrorward"))
-        // `credits` is the one rich field macOS renders here, so it carries
-        // what the panel is for: what this program *is*. One paragraph per
-        // entry — the panel wraps text itself, and manual breaks fight it.
-        .credits(Some(
-            [
-                "A warren client for RabbitHole.",
-                "",
-                "Chat, message boards, file libraries and swarmed transfers across many burrows at once \u{2014} with a portable identity that is yours, not any server's.",
-                "",
-                "rabbit.direct",
-            ]
-            .join("\n"),
-        ))
-        // An unbundled run (cargo run / tauri dev) has no .app for macOS to
-        // take an icon from, so the panel falls back to a generic folder.
-        // Embedding the already-rounded artwork makes it right either way.
-        .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/about.png")).ok())
-        .build();
-
-    let settings = MenuItemBuilder::with_id("settings", "Settings…")
+    let settings = MenuItemBuilder::with_id("/settings", "Settings…")
         .accelerator("CmdOrCtrl+,")
         .build(app)?;
-
-    // Our own About window, not `PredefinedMenuItem::about`: the system panel
-    // accepts an icon, a name, a version and a blob of credits text and
-    // nothing else, which is precisely why it can never look like the app it
-    // belongs to. The metadata above is still built, so the panel stays one
-    // line away if the custom window ever fails to open.
-    let _ = &about;
     let about_item = MenuItemBuilder::with_id("about", "About RabbitHole").build(app)?;
     let app_menu = SubmenuBuilder::new(app, "RabbitHole")
         .item(&about_item)
@@ -275,10 +158,52 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         .item(&PredefinedMenuItem::select_all(app, None)?)
         .build()?;
 
+    let appearance = MenuItemBuilder::with_id("/settings#appearance", "Appearance…").build(app)?;
+    let view_menu = SubmenuBuilder::new(app, "View")
+        .item(&appearance)
+        .separator()
+        .item(&PredefinedMenuItem::fullscreen(app, None)?)
+        .build()?;
+
+    let back = MenuItemBuilder::with_id("back", "Back")
+        .accelerator("CmdOrCtrl+[")
+        .enabled(false)
+        .build(app)?;
+    let forward = MenuItemBuilder::with_id("forward", "Forward")
+        .accelerator("CmdOrCtrl+]")
+        .enabled(false)
+        .build(app)?;
+    let mut go_menu = SubmenuBuilder::with_id(app, "go", "Go")
+        .item(&back)
+        .item(&forward)
+        .separator();
+    for (index, (label, route)) in BURROW_MENU_ROUTES.iter().enumerate() {
+        let item = MenuItemBuilder::with_id(*route, *label)
+            .accelerator(format!("CmdOrCtrl+{}", index + 1))
+            .build(app)?;
+        go_menu = go_menu.item(&item);
+    }
+    go_menu = go_menu.separator();
+    for (label, route) in [
+        ("You", "/you"),
+        ("People", "/people"),
+        ("Transfers", "/transfers"),
+        ("Servers", "/servers"),
+    ] {
+        go_menu = go_menu.item(&MenuItemBuilder::with_id(route, label).build(app)?);
+    }
+    let go_menu = go_menu.build()?;
+
+    let help_menu = SubmenuBuilder::new(app, "Help")
+        .item(&MenuItemBuilder::with_id("help-servers", "Find a Server…").build(app)?)
+        .item(&MenuItemBuilder::with_id("help-settings", "Customize RabbitHole…").build(app)?)
+        .separator()
+        .item(&MenuItemBuilder::with_id("help-about", "About RabbitHole").build(app)?)
+        .build()?;
+
     let window_menu = SubmenuBuilder::new(app, "Window")
         .item(&PredefinedMenuItem::minimize(app, None)?)
         .item(&PredefinedMenuItem::maximize(app, None)?)
-        .item(&PredefinedMenuItem::fullscreen(app, None)?)
         .separator()
         .item(&PredefinedMenuItem::close_window(app, None)?)
         .build()?;
@@ -286,7 +211,10 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
     MenuBuilder::new(app)
         .item(&app_menu)
         .item(&edit_menu)
+        .item(&view_menu)
+        .item(&go_menu)
         .item(&window_menu)
+        .item(&help_menu)
         .build()
 }
 
@@ -310,7 +238,7 @@ fn open_about(app: &tauri::AppHandle) {
         .minimizable(false)
         .initialization_script(format!(
             "{}\nhistory.replaceState({{}}, '', '/about');",
-            native_shim()
+            native_shim(false)
         ));
     #[cfg(target_os = "macos")]
     let builder = builder.title_bar_style(tauri::TitleBarStyle::Transparent);
@@ -329,13 +257,12 @@ pub fn run() {
         // one that snaps back to a hardcoded 1100x760 every launch reads as a
         // browser tab in a wrapper. The builder's sizes below become
         // first-launch defaults only.
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_window_state::Builder::default().with_denylist(&["about"]).build())
         // Native save and folder panels, called from Rust only.
         .plugin(tauri_plugin_dialog::init())
         .manage(transfers::TransfersManager::default())
         .invoke_handler(tauri::generate_handler![
-            ping,
-            tick_ack,
+            navigation_state,
             fullscreen_state,
             tracker_index,
             transfers::native_available,
@@ -365,7 +292,7 @@ pub fn run() {
                 .title("RabbitHole")
                 .inner_size(1100.0, 760.0)
                 .min_inner_size(720.0, 480.0)
-                .initialization_script(native_shim());
+                .initialization_script(native_shim(true));
             // On macOS the app's own header becomes the title bar: the system
             // bar is drawn as a transparent overlay, so the traffic lights float
             // over our chrome instead of sitting in a separate grey strip above
@@ -393,31 +320,30 @@ pub fn run() {
                 });
             }
 
-            // Settings… (⌘,) is a *menu* action with a web destination: the
-            // shell tells the SPA where to go rather than owning a second
-            // settings surface that would drift from it.
-            {
-                let handle = app.handle().clone();
-                app.on_menu_event(move |_app, event| {
-                    match event.id().0.as_str() {
-                        "settings" => {
-                            let _ = handle.emit("rh://navigate", "/settings");
-                        }
-                        "about" => open_about(&handle),
-                        _ => {}
-                    }
-                });
-            }
-
-            // Emit a test event a beat after launch so the init-script listener
-            // proves Rust→JS event delivery end-to-end.
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                eprintln!("[rh-bridge] emitting test://tick — watch the webview console for receipt");
-                let _ = handle.emit("test://tick", "hello from the native core");
+            // Navigation belongs to the main window. Broadcasting would also
+            // replace the About document with a full app in its small window.
+            app.on_menu_event(move |app, event| {
+                use tauri::Manager;
+                let id = event.id().0.as_str();
+                if matches!(id, "about" | "help-about") {
+                    open_about(app);
+                    return;
+                }
+                let (event_name, payload) = match id {
+                    "back" | "forward" => ("rh://history", id),
+                    "help-servers" => ("rh://navigate", "/servers"),
+                    "help-settings" => ("rh://navigate", "/settings#appearance"),
+                    route if route.starts_with('/') => ("rh://navigate", route),
+                    _ => return,
+                };
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.show();
+                    let _ = main.unminimize();
+                    let _ = main.set_focus();
+                    let _ = main.emit(event_name, payload);
+                }
             });
-            eprintln!("[rh-bridge] window built with native shim; app starting");
+
             Ok(())
         })
         .run(tauri::generate_context!())
