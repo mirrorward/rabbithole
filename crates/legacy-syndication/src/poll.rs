@@ -4,8 +4,8 @@
 //! (`ETag` / `Last-Modified`) to replay on the next conditional request, a
 //! consecutive-failure counter, and the unix time the feed is next due. It is
 //! deliberately **pure and clockless** — every transition takes `now` as an
-//! argument and returns the *next* state plus a [`PollDecision`], so a later
-//! server slice can drive it with a real fetcher and a real clock while the
+//! argument and returns the *next* state plus a [`PollDecision`], so the
+//! server can drive it with a real fetcher and a real clock while the
 //! logic itself stays host-testable and deterministic.
 //!
 //! The three responses a poll can produce:
@@ -20,10 +20,10 @@
 //!
 //! Scheduling honors a feed-declared minimum interval when one is present:
 //! RSS `<ttl>` (minutes) or the `sy:updatePeriod`/`sy:updateFrequency` pair.
-//! This crate does not parse those out of the document (that stays with the
-//! parser/server wiring), but [`ttl_minutes_to_secs`] and
-//! [`sy_update_period_secs`] turn the raw values into the `feed_ttl_secs`
-//! argument these transitions accept.
+//! [`crate::feed::Feed::poll_interval_secs`] supplies the parsed interval.
+//! Callers retain that hint across 304s and failures, replacing it after a
+//! fresh parsed body. The operator's floor/ceiling bound the final interval,
+//! including hints longer than the ceiling.
 
 /// Tuning for [`PollState`] scheduling. [`Default`] is a 1-hour base with a
 /// 5-minute floor, a 1-day ceiling, and interval-doubling backoff.
@@ -222,9 +222,12 @@ pub fn ttl_minutes_to_secs(ttl: &str) -> Option<i64> {
 }
 
 /// Convert an RSS 1.0 syndication module hint into a poll interval in seconds:
-/// `sy:updatePeriod` (`hourly`/`daily`/`weekly`/`monthly`/`yearly`, the RFC
+/// `sy:updatePeriod` (`hourly`/`daily`/`weekly`/`monthly`/`yearly`, the module
 /// default being `daily`) divided by `sy:updateFrequency` (times per period,
-/// defaulting to 1). Unknown periods yield `None`.
+/// defaulting to 1), rounded up to whole seconds. Unknown periods yield `None`.
+/// Month/year use fixed 30/365-day approximations; calendar `updateBase`
+/// alignment is not implemented. Zero frequency is defensively treated as 1;
+/// the feed parser rejects explicit zero frequencies.
 pub fn sy_update_period_secs(period: &str, frequency: u32) -> Option<i64> {
     let unit = match period.trim().to_ascii_lowercase().as_str() {
         "hourly" => 3_600,
@@ -235,7 +238,7 @@ pub fn sy_update_period_secs(period: &str, frequency: u32) -> Option<i64> {
         _ => return None,
     };
     let freq = i64::from(frequency.max(1));
-    Some((unit / freq).max(1))
+    Some(unit / freq + i64::from(unit % freq != 0))
 }
 
 #[cfg(test)]
@@ -424,10 +427,36 @@ mod tests {
         assert_eq!(sy_update_period_secs("hourly", 1), Some(3_600));
         assert_eq!(sy_update_period_secs("Daily", 1), Some(86_400));
         assert_eq!(sy_update_period_secs("daily", 4), Some(21_600), "4x/day");
+        assert_eq!(sy_update_period_secs("hourly", 7), Some(515), "round up");
+        assert_eq!(sy_update_period_secs("hourly", u32::MAX), Some(1));
         assert_eq!(sy_update_period_secs("weekly", 1), Some(604_800));
         // updateFrequency of 0 is treated as 1 (never divide by zero).
         assert_eq!(sy_update_period_secs("hourly", 0), Some(3_600));
         assert_eq!(sy_update_period_secs("fortnightly", 1), None);
+    }
+
+    #[test]
+    fn retained_hint_survives_304_and_backoff_with_default_bounds() {
+        let cfg = PollConfig::default();
+        let state = PollState::initial(0);
+        let (state, _) = state.on_response(&cfg, 200, Some("v1"), None, Some(7_200), 0);
+        assert_eq!(state.next_poll_at, 7_200);
+        let (state, _) = state.on_response(&cfg, 304, None, None, Some(7_200), 7_200);
+        assert_eq!(state.next_poll_at, 14_400);
+        let (state, _) = state.on_transport_error(&cfg, Some(7_200), 14_400);
+        assert_eq!(state.next_poll_at, 28_800);
+        assert_eq!(poll_interval_secs(&cfg, u32::MAX, Some(i64::MAX)), 86_400);
+        assert_eq!(
+            poll_interval_secs(
+                &PollConfig {
+                    base_interval_secs: 1,
+                    ..cfg
+                },
+                0,
+                Some(1)
+            ),
+            300
+        );
     }
 
     #[test]

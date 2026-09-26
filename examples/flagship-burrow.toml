@@ -333,7 +333,9 @@ radio_source_password = "CHANGE-ME-to-a-strong-source-password"
 # fresh items to the mapped boards; dedupe is durable per feed + burrow-wide.
 
 # syndication_enabled = false
-# syndication_poll_secs = 1800         # base interval; backoff/TTL stretch it
+# syndication_poll_secs = 1800         # live base; backoff/feed hints stretch it
+# Existing deadlines remain; the next reschedule uses an edited live base.
+# RSS ttl / syndication-module hints survive 304s; final interval is 300–86400s.
 
 
 # -----------------------------------------------------------------------------

@@ -23,6 +23,7 @@
 use std::fmt;
 
 use crate::date::parse_date_lenient;
+use crate::poll::{sy_update_period_secs, ttl_minutes_to_secs};
 use crate::text::{collapse_whitespace, html_to_text};
 use crate::xml::{attr, Reader, Token};
 
@@ -33,6 +34,11 @@ pub struct Feed {
     pub title: String,
     pub link: String,
     pub description: String,
+    /// Publisher-requested minimum polling interval, in seconds, before the
+    /// scheduler applies its operator base, floor, ceiling, and backoff.
+    /// RSS channel `ttl` and namespace-qualified syndication module hints
+    /// are combined by taking the longer valid interval.
+    pub poll_interval_secs: Option<i64>,
     pub items: Vec<FeedItem>,
 }
 
@@ -96,7 +102,9 @@ pub fn parse_with_options(input: &str, opts: &ParseOptions) -> Result<Feed, Feed
     let mut r = Reader::new(input);
     while let Some(tok) = r.next_token() {
         if let Token::Open {
-            name, self_closing, ..
+            name,
+            attrs,
+            self_closing,
         } = tok
         {
             let root = local_name(name);
@@ -104,14 +112,14 @@ pub fn parse_with_options(input: &str, opts: &ParseOptions) -> Result<Feed, Feed
                 return Ok(if self_closing {
                     Feed::default()
                 } else {
-                    parse_rss(&mut r, opts)
+                    parse_rss(&mut r, attrs, opts)
                 });
             }
             if root.eq_ignore_ascii_case("feed") {
                 return Ok(if self_closing {
                     Feed::default()
                 } else {
-                    parse_atom(&mut r, opts)
+                    parse_atom(&mut r, attrs, opts)
                 });
             }
             // Unknown wrapper element: keep scanning inside it.
@@ -182,20 +190,123 @@ fn skip_element(r: &mut Reader) {
     }
 }
 
+const SYNDICATION_NS: &str = "http://purl.org/rss/1.0/modules/syndication/";
+const MAX_HINT_BYTES: usize = 64;
+
+/// Scheduling fields are small scalars, not rich text. Consume the entire
+/// element even when invalid, without allocating for unbounded feed text.
+fn collect_hint(r: &mut Reader) -> Option<String> {
+    let mut out = String::new();
+    let mut depth = 1usize;
+    let mut valid = true;
+    let mut source_bytes = 0usize;
+    while let Some(tok) = r.next_token() {
+        match tok {
+            Token::Open { self_closing, .. } => {
+                valid = false;
+                if !self_closing {
+                    depth += 1;
+                }
+            }
+            Token::Close(_) => {
+                depth -= 1;
+                if depth == 0 {
+                    return valid.then_some(out);
+                }
+            }
+            Token::Text(t) | Token::CData(t) => {
+                source_bytes = source_bytes.saturating_add(t.len());
+                valid &= source_bytes <= MAX_HINT_BYTES;
+                if valid {
+                    if matches!(tok, Token::Text(_)) {
+                        out.push_str(&crate::text::decode_entities(t));
+                    } else {
+                        out.push_str(t);
+                    }
+                    valid &= out.len() <= MAX_HINT_BYTES;
+                }
+            }
+        }
+    }
+    None // truncated scalar
+}
+
+/// Resolve only the two module fields we consume. Inner declarations shadow
+/// outer ones, and the namespace URI (not a conventional `sy` prefix) decides.
+fn module_hint<'a>(name: &'a str, scopes: &[&str]) -> Option<&'a str> {
+    let local = local_name(name);
+    if !matches!(local, "updatePeriod" | "updateFrequency") {
+        return None;
+    }
+    let xmlns = match name.split_once(':') {
+        Some((prefix, _)) => format!("xmlns:{prefix}"),
+        None => "xmlns".into(),
+    };
+    let namespace = scopes.iter().find_map(|scope| attr(scope, &xmlns));
+    (namespace.as_deref() == Some(SYNDICATION_NS)).then_some(local)
+}
+
+#[derive(Default)]
+struct PollHints {
+    ttl_secs: Option<i64>,
+    period: Option<String>,
+    frequency: Option<u32>,
+    module_present: bool,
+    module_invalid: bool,
+}
+
+impl PollHints {
+    fn read(&mut self, name: &str, r: &mut Reader, self_closing: bool) {
+        let text = (!self_closing).then(|| collect_hint(r)).flatten();
+        if name == "ttl" {
+            self.ttl_secs = self
+                .ttl_secs
+                .max(text.as_deref().and_then(ttl_minutes_to_secs));
+            return;
+        }
+        self.module_present = true;
+        match (name, text) {
+            ("updatePeriod", Some(period)) => {
+                self.module_invalid |= sy_update_period_secs(&period, 1).is_none();
+                self.period = Some(period);
+            }
+            ("updateFrequency", Some(frequency)) => {
+                self.frequency = frequency.trim().parse::<u32>().ok().filter(|n| *n > 0);
+                self.module_invalid |= self.frequency.is_none();
+            }
+            _ => self.module_invalid = true,
+        }
+    }
+
+    fn interval(&self) -> Option<i64> {
+        let module = if self.module_present && !self.module_invalid {
+            sy_update_period_secs(
+                self.period.as_deref().unwrap_or("daily"),
+                self.frequency.unwrap_or(1),
+            )
+        } else {
+            None
+        };
+        self.ttl_secs.max(module)
+    }
+}
+
 // ---------------------------------------------------------------- RSS 2.0
 
-fn parse_rss(r: &mut Reader, opts: &ParseOptions) -> Feed {
+fn parse_rss(r: &mut Reader, root_attrs: &str, opts: &ParseOptions) -> Feed {
     let mut feed = Feed::default();
     while let Some(tok) = r.next_token() {
         if let Token::Open {
-            name, self_closing, ..
+            name,
+            attrs,
+            self_closing,
         } = tok
         {
             if self_closing {
                 continue;
             }
             if local_name(name).eq_ignore_ascii_case("channel") {
-                parse_rss_channel(r, &mut feed, opts);
+                parse_rss_channel(r, &mut feed, &[attrs, root_attrs], opts);
             } else {
                 skip_element(r);
             }
@@ -204,12 +315,29 @@ fn parse_rss(r: &mut Reader, opts: &ParseOptions) -> Feed {
     feed
 }
 
-fn parse_rss_channel(r: &mut Reader, feed: &mut Feed, opts: &ParseOptions) {
+fn parse_rss_channel(r: &mut Reader, feed: &mut Feed, scopes: &[&str; 2], opts: &ParseOptions) {
+    let mut hints = PollHints::default();
     while let Some(tok) = r.next_token() {
         match tok {
             Token::Open {
-                name, self_closing, ..
+                name,
+                attrs,
+                self_closing,
             } => {
+                let default_namespace = || {
+                    [attrs, scopes[0], scopes[1]]
+                        .iter()
+                        .find_map(|scope| attr(scope, "xmlns"))
+                };
+                let hint = if name == "ttl" && default_namespace().is_none_or(|ns| ns.is_empty()) {
+                    Some(name)
+                } else {
+                    module_hint(name, &[attrs, scopes[0], scopes[1]])
+                };
+                if let Some(hint) = hint {
+                    hints.read(hint, r, self_closing);
+                    continue;
+                }
                 if self_closing {
                     continue;
                 }
@@ -228,10 +356,11 @@ fn parse_rss_channel(r: &mut Reader, feed: &mut Feed, opts: &ParseOptions) {
                     _ => skip_element(r),
                 }
             }
-            Token::Close(_) => return, // </channel>
+            Token::Close(_) => break, // </channel>
             _ => {}
         }
     }
+    feed.poll_interval_secs = hints.interval();
 }
 
 fn parse_rss_item(r: &mut Reader, opts: &ParseOptions) -> FeedItem {
@@ -286,8 +415,9 @@ fn parse_rss_item(r: &mut Reader, opts: &ParseOptions) -> FeedItem {
 
 // --------------------------------------------------------------- Atom 1.0
 
-fn parse_atom(r: &mut Reader, opts: &ParseOptions) -> Feed {
+fn parse_atom(r: &mut Reader, root_attrs: &str, opts: &ParseOptions) -> Feed {
     let mut feed = Feed::default();
+    let mut hints = PollHints::default();
     while let Some(tok) = r.next_token() {
         match tok {
             Token::Open {
@@ -295,6 +425,10 @@ fn parse_atom(r: &mut Reader, opts: &ParseOptions) -> Feed {
                 attrs,
                 self_closing,
             } => {
+                if let Some(hint) = module_hint(name, &[attrs, root_attrs]) {
+                    hints.read(hint, r, self_closing);
+                    continue;
+                }
                 let tag = local_name(name).to_ascii_lowercase();
                 if tag == "link" {
                     pick_atom_link(attrs, &mut feed.link);
@@ -322,6 +456,7 @@ fn parse_atom(r: &mut Reader, opts: &ParseOptions) -> Feed {
             _ => {}
         }
     }
+    feed.poll_interval_secs = hints.interval();
     feed
 }
 
@@ -420,6 +555,113 @@ fn pick_atom_link(attrs: &str, slot: &mut String) {
 mod tests {
     use super::*;
     use crate::dedup::dedup_id;
+
+    fn rss_hint(fields: &str) -> Option<i64> {
+        parse(&format!(
+            r#"<rss xmlns:sy="{SYNDICATION_NS}"><channel>{fields}</channel></rss>"#
+        ))
+        .unwrap()
+        .poll_interval_secs
+    }
+
+    #[test]
+    fn channel_poll_hints_combine_and_default_only_when_declared() {
+        assert_eq!(rss_hint(""), None);
+        assert_eq!(rss_hint("<ttl>120</ttl>"), Some(7_200));
+        assert_eq!(
+            rss_hint("<sy:updatePeriod>hourly</sy:updatePeriod>"),
+            Some(3_600)
+        );
+        assert_eq!(
+            rss_hint("<sy:updateFrequency>4</sy:updateFrequency>"),
+            Some(21_600)
+        );
+        assert_eq!(
+            rss_hint("<ttl>120</ttl><sy:updatePeriod>hourly</sy:updatePeriod>"),
+            Some(7_200)
+        );
+        assert_eq!(rss_hint("<ttl>1</ttl><sy:updatePeriod>hourly</sy:updatePeriod><sy:updateFrequency>7</sy:updateFrequency>"), Some(515));
+        assert_eq!(rss_hint("<ttl><![CDATA[ 15 ]]></ttl>"), Some(900));
+        assert_eq!(rss_hint("<ttl>&#49;5</ttl>"), Some(900));
+    }
+
+    #[test]
+    fn poll_hints_require_correct_namespace_and_channel_or_feed_scope() {
+        for xml in [
+            format!(
+                r#"<rss xmlns:other="{SYNDICATION_NS}"><channel><other:updatePeriod>hourly</other:updatePeriod></channel></rss>"#
+            ),
+            format!(
+                r#"<rss><channel xmlns:other="{SYNDICATION_NS}"><other:updatePeriod>hourly</other:updatePeriod></channel></rss>"#
+            ),
+            format!(
+                r#"<feed xmlns="http://www.w3.org/2005/Atom" xmlns:other="{SYNDICATION_NS}"><other:updatePeriod>hourly</other:updatePeriod></feed>"#
+            ),
+            format!(r#"<feed><updatePeriod xmlns="{SYNDICATION_NS}">hourly</updatePeriod></feed>"#),
+        ] {
+            assert_eq!(
+                parse(&xml).unwrap().poll_interval_secs,
+                Some(3_600),
+                "{xml}"
+            );
+        }
+        for xml in [
+            "<rss><channel><sy:updatePeriod>hourly</sy:updatePeriod></channel></rss>".into(),
+            "<rss><channel><ttl xmlns=\"urn:other\">120</ttl></channel></rss>".into(),
+            "<rss xmlns=\"urn:other\"><channel><ttl>120</ttl></channel></rss>".into(),
+            format!(
+                r#"<rss xmlns:sy="{SYNDICATION_NS}"><channel xmlns:sy="urn:other"><sy:updatePeriod>hourly</sy:updatePeriod></channel></rss>"#
+            ),
+            format!(
+                r#"<feed xmlns:sy="{SYNDICATION_NS}"><sy:updatePeriod xmlns:sy="urn:other">hourly</sy:updatePeriod></feed>"#
+            ),
+            format!(
+                r#"<rss xmlns:sy="{SYNDICATION_NS}"><channel><item><ttl>120</ttl><sy:updatePeriod>daily</sy:updatePeriod></item><image><ttl>120</ttl></image></channel></rss>"#
+            ),
+            format!(
+                r#"<feed xmlns:sy="{SYNDICATION_NS}"><ttl>120</ttl><entry><sy:updatePeriod>daily</sy:updatePeriod></entry></feed>"#
+            ),
+        ] {
+            assert_eq!(parse(&xml).unwrap().poll_interval_secs, None, "{xml}");
+        }
+    }
+
+    #[test]
+    fn malformed_and_extreme_poll_hints_are_bounded() {
+        for ttl in ["0", "-1", "soon", "", "9223372036854775808", "<b>5</b>"] {
+            assert_eq!(rss_hint(&format!("<ttl>{ttl}</ttl>")), None, "{ttl}");
+        }
+        assert_eq!(rss_hint("<ttl>9223372036854775807</ttl>"), Some(i64::MAX));
+        assert_eq!(
+            rss_hint(&format!("<ttl>{}1</ttl>", " ".repeat(MAX_HINT_BYTES))),
+            None
+        );
+        assert_eq!(
+            rss_hint("<ttl>2</ttl><sy:updatePeriod>unknown</sy:updatePeriod>"),
+            Some(120)
+        );
+        for frequency in ["0", "-1", "1.5", "soon", "", "4294967296"] {
+            assert_eq!(
+                rss_hint(&format!(
+                    "<sy:updateFrequency>{frequency}</sy:updateFrequency>"
+                )),
+                None,
+                "{frequency}"
+            );
+        }
+        assert_eq!(rss_hint("<sy:updatePeriod/>"), None);
+        assert_eq!(rss_hint("<sy:updateFrequency/>"), None);
+        assert_eq!(rss_hint("<sy:updatePeriod>hourly</sy:updatePeriod><sy:updateFrequency>4294967295</sy:updateFrequency>"), Some(1));
+        assert_eq!(
+            rss_hint(&format!(
+                "<sy:updatePeriod>{}</sy:updatePeriod><title>still parsed</title>",
+                "x".repeat(100_000)
+            )),
+            None
+        );
+        let parsed = parse("<rss><channel><ttl>12").unwrap();
+        assert_eq!(parsed.poll_interval_secs, None, "incomplete scalar ignored");
+    }
 
     /// Real-world-shaped RSS 2.0: CDATA, escaped-HTML descriptions,
     /// content:encoded, dc:creator, atom:link noise, unknown elements.

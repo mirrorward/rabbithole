@@ -35,7 +35,7 @@ disables that class.
 | QWK / QWKE | — (no listener; telnet `[M]` + `ctl qwk-build`/`qwk-ingest`) | `qwk_enabled` | telnet's `telnet_min_role`; REP ingest posts under `BOARD_POST` per board | (telnet's) | HTTP spool serving, zmodem upload path, per-user scheduled packets |
 | Radio delivery (Icecast/ICY) | 8000 (`radio_addr`) | `radio_enabled` | listeners (`GET`) are anonymous; a `SOURCE`/`PUT` DJ on this port authenticates HTTP Basic against a **real account** and needs cap `BROADCAST` on the `radio` resource | conn, auth (failed source logins) | live sources are fanned out **verbatim** (no decode/transcode into the audio `Station` playout) |
 | Radio source ingest + updinfo | 8001 (`radio_source_addr`) | `radio_source_enabled` | shared credentials `radio_source_user` (default `"source"`) / `radio_source_password` — **empty password refuses every source and updinfo** (fail safe); guests never broadcast | conn, auth | same passthrough caveat as delivery |
-| Syndication fetcher (RSS/Atom) | — (outbound only, no listener) | `syndication_enabled` (+ non-empty `syndication_feeds`) | gateway posts under a member-baseline subject holding `BOARD_POST` | — (its own politeness floor + per-feed backoff) | feed-declared TTLs (`<ttl>`/`sy:updatePeriod` not wired), IPv6 literal feed hosts, compressed responses (no `Accept-Encoding`) |
+| Syndication fetcher (RSS/Atom) | — (outbound only, no listener) | `syndication_enabled` (+ non-empty `syndication_feeds`) | gateway posts under a member-baseline subject holding `BOARD_POST` | — (its own politeness floor + per-feed backoff) | calendar-aligned `sy:updateBase`, compressed responses (no `Accept-Encoding`) |
 
 ## Per-surface config keys
 
@@ -135,6 +135,25 @@ disables that class.
   slug, *TOML-only*), `syndication_poll_secs` (default 1800). Dedupe is
   durable per feed (`<data_dir>/syndication/`) *and* burrow-wide
   (`SeenKey::Syndication`).
+  Polling uses `clamp(max(operator base, feed hint) × 2^failures, 300, 86400)`
+  seconds. A live `syndication_poll_secs` edit affects the next rescheduling
+  transition; already scheduled deadlines remain intact. The five-minute floor
+  and one-day ceiling apply even to extreme publisher hints and backoff.
+  RSS 2.0 channel [`ttl`](https://www.rssboard.org/rss-specification) is in
+  minutes. RSS channels and Atom feeds also accept namespace-qualified
+  [`sy:updatePeriod` / `sy:updateFrequency`](https://web.resource.org/rss/1.0/modules/syndication/)
+  using `http://purl.org/rss/1.0/modules/syndication/`, with any prefix.
+  Periods are hourly, daily, weekly, monthly (30 days), or yearly (365 days);
+  interval division rounds up to seconds. When either module field is declared,
+  its absent companion defaults to daily or frequency 1; absent both means no
+  module hint. Invalid, zero, overflowing, nested, or over-64-byte scalar values
+  are ignored; TTL conversion saturates on multiplication overflow. When both
+  forms are valid, the longer interval wins. Item/entry hints do not apply.
+  The last parsed hint and HTTP validators survive 304s and fetch failures;
+  unrecognizable 2xx bodies back off without replacing them. Fresh parsed feeds
+  replace the hint, including clearing it when hints are missing or invalid.
+  These metadata are runtime-only and fetched afresh on restart. RSS 1.0/RDF
+  documents and calendar-aligned `updateBase` scheduling remain unsupported.
 
 Not legacy, but adjacent: the S2S federation listener (`federation_enabled`,
 `federation_addr`, default port 4655, off by default) is documented in

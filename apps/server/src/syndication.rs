@@ -49,11 +49,18 @@
 //! `syndication_feeds` map (TOML-only, like `ftn_areas`). RBAC is respected:
 //! the gateway posts only while a member-baseline subject holds `BOARD_POST`.
 //!
+//! # Poll intervals
+//!
+//! Parsed RSS `ttl` and syndication-module hints raise the operator base;
+//! failures multiply that interval before the 300–86400 second clamp. The
+//! last parsed hint survives 304s and failed fetches. A fresh parsed body
+//! replaces it, including removing a previous hint. Validators and hints are
+//! runtime-only; restart fetches fresh metadata. Live operator interval edits
+//! affect the next rescheduling transition, preserving existing deadlines.
+//!
 //! ## Deliberately deferred
 //!
-//! - **Feed-declared TTLs**: [`PollState`] honors a `feed_ttl_secs` argument,
-//!   but wiring RSS `<ttl>` / `sy:updatePeriod` out of the document into it is
-//!   left for a later pass (`None` is passed today).
+//! - **Calendar-aligned hints**: syndication-module `updateBase` is ignored.
 //! - **IPv6 literal hosts** in feed URLs are accepted as `[::1]` /
 //!   `[2001:db8::1]:8080` (same authority split as directory discovery).
 //! - **Compressed responses**: no `Accept-Encoding` is sent, so servers must
@@ -115,6 +122,7 @@ struct FeedRuntime {
     url: String,
     mapping: BoardMapping,
     poll: PollState,
+    poll_interval_secs: Option<i64>,
     seen: SeenSet,
     seen_path: PathBuf,
 }
@@ -160,6 +168,7 @@ impl SyndicationService {
             feeds.push(FeedRuntime {
                 mapping: BoardMapping::new(slug),
                 poll: PollState::initial(now),
+                poll_interval_secs: None,
                 url,
                 seen,
                 seen_path,
@@ -212,6 +221,8 @@ impl SyndicationService {
     /// board posts were created. Exposed so tests can drive the loop with a
     /// deterministic clock.
     pub async fn poll_due(&mut self, now: i64) -> usize {
+        // Refresh the live base without moving deadlines already promised.
+        self.poll_cfg.base_interval_secs = self.shared.config.read().syndication_poll_secs.max(1);
         let mut posted = 0;
         for idx in 0..self.feeds.len() {
             if self.feeds[idx].poll.is_due(now) {
@@ -243,26 +254,51 @@ impl SyndicationService {
             Ok(resp) => resp,
             Err(e) => {
                 let f = &mut self.feeds[idx];
-                let (next, _) = f.poll.on_transport_error(&self.poll_cfg, None, now);
+                let (next, _) =
+                    f.poll
+                        .on_transport_error(&self.poll_cfg, f.poll_interval_secs, now);
                 f.poll = next;
                 self.shared.stats.feed_poll(&url, stamp, "error");
                 tracing::warn!(feed = %url, failures = f.poll.failures, "syndication fetch failed: {e:#}");
                 return 0;
             }
         };
+        // Parse before committing validators or scheduling the next request:
+        // an unrecognizable 2xx body is a failure, not a new cached feed.
+        let parsed = if (200..300).contains(&resp.status) {
+            match syndication::parse(&String::from_utf8_lossy(&resp.body)) {
+                Ok(feed) => {
+                    self.feeds[idx].poll_interval_secs = feed.poll_interval_secs;
+                    Some(feed)
+                }
+                Err(e) => {
+                    let f = &mut self.feeds[idx];
+                    let (next, _) =
+                        f.poll
+                            .on_transport_error(&self.poll_cfg, f.poll_interval_secs, now);
+                    f.poll = next;
+                    self.shared.stats.feed_poll(&url, stamp, "error");
+                    tracing::warn!(feed = %url, "syndication: unparseable body: {e}");
+                    return 0;
+                }
+            }
+        } else {
+            None
+        };
         let (next, decision) = self.feeds[idx].poll.on_response(
             &self.poll_cfg,
             resp.status,
             resp.etag.as_deref(),
             resp.last_modified.as_deref(),
-            None, // feed-declared TTL wiring is deferred (see module docs)
+            self.feeds[idx].poll_interval_secs,
             now,
         );
         self.feeds[idx].poll = next;
         match decision {
             PollDecision::Modified => {
                 self.shared.stats.feed_poll(&url, stamp, "ok");
-                self.ingest(idx, &resp.body).await
+                self.ingest(idx, parsed.expect("2xx response parsed above"))
+                    .await
             }
             PollDecision::NotModified => {
                 self.shared.stats.feed_poll(&url, stamp, "not_modified");
@@ -277,19 +313,11 @@ impl SyndicationService {
         }
     }
 
-    /// Parse a fresh body, drop items already seen, and post the rest to the
+    /// Drop items already seen in a parsed feed and post the rest to the
     /// mapped board. Ids are recorded (memory + durable file + shared dedup
     /// gate) only for items actually posted, so a missing board or a revoked
     /// capability never permanently swallows an item.
-    async fn ingest(&mut self, idx: usize, body: &[u8]) -> usize {
-        let text = String::from_utf8_lossy(body);
-        let parsed = match syndication::parse(&text) {
-            Ok(feed) => feed,
-            Err(e) => {
-                tracing::warn!(feed = %self.feeds[idx].url, "syndication: unparseable body: {e}");
-                return 0;
-            }
-        };
+    async fn ingest(&mut self, idx: usize, parsed: Feed) -> usize {
         let fresh = Feed {
             items: self.feeds[idx].seen.partition(&parsed.items).fresh,
             ..parsed
