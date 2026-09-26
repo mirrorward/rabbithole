@@ -30,6 +30,22 @@ other unknown message.
 - Unknown federation message types received post-welcome are **ignored**
   (forward compatibility), not errors.
 
+Inbound connections consume the shared per-IP **CONN** budget once when the
+QUIC listener hands over a connection, before spawning its application
+handshake. The key is the actual remote IP, independent of source port or any
+claimed peer identity. An exhausted budget drops the connection without a
+HelloAck; it does not wait for peer acknowledgement in the accept loop.
+`ratelimit_conn_per_min` and `ratelimit_conn_burst` are read live. The master
+`ratelimit_enabled = false` switch or a connection rate of `0` disables this
+gate; a zero burst with a nonzero rate refuses admission. Tokens refill, and
+unrelated IPs keep separate budgets. Peers sharing an IP also share CONN with
+the other server listeners.
+
+This admission charge includes valid, pending and incomplete application
+handshakes. It is separate from the failures-only AUTH budget below. Outbound
+dialing is unchanged. QUIC's existing TLS/control-stream handshake limits
+run before this application admission gate.
+
 ## Messages
 
 Message-type constants from `apps/server/src/federation.rs`

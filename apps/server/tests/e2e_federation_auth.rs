@@ -133,6 +133,7 @@ async fn server(path: &std::path::Path) -> Burrow {
         federation_enabled: true,
         federation_origin: "source.example".into(),
         federation_addr: "127.0.0.1:0".parse().unwrap(),
+        ratelimit_conn_per_min: 0, // isolate the failures-only AUTH budget
         ratelimit_auth_per_min: 1,
         ratelimit_auth_burst: 2,
         ..ServerConfig::default()

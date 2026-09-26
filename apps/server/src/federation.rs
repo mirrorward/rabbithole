@@ -437,6 +437,9 @@ pub async fn spawn_federation(
         loop {
             match listener.accept().await {
                 Ok(conn) => {
+                    let Some(conn) = admit_peer_connection(conn, &shared) else {
+                        continue;
+                    };
                     let shared = shared.clone();
                     tokio::spawn(async move {
                         if let Err(e) = serve_peer(conn, shared).await {
@@ -453,6 +456,20 @@ pub async fn spawn_federation(
         }
     });
     Ok((local, handle))
+}
+
+/// Charge admission once, before spawning or reading the application handshake.
+/// A refusal drops the QUIC connection immediately. Graceful `close()` waits
+/// for a peer acknowledgement and must not stall this shared accept loop.
+fn admit_peer_connection(
+    conn: Box<dyn Connection>,
+    shared: &Shared,
+) -> Option<Box<dyn Connection>> {
+    if shared.rate_allow(Scope::Ip(conn.peer().remote_addr.ip()), rl::CONN) {
+        Some(conn)
+    } else {
+        None
+    }
 }
 
 /// Handle one inbound peer connection: run the mutual-auth handshake, apply
@@ -1802,6 +1819,7 @@ mod auth_tests {
         reads: usize,
         sent: Vec<Frame>,
         closed: bool,
+        dropped: bool,
     }
 
     type ReadHook = (usize, Box<dyn FnOnce() + Send>);
@@ -1846,6 +1864,12 @@ mod auth_tests {
 
         fn scope(&self) -> Scope {
             Scope::Ip(self.info.remote_addr.ip())
+        }
+    }
+
+    impl Drop for Peer {
+        fn drop(&mut self) {
+            self.trace.lock().dropped = true;
         }
     }
 
@@ -1931,6 +1955,132 @@ mod auth_tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn connection_admission_charges_once_before_any_handshake_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = server(dir.path(), 1).await;
+        b.shared
+            .config
+            .set_key("ratelimit_conn_per_min", "1")
+            .unwrap();
+        b.shared
+            .config
+            .set_key("ratelimit_conn_burst", "2")
+            .unwrap();
+        let scope = Peer::new(1, true).scope();
+        for port in [12345, 23456] {
+            let mut peer = Peer::new(1, true);
+            peer.info.remote_addr.set_port(port);
+            let trace = peer.trace.clone();
+            let admitted = admit_peer_connection(Box::new(peer), &b.shared).unwrap();
+            assert_eq!(trace.lock().reads, 0);
+            assert!(trace.lock().sent.is_empty());
+            assert!(!trace.lock().dropped);
+            serve_peer(admitted, b.shared.clone()).await.unwrap();
+        }
+        // Another identity/origin on the same real IP cannot select a fresh
+        // admission bucket. Neither an auth read nor a reply happens on denial.
+        let mut peer = Peer::new(2, true);
+        peer.info.remote_addr = "192.0.2.1:34567".parse().unwrap();
+        let trace = peer.trace.clone();
+        assert!(admit_peer_connection(Box::new(peer), &b.shared).is_none());
+        assert_eq!(trace.lock().reads, 0);
+        assert!(trace.lock().sent.is_empty());
+        assert!(trace.lock().dropped);
+        assert!(
+            b.shared.rate_allow(scope, rl::AUTH),
+            "CONN did not spend AUTH"
+        );
+        assert!(!b.shared.rate_allow(scope, rl::AUTH));
+        b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn connection_admission_isolated_by_ip_and_recovers_after_refill() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = server(dir.path(), 1).await;
+        b.shared
+            .config
+            .set_key("ratelimit_conn_per_min", "1")
+            .unwrap();
+        b.shared
+            .config
+            .set_key("ratelimit_conn_burst", "1")
+            .unwrap();
+        let scope = Peer::new(1, true).scope();
+        assert!(admit_peer_connection(Box::new(Peer::new(1, true)), &b.shared).is_some());
+        assert!(admit_peer_connection(Box::new(Peer::new(1, true)), &b.shared).is_none());
+        assert!(admit_peer_connection(Box::new(Peer::new(2, true)), &b.shared).is_some());
+
+        let key = LimitKey {
+            scope,
+            class: rl::CONN,
+        };
+        let policy = Policy::for_class(&b.shared.config.read(), rl::CONN).unwrap();
+        let now = ratelimit::now_ms();
+        let Decision::Limited { retry_after_ms, .. } =
+            b.shared.ratelimit.peek_with(key, policy, now)
+        else {
+            panic!("accepted connection consumed the only token");
+        };
+        assert!(retry_after_ms > 1);
+        assert!(b
+            .shared
+            .ratelimit
+            .peek_with(key, policy, now + retry_after_ms - 1)
+            .is_limited());
+        assert!(!b
+            .shared
+            .ratelimit
+            .peek_with(key, policy, now + retry_after_ms + 1)
+            .is_limited());
+        assert!(admit_peer_connection(Box::new(Peer::new(1, true)), &b.shared).is_some());
+        assert!(admit_peer_connection(Box::new(Peer::new(1, true)), &b.shared).is_none());
+        b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn connection_admission_observes_live_disable_and_independent_auth_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = server(dir.path(), 0).await;
+        b.shared
+            .config
+            .set_key("ratelimit_conn_per_min", "1")
+            .unwrap();
+        b.shared
+            .config
+            .set_key("ratelimit_conn_burst", "0")
+            .unwrap();
+        assert!(admit_peer_connection(Box::new(Peer::new(1, true)), &b.shared).is_none());
+        b.shared
+            .config
+            .set_key("ratelimit_enabled", "false")
+            .unwrap();
+        assert!(admit_peer_connection(Box::new(Peer::new(1, true)), &b.shared).is_some());
+        b.shared
+            .config
+            .set_key("ratelimit_enabled", "true")
+            .unwrap();
+        b.shared
+            .config
+            .set_key("ratelimit_conn_per_min", "0")
+            .unwrap();
+        let peer = Peer::new(1, true);
+        let trace = peer.trace.clone();
+        let admitted = admit_peer_connection(Box::new(peer), &b.shared).unwrap();
+        assert!(
+            serve_peer(admitted, b.shared.clone()).await.is_err(),
+            "AUTH remains enabled"
+        );
+        assert_eq!(trace.lock().reads, 0);
+        b.shared
+            .config
+            .set_key("ratelimit_conn_per_min", "1")
+            .unwrap();
+        assert!(admit_peer_connection(Box::new(Peer::new(1, true)), &b.shared).is_none());
+        b.shutdown().await;
     }
 
     #[tokio::test]
