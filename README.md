@@ -173,6 +173,16 @@ listener, set an exact HTTPS `ws_allowed_origins` allowlist, and publish the
 external endpoint through `ws_public_url`. See
 [`docs/deployment.md`](docs/deployment.md#public-websocket-access).
 
+In the desktop and web connect window, **Save sign-in to bookmark** remembers
+the account after a successful sign-in. Different handles on the same burrow
+get separate bookmarks, each with its own name and saved sign-in. Selecting one
+lets you reconnect without entering a password; **Use password instead** lets
+you replace an expired sign-in. Only one account per burrow is active at a time.
+Passwords are never saved: the app keeps a revocable server-issued session
+token in this app/browser's local storage. **Forget saved sign-in** clears that
+bookmark's credential; **Remove bookmark** removes the bookmark and credential.
+Expired sessions keep the bookmark and handle, and ask you to sign in again.
+
 Back up and restore (the server must be **stopped** before a restore):
 
 ```console

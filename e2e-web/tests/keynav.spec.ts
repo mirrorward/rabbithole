@@ -32,6 +32,7 @@ test("dynamic lists recover removed rows without stealing focus", async ({ conte
     await page.locator("#rh-login-server").fill(server.wsURL);
     await page.locator("#rh-login-handle").fill("theme-viewer");
     await page.locator("#rh-login-password").fill("theme-e2e-password");
+    await page.getByLabel("Save sign-in to bookmark").check();
     await page.locator('.rh-login button[type="submit"]').click();
     await expect(page.locator(".rh-header .rh-title-text")).toHaveText(server.name);
     await page.locator('.rh-subnav a[href="/directory"]').click();
@@ -157,6 +158,7 @@ test("board links share one Tab stop and retain native link activation", async (
     await page.locator("#rh-login-server").fill(server.wsURL);
     await page.locator("#rh-login-handle").fill("theme-viewer");
     await page.locator("#rh-login-password").fill("theme-e2e-password");
+    await page.getByLabel("Save sign-in to bookmark").check();
     await page.locator('.rh-login button[type="submit"]').click();
     await expect(page.locator(".rh-header .rh-title-text")).toHaveText(server.name);
     await page.locator('.rh-subnav a[href="/boards"]').click();

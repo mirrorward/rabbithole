@@ -62,6 +62,7 @@ async function signIn(page: Page, burrow: TestBurrow) {
   await page.locator("#rh-login-server").fill(burrow.wsURL);
   await page.locator("#rh-login-handle").fill("theme-viewer");
   await page.locator("#rh-login-password").fill("theme-e2e-password");
+  await page.getByLabel("Save sign-in to bookmark").check();
   await page.locator('.rh-login button[type="submit"]').click();
   await expect(page.locator(".rh-header .rh-title-text")).toHaveText(burrow.name);
   await expect(page.locator(".rh-header .rh-dot.on")).toBeVisible();

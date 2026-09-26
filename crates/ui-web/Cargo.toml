@@ -32,6 +32,7 @@ rabbithole-art.workspace = true
 # a future server theme bundle plugs into. Both wasm-clean.
 serde.workspace = true
 serde_json.workspace = true
+url.workspace = true
 # Portable identity (`src/identity.rs`): a persisted Ed25519 keypair that names
 # "you" across burrows. Just the curve + a blake3/hex fingerprint — no argon2 or
 # totp (so we don't pull rabbithole-identity's heavier tree into wasm).

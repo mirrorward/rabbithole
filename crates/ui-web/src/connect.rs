@@ -24,9 +24,13 @@ pub type Probes = HashMap<String, Probe>;
 /// Which shelf a row sits on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Shelf {
-    /// A burrow you bookmarked, with the handle you last used there if you
-    /// have ever signed in.
-    Bookmark { handle: Option<String> },
+    /// A specific bookmark. Account bookmarks carry their own login rather
+    /// than borrowing whichever account most recently visited this burrow.
+    Bookmark {
+        bookmark_id: String,
+        handle: Option<String>,
+        saved_signin: bool,
+    },
     /// A burrow you have signed into before, with the handle you used there.
     Yours { handle: String },
     /// A burrow a directory or a Looking Glass lists.
@@ -128,12 +132,20 @@ pub fn bookmarked(
             let known = listed
                 .iter()
                 .find(|s| same_place(&s.endpoint, &kept.endpoint));
-            let handle = recent
-                .iter()
-                .find(|r| same_place(&r.endpoint, &kept.endpoint))
-                .map(|r| r.handle.clone());
+            let handle = kept.login.clone().or_else(|| {
+                recent
+                    .iter()
+                    .find(|r| same_place(&r.endpoint, &kept.endpoint))
+                    .map(|r| r.handle.clone())
+            });
             Row {
-                shelf: Shelf::Bookmark { handle },
+                shelf: Shelf::Bookmark {
+                    bookmark_id: kept.id.clone(),
+                    handle,
+                    saved_signin: kept.login.is_some()
+                        && kept.token.as_ref().is_some_and(|token| !token.is_empty())
+                        && crate::bookmarks::credential_endpoint(&kept.endpoint).is_some(),
+                },
                 name: kept.name.clone(),
                 endpoint: kept.endpoint.clone(),
                 description: known.map(|s| s.description.clone()).unwrap_or_default(),
@@ -280,6 +292,7 @@ pub fn filter(rows: Vec<Row>, query: &str) -> Vec<Row> {
                 Shelf::Yours { handle } => handle.as_str(),
                 Shelf::Bookmark {
                     handle: Some(handle),
+                    ..
                 } => handle.as_str(),
                 _ => "",
             };
@@ -352,6 +365,7 @@ mod tests {
 
     fn saved(endpoint: &str, handle: &str) -> RecentBurrow {
         RecentBurrow {
+            typed_login: false,
             endpoint: endpoint.into(),
             handle: handle.into(),
             token: None,
@@ -496,8 +510,11 @@ mod tests {
 
     fn kept(endpoint: &str, name: &str) -> Bookmark {
         Bookmark {
+            id: format!("bookmark-{endpoint}"),
             endpoint: endpoint.into(),
             name: name.into(),
+            login: None,
+            token: None,
         }
     }
 
@@ -525,14 +542,23 @@ mod tests {
         assert_eq!(
             rows[0].shelf,
             Shelf::Bookmark {
-                handle: Some("alice".into())
+                bookmark_id: shelf[0].id.clone(),
+                handle: Some("alice".into()),
+                saved_signin: false,
             }
         );
         // Nobody lists the attic. It is still on the shelf, and its status is
         // whatever our own knock found.
         assert_eq!(rows[1].name, "Attic");
         assert_eq!(rows[1].reachable, Some(false));
-        assert_eq!(rows[1].shelf, Shelf::Bookmark { handle: None });
+        assert_eq!(
+            rows[1].shelf,
+            Shelf::Bookmark {
+                bookmark_id: shelf[1].id.clone(),
+                handle: None,
+                saved_signin: false,
+            }
+        );
         // A knock still out is "unknown", not "down".
         probes.insert(probe_key("ws://attic.lan:4654"), Probe::Checking);
         assert_eq!(
@@ -558,6 +584,51 @@ mod tests {
         let found = discover(&glass, &DirectorySource::Directory, &recent, &shelf);
         let names: Vec<&str> = found.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["Other"]);
+    }
+
+    #[test]
+    fn account_bookmarks_display_their_own_logins_and_saved_state() {
+        let (list, alice) = crate::bookmarks::upsert_account(
+            Vec::new(),
+            "wss://one.example",
+            "alice",
+            "Work",
+            "alice-secret",
+        )
+        .unwrap();
+        let (list, bob) = crate::bookmarks::upsert_account(
+            list,
+            "wss://one.example",
+            "bob",
+            "Play",
+            "bob-secret",
+        )
+        .unwrap();
+        let list = crate::bookmarks::clear_token(list, &bob);
+        let rows = bookmarked(
+            &list,
+            &[saved("wss://one.example", "another-user")],
+            &[],
+            &Probes::new(),
+        );
+        assert_eq!(
+            rows[0].shelf,
+            Shelf::Bookmark {
+                bookmark_id: alice,
+                handle: Some("alice".into()),
+                saved_signin: true
+            }
+        );
+        assert_eq!(
+            rows[1].shelf,
+            Shelf::Bookmark {
+                bookmark_id: bob,
+                handle: Some("bob".into()),
+                saved_signin: false
+            }
+        );
+        assert_ne!(rows[0].key(), rows[1].key());
+        assert_eq!(filter(rows, "bob").len(), 1);
     }
 
     #[test]

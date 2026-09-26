@@ -49,6 +49,8 @@ real service workers and gives each fixture its own writable copy of the app. No
 | `npm run test:smoke` | App mount, real guest sign-in (`AuthGuest`/`AuthOk`), connected lobby and composer. |
 | `npm run test:theme` | Signed theme loading, live publish/clear, High Contrast, multiple burrows, reconnect, session restoration, and account opt-out (two tests). |
 | `npm run test:routes` | Direct `/lobby`, actual hard reload and token resume, nested routes and real JS/WASM assets, missing-asset 404s. |
+| `npx playwright test tests/auth.spec.ts` | Correlated authentication failures, delayed handshakes, early pane requests, corrected password retry, and explicit saved-sign-in resume. |
+| `npx playwright test tests/bookmarks.spec.ts` | Opt-in account bookmarks, two users on one burrow, legacy migration, independent expiry/removal, and storage failures. |
 | `npm run test:chat` | Recent chat history for a second client, room isolation, and reconnection. |
 | `npm run test:keynav` | Focus recovery in Members after filtering, no focus stealing, route disposal/remount, and Boards Tab order with arrow, Enter, pointer and modified-click navigation. |
 | `npm run test:radio` | Radio playback refusal, explicit retry, stream errors, and stale outcomes after station changes or stopping. |

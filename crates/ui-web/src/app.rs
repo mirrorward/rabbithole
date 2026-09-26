@@ -75,6 +75,8 @@ pub struct Session {
     /// burrow something before the drop has no answer coming: panes track
     /// this and ask again.
     pub ready: RwSignal<u64>,
+    /// Authenticated on the current socket, cleared while reconnecting.
+    pub authenticated: RwSignal<bool>,
     /// Whether this session is a guest: a handle with no account behind it.
     /// The server refuses a guest everything that is between accounts, so
     /// the DM view offers sign-in instead of asking and failing.
@@ -114,6 +116,15 @@ impl Session {
 enum AuthMethod {
     Password { login: String, password: String },
     Resume { token: String },
+}
+
+#[cfg(target_arch = "wasm32")]
+struct SignInMemory {
+    login: Option<String>,
+    keep_recent: bool,
+    save_bookmark: bool,
+    bookmark: Option<crate::bookmarks::Bookmark>,
+    saved_once: bool,
 }
 
 /// How many accounts one look at the People pane brings back. The burrow
@@ -211,6 +222,8 @@ pub struct AppState {
     /// An endpoint chosen in the server browser, handed to the login screen to
     /// prefill on its next mount (then cleared).
     pub pending_endpoint: RwSignal<Option<String>>,
+    pub pending_login: RwSignal<Option<String>>,
+    pub pending_bookmark: RwSignal<Option<String>>,
     /// Why the connect form is open, when it is open because something went
     /// wrong ("Your session on Wonderland expired. Sign in again."). Shown
     /// once by the form, then cleared.
@@ -266,6 +279,7 @@ impl AppState {
             caps: create_rw_signal(0),
             handle: create_rw_signal(String::new()),
             ready: create_rw_signal(0),
+            authenticated: create_rw_signal(false),
             live: create_rw_signal(false),
             server_theme: create_rw_signal(None),
             name: create_rw_signal(None),
@@ -315,6 +329,8 @@ impl AppState {
             }),
             probes: create_rw_signal(Default::default()),
             pending_endpoint: create_rw_signal(None),
+            pending_login: create_rw_signal(None),
+            pending_bookmark: create_rw_signal(None),
             pending_notice: create_rw_signal(None),
             confirm: create_rw_signal(None),
             sending: create_rw_signal(None),
@@ -346,31 +362,29 @@ impl AppState {
         self.focused()
     }
 
-    /// Ask the focused burrow for what a pane shows: now, and again each
-    /// time that burrow is signed in to.
-    ///
-    /// A pane that asks only when it opens keeps showing what was true
-    /// before a dropped socket, and anything it asked for died with that
-    /// socket. The first ask is made straight away, as a pane always has;
-    /// later ones are put off a tick, because a sign-in is announced from
-    /// inside the socket's own sink, where sending again panics and leaves
-    /// the socket borrowed for good.
-    ///
-    /// The demo burrow is never signed in to, so it is asked once.
+    /// Ask a pane again after each sign-in. A live socket opening is not yet
+    /// a session: wait for AuthOk before the first read and after reconnect.
+    /// Defer live reads because authentication is announced inside the socket
+    /// callback; demo reads remain immediate and need no authentication.
     pub fn each_sign_in(&self, ask: impl Fn() + 'static) {
         let app = *self;
         let ask = std::rc::Rc::new(ask);
-        create_effect(move |was: Option<u64>| {
-            let now = app.focused_tracked().ready.get();
-            match was {
-                None => ask(),
-                Some(before) if before != now => {
+        create_effect(move |was: Option<Option<u64>>| {
+            let session = app.focused_tracked();
+            let live = session.live.get();
+            if live && !session.authenticated.get() {
+                return None;
+            }
+            let now = session.ready.get();
+            if was != Some(Some(now)) {
+                if live {
                     let ask = ask.clone();
                     defer(move || ask());
+                } else {
+                    ask();
                 }
-                _ => {}
             }
-            now
+            Some(now)
         });
     }
 
@@ -555,6 +569,7 @@ impl AppState {
                 caps: create_rw_signal(0),
                 handle: create_rw_signal(String::new()),
                 ready: create_rw_signal(0),
+                authenticated: create_rw_signal(false),
                 live: create_rw_signal(false),
                 server_theme: create_rw_signal(None),
                 name: create_rw_signal(None),
@@ -681,20 +696,135 @@ impl AppState {
     /// Open a live session to `endpoint`, authenticating with a fresh password.
     #[cfg(target_arch = "wasm32")]
     pub fn connect_live(&self, endpoint: String, login: String, password: String) {
-        self.connect_with(endpoint, AuthMethod::Password { login, password });
+        self.connect_live_bookmarked(endpoint, login, password, false, None);
+    }
+
+    pub fn connect_live_bookmarked(
+        &self,
+        endpoint: String,
+        login: String,
+        password: String,
+        save: bool,
+        bookmark_id: Option<String>,
+    ) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let login = login.trim().to_string();
+            let bookmark = self.bookmarks.with_untracked(|list| {
+                bookmark_id
+                    .as_deref()
+                    .and_then(|id| crate::bookmarks::by_id(list, id))
+                    .filter(|b| {
+                        crate::bookmarks::credential_endpoint(&b.endpoint)
+                            == crate::bookmarks::credential_endpoint(&endpoint)
+                            && b.login
+                                .as_ref()
+                                .is_none_or(|saved| saved.eq_ignore_ascii_case(&login))
+                    })
+                    .or_else(|| crate::bookmarks::find_account(list, &endpoint, &login))
+                    .or_else(|| {
+                        list.iter().find(|b| {
+                            b.login.is_none()
+                                && crate::bookmarks::credential_endpoint(&b.endpoint)
+                                    == crate::bookmarks::credential_endpoint(&endpoint)
+                        })
+                    })
+                    .cloned()
+            });
+            let account_login = (!password.is_empty()).then(|| login.clone());
+            self.connect_with(
+                endpoint,
+                AuthMethod::Password { login, password },
+                SignInMemory {
+                    login: account_login,
+                    keep_recent: save,
+                    save_bookmark: save,
+                    bookmark,
+                    saved_once: false,
+                },
+            );
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (endpoint, login, password, save, bookmark_id);
+            self.focused().live.set(true);
+        }
+    }
+
+    pub fn connect_bookmark(&self, id: &str, keep: bool) {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(bookmark) = self
+            .bookmarks
+            .with_untracked(|list| crate::bookmarks::by_id(list, id).cloned())
+        {
+            if let Some(token) = bookmark.token.clone() {
+                self.connect_with(
+                    bookmark.endpoint.clone(),
+                    AuthMethod::Resume { token },
+                    SignInMemory {
+                        login: bookmark.login.clone(),
+                        keep_recent: keep,
+                        save_bookmark: keep,
+                        bookmark: Some(bookmark),
+                        saved_once: false,
+                    },
+                );
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = (id, keep);
     }
 
     /// Auto-reconnect to `endpoint` by resuming a persisted session `token` — no
     /// password needed. Used on launch to restore your burrows.
     #[cfg(target_arch = "wasm32")]
     pub fn reconnect_live(&self, endpoint: String, token: String) {
-        self.connect_with(endpoint, AuthMethod::Resume { token });
+        let bookmark = self.bookmarks.with_untracked(|list| {
+            list.iter()
+                .find(|b| {
+                    b.token.as_ref() == Some(&token)
+                        && crate::bookmarks::credential_endpoint(&b.endpoint)
+                            == crate::bookmarks::credential_endpoint(&endpoint)
+                })
+                .cloned()
+        });
+        let login = bookmark.as_ref().and_then(|b| b.login.clone()).or_else(|| {
+            crate::recent::load()
+                .into_iter()
+                .find(|b| {
+                    b.token.as_ref() == Some(&token)
+                        && crate::bookmarks::credential_endpoint(&b.endpoint)
+                            == crate::bookmarks::credential_endpoint(&endpoint)
+                })
+                .map(|b| b.handle)
+        });
+        self.connect_with(
+            endpoint,
+            AuthMethod::Resume { token },
+            SignInMemory {
+                login,
+                keep_recent: true,
+                save_bookmark: bookmark.is_some(),
+                bookmark,
+                saved_once: false,
+            },
+        );
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn connect_with(&self, endpoint: String, auth: AuthMethod) {
+    fn connect_with(&self, endpoint: String, auth: AuthMethod, memory: SignInMemory) {
         use crate::wire::EventClient;
         use rabbithole_core::api::{Command, Event};
+        let endpoint = crate::bookmarks::credential_endpoint(&endpoint).unwrap_or(endpoint);
+        let memory = std::rc::Rc::new(std::cell::RefCell::new(memory));
+        // Accounts share one active connection per burrow. Switching accounts
+        // must drop the old account's data and permissions before opening it.
+        if self
+            .sessions
+            .with_untracked(|list| list.iter().any(|(sid, _)| sid.0 == endpoint))
+        {
+            self.disconnect(&ServerId(endpoint.clone()));
+        }
         // Give this live server its own session (keyed by endpoint) + focus it,
         // so the offline demo and any other burrows stay put. Everything below
         // then binds to the new session via `self.focused()`.
@@ -711,20 +841,14 @@ impl AppState {
         let my_caps = self.focused().caps;
         let my_login = self.focused().handle;
         let session_ready = self.focused().ready;
+        let session_authenticated = self.focused().authenticated;
         let session_seen = self.focused().seen;
         let presence = self.presence;
         let ws_sv = self.focused().ws;
         // Endpoint captured for both the "connected" toast/label and, on a
         // successful auth, persisting the resume token + handle for next launch.
         let ep = endpoint.clone();
-        // Tracks whether this session authenticated, so a failure *before* auth
-        // (an expired/invalid resume token) can drop the dead token and toast —
-        // rather than leaving the burrow connected-but-unauthenticated forever.
-        let authed = std::rc::Rc::new(std::cell::Cell::new(false));
         let resuming = matches!(auth, AuthMethod::Resume { .. });
-        // A refused sign-in signs the burrow out exactly once, even though
-        // the requests queued behind it fail too.
-        let signed_out = std::rc::Rc::new(std::cell::Cell::new(false));
         let so_app = *self;
         let so_name = self.focused().name;
         // Our own handle on this burrow (from AuthOk), so a chat line echoed back
@@ -752,6 +876,49 @@ impl AppState {
             ws.on_theme(std::rc::Rc::new(move |overlay| {
                 theme_session.set_server_theme(overlay);
             }));
+            let failure_endpoint = endpoint.clone();
+            let failure_memory = memory.clone();
+            ws.on_auth_failure(std::rc::Rc::new(move |failure| {
+                let id = ServerId(failure_endpoint.clone());
+                let failure_memory = failure_memory.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    // The rejected attempt may already have been replaced or
+                    // disconnected by the time this deferred callback runs.
+                    let same_session = so_app.sessions.with_untracked(|list| {
+                        list.iter()
+                            .any(|(sid, session)| *sid == id && session.ws == ws_sv)
+                    });
+                    if !same_session
+                        || !ws_sv
+                            .try_with_value(|c| c.auth_failure_is_current(failure))
+                            .unwrap_or(false)
+                    {
+                        return;
+                    }
+                    let burrow = so_name
+                        .get_untracked()
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| server_label(&id));
+                    let notice = if resuming && failure.code == rabbithole_proto::ErrorCode::SessionExpired {
+                        if let Some(login) = &failure_memory.borrow().login {
+                            crate::recent::remember_account_token(&id.0, login, "");
+                        }
+                        if let Some(bookmark) = &failure_memory.borrow().bookmark {
+                            so_app.forget_bookmark_signin(&bookmark.id);
+                        }
+                        format!("Your session on {burrow} expired. Sign in again.")
+                    } else if resuming {
+                        format!("{burrow} could not resume this sign-in ({:?}). Your saved sign-in has been kept; try again.", failure.code)
+                    } else if failure.code == rabbithole_proto::ErrorCode::Unauthenticated {
+                        format!("{burrow} didn’t accept that handle and password.")
+                    } else {
+                        format!("{burrow} didn’t accept that sign-in ({:?}).", failure.code)
+                    };
+                    so_app.pending_login.set(failure_memory.borrow().login.clone());
+                    so_app.pending_bookmark.set(failure_memory.borrow().bookmark.as_ref().map(|b| b.id.clone()));
+                    so_app.sign_out(&id, notice);
+                });
+            }));
             ws.on_event(std::rc::Rc::new(move |event| {
                 match &event {
                     Event::Connected { server_name, .. } => {
@@ -766,9 +933,8 @@ impl AppState {
                                 format!("Connected to {name}"),
                             );
                         });
-                        // Authenticate once the handshake lands. We can't dispatch
-                        // from inside the transport's own borrow, so defer to the
-                        // next microtask. Password sign-in or token resume.
+                        // The transport defers this under its own borrow and
+                        // captures the socket generation before doing so.
                         let cmd = match &auth {
                             AuthMethod::Password { login, password } if !login.is_empty() => {
                                 Some(Command::SignIn {
@@ -784,26 +950,7 @@ impl AppState {
                             _ => None,
                         };
                         if let Some(cmd) = cmd {
-                            wasm_bindgen_futures::spawn_local(async move {
-                                ws_sv.update_value(|c| {
-                                    c.dispatch(cmd);
-                                    // Pull the initial roster once signed in.
-                                    c.request_who();
-                                    // …and the burrow's front page (its welcome
-                                    // screen: featured item, who's on, ticker).
-                                    c.request_front_page();
-                                    // …and what is on the air, and where: the
-                                    // stream address is the burrow's to say.
-                                    c.request_radio_stations();
-                                    // …and which rooms there are. A pane that
-                                    // asks when it opens can be opened before
-                                    // the socket is up, and then it is a
-                                    // burrow with one room in it, for ever.
-                                    c.dispatch_room(&crate::wire::RoomCommand::List);
-                                    // This burrow inherits the user's current status.
-                                    c.set_presence(presence.get_untracked(), None);
-                                });
-                            });
+                            ws_sv.with_value(|c| c.authenticate(cmd));
                         }
                     }
                     Event::Authenticated {
@@ -812,12 +959,16 @@ impl AppState {
                         role,
                         caps,
                     } => {
-                        authed.set(true);
                         // Authentication automatically joins the lobby. Other
                         // rooms must accept a fresh join on this socket before
                         // the transport requests their private scrollback.
                         wasm_bindgen_futures::spawn_local(async move {
                             ws_sv.with_value(|c| {
+                                c.request_who();
+                                c.request_front_page();
+                                c.request_radio_stations();
+                                c.dispatch_room(&crate::wire::RoomCommand::List);
+                                c.set_presence(presence.get_untracked(), None);
                                 c.request_chat_history(crate::client::LOBBY);
                                 let here = state.with_untracked(|s| s.room().to_string());
                                 if here != crate::client::LOBBY {
@@ -846,11 +997,8 @@ impl AppState {
                         // conversation list, get Forbidden, and offer a
                         // "Try again" that could never work.
                         is_guest.set(crate::state::role_is_guest(*role));
-                        // Persist the session so a reload auto-reconnects: the
-                        // handle (from the persona) + the resume token (empty for
-                        // guests → cleared). Never the password.
-                        crate::recent::remember(&ep, screen_name);
-                        crate::recent::remember_token(&ep, token);
+                        session_authenticated.set(true);
+                        so_app.remember_authenticated(&ep, screen_name, token, &mut memory.borrow_mut());
                         // In the desktop shell, give the in-process swarm core its
                         // own session to this burrow so downloads can resolve
                         // sources + tickets and fetch multi-source. No-op on web.
@@ -895,32 +1043,6 @@ impl AppState {
                             crate::sound::play(crate::sound::Chime::Chat);
                         }
                     }
-                    Event::CommandFailed { detail } if !authed.get() && !signed_out.get() => {
-                        // A refused password or a dead resume token. The socket
-                        // is up but nothing works: the header kept saying
-                        // "Online", every panel shimmered, a toast per failed
-                        // retry stacked up, and the only way to a sign-in was
-                        // Leave. Sign the burrow out and open the connect form
-                        // with the reason. Deferred: this runs inside the
-                        // transport's own event dispatch.
-                        signed_out.set(true);
-                        let burrow = so_name
-                            .get_untracked()
-                            .filter(|n| !n.is_empty())
-                            .unwrap_or_else(|| server_label(&ServerId(ep.clone())));
-                        let notice = if resuming {
-                            crate::recent::remember_token(&ep, "");
-                            format!("Your session on {burrow} expired. Sign in again.")
-                        } else if detail.contains("Unauthenticated") {
-                            format!("{burrow} didn\u{2019}t accept that handle and password.")
-                        } else {
-                            format!("{burrow} didn\u{2019}t accept that sign-in ({detail}).")
-                        };
-                        let id = ServerId(ep.clone());
-                        wasm_bindgen_futures::spawn_local(async move {
-                            so_app.sign_out(&id, notice);
-                        });
-                    }
                     _ => {}
                 }
                 if !matches!(event, Event::ChatMessage { .. }) {
@@ -928,6 +1050,9 @@ impl AppState {
                 }
             }));
             ws.on_conn(std::rc::Rc::new(move |c| {
+                if c != crate::conn::ConnState::Online {
+                    session_authenticated.set(false);
+                }
                 // Toast the drop edge exactly once (Online → Reconnecting);
                 // every backoff attempt re-emits Reconnecting, so guard on the
                 // transition to avoid spamming.
@@ -1410,6 +1535,85 @@ impl AppState {
         let _ = on;
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn remember_authenticated(
+        &self,
+        endpoint: &str,
+        screen_name: &str,
+        token: &str,
+        memory: &mut SignInMemory,
+    ) {
+        let Some(login) = memory.login.as_deref() else {
+            crate::recent::remember(endpoint, screen_name);
+            crate::recent::remember_token(endpoint, "");
+            return;
+        };
+        crate::recent::remember_login(endpoint, login);
+        // A removed bookmark or deliberately forgotten credential stays gone,
+        // even if an earlier sign-in/reconnect completes afterward. Renames are
+        // harmless and are kept by upsert rather than overwritten.
+        let still_current = memory
+            .bookmark
+            .as_ref()
+            .map(|before| {
+                self.bookmarks.with_untracked(|list| {
+                    crate::bookmarks::by_id(list, &before.id).is_some_and(|now| {
+                        now.endpoint == before.endpoint
+                            && now.login == before.login
+                            && now.token == before.token
+                    })
+                })
+            })
+            .unwrap_or(!memory.saved_once || !memory.save_bookmark);
+        if !still_current {
+            return;
+        }
+        let mut keep_recent = memory.keep_recent;
+        if memory.save_bookmark && !token.is_empty() {
+            let name = if memory.bookmark.is_some() {
+                String::new()
+            } else {
+                self.session_at(endpoint)
+                    .and_then(|session| session.name.get_untracked())
+                    .unwrap_or_default()
+            };
+            match crate::bookmarks::upsert_account(
+                self.bookmarks.get_untracked(),
+                endpoint,
+                login,
+                &name,
+                token,
+            ) {
+                Ok((list, id)) => {
+                    let saved = crate::bookmarks::by_id(&list, &id).cloned();
+                    if self.store_bookmarks(list) {
+                        memory.bookmark = saved;
+                    } else {
+                        keep_recent = false;
+                    }
+                }
+                Err(error) => {
+                    keep_recent = false;
+                    self.notify(
+                        crate::toasts::ToastKind::Warn,
+                        format!(
+                            "Signed in, but the bookmark was not saved. {}",
+                            error.message()
+                        ),
+                    );
+                }
+            }
+        } else if !memory.keep_recent {
+            if let Some(bookmark) = &memory.bookmark {
+                self.forget_bookmark_signin(&bookmark.id);
+            }
+        }
+        memory.saved_once = true;
+        if keep_recent {
+            crate::recent::remember_account_token(endpoint, login, token);
+        }
+    }
+
     /// Keep a burrow. `Err` says why not, in words for the person.
     pub fn add_bookmark(
         &self,
@@ -1424,21 +1628,42 @@ impl AppState {
     }
 
     /// Stop keeping a burrow.
-    pub fn remove_bookmark(&self, endpoint: &str) {
-        let list = crate::bookmarks::remove(self.bookmarks.get_untracked(), endpoint);
+    pub fn remove_bookmark(&self, id: &str) {
+        self.forget_bookmark_signin(id);
+        let list = crate::bookmarks::remove(self.bookmarks.get_untracked(), id);
         self.store_bookmarks(list);
+    }
+
+    pub fn forget_bookmark_signin(&self, id: &str) {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(bookmark) = self
+            .bookmarks
+            .with_untracked(|list| crate::bookmarks::by_id(list, id).cloned())
+        {
+            if let Some(login) = bookmark.login.as_deref() {
+                crate::recent::remember_account_token(&bookmark.endpoint, login, "");
+            }
+        }
+        self.store_bookmarks(crate::bookmarks::clear_token(
+            self.bookmarks.get_untracked(),
+            id,
+        ));
     }
 
     /// Call a kept burrow something else.
-    pub fn rename_bookmark(&self, endpoint: &str, name: &str) {
-        let list = crate::bookmarks::rename(self.bookmarks.get_untracked(), endpoint, name);
+    pub fn rename_bookmark(&self, id: &str, name: &str) {
+        let list = crate::bookmarks::rename(self.bookmarks.get_untracked(), id, name);
         self.store_bookmarks(list);
     }
 
-    fn store_bookmarks(&self, list: Vec<crate::bookmarks::Bookmark>) {
+    fn store_bookmarks(&self, list: Vec<crate::bookmarks::Bookmark>) -> bool {
         #[cfg(target_arch = "wasm32")]
-        crate::bookmarks::save(&list);
+        if let Err(error) = crate::bookmarks::save(&list) {
+            self.notify(crate::toasts::ToastKind::Warn, error);
+            return false;
+        }
         self.bookmarks.set(list);
+        true
     }
 
     /// Knock on these burrows and record who answered. A place reads
@@ -1512,10 +1737,12 @@ impl AppState {
         }
     }
 
-    /// Whether the session is currently live-connected. Reactive (reads the
-    /// conn signal), so views can gate composers on it.
+    /// Whether this session can send commands. An open transport still needs
+    /// AuthOk before a live composer may submit and clear its draft.
     pub fn online(&self) -> bool {
-        self.focused().state.with(|s| s.conn.is_live())
+        let session = self.focused();
+        session.state.with(|s| s.conn.is_live())
+            && (!session.live.get() || session.authenticated.get())
     }
 
     /// Send a lobby chat line — over the live socket when connected, else
@@ -1592,6 +1819,7 @@ impl AppState {
                 caps: create_rw_signal(0),
                 handle: create_rw_signal(String::new()),
                 ready: create_rw_signal(0),
+                authenticated: create_rw_signal(false),
                 live: create_rw_signal(false),
                 server_theme: create_rw_signal(None),
                 name: create_rw_signal(Some(demo.name.to_string())),

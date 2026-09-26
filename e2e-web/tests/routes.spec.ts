@@ -67,6 +67,7 @@ test("deep links and hard reloads boot the SPA without a service worker", async 
     await page.locator("#rh-login-server").fill(server.wsURL);
     await page.locator("#rh-login-handle").fill("theme-viewer");
     await page.locator("#rh-login-password").fill("theme-e2e-password");
+    await page.getByLabel("Save sign-in to bookmark").check();
     await page.locator('.rh-login button[type="submit"]').click();
     await expect.poll(() => auth.password).toBeGreaterThan(0);
     await expect.poll(() => auth.accepted).toBeGreaterThan(0);

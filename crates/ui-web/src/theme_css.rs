@@ -750,6 +750,10 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 .rh-login label{margin-top:var(--rh-space-2);font-size:var(--rh-font-sm);font-weight:600;color:var(--rh-text)}\
 .rh-login label:first-child{margin-top:0}\
 .rh-login .rh-input{width:100%}\
+.rh-login .rh-login-save{display:flex;align-items:flex-start;gap:var(--rh-space-2);line-height:1.4;cursor:pointer}\
+.rh-login-save input{flex:none;margin:.2em 0 0;accent-color:var(--rh-accent)}\
+.rh-login-saved{margin-top:var(--rh-space-2);padding:var(--rh-space-2) 0;border-block:1px solid color-mix(in srgb,var(--rh-text) 14%,transparent);font-size:var(--rh-font-sm)}\
+.rh-login-saved p{margin:0 0 var(--rh-space-2)}\
 .rh-login-address{font-family:var(--rh-font-mono);font-size:var(--rh-font-sm);font-variant-numeric:slashed-zero}\
 .rh-connect .rh-input{caret-color:var(--rh-brand)}\
 .rh-connect .rh-input:focus{border-color:var(--rh-brand);box-shadow:0 0 0 3px color-mix(in srgb,var(--rh-brand) 24%,transparent)}\

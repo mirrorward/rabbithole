@@ -143,6 +143,108 @@ pub trait EventClient {
     fn dispatch(&mut self, command: Command);
 }
 
+/// Only the current authentication request may accept or refuse a sign-in.
+/// Ordinary command errors and push sequence numbers share the same wire, but
+/// are never evidence that a password or resume token was rejected.
+#[derive(Debug, Default)]
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) struct AuthTracker {
+    generation: u64,
+    pending: Option<(RequestId, rabbithole_proto::Family, u16)>,
+    authenticated: bool,
+    failure: Option<AuthFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) struct AuthFailure {
+    pub generation: u64,
+    pub request: RequestId,
+    pub code: rabbithole_proto::ErrorCode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) enum AuthReply {
+    Unrelated,
+    Accepted,
+    Refused(AuthFailure),
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl AuthTracker {
+    pub(crate) fn reset(&mut self, generation: u64) {
+        *self = Self {
+            generation,
+            ..Self::default()
+        };
+    }
+
+    pub(crate) fn begin(&mut self, generation: u64, frame: &Frame) {
+        if self.generation == generation {
+            self.pending = Some((frame.id, frame.family, frame.message_type));
+            self.authenticated = false;
+            self.failure = None;
+        }
+    }
+
+    pub(crate) fn authenticated(&self) -> bool {
+        self.authenticated
+    }
+
+    /// A deferred refusal must not sign out a replacement socket or attempt.
+    pub(crate) fn failure_is_current(&self, failure: AuthFailure) -> bool {
+        self.failure == Some(failure) && !self.authenticated
+    }
+
+    pub(crate) fn reply(&mut self, generation: u64, frame: &Frame) -> AuthReply {
+        if self.generation != generation || frame.kind != rabbithole_proto::FrameKind::Reply {
+            return AuthReply::Unrelated;
+        }
+        let Some((id, family, message_type)) = self.pending else {
+            return AuthReply::Unrelated;
+        };
+        if frame.id != id {
+            return AuthReply::Unrelated;
+        }
+        if let Some(code) = frame.error {
+            if frame.family != family || frame.message_type != message_type {
+                return AuthReply::Unrelated;
+            }
+            let failure = AuthFailure {
+                generation,
+                request: id,
+                code,
+            };
+            self.pending = None;
+            self.failure = Some(failure);
+            return AuthReply::Refused(failure);
+        }
+        if matches!(
+            frame.decode::<rabbithole_proto::session::AuthOk>(),
+            Some(Ok(_))
+        ) {
+            self.pending = None;
+            self.authenticated = true;
+            self.failure = None;
+            return AuthReply::Accepted;
+        }
+        AuthReply::Unrelated
+    }
+}
+
+/// Recognize late/duplicate authentication replies so they never leak into
+/// ordinary command reducers after their tracked attempt has ended.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn is_auth_reply(frame: &Frame) -> bool {
+    use rabbithole_proto::session::{AuthGuest, AuthOk, AuthResume};
+    frame.decode::<AuthOk>().is_some()
+        || (frame.error.is_some()
+            && (frame.decode::<AuthPassword>().is_some()
+                || frame.decode::<AuthGuest>().is_some()
+                || frame.decode::<AuthResume>().is_some()))
+}
+
 /// Build the [`Hello`] request frame that opens every RHP session.
 pub fn hello_request(id: RequestId, pubkey: Option<[u8; 32]>) -> Result<Frame, ProtoError> {
     let capabilities = CapabilitySet(vec![rabbithole_proto::hello::Capability::new(
@@ -2788,6 +2890,80 @@ mod tests {
         assert!(command_to_frame(&Command::Disconnect, RequestId(1))
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn authentication_ignores_unrelated_errors_and_push_ids_before_accepting_its_reply() {
+        use rabbithole_proto::session::AuthOk;
+        let request = Frame::request(RequestId(7), &AuthPassword::new("alice", "test")).unwrap();
+        let ok = AuthOk::new("token", 1, "alice", 1, 0, false);
+        let mut auth = AuthTracker::default();
+        auth.reset(4);
+        auth.begin(4, &request);
+        assert!(!auth.authenticated());
+
+        // A pane's earlier refusal cannot turn a correct password into a
+        // failed sign-in, even if a malformed reply reuses the auth id.
+        for id in [RequestId(6), request.id] {
+            let room = Frame::request(id, &rabbithole_proto::chat::RoomListRequest).unwrap();
+            let refused = Frame::error_reply(&room, ErrorCode::Unauthenticated);
+            assert_eq!(auth.reply(4, &refused), AuthReply::Unrelated);
+            assert!(!is_auth_reply(&refused));
+        }
+        let mut push = Frame::push(&ok).unwrap();
+        push.id = request.id;
+        assert_eq!(auth.reply(4, &push), AuthReply::Unrelated);
+        assert!(!auth.authenticated());
+
+        let accepted = Frame::reply_to(&request, &ok).unwrap();
+        assert_eq!(auth.reply(4, &accepted), AuthReply::Accepted);
+        assert!(auth.authenticated());
+        assert_eq!(auth.reply(4, &accepted), AuthReply::Unrelated);
+        let late = Frame::error_reply(&request, ErrorCode::Unauthenticated);
+        assert_eq!(auth.reply(4, &late), AuthReply::Unrelated);
+        assert!(is_auth_reply(&late));
+        assert!(auth.authenticated());
+    }
+
+    #[test]
+    fn authentication_refusal_belongs_only_to_the_current_attempt_and_generation() {
+        use rabbithole_proto::session::{AuthOk, AuthResume};
+        let request = Frame::request(RequestId(2), &AuthResume::new("expired", 0)).unwrap();
+        let mut auth = AuthTracker::default();
+        auth.reset(1);
+        auth.begin(1, &request);
+        let refused = Frame::error_reply(&request, ErrorCode::SessionExpired);
+        let AuthReply::Refused(failure) = auth.reply(1, &refused) else {
+            panic!("correlated refusal")
+        };
+        assert!(auth.failure_is_current(failure));
+        assert!(!auth.authenticated());
+        assert_eq!(auth.reply(1, &refused), AuthReply::Unrelated);
+
+        // Retrying before a deferred sign-out executes revokes that callback.
+        let newer = Frame::request(RequestId(3), &AuthPassword::new("alice", "new")).unwrap();
+        auth.begin(1, &newer);
+        assert!(!auth.failure_is_current(failure));
+        assert_eq!(auth.reply(1, &refused), AuthReply::Unrelated);
+        let ok = AuthOk::new("fresh", 1, "alice", 1, 0, false);
+        assert_eq!(
+            auth.reply(1, &Frame::reply_to(&newer, &ok).unwrap()),
+            AuthReply::Accepted
+        );
+        assert!(auth.authenticated());
+
+        // Reconnect revokes readiness and every old socket's response, even
+        // when a new transport happens to allocate the same request id.
+        auth.reset(2);
+        assert!(!auth.authenticated());
+        auth.begin(2, &request);
+        assert_eq!(auth.reply(1, &refused), AuthReply::Unrelated);
+        let AuthReply::Refused(current) = auth.reply(2, &refused) else {
+            panic!("new socket refusal")
+        };
+        assert!(auth.failure_is_current(current));
+        auth.reset(2); // a deliberate close also revokes the deferred callback
+        assert!(!auth.failure_is_current(current));
     }
 
     #[test]

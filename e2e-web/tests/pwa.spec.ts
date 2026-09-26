@@ -26,6 +26,7 @@ async function guest(page: Page, server: TestBurrow, handle: string) {
   await page.locator("#rh-login-server").fill(server.wsURL);
   await page.locator("#rh-login-handle").fill(handle);
   await page.locator("#rh-login-password").fill("");
+  await page.getByLabel("Save sign-in to bookmark").check();
   await page.locator('.rh-login button[type="submit"]').click();
   await expect(page.getByRole("textbox", { name: "Message #lobby", exact: true })).toBeVisible();
   await expect(page.locator(".rh-header .rh-title-text")).toHaveText(server.name);

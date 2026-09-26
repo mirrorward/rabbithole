@@ -2096,6 +2096,9 @@ struct Browsing {
     endpoint: RwSignal<String>,
     /// The connect form's handle; a saved burrow brings its own.
     handle: RwSignal<String>,
+    /// Account bookmarks have their own selection even at the same address.
+    selected_bookmark: RwSignal<Option<String>>,
+    on_pick: Option<Callback<()>>,
     /// The burrows signed into before, so "Forget" can take one off the shelf.
     recent: RwSignal<Vec<crate::recent::RecentBurrow>>,
     /// Connect to the selected burrow now.
@@ -2119,6 +2122,8 @@ fn GlassRow(row: crate::connect::Row, browsing: Browsing) -> impl IntoView {
     let Browsing {
         endpoint,
         handle,
+        selected_bookmark,
+        on_pick,
         recent,
         on_open,
         standalone,
@@ -2127,18 +2132,38 @@ fn GlassRow(row: crate::connect::Row, browsing: Browsing) -> impl IntoView {
     let name = store_value(row.name.clone());
     let saved_handle = store_value(match &row.shelf {
         Shelf::Yours { handle } => Some(handle.clone()),
-        Shelf::Bookmark { handle } => handle.clone(),
+        Shelf::Bookmark { handle, .. } => handle.clone(),
         _ => None,
     });
-    let selected =
-        move || place.with_value(|p| endpoint.with(|e| crate::connect::same_place(e, p)));
-    let pick = move || {
-        if !selected() {
-            endpoint.set(place.get_value());
+    let bookmark_id = store_value(match &row.shelf {
+        Shelf::Bookmark { bookmark_id, .. } => Some(bookmark_id.clone()),
+        _ => None,
+    });
+    let selected = move || {
+        if let Some(id) = bookmark_id.get_value() {
+            selected_bookmark.get().as_ref() == Some(&id)
+        } else {
+            selected_bookmark.get().is_none()
+                && place.with_value(|p| endpoint.with(|e| crate::connect::same_place(e, p)))
+                && saved_handle.with_value(|saved| {
+                    saved
+                        .as_ref()
+                        .is_none_or(|h| handle.with(|v| v.eq_ignore_ascii_case(h)))
+                })
         }
+    };
+    let pick = move || {
+        let changed = !selected();
+        endpoint.set(place.get_value());
+        selected_bookmark.set(bookmark_id.get_value());
         if let Some(h) = saved_handle.get_value() {
             if handle.with_untracked(|now| *now != h) {
                 handle.set(h);
+            }
+        }
+        if changed {
+            if let Some(on_pick) = on_pick {
+                on_pick.call(());
             }
         }
     };
@@ -2263,10 +2288,30 @@ fn GlassRow(row: crate::connect::Row, browsing: Browsing) -> impl IntoView {
                                         <button
                                             type="button"
                                             class="rh-btn ghost small"
-                                            on:click=move |_| place.with_value(|p| app.remove_bookmark(p))
+                                            on:click=move |_| {
+                                                if let Some(id) = bookmark_id.get_value() {
+                                                    app.remove_bookmark(&id);
+                                                    selected_bookmark.set(None);
+                                                    if let Some(on_pick) = on_pick { on_pick.call(()); }
+                                                }
+                                            }
                                         >
                                             "Remove bookmark"
                                         </button>
+                                        <Show when=move || matches!(shelf.get_value(), Shelf::Bookmark { saved_signin: true, .. })>
+                                            <button type="button" class="rh-btn ghost small" on:click=move |_| {
+                                                if let Some(id) = bookmark_id.get_value() {
+                                                    app.forget_bookmark_signin(&id);
+                                                    if let Some(on_pick) = on_pick { on_pick.call(()); }
+                                                }
+                                            }>"Forget saved sign-in"</button>
+                                        </Show>
+                                        <Show when=move || !standalone><button type="button" class="rh-btn ghost small" on:click=move |_| {
+                                            selected_bookmark.set(None);
+                                            handle.set(String::new());
+                                            if let Some(on_pick) = on_pick { on_pick.call(()); }
+                                            crate::a11y::focus_id(a11y::LOGIN_HANDLE_ID);
+                                        }>"Use another account"</button></Show>
                                     }
                                     .into_view(),
                                     Shelf::Yours { .. } => view! {
@@ -2298,7 +2343,9 @@ fn GlassRow(row: crate::connect::Row, browsing: Browsing) -> impl IntoView {
                             class="rh-glass-rename"
                             on:submit=move |ev: leptos::ev::SubmitEvent| {
                                 ev.prevent_default();
-                                place.with_value(|p| app.rename_bookmark(p, &new_name.get_untracked()));
+                                if let Some(id) = bookmark_id.get_value() {
+                                    app.rename_bookmark(&id, &new_name.get_untracked());
+                                }
                                 renaming.set(false);
                             }
                         >
@@ -2357,8 +2404,10 @@ fn GlassShelf(
 fn BurrowBrowser(
     endpoint: RwSignal<String>,
     handle: RwSignal<String>,
+    selected_bookmark: RwSignal<Option<String>>,
     recent: RwSignal<Vec<crate::recent::RecentBurrow>>,
     #[prop(into)] on_open: Callback<()>,
+    #[prop(optional)] on_pick: Option<Callback<()>>,
     #[prop(optional)] standalone: bool,
 ) -> impl IntoView {
     let burrows_node = crate::keynav::track_removal(".rh-glass-row");
@@ -2367,6 +2416,8 @@ fn BurrowBrowser(
     let browsing = Browsing {
         endpoint,
         handle,
+        selected_bookmark,
+        on_pick,
         recent,
         on_open,
         standalone,
@@ -2469,6 +2520,10 @@ fn BurrowBrowser(
         match app.add_bookmark(&add_address.get_untracked(), &add_name.get_untracked()) {
             Ok(()) => {
                 endpoint.set(add_address.get_untracked().trim().to_string());
+                selected_bookmark.set(None);
+                if let Some(on_pick) = on_pick {
+                    on_pick.call(());
+                }
                 adding.set(false);
             }
             Err(why) => add_error.set(Some(why.message())),
@@ -2658,8 +2713,73 @@ pub fn Login() -> impl IntoView {
     // signal set in one component and read by another during the same
     // navigation races the new component's first read.
     let query = leptos_router::use_query_map();
-    let handle = create_rw_signal(last.as_ref().map(|b| b.handle.clone()).unwrap_or_default());
+    let handle = create_rw_signal(
+        app.pending_login
+            .get_untracked()
+            .or_else(|| last.as_ref().map(|b| b.handle.clone()))
+            .unwrap_or_default(),
+    );
+    let selected_bookmark = create_rw_signal(app.pending_bookmark.get_untracked().or_else(|| {
+        app.bookmarks.with_untracked(|list| {
+            crate::bookmarks::find_account(list, &endpoint.get_untracked(), &handle.get_untracked())
+                .map(|b| b.id.clone())
+        })
+    }));
+    let password = create_rw_signal(String::new());
+    let use_password = create_rw_signal(false);
+    let save_signin = create_rw_signal(selected_bookmark.with_untracked(|id| {
+        id.as_ref().is_some_and(|id| {
+            app.bookmarks.with_untracked(|list| {
+                crate::bookmarks::by_id(list, id).is_some_and(|b| b.token.is_some())
+            })
+        })
+    }));
+    let on_pick = Callback::new(move |()| {
+        password.set(String::new());
+        use_password.set(false);
+        save_signin.set(selected_bookmark.with_untracked(|id| {
+            id.as_ref().is_some_and(|id| {
+                app.bookmarks.with_untracked(|list| {
+                    crate::bookmarks::by_id(list, id).is_some_and(|b| b.token.is_some())
+                })
+            })
+        }));
+        app.pending_notice.set(None);
+    });
+    let saved_signin = move || {
+        if use_password.get() {
+            return None;
+        }
+        selected_bookmark.with(|id| {
+            id.as_ref().and_then(|id| {
+                app.bookmarks.with(|list| {
+                    crate::bookmarks::by_id(list, id)
+                        .filter(|b| {
+                            b.token.is_some()
+                                && b.login.as_ref().is_some_and(|login| {
+                                    login.eq_ignore_ascii_case(handle.get().trim())
+                                })
+                                && crate::bookmarks::credential_endpoint(&b.endpoint)
+                                    == crate::bookmarks::credential_endpoint(&endpoint.get())
+                        })
+                        .map(|b| b.id.clone())
+                })
+            })
+        })
+    };
     create_render_effect(move |_| {
+        if let Some(id) = query.with(|q| q.get("bookmark").cloned()) {
+            if let Some(bookmark) = app
+                .bookmarks
+                .with_untracked(|list| crate::bookmarks::by_id(list, &id).cloned())
+            {
+                endpoint.set(bookmark.endpoint);
+                handle.set(bookmark.login.unwrap_or_default());
+                selected_bookmark.set(Some(id));
+                on_pick.call(());
+                return;
+            }
+        }
         if let Some(ep) = query.with(|q| q.get("server").cloned()) {
             if !ep.is_empty() {
                 // A burrow you have been to brings the handle you used there.
@@ -2670,11 +2790,12 @@ pub fn Login() -> impl IntoView {
                 }) {
                     handle.set(h);
                 }
+                selected_bookmark.set(None);
                 endpoint.set(ep);
+                on_pick.call(());
             }
         }
     });
-    let password = create_rw_signal(String::new());
     let handle_missing = create_rw_signal(false);
     // Whether this is a seeded demo burrow is a fact about the address, so the
     // form asks no "real or demo?" question: a demo row fills in a `demo://`
@@ -2690,6 +2811,8 @@ pub fn Login() -> impl IntoView {
     let go = Callback::new(move |()| {
         app.pending_notice.set(None);
         app.pending_endpoint.set(None);
+        app.pending_login.set(None);
+        app.pending_bookmark.set(None);
         let place = endpoint.get_untracked();
         if place.trim().is_empty() {
             crate::a11y::focus_id(a11y::LOGIN_SERVER_ID);
@@ -2708,7 +2831,17 @@ pub fn Login() -> impl IntoView {
             // Live: open a real socket + authenticate; state fills from
             // transport events (the handshake sets the header to Online, and
             // the lobby fills with live chat once signed in).
-            app.connect_live(place, who, password.get_untracked());
+            if let Some(id) = saved_signin() {
+                app.connect_bookmark(&id, save_signin.get_untracked());
+            } else {
+                app.connect_live_bookmarked(
+                    place,
+                    who,
+                    password.get_untracked(),
+                    save_signin.get_untracked(),
+                    selected_bookmark.get_untracked(),
+                );
+            }
             navigate("/lobby", Default::default());
             return;
         }
@@ -2748,6 +2881,14 @@ pub fn Login() -> impl IntoView {
 
     // The button names where it is going when the address is a known place.
     let go_label = move || {
+        if let Some(bookmark) = selected_bookmark.with(|id| {
+            id.as_ref().and_then(|id| {
+                app.bookmarks
+                    .with(|list| crate::bookmarks::by_id(list, id).cloned())
+            })
+        }) {
+            return format!("Connect to {}", bookmark.name);
+        }
         let known = app.bookmarks.with(|b| {
             recent.with(|r| {
                 app.servers.with(|l| {
@@ -2802,7 +2943,13 @@ pub fn Login() -> impl IntoView {
                         spellcheck="false"
                         placeholder="ws://localhost:4654"
                         prop:value=endpoint
-                        on:input=move |ev| endpoint.set(event_target_value(&ev))
+                        on:input=move |ev| {
+                            endpoint.set(event_target_value(&ev));
+                            selected_bookmark.set(None);
+                            password.set(String::new());
+                            use_password.set(false);
+                            save_signin.set(false);
+                        }
                     />
                     <p class="rh-field-hint">
                         "ws:// reaches a burrow on this machine; anything further away needs wss://."
@@ -2826,6 +2973,10 @@ pub fn Login() -> impl IntoView {
                         on:input=move |ev| {
                             handle_missing.set(false);
                             handle.set(event_target_value(&ev));
+                            selected_bookmark.set(None);
+                            password.set(String::new());
+                            use_password.set(false);
+                            save_signin.set(false);
                         }
                     />
                     <Show
@@ -2838,6 +2989,7 @@ pub fn Login() -> impl IntoView {
                     </Show>
                     // A seeded demo burrow has no accounts to sign in to.
                     <Show when=move || !is_demo() fallback=|| ()>
+                        <Show when=move || saved_signin().is_some() fallback=move || view! {
                         <label for="rh-login-password">"Password"</label>
                         <input
                             id="rh-login-password"
@@ -2849,6 +3001,21 @@ pub fn Login() -> impl IntoView {
                             on:input=move |ev| password.set(event_target_value(&ev))
                         />
                         <p class="rh-field-hint">"Leave it empty to visit as a guest."</p>
+                        }>
+                            <div class="rh-login-saved">
+                                <p>"Saved sign-in for "<strong>{handle}</strong></p>
+                                <button type="button" class="rh-btn ghost small" on:click=move |_| {
+                                    use_password.set(true);
+                                    crate::a11y::focus_id("rh-login-password");
+                                }>"Use password instead"</button>
+                            </div>
+                        </Show>
+                        <label class="rh-login-save" for="rh-save-signin">
+                            <input id="rh-save-signin" type="checkbox" prop:checked=save_signin
+                                on:change=move |ev| save_signin.set(event_target_checked(&ev))/>
+                            <span>"Save sign-in to bookmark"</span>
+                        </label>
+                        <p class="rh-field-hint">"Remember this account on this device. Different handles get separate bookmarks."</p>
                     </Show>
                     <button class="rh-btn rh-connect-go" type="submit">
                         <span>{go_label}</span>
@@ -2875,7 +3042,7 @@ pub fn Login() -> impl IntoView {
                     </p>
                 </div>
             </section>
-            <BurrowBrowser endpoint handle recent on_open/>
+            <BurrowBrowser endpoint handle selected_bookmark recent on_open on_pick/>
         </main>
     }
 }
@@ -3043,7 +3210,7 @@ pub fn Lobby() -> impl IntoView {
 
     let send = move || {
         let text = draft.get();
-        if text.trim().is_empty() {
+        if !app.online() || text.trim().is_empty() {
             return;
         }
         // Routes over the live socket when connected, else the mock seam.
@@ -3314,6 +3481,7 @@ pub fn Lobby() -> impl IntoView {
                 </Show>
                 <Composer
                     draft=draft
+                    disabled=Signal::derive(move || !app.online())
                     // The room being read, not "the lobby": there is more
                     // than one now, and a box that names the wrong one is a
                     // message sent somewhere you did not mean.
@@ -3365,6 +3533,9 @@ pub fn Composer(
     /// Whether sending is currently possible.
     #[prop(into)]
     can_send: Signal<bool>,
+    /// Keep the draft intact while the current session cannot send commands.
+    #[prop(optional, into)]
+    disabled: MaybeSignal<bool>,
     /// Label for the send button.
     send_label: &'static str,
     /// Show a live preview in rich mode. Right for a post; noise for chat,
@@ -3431,6 +3602,7 @@ pub fn Composer(
                                 class="rh-format-btn"
                                 title=title
                                 aria-label=name
+                                prop:disabled=move || disabled.get()
                                 // Keep focus in the text area: a toolbar button
                                 // that steals it loses the selection it acts on.
                                 on:mousedown=move |ev| ev.prevent_default()
@@ -3451,6 +3623,7 @@ pub fn Composer(
                     class="rh-format-btn rh-format-mode"
                     class:on=move || markdown_mode.get()
                     aria-pressed=move || markdown_mode.get().to_string()
+                    prop:disabled=move || disabled.get()
                     title="Type markdown directly"
                     on:click=move |_| markdown_mode.update(|m| *m = !*m)
                 >
@@ -3469,8 +3642,13 @@ pub fn Composer(
                 placeholder=placeholder
                 prop:rows=move || if chat { crate::compose::rows_for(&draft.get()) } else { 2 }
                 prop:value=draft
+                prop:disabled=move || disabled.get()
                 on:input=move |ev| draft.set(event_target_value(&ev))
                 on:keydown=move |ev| {
+                    if disabled.get() {
+                        ev.prevent_default();
+                        return;
+                    }
                     // ⌘/Ctrl shortcuts for the bar's own buttons.
                     if ev.meta_key() || ev.ctrl_key() {
                         if let Some(f) = crate::compose::shortcut(&ev.key()) {
@@ -3503,6 +3681,7 @@ pub fn Composer(
                             aria-pressed=move || bar_open.get().to_string()
                             title="Formatting"
                             aria-label="Formatting"
+                            prop:disabled=move || disabled.get()
                             on:mousedown=move |ev| ev.prevent_default()
                             on:click=move |_| bar_open.update(|o| *o = !*o)
                         >
@@ -3514,8 +3693,12 @@ pub fn Composer(
                             class="rh-compose-iconbtn rh-compose-send"
                             title=send_label
                             aria-label=send_label
-                            prop:disabled=move || !can_send.get()
-                            on:click=move |_| on_send.call(())
+                            prop:disabled=move || disabled.get() || !can_send.get()
+                            on:click=move |_| {
+                                if !disabled.get() && can_send.get() {
+                                    on_send.call(());
+                                }
+                            }
                             inner_html=crate::icons::send_icon()
                         ></button>
                     </div>
@@ -3550,8 +3733,12 @@ pub fn Composer(
                         <button
                             class="rh-btn"
                             type="button"
-                            prop:disabled=move || !can_send.get()
-                            on:click=move |_| on_send.call(())
+                            prop:disabled=move || disabled.get() || !can_send.get()
+                            on:click=move |_| {
+                                if !disabled.get() && can_send.get() {
+                                    on_send.call(());
+                                }
+                            }
                         >
                             {send_label}
                         </button>
@@ -3629,10 +3816,12 @@ pub fn Boards() -> impl IntoView {
 pub fn BoardView() -> impl IntoView {
     let threads_node = crate::keynav::track_removal(".rh-thread-link");
     let app = expect_context::<AppState>();
-    let state = app.focused().state;
+    let session = app.focused();
+    let state = session.state;
     let params = use_params_map();
 
-    // Re-select the board whenever the `:slug` route param changes.
+    // Re-select on a new route or authenticated socket. A direct board link
+    // can mount before AuthOk, when ordinary requests must not be sent.
     //
     // A *render* effect, for the same reason as the DM view's: `create_effect`
     // queues its first run for after the current tick, and if this view is
@@ -3641,7 +3830,25 @@ pub fn BoardView() -> impl IntoView {
     // disposed owner and panics, which left the thread list showing its
     // loading skeleton forever.
     create_render_effect(move |_| {
-        if let Some(slug) = params.with(|p| p.get("slug").cloned()) {
+        let Some(slug) = params.with(|p| p.get("slug").cloned()) else {
+            return;
+        };
+        let ready = session.ready.get();
+        let live = session.live.get();
+        if live && !session.authenticated.get() {
+            return;
+        }
+        let load = move || {
+            // AuthOk arrives under the transport's borrow. The deferred read
+            // belongs only to this still-mounted route and authenticated
+            // session, even if navigation or reconnect wins the next tick.
+            if params.try_with_untracked(|p| p.get("slug") == Some(&slug)) != Some(true)
+                || app.focused().state != state
+                || session.ready.try_get_untracked() != Some(ready)
+                || (live && session.authenticated.try_get_untracked() != Some(true))
+            {
+                return;
+            }
             // Arriving here by link, before the board list has loaded, the
             // title fell back to the slug ("general"). Ask for the list so
             // the board can say its own name.
@@ -3649,6 +3856,11 @@ pub fn BoardView() -> impl IntoView {
                 app.load_boards();
             }
             app.select_board(&slug);
+        };
+        if live {
+            crate::app::defer(load);
+        } else {
+            load();
         }
     });
 
@@ -3774,6 +3986,7 @@ pub fn BoardView() -> impl IntoView {
                     // there's no scrollback about to show you the result.
                     <Composer
                         draft=new_body
+                        disabled=Signal::derive(move || !app.online())
                         label="First post body"
                         placeholder="Write the first post\u{2026}"
                         on_send=move |_| post()
@@ -3879,6 +4092,7 @@ pub fn BoardView() -> impl IntoView {
                     <div class="rh-reply">
                         <Composer
                             draft=reply_body
+                            disabled=Signal::derive(move || !app.online())
                             label="Reply body"
                             placeholder="Write a reply\u{2026}"
                             on_send=move |_| reply()
@@ -4123,6 +4337,7 @@ pub fn Dms() -> impl IntoView {
                     </Show>
                     <Composer
                         draft=draft
+                        disabled=Signal::derive(move || !app.online())
                         label="Write a direct message"
                         placeholder="Write a message\u{2026}"
                         on_send=move |_| send()
@@ -4340,6 +4555,7 @@ pub fn ServerBrowser() -> impl IntoView {
     // param is also shareable and reload-proof.)
     let endpoint = create_rw_signal(String::new());
     let handle = create_rw_signal(String::new());
+    let selected_bookmark = create_rw_signal(None::<String>);
     #[cfg(target_arch = "wasm32")]
     let recent = create_rw_signal(crate::recent::load());
     #[cfg(not(target_arch = "wasm32"))]
@@ -4348,7 +4564,10 @@ pub fn ServerBrowser() -> impl IntoView {
         let pick = endpoint.get_untracked();
         if !pick.trim().is_empty() {
             navigate(
-                &format!("/?server={}", crate::servers::encode_param(&pick)),
+                &selected_bookmark
+                    .get_untracked()
+                    .map(|id| format!("/?bookmark={}", crate::servers::encode_param(&id)))
+                    .unwrap_or_else(|| format!("/?server={}", crate::servers::encode_param(&pick))),
                 Default::default(),
             );
         }
@@ -4357,7 +4576,7 @@ pub fn ServerBrowser() -> impl IntoView {
         <StatusBar/>
         <main class="rh-body rh-glass-page" id=a11y::MAIN_ID tabindex="-1">
             <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Looking Glass"</h1>
-            <BurrowBrowser endpoint handle recent on_open standalone=true/>
+            <BurrowBrowser endpoint handle selected_bookmark recent on_open standalone=true/>
         </main>
     }
 }

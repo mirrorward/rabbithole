@@ -18,6 +18,7 @@ test("profile drafts survive navigation and public icons and cleared fields surv
     await page.locator("#rh-login-server").fill(server.wsURL);
     await page.locator("#rh-login-handle").fill("theme-viewer");
     await page.locator("#rh-login-password").fill("theme-e2e-password");
+    await page.getByLabel("Save sign-in to bookmark").check();
     await page.locator('.rh-login button[type="submit"]').click();
     await expect(page.getByRole("textbox", { name: "Message #lobby", exact: true })).toBeVisible();
     const you = () => page.getByRole("button", { name: "You", exact: true }).click();

@@ -18,6 +18,7 @@ async function signIn(page: Page, server: TestBurrow, handle = "theme-viewer") {
   await page.locator("#rh-login-server").fill(server.wsURL);
   await page.locator("#rh-login-handle").fill(handle);
   await page.locator("#rh-login-password").fill("theme-e2e-password");
+  await page.getByLabel("Save sign-in to bookmark").check();
   await page.locator('.rh-login button[type="submit"]').click();
   await expect(page.locator(".rh-header .rh-title-text")).toHaveText(server.name);
   await expect(page.getByRole("textbox", { name: "Message #lobby", exact: true })).toBeVisible();

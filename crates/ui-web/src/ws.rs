@@ -69,6 +69,8 @@ const WS_OPEN: u16 = 1;
 
 /// A sink the transport pushes connection-state changes into.
 pub type ConnSink = Rc<dyn Fn(ConnState)>;
+/// A refusal of this socket's current password/guest/resume request only.
+pub(crate) type AuthFailureSink = Rc<dyn Fn(wire::AuthFailure)>;
 /// A sink the transport pushes decoded [`FileEvent`]s into.
 pub type FileSink = Rc<dyn Fn(FileEvent)>;
 /// A sink the transport pushes decoded [`AdminEvent`]s into. The optional
@@ -153,6 +155,8 @@ struct Inner {
     ws: Option<WebSocket>,
     sink: Option<EventSink>,
     conn_sink: Option<ConnSink>,
+    auth_failure_sink: Option<AuthFailureSink>,
+    auth: RefCell<wire::AuthTracker>,
     file_sink: Option<FileSink>,
     admin_sink: Option<AdminSink>,
     /// What each in-flight management request was about
@@ -352,6 +356,8 @@ impl WsClient {
                 ws: None,
                 sink: None,
                 conn_sink: None,
+                auth_failure_sink: None,
+                auth: RefCell::new(wire::AuthTracker::default()),
                 file_sink: None,
                 admin_sink: None,
                 pending_admin: RefCell::new(std::collections::HashMap::new()),
@@ -405,6 +411,36 @@ impl WsClient {
     /// Offline). The most recent registration wins.
     pub fn on_conn(&mut self, sink: ConnSink) {
         self.inner.borrow_mut().conn_sink = Some(sink);
+    }
+
+    pub(crate) fn on_auth_failure(&mut self, sink: AuthFailureSink) {
+        self.inner.borrow_mut().auth_failure_sink = Some(sink);
+    }
+
+    pub(crate) fn auth_failure_is_current(&self, failure: wire::AuthFailure) -> bool {
+        self.inner
+            .borrow()
+            .auth
+            .borrow()
+            .failure_is_current(failure)
+    }
+
+    /// The handshake sink runs under an Inner borrow. Defer its sign-in while
+    /// retaining the socket generation, so reconnect cannot inherit the send.
+    pub(crate) fn authenticate(&self, command: Command) {
+        let generation = self.inner.borrow().generation;
+        self.when_free(move |b| {
+            if b.generation != generation || !b.alive || !b.want_connected {
+                return;
+            }
+            let id = b.next_request_id();
+            if let Ok(Some(frame)) = wire::command_to_frame(&command, id) {
+                if let Ok(bytes) = encode_frame(&frame) {
+                    b.auth.borrow_mut().begin(generation, &frame);
+                    Self::write_now(b, &bytes);
+                }
+            }
+        });
     }
 
     /// Manually redial the last endpoint now (a "Reconnect"/"Retry now" button):
@@ -770,6 +806,9 @@ impl WsClient {
     /// Ask for the message history with `peer` ([`on_dm_history`](Self::on_dm_history)).
     pub fn request_dm_history(&self, peer: &str) {
         let mut b = self.inner.borrow_mut();
+        if !b.auth.borrow().authenticated() {
+            return;
+        }
         let id = b.next_request_id();
         if let Ok(bytes) = wire::dm_history_request(peer, id).and_then(|f| encode_frame(&f)) {
             b.pending_dm_history
@@ -829,6 +868,9 @@ impl WsClient {
     /// [`on_avatar`](Self::on_avatar) sink.
     pub fn request_blob(&self, hex: &str) {
         let mut b = self.inner.borrow_mut();
+        if !b.auth.borrow().authenticated() {
+            return;
+        }
         let id = b.next_request_id();
         let frame = wire::blob_get_request(hex, id).map(|r| r.and_then(|f| encode_frame(&f)));
         if let Some(Ok(bytes)) = frame {
@@ -850,6 +892,9 @@ impl WsClient {
     pub fn dispatch_admin(&self, command: &AdminCommand) {
         let command = command.clone();
         self.when_free(move |b| {
+            if !b.auth.borrow().authenticated() {
+                return;
+            }
             let id = b.next_request_id();
             let pending = command.tag();
             match wire::admin_command_to_frame(&command, id) {
@@ -907,7 +952,8 @@ impl WsClient {
                 .and_then(|frame| encode_frame(&frame).ok());
             let mut resolver = None;
             let promise = Promise::new(&mut |resolve, _reject| resolver = Some(resolve));
-            let open = matches!(&b.ws, Some(ws) if ws.ready_state() == WS_OPEN);
+            let open = b.auth.borrow().authenticated()
+                && matches!(&b.ws, Some(ws) if ws.ready_state() == WS_OPEN);
             match (bytes, resolver, open) {
                 (Some(bytes), Some(resolve), true) => {
                     b.pending_calls.borrow_mut().insert(id, resolve);
@@ -1065,6 +1111,16 @@ impl WsClient {
 
     /// Write `bytes` to the socket, surfacing failures on the api-event sink.
     fn write(b: &mut Inner, bytes: &[u8]) {
+        // Panes retry their reads at AuthOk. Do not send ordinary requests
+        // during Hello/auth, or replay user actions into a later session.
+        if !b.auth.borrow().authenticated() {
+            return;
+        }
+        Self::write_now(b, bytes);
+    }
+
+    /// Hello/KeyProof and authentication are allowed before session readiness.
+    fn write_now(b: &mut Inner, bytes: &[u8]) {
         match &b.ws {
             Some(ws) if ws.ready_state() == WS_OPEN => {
                 if let Err(err) = ws.send_with_u8_array(bytes) {
@@ -1130,6 +1186,10 @@ impl WsClient {
         let generation = {
             let mut b = inner.borrow_mut();
             b.generation = b.generation.wrapping_add(1);
+            b.auth.borrow_mut().reset(b.generation);
+            b.pending_dm_history.borrow_mut().clear();
+            b.pending_avatars.borrow_mut().clear();
+            b.pending_admin.borrow_mut().clear();
             Self::reset_theme(&b);
             b.history_requests.borrow_mut().reset(b.generation);
             b.generation
@@ -1192,6 +1252,17 @@ impl WsClient {
                             let copy = Uint8Array::from(bytes.as_slice());
                             let _ = resolve.call1(&JsValue::NULL, &copy);
                             return;
+                        }
+                        let auth_reply = b.auth.borrow_mut().reply(generation, &frame);
+                        match auth_reply {
+                            wire::AuthReply::Refused(failure) => {
+                                if let Some(sink) = &b.auth_failure_sink {
+                                    sink(failure);
+                                }
+                                return;
+                            }
+                            wire::AuthReply::Unrelated if wire::is_auth_reply(&frame) => return,
+                            _ => {}
                         }
                         if Self::chat_history_frame(&inner, &b, &frame) {
                             return;
@@ -1383,6 +1454,7 @@ impl WsClient {
                         return;
                     }
                     b.alive = false;
+                    b.auth.borrow_mut().reset(b.generation);
                     b.ws = None;
                     Self::release_calls(&b);
                     Self::reset_theme(&b);
@@ -1529,6 +1601,7 @@ impl EventClient for WsClient {
                 let mut b = self.inner.borrow_mut();
                 b.alive = false;
                 b.want_connected = false;
+                b.auth.borrow_mut().reset(b.generation);
                 Self::reset_theme(&b);
                 b.history_requests.borrow_mut().reset(b.generation);
                 if let Some(ws) = &b.ws {
@@ -1536,6 +1609,7 @@ impl EventClient for WsClient {
                     let _ = ws.close();
                 }
             }
+            Command::SignIn { .. } | Command::Resume { .. } => self.authenticate(command),
             _ => self.send_command(&command),
         }
     }
