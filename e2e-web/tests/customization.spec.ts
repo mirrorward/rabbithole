@@ -83,7 +83,7 @@ test("appearance and sound choices persist and affect the rendered app", async (
     await expect(list.locator(".rh-member-link").first()).toBeFocused();
     await settings(page);
     await page.getByRole("group", { name: "Light & dark", exact: true }).getByRole("button", { name: "System", exact: true }).click();
-    await page.getByRole("checkbox", { name: /Use each burrow/ }).uncheck();
+    await page.getByLabel("Default burrow theme", { exact: true }).selectOption("off");
     await page.getByRole("group", { name: "Accent color", exact: true }).getByRole("button", { name: "Forest", exact: true }).click();
     await page.getByLabel("Chat font", { exact: true }).selectOption("mono");
     await range(page.getByLabel("Chat text size", { exact: true }), "20");
@@ -99,7 +99,7 @@ test("appearance and sound choices persist and affect the rendered app", async (
     await expect(page.getByLabel("Chat text size", { exact: true })).toHaveValue("20");
     await expect(page.getByLabel("Spacing", { exact: true })).toHaveValue("compact");
     await expect(page.getByLabel("Message times", { exact: true })).toHaveValue("always");
-    await expect(page.getByRole("checkbox", { name: /Use each burrow/ })).not.toBeChecked();
+    await expect(page.getByLabel("Default burrow theme", { exact: true })).toHaveValue("off");
     await expect(page.getByLabel("Chime voice", { exact: true })).toHaveValue("classic");
     await expect(page.getByLabel("Chime volume", { exact: true })).toHaveValue("37");
     await expect(sounds(page)).not.toBeChecked();

@@ -86,6 +86,11 @@ pub struct Session {
     pub live: RwSignal<bool>,
     /// This server's published theme overlay (PLAN §9.11), if any.
     pub server_theme: RwSignal<Option<ServerOverlay>>,
+    /// Stable original login, when authentication context retained it.
+    pub theme_owner: RwSignal<Option<crate::theme_preferences::Owner>>,
+    pub theme_choice: RwSignal<Option<crate::theme_preferences::ThemeMode>>,
+    pub theme_sync: RwSignal<crate::theme_preferences::SyncState>,
+    pub theme_revision: RwSignal<u64>,
     /// The burrow's display name, learned from the `Connected` handshake. `None`
     /// until connected (the rail tile falls back to the endpoint host).
     pub name: RwSignal<Option<String>>,
@@ -247,8 +252,9 @@ pub struct AppState {
     /// still applies). Session-local and unpersisted — Apply is a preview,
     /// not a save.
     pub custom_pack: RwSignal<Option<PackTokens>>,
-    /// The user's opt-out of server theming (persisted). `true` = ignore any
-    /// server overlay and render the user's own pack/mode choice only.
+    /// Device default plus overrides bound to original account logins.
+    pub theme_preferences: RwSignal<crate::theme_preferences::ThemePreferences>,
+    pub theme_storage_ok: RwSignal<bool>,
     /// Radio now-playing per station, folded from routed `[radio]` notices.
     pub radio: RwSignal<RadioState>,
     /// The user's radio player preferences (enable/volume/mute/station plus
@@ -282,6 +288,10 @@ impl AppState {
             authenticated: create_rw_signal(false),
             live: create_rw_signal(false),
             server_theme: create_rw_signal(None),
+            theme_owner: create_rw_signal(None),
+            theme_choice: create_rw_signal(None),
+            theme_sync: create_rw_signal(Default::default()),
+            theme_revision: create_rw_signal(0),
             name: create_rw_signal(None),
             seen: create_rw_signal(0),
             #[cfg(target_arch = "wasm32")]
@@ -338,6 +348,17 @@ impl AppState {
             theme: create_rw_signal(initial_theme_choice()),
             system_dark: create_rw_signal(os_prefers_dark()),
             custom_pack: create_rw_signal(None),
+            theme_preferences: create_rw_signal({
+                #[cfg(target_arch = "wasm32")]
+                {
+                    crate::theme_preferences::storage::load()
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    Default::default()
+                }
+            }),
+            theme_storage_ok: create_rw_signal(true),
             radio: create_rw_signal(RadioState::default()),
             radio_prefs: create_rw_signal(initial_radio_prefs()),
             radio_playback,
@@ -572,6 +593,10 @@ impl AppState {
                 authenticated: create_rw_signal(false),
                 live: create_rw_signal(false),
                 server_theme: create_rw_signal(None),
+                theme_owner: create_rw_signal(None),
+                theme_choice: create_rw_signal(None),
+                theme_sync: create_rw_signal(Default::default()),
+                theme_revision: create_rw_signal(0),
                 name: create_rw_signal(None),
                 seen: create_rw_signal(0),
                 ws: store_value(crate::ws::WsClient::new()),
@@ -655,6 +680,112 @@ impl AppState {
     /// Drop the current server theme (e.g. on disconnect).
     pub fn clear_server_theme(&self) {
         self.focused().set_server_theme(None);
+    }
+
+    /// Global defaults are local to this device. Explicit account choices win.
+    pub fn set_theme_default(&self, mode: crate::theme_preferences::ThemeMode) {
+        self.theme_preferences.update(|prefs| prefs.default = mode);
+        self.persist_theme_preferences();
+    }
+
+    pub fn set_burrow_theme(&self, choice: Option<crate::theme_preferences::ThemeMode>) {
+        let session = self.focused();
+        session.theme_choice.set(choice);
+        if let Some(owner) = session.theme_owner.get_untracked() {
+            self.theme_preferences
+                .update(|prefs| prefs.set(owner, choice));
+            self.persist_theme_preferences();
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.sync_theme_preference(session, true);
+    }
+
+    fn persist_theme_preferences(&self) {
+        #[cfg(target_arch = "wasm32")]
+        self.theme_storage_ok.set(
+            self.theme_preferences
+                .with_untracked(crate::theme_preferences::storage::save),
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn sync_theme_preference(&self, session: Session, write: bool) {
+        use crate::theme_preferences::{SyncState, ThemeMode};
+        use rabbithole_proto::welcome::{ThemePrefGet, ThemePrefSet, ThemePrefState};
+        if !session.authenticated.get_untracked() || session.is_guest.get_untracked() {
+            session.theme_sync.set(SyncState::Local);
+            return;
+        }
+        session
+            .theme_revision
+            .update(|revision| *revision = revision.wrapping_add(1));
+        let revision = session.theme_revision.get_untracked();
+        let ready = session.ready.get_untracked();
+        let choice = session.theme_choice.get_untracked();
+        let desired = choice.unwrap_or(ThemeMode::Full);
+        let app = *self;
+        session.theme_sync.set(if write {
+            SyncState::Loading
+        } else {
+            SyncState::Checking
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let current = || {
+                session.theme_revision.try_get_untracked() == Some(revision)
+                    && session.ready.try_get_untracked() == Some(ready)
+                    && session.authenticated.try_get_untracked() == Some(true)
+                    && app.sessions.with_untracked(|sessions| {
+                        sessions
+                            .iter()
+                            .any(|(_, active)| active.state == session.state)
+                    })
+            };
+            if !current() {
+                return;
+            }
+            // This microtask runs outside the transport's immutable event borrow.
+            let reply = session
+                .ws
+                .with_value(|ws| {
+                    if write {
+                        ws.call_with_timeout(&ThemePrefSet::new(desired == ThemeMode::Off), 3000)
+                    } else {
+                        ws.call_with_timeout(&ThemePrefGet, 3000)
+                    }
+                })
+                .await;
+            if !current() {
+                return;
+            }
+            let remote = reply
+                .filter(|frame| frame.error.is_none())
+                .and_then(|frame| frame.decode::<ThemePrefState>().and_then(Result::ok));
+            let Some(remote) = remote else {
+                session.theme_sync.set(SyncState::Unavailable);
+                return;
+            };
+            if write && remote.disable_server_theme != (desired == ThemeMode::Off) {
+                session.theme_sync.set(SyncState::Unavailable);
+                return;
+            }
+            if !write {
+                if choice.is_some() && remote.disable_server_theme != (desired == ThemeMode::Off) {
+                    // An explicit saved local override is user intent. A default
+                    // must never silently turn on an account's existing opt-out.
+                    app.sync_theme_preference(session, true);
+                    return;
+                }
+                if choice.is_none() && remote.disable_server_theme {
+                    session.theme_choice.set(Some(ThemeMode::Off));
+                    if let Some(owner) = session.theme_owner.get_untracked() {
+                        app.theme_preferences
+                            .update(|prefs| prefs.set(owner, Some(ThemeMode::Off)));
+                        app.persist_theme_preferences();
+                    }
+                }
+            }
+            session.theme_sync.set(SyncState::Saved);
+        });
     }
 
     /// The connected server's theme name, if it ships one — labels the opt-out
@@ -1000,6 +1131,17 @@ impl AppState {
                         // "Try again" that could never work.
                         is_guest.set(crate::state::role_is_guest(*role));
                         session_authenticated.set(true);
+                        let owner = memory.borrow().login.as_deref().filter(|_| !is_guest.get_untracked())
+                            .and_then(|login| crate::theme_preferences::Owner::new(&ep, login));
+                        let previous_owner = theme_session.theme_owner.get_untracked();
+                        if previous_owner != owner || is_guest.get_untracked() {
+                            theme_session.theme_choice.set(None);
+                        }
+                        theme_session.theme_owner.set(owner.clone());
+                        if let Some(owner) = owner {
+                            theme_session.theme_choice.set(so_app.theme_preferences.with_untracked(|prefs| prefs.choice(&owner)));
+                        }
+                        so_app.sync_theme_preference(theme_session, false);
                         so_app.remember_authenticated(&ep, screen_name, token, &mut memory.borrow_mut());
                         // In the desktop shell, give the in-process swarm core its
                         // own session to this burrow so downloads can resolve
@@ -1393,6 +1535,10 @@ impl AppState {
             self.sessions.with_untracked(|list| {
                 if let Some((_, session)) = list.iter().find(|(sid, _)| *sid == id) {
                     session
+                        .theme_revision
+                        .update(|revision| *revision = revision.wrapping_add(1));
+                    session.authenticated.set(false);
+                    session
                         .ws
                         .update_value(|c| c.dispatch(rabbithole_core::api::Command::Disconnect));
                 }
@@ -1412,16 +1558,20 @@ impl AppState {
         if id.is_placeholder() {
             return;
         }
-        self.sessions
-            .update(|list| list.retain(|(sid, _)| sid != id));
-        if self.focused_id.get_untracked() == *id {
-            let next = self
-                .sessions
-                .with_untracked(|list| list.first().map(|(sid, _)| sid.clone()));
-            if let Some(next) = next {
-                self.set_focus(next);
+        // Theme and account controls react to both signals. No observer may
+        // see a focused id after its session was removed.
+        batch(|| {
+            self.sessions
+                .update(|list| list.retain(|(sid, _)| sid != id));
+            if self.focused_id.get_untracked() == *id {
+                let next = self
+                    .sessions
+                    .with_untracked(|list| list.first().map(|(sid, _)| sid.clone()));
+                if let Some(next) = next {
+                    self.set_focus(next);
+                }
             }
-        }
+        });
     }
 
     /// Sign a burrow out after a refused sign-in or a dead resume token: the
@@ -1824,6 +1974,10 @@ impl AppState {
                 authenticated: create_rw_signal(false),
                 live: create_rw_signal(false),
                 server_theme: create_rw_signal(None),
+                theme_owner: create_rw_signal(None),
+                theme_choice: create_rw_signal(None),
+                theme_sync: create_rw_signal(Default::default()),
+                theme_revision: create_rw_signal(0),
                 name: create_rw_signal(Some(demo.name.to_string())),
                 seen: create_rw_signal(0),
                 #[cfg(target_arch = "wasm32")]
@@ -4390,13 +4544,23 @@ pub fn App() -> impl IntoView {
 
     let style = move || {
         let (pack, mode) = (app.theme.get().pack, app.mode());
-        let appearance = app.settings.get().appearance;
+        let mut appearance = app.settings.get().appearance;
+        // The old boolean is migration input; the new scoped choice owns policy.
+        appearance.use_burrow_theme = true;
+        let session = app.focused_tracked();
+        let mode_choice = session
+            .theme_choice
+            .get()
+            .unwrap_or(app.theme_preferences.get().default);
         app.custom_pack.with(|custom| {
-            app.focused_tracked().server_theme.with(|server| {
+            session.server_theme.with(|server| {
+                let overlay = server
+                    .as_ref()
+                    .and_then(|server| mode_choice.overlay(server));
                 crate::appearance::resolve_style(
                     &appearance,
                     custom.as_ref(),
-                    server.as_ref(),
+                    overlay.as_ref(),
                     pack,
                     mode,
                 )

@@ -58,9 +58,9 @@ async function expectAccent(page: Page, accent: string) {
   await expect.poll(async () => (await tokens(page))["--rh-accent"]).toBe(accent);
 }
 
-async function signIn(page: Page, burrow: TestBurrow) {
+async function signIn(page: Page, burrow: TestBurrow, login = "theme-viewer") {
   await page.locator("#rh-login-server").fill(burrow.wsURL);
-  await page.locator("#rh-login-handle").fill("theme-viewer");
+  await page.locator("#rh-login-handle").fill(login);
   await page.locator("#rh-login-password").fill("theme-e2e-password");
   await page.getByLabel("Save sign-in to bookmark").check();
   await page.locator('.rh-login button[type="submit"]').click();
@@ -188,5 +188,202 @@ test("an account opting out on the server clears its previously displayed theme"
   } finally {
     await server.dispose();
     await test.info().attach("server-log", { body: server.logs(), contentType: "text/plain" });
+  }
+});
+
+const defaultTheme = (page: Page) => page.getByLabel("Default burrow theme", { exact: true });
+const burrowTheme = (page: Page) => page.getByLabel("This burrow’s theme", { exact: true });
+async function preferences(page: Page) {
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(burrowTheme(page)).toBeVisible();
+}
+async function accountTheme(server: TestBurrow, login = "theme-viewer") {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { join } = await import("node:path");
+  const db = new DatabaseSync(join(server.dataDir, "burrow.db"));
+  try {
+    return (db.prepare("SELECT theme_server_disabled AS disabled FROM accounts WHERE login = ?").get(login) as { disabled: number }).disabled;
+  } finally { db.close(); }
+}
+async function addBurrow(page: Page, server: TestBurrow, login = "theme-viewer") {
+  await page.getByRole("button", { name: "Add a burrow", exact: true }).click();
+  await page.getByRole("button", { name: "Add a bookmark by address", exact: true }).click();
+  await page.getByRole("textbox", { name: "Name for the bookmark (optional)", exact: true }).fill(server.name);
+  await page.getByRole("textbox", { name: "Burrow address", exact: true }).fill(server.wsURL);
+  await page.getByRole("button", { name: "Add bookmark", exact: true }).click();
+  await page.locator(".rh-glass-row").filter({ hasText: server.name }).last().click();
+  await page.getByRole("button", { name: "Connect…", exact: true }).click();
+  const password = page.getByRole("button", { name: "Use password instead", exact: true });
+  if (await password.count()) await password.click();
+  await signIn(page, server, login);
+}
+async function settingsPictures(page: Page) {
+  await page.locator('.rh-toasts button').evaluateAll((buttons) => buttons.forEach((button) => (button as HTMLButtonElement).click()));
+  for (const [size, width, height] of [["desktop", 1280, 900], ["mobile", 390, 844]] as const) {
+    await page.setViewportSize({ width, height });
+    await page.getByText("Minimal keeps burrow colors", { exact: false }).scrollIntoViewIfNeeded();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const png = await page.screenshot({ path: test.info().outputPath(`theme-preferences-${size}.png`) });
+    await test.info().attach(`theme-preferences-${size}`, { body: png, contentType: "image/png" });
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+}
+
+test("full, minimal and off remain scoped to accounts and burrows with a local default", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const a = await TestBurrow.create("Preference Alpha", "a34700");
+  const b = await TestBurrow.create("Preference Beta", "235b96");
+  try {
+    await a.ctl("account-create", "second-account", "theme-e2e-password", "user");
+    await page.goto(a.httpURL);
+    const base = await tokens(page);
+    await signIn(page, a); await preferences(page);
+    await expect(defaultTheme(page)).toHaveValue("full");
+    await expect(burrowTheme(page)).toHaveValue("default");
+    await burrowTheme(page).selectOption("minimal");
+    await expectAccent(page, "#a34700");
+    await expect.poll(async () => (await tokens(page))["--rh-radius"]).toBe(base["--rh-radius"]);
+    await expect(page.getByText("For Preference Alpha as theme-viewer.", { exact: false })).toContainText("saved to your account");
+    await defaultTheme(page).selectOption("off");
+    await expectAccent(page, "#a34700"); // this account's override wins
+    await settingsPictures(page);
+
+    await addBurrow(page, b);
+    await expect.poll(() => tokens(page)).toEqual(base); // same login, different burrow
+    await preferences(page); await expect(burrowTheme(page)).toHaveValue("default");
+    await burrowTheme(page).selectOption("full");
+    await expectAccent(page, "#235b96");
+    await expect.poll(async () => (await tokens(page))["--rh-radius"]).toBe("0.75rem");
+    await page.locator('.rh-rail-server[aria-label^="Preference Alpha —"]').click();
+    await expectAccent(page, "#a34700");
+    await preferences(page); await expect(burrowTheme(page)).toHaveValue("minimal");
+    await burrowTheme(page).selectOption("off");
+    await expect.poll(() => accountTheme(a)).toBe(1);
+    await expect.poll(() => tokens(page)).toEqual(base);
+    await page.reload(); await preferences(page);
+    await page.locator('.rh-rail-server[aria-label^="Preference Alpha —"]').click();
+    await preferences(page); await expect(burrowTheme(page)).toHaveValue("off");
+    await defaultTheme(page).selectOption("full");
+    await expect.poll(() => tokens(page)).toEqual(base); // account Off wins over a new default
+    await burrowTheme(page).selectOption("default");
+    await expect.poll(() => accountTheme(a)).toBe(0);
+    await expectAccent(page, "#a34700");
+    await expect.poll(async () => (await tokens(page))["--rh-radius"]).toBe("0.75rem");
+    await burrowTheme(page).selectOption("minimal");
+    await page.locator('.rh-rail-server[aria-label^="Preference Alpha —"]').click();
+    await page.getByRole("button", { name: "Leave", exact: true }).click();
+    await page.getByRole("alertdialog", { name: `Leave ${a.name}?`, exact: true }).getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(page.locator('.rh-rail-server[aria-label^="Preference Alpha —"]')).toHaveCount(0);
+    await expect(page.locator("#rh-login-handle")).toBeVisible();
+    // A second account on Alpha must not inherit the first account's Minimal.
+    await signIn(page, a, "second-account");
+    await preferences(page); await expect(burrowTheme(page)).toHaveValue("default");
+    await expectAccent(page, "#a34700");
+    await expect.poll(async () => (await tokens(page))["--rh-radius"]).toBe("0.75rem");
+    await burrowTheme(page).selectOption("off");
+    await expect.poll(() => accountTheme(a, "second-account")).toBe(1);
+    expect(await accountTheme(a)).toBe(0);
+    await page.locator('.rh-rail-server[aria-label^="Preference Beta —"]').click();
+    await expectAccent(page, "#235b96");
+    expect(errors).toEqual([]);
+  } finally {
+    for (const server of [b, a]) {
+      await server.dispose();
+      await test.info().attach(`${server.name}-log`, { body: server.logs(), contentType: "text/plain" });
+    }
+  }
+});
+
+// Only parse the public routing header; never inspect or log authentication
+// payloads. The injected reply models an older peer's Unsupported response.
+function unsupportedPreference(message: string | Buffer): Buffer | undefined {
+  if (!Buffer.isBuffer(message) || message[0] !== 1 || message[1] !== 0 || message[2] !== 0 || ![57, 58].includes(message[3])) return;
+  let end = 4;
+  while (message[end++] & 0x80) { /* request-id varint */ }
+  const prefix = Buffer.from(message.subarray(0, end)); prefix[1] = 1;
+  return Buffer.concat([prefix, Buffer.from([1, 8, 0])]);
+}
+
+test("legacy opt-out migrates and unsupported account preferences retain an honest local fallback", async ({ context, page }) => {
+  const server = await TestBurrow.create("Older Theme Peer", "a34700");
+  const seen = { get: 0, set: 0 };
+  try {
+    await context.addInitScript(() => {
+      if (!localStorage.getItem("rh.theme.preferences.v1")) localStorage.setItem("rh-server-theme-disabled", "1");
+    });
+    await context.routeWebSocket(server.wsURL, (route) => {
+      const upstream = route.connectToServer();
+      route.onMessage((message) => {
+        const reply = unsupportedPreference(message);
+        if (reply) {
+          if ((message as Buffer)[3] === 57) seen.get++; else seen.set++;
+          route.send(reply);
+        } else upstream.send(message);
+      });
+      upstream.onMessage((message) => route.send(message));
+    });
+    await page.goto(server.httpURL); const base = await tokens(page);
+    await signIn(page, server); await preferences(page);
+    await expect(defaultTheme(page)).toHaveValue("off");
+    await expect.poll(() => seen.get).toBe(1);
+    await expect(page.getByText("For Older Theme Peer as theme-viewer.", { exact: false })).toContainText("could not save");
+    await expect.poll(() => tokens(page)).toEqual(base);
+    await burrowTheme(page).selectOption("minimal");
+    await expect.poll(() => seen.set).toBe(1);
+    await expectAccent(page, "#a34700");
+    await expect.poll(async () => (await tokens(page))["--rh-radius"]).toBe(base["--rh-radius"]);
+    await page.reload(); await preferences(page);
+    await expect(burrowTheme(page)).toHaveValue("minimal");
+    await expect(defaultTheme(page)).toHaveValue("off");
+    await expectAccent(page, "#a34700");
+    await expect(page.locator(".rh-toasts")).not.toContainText("Unsupported");
+    // Block only this new preference write, leaving authentication and every
+    // other local setting real. The UI must not claim durable local saving.
+    await page.evaluate(() => {
+      const set = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key, value) {
+        if (key === "rh.theme.preferences.v1") throw new DOMException("Injected storage refusal", "QuotaExceededError");
+        return set.call(this, key, value);
+      };
+    });
+    await defaultTheme(page).selectOption("full");
+    await expect(page.getByRole("status").filter({ hasText: "Could not save theme choices" })).toBeVisible();
+    expect(await accountTheme(server)).toBe(0);
+  } finally {
+    await server.dispose(); await test.info().attach("fallback-server-log", { body: server.logs(), contentType: "text/plain" });
+  }
+});
+
+test("a delayed account preference read cannot undo a newer selection", async ({ context, page }) => {
+  const server = await TestBurrow.create("Delayed Theme Preference", "a34700");
+  let release: (() => void) | undefined;
+  let states = 0;
+  try {
+    await server.disableAccountTheme();
+    await context.routeWebSocket(server.wsURL, (route) => {
+      const upstream = route.connectToServer();
+      upstream.onMessage((message) => {
+        if (Buffer.isBuffer(message) && message[0] === 1 && message[1] === 1 && message[2] === 0 && message[3] === 59 && ++states === 1) {
+          release = () => route.send(message);
+        } else route.send(message);
+      });
+    });
+    await page.goto(server.httpURL);
+    await signIn(page, server); await preferences(page);
+    await expect.poll(() => !!release).toBe(true);
+    await burrowTheme(page).selectOption("minimal");
+    await expect.poll(() => accountTheme(server)).toBe(0);
+    await expectAccent(page, "#a34700");
+    await expect(page.getByText("For Delayed Theme Preference as theme-viewer.", { exact: false })).toContainText("saved to your account");
+    release!();
+    // A round trip after the delayed read provides an ordering sentinel.
+    await server.ctl("config-set", "theme_accent", "235b96");
+    await expectAccent(page, "#235b96");
+    await expect(burrowTheme(page)).toHaveValue("minimal");
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("rh.theme.preferences.v1")!).overrides);
+    expect(stored).toHaveLength(1); expect(stored[0].mode).toBe("minimal");
+  } finally {
+    await server.dispose(); await test.info().attach("delayed-preference-log", { body: server.logs(), contentType: "text/plain" });
   }
 });

@@ -944,6 +944,24 @@ impl WsClient {
         &self,
         msg: &M,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Frame>>>> {
+        self.call_limited(msg, None)
+    }
+
+    /// A bounded optional capability probe must not retain a pending resolver
+    /// forever when an older peer ignores the request.
+    pub fn call_with_timeout<M: rabbithole_proto::Message>(
+        &self,
+        msg: &M,
+        timeout_ms: u32,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Frame>>>> {
+        self.call_limited(msg, Some(timeout_ms))
+    }
+
+    fn call_limited<M: rabbithole_proto::Message>(
+        &self,
+        msg: &M,
+        timeout_ms: Option<u32>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Frame>>>> {
         let promise = {
             let mut b = self.inner.borrow_mut();
             let id = b.next_request_id();
@@ -958,6 +976,18 @@ impl WsClient {
                 (Some(bytes), Some(resolve), true) => {
                     b.pending_calls.borrow_mut().insert(id, resolve);
                     Self::write(&mut b, &bytes);
+                    if let Some(timeout_ms) = timeout_ms {
+                        let weak = Rc::downgrade(&self.inner);
+                        spawn_local(async move {
+                            TimeoutFuture::new(timeout_ms).await;
+                            if let Some(inner) = weak.upgrade() {
+                                let resolve = inner.borrow().pending_calls.borrow_mut().remove(&id);
+                                if let Some(resolve) = resolve {
+                                    let _ = resolve.call1(&JsValue::NULL, &JsValue::NULL);
+                                }
+                            }
+                        });
+                    }
                 }
                 (_, Some(resolve), _) => {
                     let _ = resolve.call1(&JsValue::NULL, &JsValue::NULL);
@@ -1045,6 +1075,13 @@ impl WsClient {
     fn theme_frame(inner: &Rc<RefCell<Inner>>, b: &Inner, frame: &Frame) -> bool {
         use rabbithole_proto::welcome::{ThemeChanged, ThemeReply};
         if frame.kind == FrameKind::Reply {
+            // Account-pref replies belong exclusively to their bounded call.
+            // Late errors after timeout must not become generic error toasts.
+            if frame.family == rabbithole_proto::Family::SESSION
+                && matches!(frame.message_type, 57..=59)
+            {
+                return true;
+            }
             let action = b.theme_sync.borrow_mut().reply(b.generation, frame.id);
             if let Some(action) = action {
                 match action {

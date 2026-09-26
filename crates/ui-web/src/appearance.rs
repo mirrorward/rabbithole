@@ -230,11 +230,12 @@ pub fn AppearanceSettings() -> impl IntoView {
             <div class="rh-pref-heading">
                 <h3 id="rh-appearance-title">"Appearance"</h3>
                 <button class="rh-btn ghost small" type="button"
-                    disabled=move || prefs() == Appearance::default() && app.theme.get() == ThemeChoice::default()
+                    disabled=move || prefs() == Appearance::default() && app.theme.get() == ThemeChoice::default() && app.theme_preferences.get().default == crate::theme_preferences::ThemeMode::Full
                     on:click=move |_| {
                         change(app, |p| *p = Appearance::default());
                         app.set_pack(ThemePack::Clean);
                         app.set_mode(ModeChoice::System);
+                        app.set_theme_default(crate::theme_preferences::ThemeMode::Full);
                     }>"Reset appearance"</button>
             </div>
             <p class="rh-settings-note">"Make yourself at home. Changes save automatically on this device."</p>
@@ -283,11 +284,45 @@ pub fn AppearanceSettings() -> impl IntoView {
             <Show when=move || app.theme.get().pack == ThemePack::HighContrast>
                 <p class="rh-settings-note">"High contrast keeps its own palette for readability."</p>
             </Show>
-            <label class="rh-settings-check rh-pref-check">
-                <input type="checkbox" prop:checked=move || prefs().use_burrow_theme
-                    on:change=move |ev| change(app, |p| p.use_burrow_theme = event_target_checked(&ev))/>
-                <span>"Use each burrow’s theme"<small>"Your accent choice still takes priority."</small></span>
-            </label>
+            <div class="rh-pref-row">
+                <label class="rh-pref-label" for="rh-theme-default">"Default burrow theme"</label>
+                <select class="rh-input" id="rh-theme-default"
+                    prop:value=move || app.theme_preferences.get().default.key()
+                    on:change=move |event| {
+                        if let Some(mode) = crate::theme_preferences::ThemeMode::parse(&event_target_value(&event)) {
+                            app.set_theme_default(mode);
+                        }
+                    }>
+                    {crate::theme_preferences::ThemeMode::ALL.into_iter().map(|mode| view! {
+                        <option value=mode.key() selected=move || app.theme_preferences.get().default == mode>{mode.label()}</option>
+                    }).collect_view()}
+                </select>
+            </div>
+            <div class="rh-pref-row">
+                <label class="rh-pref-label" for="rh-theme-burrow">"This burrow’s theme"</label>
+                <select class="rh-input" id="rh-theme-burrow"
+                    disabled=move || !app.focused_tracked().authenticated.get()
+                    prop:value=move || app.focused_tracked().theme_choice.get().map(|mode| mode.key()).unwrap_or("default")
+                    on:change=move |event| app.set_burrow_theme(crate::theme_preferences::ThemeMode::parse(&event_target_value(&event)))>
+                    <option value="default" selected=move || app.focused_tracked().theme_choice.get().is_none()>"Use default"</option>
+                    {crate::theme_preferences::ThemeMode::ALL.into_iter().map(|mode| view! {
+                        <option value=mode.key() selected=move || app.focused_tracked().theme_choice.get() == Some(mode)>{mode.label()}</option>
+                    }).collect_view()}
+                </select>
+            </div>
+            <p class="rh-settings-note">
+                {move || {
+                    let session = app.focused_tracked();
+                    if session.authenticated.get() {
+                        format!("For {} as {}. {}", session.name.get().unwrap_or_else(|| "this burrow".into()), session.handle.get(),
+                            if session.theme_owner.get().is_some() { session.theme_sync.get().message() } else { "The local choice lasts for this session." })
+                    } else { "Connect to a burrow to choose its theme. The default is saved on this device.".into() }
+                }}
+            </p>
+            <p class="rh-settings-note">"Minimal keeps burrow colors with your own layout and type. Off uses your own theme. Your accent choice still takes priority."</p>
+            <Show when=move || !app.theme_storage_ok.get()>
+                <p class="rh-settings-note" role="status">"Could not save theme choices on this device. They apply until you close the app."</p>
+            </Show>
             <div class="rh-pref-row">
                 <label class="rh-pref-label" for="rh-chat-font">"Chat font"</label>
                 <select class="rh-input" id="rh-chat-font"

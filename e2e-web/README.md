@@ -47,7 +47,7 @@ real service workers and gives each fixture its own writable copy of the app. No
 | Command | Checks |
 | --- | --- |
 | `npm run test:smoke` | App mount, real guest sign-in (`AuthGuest`/`AuthOk`), connected lobby and composer. |
-| `npm run test:theme` | Signed theme loading, live publish/clear, High Contrast, multiple burrows, reconnect, session restoration, and account opt-out (two tests). |
+| `npm run test:theme` | Signed themes, live updates, High Contrast, reconnect, account opt-out, full/minimal/off defaults and overrides, unsupported peers, and delayed preference replies. |
 | `npm run test:routes` | Direct `/lobby`, actual hard reload and token resume, nested routes and real JS/WASM assets, missing-asset 404s. |
 | `npx playwright test tests/auth.spec.ts` | Correlated authentication failures, delayed handshakes, early pane requests, corrected password retry, and explicit saved-sign-in resume. |
 | `npx playwright test tests/bookmarks.spec.ts` | Opt-in account bookmarks, two users on one burrow, legacy migration, independent expiry/removal, and storage failures. |
@@ -63,9 +63,28 @@ the browser cache through request interception; both document loads must fetch
 real assets without connection resets or HTTP errors. It introduces no pause
 or rate-budget reset between loads.
 
-The account opt-out test seeds the existing preference in its temporary database;
-it does not assume an absent client-side opt-out control exists. Route tests
-observe token resumption after reload without another password submission.
+One account opt-out test seeds the existing preference in its temporary database;
+the preference tests also exercise the shipped controls and verify the account
+flag stored by the real server. An intercepted `Unsupported` reply models older
+peers, and a held real preference reply exercises stale-read protection. Route
+tests observe token resumption after reload without another password submission.
+
+Appearance offers a device-wide Full/Minimal/Off default and an override for the
+current burrow/account. Overrides use the canonical endpoint and original login;
+an unknown login or guest keeps its local choice only for the current session.
+Full applies validated color and shared tokens; Minimal drops shared geometry and
+type overrides; Off applies no server tokens. This rich-client renderer does not
+fetch or play theme banner/icon assets, ANSI artwork, or server sounds, so their
+current cap is zero in Minimal as well as the existing renderer. It does not
+change personal profile pictures, radio artwork, or message chimes.
+
+The current account protocol stores on/off only: explicit Full/Minimal enables
+server themes, Off disables them, and Use default clears the account opt-out so
+the local default can apply. The global default does not silently change remote
+account preferences. On connection, an existing account opt-out is respected
+unless an explicit local override exists; that override is reconciled to the
+server. Minimal remains local. Unsupported or failed requests preserve the local
+choice and display a fallback notice; blocked local storage is reported separately.
 
 The radio fixture uses authenticated source ingestion and metadata on a real
 burrow for station discovery, with generated WAV audio served from an isolated
