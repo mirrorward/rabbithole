@@ -132,12 +132,17 @@ pub struct Sender<'a> {
 
 pub struct ChatService {
     bus: EventBus,
+    #[cfg(test)]
+    before_moderation_publish: parking_lot::Mutex<Option<ModerationPause>>,
     /// Only live ephemeral sessions; no departed-account tombstones. Whenever
     /// both locks are needed, take this lock before `rooms`.
     guest_sessions: RwLock<HashMap<u64, i64>>,
     rooms: RwLock<HashMap<String, Room>>, // keyed lowercase
     max_len: usize,
 }
+
+#[cfg(test)]
+type ModerationPause = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ChatError {
@@ -169,6 +174,8 @@ impl ChatService {
     pub fn new(bus: EventBus, max_len: usize) -> Self {
         let service = Self {
             bus,
+            #[cfg(test)]
+            before_moderation_publish: parking_lot::Mutex::default(),
             guest_sessions: RwLock::default(),
             rooms: RwLock::default(),
             max_len,
@@ -231,12 +238,11 @@ impl ChatService {
             }
             survives
         });
-        drop(rooms);
-        drop(guests);
         // Reuse the scoped moderation update so an open keeper view refreshes.
-        // Publish only after cleanup, and never announce a room just reaped.
+        // Publish after cleanup while rooms is still locked: later moderation
+        // must not overtake this notice. Never announce a room just reaped.
         for (room, screen_name) in lifted {
-            self.bus.publish(ServerEvent::RoomMuted {
+            self.publish_moderation(ServerEvent::RoomMuted {
                 account: account_id,
                 screen_name,
                 room,
@@ -244,6 +250,23 @@ impl ChatService {
                 duration_secs: None,
             });
         }
+    }
+
+    /// Called with the rooms write lock held after changing mute state.
+    /// Broadcast send is synchronous and never calls subscribers, so a later
+    /// mutation cannot publish ahead of this one and no lock is held over I/O.
+    fn publish_moderation(&self, event: ServerEvent) {
+        #[cfg(test)]
+        {
+            // One-shot barrier makes the mutation/publication boundary
+            // deterministic in concurrency tests; no hook exists in production.
+            let pause = self.before_moderation_publish.lock().take();
+            if let Some((entered, release)) = pause {
+                entered.send(()).unwrap();
+                release.recv().unwrap();
+            }
+        }
+        self.bus.publish(event);
     }
 
     /// Is this session a member of the room?
@@ -453,7 +476,8 @@ impl ChatService {
     /// keep receiving events. `duration` of `None` is permanent — until
     /// unmuted or the room is reaped; a timed mute expires lazily against
     /// the injected clock. Creator-or-moderator gated; the room's creator
-    /// can't be muted (mirroring kick).
+    /// can't be muted (mirroring kick). Publishes the update before releasing
+    /// the room lock, so subscribers see changes in their mutation order.
     #[allow(clippy::too_many_arguments)]
     pub fn mute(
         &self,
@@ -484,18 +508,29 @@ impl ChatService {
         room.muted.insert(target_account, until);
         room.muted_as
             .insert(target_account, target_name.to_string());
+        self.publish_moderation(ServerEvent::RoomMuted {
+            account: target_account,
+            screen_name: target_name.to_string(),
+            room: name.to_string(),
+            muted: true,
+            duration_secs: duration.map(|duration| {
+                u32::try_from(duration.as_millis().div_ceil(1000)).unwrap_or(u32::MAX)
+            }),
+        });
         Ok(())
     }
 
     /// Lift a mute (same gate as [`mute`](Self::mute)). Returns `false`
     /// when the target wasn't muted any more — including a timed mute that
-    /// had already expired — so callers can skip the audit/push.
+    /// had already expired — so callers can skip the audit. A successful lift
+    /// publishes its update under the same lock as the mutation.
     pub fn unmute(
         &self,
         name: &str,
         by_account: i64,
         by_is_moderator: bool,
         target_account: i64,
+        target_name: &str,
         now_ms: u64,
     ) -> Result<bool, ChatError> {
         let mut rooms = self.rooms.write();
@@ -508,6 +543,15 @@ impl ChatService {
         let was_muted = room.muted_now(target_account, now_ms);
         room.muted.remove(&target_account);
         room.muted_as.remove(&target_account);
+        if was_muted {
+            self.publish_moderation(ServerEvent::RoomMuted {
+                account: target_account,
+                screen_name: target_name.to_string(),
+                room: name.to_string(),
+                muted: false,
+                duration_secs: None,
+            });
+        }
         Ok(was_muted)
     }
 
@@ -755,6 +799,172 @@ mod tests {
             is_moderator: false,
             screen_name,
         }
+    }
+
+    /// Hold the first mutation exactly before it publishes, while a second
+    /// caller starts. No timing sleeps: the hook and channels order the test.
+    fn competing_moderation(
+        chat: &ChatService,
+        first: impl FnOnce() + Send,
+        second: impl FnOnce() + Send,
+    ) {
+        use std::sync::mpsc::{channel, Sender};
+        struct ReleaseOnDrop(Sender<()>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let (entered_tx, entered) = channel();
+        let (release, released) = channel();
+        *chat.before_moderation_publish.lock() = Some((entered_tx, released));
+        std::thread::scope(move |scope| {
+            // Release even if an assertion fails, so the scoped worker cannot
+            // strand the test while the scope joins its threads.
+            let release = ReleaseOnDrop(release);
+            let first = scope.spawn(first);
+            entered.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(
+                chat.rooms.try_read().is_none(),
+                "a mutation released the room lock before publishing"
+            );
+            let (started_tx, started) = channel();
+            let second = scope.spawn(move || {
+                started_tx.send(()).unwrap();
+                second();
+            });
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+            drop(release);
+            first.join().unwrap();
+            second.join().unwrap();
+        });
+    }
+
+    fn notices(
+        rx: &mut tokio::sync::broadcast::Receiver<ServerEvent>,
+    ) -> Vec<(i64, String, bool, Option<u32>)> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            let ServerEvent::RoomMuted {
+                account,
+                screen_name,
+                room,
+                muted,
+                duration_secs,
+            } = event
+            else {
+                panic!("unexpected event: {event:?}");
+            };
+            assert_eq!(room, LOBBY);
+            out.push((account, screen_name, muted, duration_secs));
+        }
+        out
+    }
+
+    #[test]
+    fn concurrent_mute_and_unmute_notices_follow_state_order() {
+        let chat = service();
+        let mut rx = chat.bus.subscribe();
+        competing_moderation(
+            &chat,
+            || {
+                chat.mute(LOBBY, 10, true, 20, "bob", Some(Duration::from_secs(60)), 0)
+                    .unwrap()
+            },
+            || assert!(chat.unmute(LOBBY, 10, true, 20, "bob now", 0).unwrap()),
+        );
+        assert_eq!(
+            notices(&mut rx),
+            vec![
+                (20, "bob".into(), true, Some(60)),
+                (20, "bob now".into(), false, None),
+            ]
+        );
+        assert!(!chat.is_muted(LOBBY, 20, 0));
+
+        chat.mute(LOBBY, 10, true, 20, "bob", None, 0).unwrap();
+        assert_eq!(notices(&mut rx), vec![(20, "bob".into(), true, None)]);
+        competing_moderation(
+            &chat,
+            || assert!(chat.unmute(LOBBY, 10, true, 20, "bob", 0).unwrap()),
+            || chat.mute(LOBBY, 10, true, 20, "bob", None, 0).unwrap(),
+        );
+        assert_eq!(
+            notices(&mut rx),
+            vec![
+                (20, "bob".into(), false, None),
+                (20, "bob".into(), true, None),
+            ]
+        );
+        assert!(chat.is_muted(LOBBY, 20, 0));
+    }
+
+    #[test]
+    fn final_guest_cleanup_notices_cannot_overtake_or_be_overtaken_by_mutes() {
+        let chat = service();
+        chat.join_lobby(3, -1, "visitor");
+        let mut rx = chat.bus.subscribe();
+        competing_moderation(
+            &chat,
+            || chat.mute(LOBBY, 10, true, -1, "visitor", None, 0).unwrap(),
+            || chat.session_closed(3, -1),
+        );
+        assert_eq!(
+            notices(&mut rx),
+            vec![
+                (-1, "visitor".into(), true, None),
+                (-1, "visitor".into(), false, None),
+            ]
+        );
+        assert!(!chat.is_muted(LOBBY, -1, 0));
+
+        chat.join_lobby(4, -2, "next visitor");
+        chat.mute(LOBBY, 10, true, -2, "next visitor", None, 0)
+            .unwrap();
+        assert_eq!(
+            notices(&mut rx),
+            vec![(-2, "next visitor".into(), true, None)]
+        );
+        competing_moderation(
+            &chat,
+            || chat.session_closed(4, -2),
+            || {
+                assert_eq!(
+                    chat.mute(LOBBY, 10, true, -2, "stale target", None, 0),
+                    Err(ChatError::Forbidden)
+                )
+            },
+        );
+        assert_eq!(
+            notices(&mut rx),
+            vec![(-2, "next visitor".into(), false, None)]
+        );
+        chat.session_closed(4, -2);
+        assert!(notices(&mut rx).is_empty(), "no duplicate final notice");
+        assert!(chat.guest_sessions.read().is_empty());
+        assert!(chat.rooms.read()[LOBBY].muted.is_empty());
+        assert!(chat.rooms.read()[LOBBY].muted_as.is_empty());
+    }
+
+    #[test]
+    fn refused_absent_and_expired_moderation_do_not_publish_notices() {
+        let chat = service();
+        let mut rx = chat.bus.subscribe();
+        assert_eq!(
+            chat.mute(LOBBY, 10, false, 20, "bob", None, 0),
+            Err(ChatError::Forbidden)
+        );
+        assert_eq!(
+            chat.unmute(LOBBY, 10, false, 20, "bob", 0),
+            Err(ChatError::Forbidden)
+        );
+        assert!(!chat.unmute(LOBBY, 10, true, 20, "bob", 0).unwrap());
+        assert!(notices(&mut rx).is_empty());
+        chat.mute(LOBBY, 10, true, 20, "bob", Some(Duration::from_secs(1)), 0)
+            .unwrap();
+        assert_eq!(notices(&mut rx), vec![(20, "bob".into(), true, Some(1))]);
+        assert!(!chat.unmute(LOBBY, 10, true, 20, "bob", 1_000).unwrap());
+        assert!(notices(&mut rx).is_empty(), "lazy expiry stays silent");
     }
 
     #[test]
@@ -1126,11 +1336,11 @@ mod tests {
         // Unmute needs the same gate, restores the voice, and reports
         // whether anything was removed.
         assert!(matches!(
-            chat.unmute(LOBBY, 20, false, 10, 0),
+            chat.unmute(LOBBY, 20, false, 10, "someone", 0),
             Err(ChatError::Forbidden)
         ));
-        assert!(chat.unmute(LOBBY, 999, true, 10, 0).unwrap());
-        assert!(!chat.unmute(LOBBY, 999, true, 10, 0).unwrap());
+        assert!(chat.unmute(LOBBY, 999, true, 10, "someone", 0).unwrap());
+        assert!(!chat.unmute(LOBBY, 999, true, 10, "someone", 0).unwrap());
         chat.send(LOBBY, sender(1, 10, "alice"), "free again", 0)
             .unwrap();
 
@@ -1163,7 +1373,9 @@ mod tests {
             0,
         )
         .unwrap();
-        assert!(!chat.unmute(LOBBY, 999, true, 10, 10_000).unwrap());
+        assert!(!chat
+            .unmute(LOBBY, 999, true, 10, "someone", 10_000)
+            .unwrap());
     }
 
     #[test]

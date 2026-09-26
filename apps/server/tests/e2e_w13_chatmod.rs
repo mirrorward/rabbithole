@@ -1001,6 +1001,118 @@ impl Telnet {
     }
 }
 
+#[tokio::test]
+async fn moderation_and_guest_cleanup_have_one_ordered_notice_on_every_surface() {
+    use rabbithole_proto::presence::UserLeft;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = ServerConfig {
+        hotline_enabled: true,
+        hotline_addr: "127.0.0.1:0".parse().unwrap(),
+        telnet_enabled: true,
+        telnet_addr: "127.0.0.1:0".parse().unwrap(),
+        ..test_config(dir.path())
+    };
+    let burrow = start(cfg).await;
+    let mut mo = login(&burrow, "mo").await;
+    let mut hotline = Hotline::connect(burrow.hotline_addr.unwrap()).await;
+    assert_eq!(
+        hotline.login("pest", "pw-pw-pw", "pest").await.header.error,
+        0
+    );
+    hotline.send(transaction::GET_USER_NAME_LIST, vec![]).await;
+    hotline.read_until(transaction::GET_USER_NAME_LIST).await;
+    let mut telnet = Telnet::connect(burrow.telnet_addr.unwrap()).await;
+    telnet.login("alice").await;
+    telnet.send("c").await;
+    telnet.expect(b"--- Chat: lobby ---").await;
+    telnet.send("observers ready").await;
+    telnet.expect(b"<alice> observers ready\r\n").await;
+    hotline.chat_line(None, "\ralice:  observers ready").await;
+    let telnet_start = telnet.pos;
+
+    // Do not read notices between operations: all surfaces must preserve the
+    // queued order and emit exactly one notice per successful state change.
+    for duration in [Some(60), None] {
+        mo.request_ack(&RoomMute::new(LOBBY, "pest", duration))
+            .await
+            .unwrap();
+        mo.request_ack(&RoomUnmute::new(LOBBY, "pest"))
+            .await
+            .unwrap();
+    }
+    let mut guest = Client::connect(
+        &format!("ws://{}", burrow.ws_addr),
+        None,
+        None,
+        "notice-order",
+        "0",
+    )
+    .await
+    .unwrap();
+    let guest_name = guest
+        .auth_guest(Some("visitor".into()))
+        .await
+        .unwrap()
+        .screen_name;
+    guest.expect_welcome().await.unwrap();
+    mo.request_ack(&RoomMute::new(LOBBY, &guest_name, None))
+        .await
+        .unwrap();
+    guest.close().await;
+
+    let mut native = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let frame = mo.next_push().await.unwrap().expect("native push");
+            if let Some(Ok(update)) = frame.decode::<RoomMuted>() {
+                assert_eq!(update.room, LOBBY);
+                native.push((update.screen_name, update.muted, update.duration_secs));
+            }
+            if matches!(frame.decode::<UserLeft>(), Some(Ok(ref left)) if left.screen_name == guest_name) {
+                break;
+            }
+        }
+    }).await.expect("guest cleanup and departure");
+    assert_eq!(
+        native,
+        vec![
+            ("pest".into(), true, Some(60)),
+            ("pest".into(), false, None),
+            ("pest".into(), true, None),
+            ("pest".into(), false, None),
+            (guest_name.clone(), true, None),
+            (guest_name.clone(), false, None),
+        ]
+    );
+    mo.chat_send(LOBBY, "after moderation").await.unwrap();
+    let expected = [
+        "pest was muted in lobby for 60 seconds.".to_string(),
+        "pest was unmuted in lobby.".to_string(),
+        "pest was muted in lobby until unmuted.".to_string(),
+        "pest was unmuted in lobby.".to_string(),
+        format!("{guest_name} was muted in lobby until unmuted."),
+        format!("{guest_name} was unmuted in lobby."),
+    ];
+    for text in &expected {
+        hotline.notice(None, text).await;
+    }
+    hotline.chat_line(None, "\rmo:  after moderation").await;
+    telnet.expect(b"<mo> after moderation\r\n").await;
+    let received = String::from_utf8_lossy(&telnet.buf[telnet_start..telnet.pos]);
+    let telnet_notices: Vec<&str> = received
+        .lines()
+        .filter(|line| line.contains(" was muted in ") || line.contains(" was unmuted in "))
+        .collect();
+    assert_eq!(telnet_notices, expected.map(|text| format!("({text})")));
+    let kept: RoomModeration = mo
+        .request(&RoomModerationRequest::new(LOBBY))
+        .await
+        .unwrap();
+    assert!(kept.muted.is_empty());
+    hotline.close().await;
+    burrow.shutdown().await;
+}
+
 /// The telnet lobby observes a mute: the typed line is answered with the
 /// refusal line instead of echoing through the room, and an unmute restores
 /// the flow.

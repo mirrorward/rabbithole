@@ -302,13 +302,6 @@ pub async fn handle(
             now_ms(),
         ) {
             Ok(()) => {
-                shared.bus.publish(ServerEvent::RoomMuted {
-                    account: target_account,
-                    screen_name: req.screen_name.clone(),
-                    room: req.room.clone(),
-                    muted: true,
-                    duration_secs: req.duration_secs,
-                });
                 audit(
                     shared,
                     &ctx.login,
@@ -338,16 +331,10 @@ pub async fn handle(
             ctx.account_id,
             is_moderator,
             target_account,
+            &req.screen_name,
             now_ms(),
         ) {
             Ok(true) => {
-                shared.bus.publish(ServerEvent::RoomMuted {
-                    account: target_account,
-                    screen_name: req.screen_name.clone(),
-                    room: req.room.clone(),
-                    muted: false,
-                    duration_secs: None,
-                });
                 audit(
                     shared,
                     &ctx.login,
