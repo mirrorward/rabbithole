@@ -533,6 +533,30 @@ impl FileService {
         Ok(self.repo().uploaded_bytes(account_id).await?)
     }
 
+    /// Candidate pages for search callers that apply visibility before their
+    /// result limit. `before` is the previous page's final (created_at, id).
+    pub async fn search_page(
+        &self,
+        area_slug: Option<&str>,
+        query: &str,
+        limit: i64,
+        before: Option<(i64, i64)>,
+    ) -> Result<Vec<FileNodeRow>, FileError> {
+        let area_id = match area_slug {
+            Some(slug) => Some(self.area(slug).await?.id),
+            None => None,
+        };
+        Ok(self
+            .repo()
+            .search_page(area_id, query, limit, before)
+            .await?)
+    }
+
+    /// Search traverses all matching paths, including nested drop boxes.
+    pub async fn has_dropbox_ancestor(&self, node_id: i64) -> Result<bool, FileError> {
+        Ok(self.repo().has_dropbox_ancestor(node_id).await?)
+    }
+
     pub async fn search(
         &self,
         area_slug: Option<&str>,

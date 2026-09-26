@@ -515,43 +515,85 @@ impl FilesRepo<'_> {
         .get("total"))
     }
 
-    /// Search files (kind = 1) by name/comment/uploader substring, optionally
-    /// scoped to one area, newest first.
+    /// Search files by name/comment/uploader substring, newest first.
+    /// Callers needing authorization before the result limit use search_page.
     pub async fn search(
         &self,
         area_id: Option<i64>,
         query: &str,
         limit: i64,
     ) -> Result<Vec<FileNodeRow>, StoreError> {
+        self.search_candidates(area_id, query, limit, None).await
+    }
+
+    /// A bounded candidate page in (created_at DESC, id DESC) order. The
+    /// cursor is the last *examined* row, including invisible matches. This
+    /// lets callers fill a visible result limit without loading every match
+    /// or letting hidden rows consume it. No OFFSET drift on deletions.
+    pub async fn search_page(
+        &self,
+        area_id: Option<i64>,
+        query: &str,
+        limit: i64,
+        before: Option<(i64, i64)>,
+    ) -> Result<Vec<FileNodeRow>, StoreError> {
+        self.search_candidates(area_id, query, limit.clamp(1, 200), before)
+            .await
+    }
+
+    async fn search_candidates(
+        &self,
+        area_id: Option<i64>,
+        query: &str,
+        limit: i64,
+        before: Option<(i64, i64)>,
+    ) -> Result<Vec<FileNodeRow>, StoreError> {
+        // Keep the old literal-substring contract, including stripping LIKE
+        // wildcards. No user input is interpreted as FTS MATCH syntax. LIKE
+        // retains its ASCII case-folding; short queries still work by scan.
         let like = format!("%{}%", query.replace(['%', '_'], ""));
-        let rows = match area_id {
-            Some(aid) => {
-                let sql = format!(
-                    "{NODE_SELECT} WHERE n.kind = 1 AND n.area_id = ?
-                     AND (n.name LIKE ?2 OR n.comment LIKE ?2 OR n.uploader LIKE ?2)
-                     ORDER BY n.created_at DESC LIMIT ?3"
-                );
-                sqlx::query(&sql)
-                    .bind(aid)
-                    .bind(&like)
-                    .bind(limit)
-                    .fetch_all(self.0)
-                    .await?
-            }
-            None => {
-                let sql = format!(
-                    "{NODE_SELECT} WHERE n.kind = 1
-                     AND (n.name LIKE ?1 OR n.comment LIKE ?1 OR n.uploader LIKE ?1)
-                     ORDER BY n.created_at DESC LIMIT ?2"
-                );
-                sqlx::query(&sql)
-                    .bind(&like)
-                    .bind(limit)
-                    .fetch_all(self.0)
-                    .await?
-            }
-        };
+        // Separate indexed branches matter: an OR across FTS columns falls
+        // back to scanning the virtual table. UNION also deduplicates a file
+        // whose name, comment and uploader all match.
+        let sql = format!(
+            "{NODE_SELECT} WHERE n.kind = 1
+             AND (?1 IS NULL OR n.area_id = ?1)
+             AND (?3 IS NULL OR (n.created_at, n.id) < (?3, ?4))
+             AND n.id IN (
+                 SELECT rowid FROM file_search WHERE name LIKE ?2
+                 UNION SELECT rowid FROM file_search WHERE comment LIKE ?2
+                 UNION SELECT rowid FROM file_search WHERE uploader LIKE ?2
+             )
+             ORDER BY n.created_at DESC, n.id DESC LIMIT ?5"
+        );
+        let rows = sqlx::query(&sql)
+            .bind(area_id)
+            .bind(like)
+            .bind(before.map(|c| c.0))
+            .bind(before.map(|c| c.1))
+            .bind(limit)
+            .fetch_all(self.0)
+            .await?;
         Ok(rows.iter().map(row_to_node).collect())
+    }
+
+    /// Search may reach nested descendants without opening their folders.
+    /// Walk every ancestor, not just the immediate parent. UNION makes even
+    /// a malformed cyclic tree finite.
+    pub async fn has_dropbox_ancestor(&self, node_id: i64) -> Result<bool, StoreError> {
+        let row = sqlx::query(
+            "WITH RECURSIVE parents(id, parent_id, is_dropbox) AS (
+                 SELECT p.id, p.parent_id, p.is_dropbox FROM file_nodes n
+                 JOIN file_nodes p ON p.id = n.parent_id WHERE n.id = ?1
+                 UNION
+                 SELECT p.id, p.parent_id, p.is_dropbox FROM file_nodes p
+                 JOIN parents c ON p.id = c.parent_id
+             ) SELECT EXISTS(SELECT 1 FROM parents WHERE is_dropbox != 0) AS hidden",
+        )
+        .bind(node_id)
+        .fetch_one(self.0)
+        .await?;
+        Ok(row.get("hidden"))
     }
 }
 

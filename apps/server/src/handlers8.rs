@@ -13,12 +13,15 @@ use rabbithole_net::Connection;
 use rabbithole_proto::filelib as pf;
 use rabbithole_proto::{ErrorCode, Frame};
 use rabbithole_server_core::files::KIND_FILE;
-use rabbithole_server_core::{Caps, FileError, ServerEvent};
+use rabbithole_server_core::{Caps, FileError, FileService, ServerEvent};
 use rabbithole_store_server::repo6::FileNodeRow;
 
 use crate::handlers15::audit;
 use crate::session::SessionCtx;
 use crate::Shared;
+
+#[cfg(test)]
+mod search_tests;
 
 /// Inline upload cap: control frames are capped at 1 MiB, so keep a margin
 /// for the surrounding fields. Larger files use W4.2 streaming.
@@ -61,6 +64,46 @@ fn map_err(e: FileError) -> ErrorCode {
         FileError::BadName | FileError::NotAFile | FileError::NotEmpty => ErrorCode::BadRequest,
         FileError::NotAFolder | FileError::IntoItself => ErrorCode::BadRequest,
         FileError::Store(_) => ErrorCode::Internal,
+    }
+}
+
+/// Keep authorization ahead of the result limit. Permissions are supplied by
+/// the live session; the service supplies only bounded pages of candidates.
+async fn visible_search(
+    files: &FileService,
+    area: Option<&str>,
+    query: &str,
+    limit: usize,
+    allows: impl Fn(&str, Caps) -> bool,
+    quarantined: impl Fn(Option<&[u8; 32]>) -> bool,
+) -> Result<Vec<pf::FileNodeView>, FileError> {
+    let limit = limit.clamp(1, 200);
+    let mut found = Vec::new();
+    let mut before = None;
+    loop {
+        let page = files.search_page(area, query, 64, before).await?;
+        let Some(last) = page.last() else {
+            return Ok(found);
+        };
+        before = Some((last.created_at, last.id));
+        for node in page {
+            let res = resource(&node.area, Some(&node.path));
+            if !allows(&res, Caps::SEE | Caps::FILE_LIST)
+                || (quarantined(node.blob_id.as_ref()) && !allows("moderation", Caps::MODERATE))
+            {
+                continue;
+            }
+            if !allows(&res, Caps::DROPBOX_VIEW)
+                && !allows(&resource(&node.area, None), Caps::FILE_MANAGE)
+                && files.has_dropbox_ancestor(node.id).await?
+            {
+                continue;
+            }
+            found.push(view(&node));
+            if found.len() == limit {
+                return Ok(found);
+            }
+        }
     }
 }
 
@@ -454,21 +497,20 @@ pub async fn handle(
             Some(a) => resource(a, None),
             None => "files".to_string(),
         };
-        if !ctx.allows(shared, &res, Caps::FILE_LIST) {
+        if !ctx.allows(shared, &res, Caps::SEE | Caps::FILE_LIST) {
             fail!(ErrorCode::Forbidden);
         }
-        let limit = req.limit.clamp(1, 200) as i64;
-        let sees_quarantined = ctx.allows(shared, "moderation", Caps::MODERATE);
         let nodes = try_file!(
-            shared
-                .files
-                .search(req.area.as_deref(), &req.query, limit)
-                .await
-        )
-        .iter()
-        .filter(|n| sees_quarantined || !shared.moderation.file_quarantined(n.blob_id.as_ref()))
-        .map(view)
-        .collect();
+            visible_search(
+                &shared.files,
+                req.area.as_deref(),
+                &req.query,
+                req.limit.clamp(1, 200) as usize,
+                |res, caps| ctx.allows(shared, res, caps),
+                |blob| shared.moderation.file_quarantined(blob),
+            )
+            .await
+        );
         reply!(&pf::SearchResults::new(nodes));
         return Ok(true);
     }
