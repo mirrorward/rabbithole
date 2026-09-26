@@ -12,7 +12,8 @@ use std::time::Duration;
 use burrow::Burrow;
 use rabbithole_core::Client;
 use rabbithole_proto::filelib::{
-    pull_state, PullGrantAsk, PullGrantIssued, RemotePull, RemotePullAccepted, RemotePullStatus,
+    pull_sources, pull_state, PullGrantAsk, PullGrantIssued, RemotePull, RemotePullAccepted,
+    RemotePullStatus, RemotePullWithSources,
 };
 use rabbithole_proto::swarm::AdvertEntry;
 use rabbithole_server_core::{Role, ServerConfig};
@@ -177,15 +178,38 @@ async fn a_sent_file_comes_from_the_sources_swarm_and_falls_back_to_the_source()
 
     let mut alice_s = login(&source, "alice").await;
     let mut alice_d = login(&dest, "alice").await;
-    let mut send = async |name: &str| {
+    let mut send = async |name: &str, sources: Option<u8>| {
         let issued: PullGrantIssued = alice_s
             .request(&PullGrantAsk::new(dest_key, vec![tape], "127.0.0.1"))
             .await
             .unwrap();
-        let accepted: RemotePullAccepted = alice_d
-            .request(&RemotePull::new(issued.grant, "inbox", None))
-            .await
-            .unwrap();
+        let accepted: RemotePullAccepted = if let Some(sources) = sources {
+            // Invalid choices are rejected without spending this grant.
+            let bad = alice_d
+                .request::<_, RemotePullAccepted>(&RemotePullWithSources::new(
+                    issued.grant.clone(),
+                    "inbox",
+                    None,
+                    255,
+                ))
+                .await
+                .unwrap_err();
+            assert!(format!("{bad:?}").contains("BadRequest"));
+            alice_d
+                .request(&RemotePullWithSources::new(
+                    issued.grant,
+                    "inbox",
+                    None,
+                    sources,
+                ))
+                .await
+                .unwrap()
+        } else {
+            alice_d
+                .request(&RemotePull::new(issued.grant, "inbox", None))
+                .await
+                .unwrap()
+        };
         let done = until_done(&mut alice_d, accepted.pull_id).await;
         assert_eq!(
             (done.state, done.files_done),
@@ -219,7 +243,7 @@ async fn a_sent_file_comes_from_the_sources_swarm_and_falls_back_to_the_source()
         .config
         .set_key("transfer_rate_bytes_per_sec", "262144")
         .unwrap();
-    let pull = send("tape.bin").await;
+    let pull = send("tape.bin", None).await;
     source
         .shared
         .config
@@ -235,7 +259,7 @@ async fn a_sent_file_comes_from_the_sources_swarm_and_falls_back_to_the_source()
         .set_key("s2s_swarm_sources", "false")
         .unwrap();
     let before = ranges_served();
-    let pull = send("tape (2).bin").await;
+    let pull = send("tape (2).bin", Some(pull_sources::SWARM_WHEN_AVAILABLE)).await;
     assert_eq!(from_swarm(&dest, pull).await, 0);
     assert_eq!(ranges_served(), before, "no proved ranges without seeders");
     source
@@ -246,16 +270,72 @@ async fn a_sent_file_comes_from_the_sources_swarm_and_falls_back_to_the_source()
 
     // The destination does not want it: the same.
     dest.shared.config.set_key("s2s_swarm", "false").unwrap();
-    let pull = send("tape (3).bin").await;
+    let asks_before = source
+        .shared
+        .s2s
+        .sources_asked
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let pull = send("tape (3).bin", Some(pull_sources::SWARM_WHEN_AVAILABLE)).await;
     assert_eq!(from_swarm(&dest, pull).await, 0);
+    assert_eq!(
+        source
+            .shared
+            .s2s
+            .sources_asked
+            .load(std::sync::atomic::Ordering::Relaxed),
+        asks_before
+    );
     dest.shared.config.set_key("s2s_swarm", "true").unwrap();
+
+    // Both operators and real live seeders permit swarm, but this send does
+    // not: no discovery or proved-range requests, not merely zero peer bytes.
+    let asks_before = source
+        .shared
+        .s2s
+        .sources_asked
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let ranges_before = ranges_served();
+    let pull = send("tape (4).bin", Some(pull_sources::ORIGIN_ONLY)).await;
+    assert_eq!(from_swarm(&dest, pull).await, 0);
+    assert_eq!(
+        source
+            .shared
+            .s2s
+            .sources_asked
+            .load(std::sync::atomic::Ordering::Relaxed),
+        asks_before
+    );
+    assert_eq!(ranges_served(), ranges_before);
+
+    // The next send can independently opt in; the prior choice is not sticky
+    // operator state and the explicit request still uses the live seeders.
+    source
+        .shared
+        .config
+        .set_key("transfer_rate_bytes_per_sec", "262144")
+        .unwrap();
+    let pull = send("tape (5).bin", Some(pull_sources::SWARM_WHEN_AVAILABLE)).await;
+    source
+        .shared
+        .config
+        .set_key("transfer_rate_bytes_per_sec", "0")
+        .unwrap();
+    assert_eq!(from_swarm(&dest, pull).await, 1);
+    assert!(
+        source
+            .shared
+            .s2s
+            .sources_asked
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > asks_before
+    );
 
     // The seeders are gone but still listed (their sessions are up): the
     // swarm gives nothing, and the source sends the file instead.
     carol_peer.stop();
     dave_peer.stop();
     let before = ranges_served();
-    let pull = send("tape (4).bin").await;
+    let pull = send("tape (6).bin", Some(pull_sources::SWARM_WHEN_AVAILABLE)).await;
     assert_eq!(from_swarm(&dest, pull).await, 0);
     // It came as proved ranges from the source (every unit of it), which
     // keeps the file's proofs beside it for that.

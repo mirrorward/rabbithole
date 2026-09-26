@@ -94,6 +94,8 @@ pub struct S2sState {
     /// tells a file carried by its ranges from one carried by a plain
     /// stream.
     pub ranges_served: AtomicU64,
+    /// Validly framed requests for swarm sources (including policy refusals).
+    pub sources_asked: AtomicU64,
 }
 
 /// What a burrow derives, from its signing seed, the key it hides the
@@ -325,7 +327,22 @@ pub async fn handle(
     }
 
     if let Some(Ok(req)) = frame.decode::<pf::RemotePull>() {
-        match accept(shared, ctx, req).await {
+        match accept(shared, ctx, req, pf::pull_sources::SWARM_WHEN_AVAILABLE).await {
+            Ok(accepted) => conn.send(Frame::reply_to(frame, &accepted)?).await?,
+            Err(code) => fail!(code),
+        }
+        return Ok(true);
+    }
+
+    if let Some(Ok(req)) = frame.decode::<pf::RemotePullWithSources>() {
+        if !matches!(
+            req.sources,
+            pf::pull_sources::ORIGIN_ONLY | pf::pull_sources::SWARM_WHEN_AVAILABLE
+        ) {
+            fail!(ErrorCode::BadRequest);
+        }
+        let plain = pf::RemotePull::new(req.grant, req.area, req.folder);
+        match accept(shared, ctx, plain, req.sources).await {
             Ok(accepted) => conn.send(Frame::reply_to(frame, &accepted)?).await?,
             Err(code) => fail!(code),
         }
@@ -603,6 +620,7 @@ async fn accept(
     shared: &Arc<Shared>,
     ctx: &SessionCtx,
     req: pf::RemotePull,
+    sources: u8,
 ) -> Result<pf::RemotePullAccepted, ErrorCode> {
     let (enabled, max_bytes, per_account) = {
         let config = shared.config.read();
@@ -738,7 +756,7 @@ async fn accept(
         &ctx.login,
         "pull-accept",
         format!(
-            "#{pull_id} from={source_name:?} key={} files={files} bytes={total} into={}/{}",
+            "#{pull_id} from={source_name:?} key={} files={files} bytes={total} sources={sources} into={}/{}",
             rabbithole_identity::PublicKey(source).fingerprint(),
             req.area,
             folder.as_deref().unwrap_or("")
@@ -754,6 +772,7 @@ async fn accept(
         source_name: source_name.clone(),
         grant_bytes: req.grant,
         grant: signed,
+        sources,
         area: req.area,
         folder,
         cancel,
@@ -780,6 +799,7 @@ struct Pull {
     source_name: String,
     grant_bytes: Vec<u8>,
     grant: SignedPullGrant,
+    sources: u8,
     area: String,
     folder: Option<String>,
     cancel: Arc<AtomicBool>,
@@ -1561,7 +1581,10 @@ impl Pull {
             let mut seeders_tried = false;
             // An empty file, or one too big for the swarm's bookkeeping, goes
             // the plain way.
-            if !plain && (1..=SWARM_MAX_BYTES).contains(&item.size) {
+            if self.sources == pf::pull_sources::SWARM_WHEN_AVAILABLE
+                && !plain
+                && (1..=SWARM_MAX_BYTES).contains(&item.size)
+            {
                 match self
                     .fetch_proved(
                         &link,
@@ -1599,7 +1622,7 @@ impl Pull {
             }
             let from_swarm = match proved {
                 Some(from_seeders) => from_seeders,
-                None if seeders_tried => false,
+                None if seeders_tried || self.sources == pf::pull_sources::ORIGIN_ONLY => false,
                 None => {
                     let tried = self
                         .fetch_from_swarm(
@@ -2152,6 +2175,7 @@ async fn answer_ask(
                 .ok_or(stream_status::BAD)?;
         match postcard::from_bytes::<fp::PullStreamAsk>(&bytes) {
             Ok(fp::PullStreamAsk::Sources { grant, item }) => {
+                shared.s2s.sources_asked.fetch_add(1, Ordering::Relaxed);
                 let (item, nonce) = granted_item(shared, peer_key, direct, &grant, item).await?;
                 if !may_use_swarm(shared, &nonce).await {
                     return Err(stream_status::OFF);

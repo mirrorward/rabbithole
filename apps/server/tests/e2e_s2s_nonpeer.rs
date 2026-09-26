@@ -11,8 +11,8 @@ use burrow::Burrow;
 use rabbithole_core::{Client, ClientError};
 use rabbithole_identity::IdentityKey;
 use rabbithole_proto::filelib::{
-    pull_state, PullGrantAsk, PullGrantIssued, PullGrantRequest, RemotePull, RemotePullAccepted,
-    RemotePullStatus,
+    pull_sources, pull_state, PullGrantAsk, PullGrantIssued, PullGrantRequest, RemotePull,
+    RemotePullAccepted, RemotePullStatus, RemotePullWithSources,
 };
 use rabbithole_proto::hello::PullSessionOpen;
 use rabbithole_proto::ErrorCode;
@@ -185,12 +185,22 @@ async fn a_file_crosses_between_burrows_that_are_not_peers() {
         .config
         .set_key("s2s_pull_from_any", "false")
         .unwrap();
-    refused(
-        alice_d
-            .request::<_, RemotePullAccepted>(&RemotePull::new(issued.grant.clone(), "inbox", None))
-            .await,
-        ErrorCode::Unavailable,
-    );
+    for sources in [
+        pull_sources::ORIGIN_ONLY,
+        pull_sources::SWARM_WHEN_AVAILABLE,
+    ] {
+        refused(
+            alice_d
+                .request::<_, RemotePullAccepted>(&RemotePullWithSources::new(
+                    issued.grant.clone(),
+                    "inbox",
+                    None,
+                    sources,
+                ))
+                .await,
+            ErrorCode::Unavailable,
+        );
+    }
     dest.shared
         .config
         .set_key("s2s_pull_from_any", "true")
@@ -201,12 +211,22 @@ async fn a_file_crosses_between_burrows_that_are_not_peers() {
         .config
         .set_key("s2s_private_addresses", "false")
         .unwrap();
-    refused(
-        alice_d
-            .request::<_, RemotePullAccepted>(&RemotePull::new(issued.grant.clone(), "inbox", None))
-            .await,
-        ErrorCode::Unavailable,
-    );
+    for sources in [
+        pull_sources::ORIGIN_ONLY,
+        pull_sources::SWARM_WHEN_AVAILABLE,
+    ] {
+        refused(
+            alice_d
+                .request::<_, RemotePullAccepted>(&RemotePullWithSources::new(
+                    issued.grant.clone(),
+                    "inbox",
+                    None,
+                    sources,
+                ))
+                .await,
+            ErrorCode::Unavailable,
+        );
+    }
     dest.shared
         .config
         .set_key("s2s_private_addresses", "true")

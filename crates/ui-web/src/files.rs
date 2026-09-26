@@ -71,6 +71,8 @@ pub struct Transfer {
     /// How many sources the last attempt pulled from, when the swarm reported
     /// it. `None` for the inline (single-source) path.
     pub sources: Option<u32>,
+    /// The choice made for this inter-burrow send, when started in this app.
+    pub source_strategy: Option<crate::send::SourceStrategy>,
     /// The file node this transfer came from, so a failed transfer can be
     /// retried without hunting for it again.
     pub node_id: Option<i64>,
@@ -194,6 +196,7 @@ impl FilesState {
                     hash: node.blob_id.as_ref().map(blob_hex),
                     error: None,
                     sources: None,
+                    source_strategy: None,
                     node_id: Some(node.id),
                     retryable: true,
                 });
@@ -224,6 +227,7 @@ impl FilesState {
                     hash: None,
                     error: None,
                     sources: None,
+                    source_strategy: None,
                     node_id: None,
                     retryable: true,
                 });
@@ -300,6 +304,7 @@ impl FilesState {
                             hash: None,
                             error: Some(detail.clone()),
                             sources: Some(*sources_tried as u32),
+                            source_strategy: None,
                             node_id,
                             retryable: *retryable,
                         });
@@ -362,9 +367,16 @@ impl FilesState {
 impl FilesState {
     /// A send of `name` into this burrow was accepted as pull `pull_id`: its
     /// queue row, named for what is coming. Returns the row's key.
-    pub fn pull_started(&mut self, pull_id: u64, name: &str, bytes: u64) -> u64 {
+    pub fn pull_started(
+        &mut self,
+        pull_id: u64,
+        name: &str,
+        bytes: u64,
+        sources: crate::send::SourceStrategy,
+    ) -> u64 {
         let key = self.pull_row(pull_id, name);
         if let Some(t) = self.transfers.iter_mut().find(|t| t.id == key) {
+            t.source_strategy = Some(sources);
             t.name = name.to_string();
             t.total = t.total.max(bytes);
         }
@@ -398,6 +410,7 @@ impl FilesState {
             hash: None,
             error: None,
             sources: None,
+            source_strategy: None,
             node_id: None,
             retryable: false,
         });
@@ -447,6 +460,7 @@ impl FilesState {
             hash: None,
             error: None,
             sources: None,
+            source_strategy: None,
             node_id: None,
             retryable: false,
         });
@@ -684,7 +698,7 @@ mod tests {
             ))
         };
         let mut files = FilesState::default();
-        let key = files.pull_started(7, "tapes", 300);
+        let key = files.pull_started(7, "tapes", 300, crate::send::SourceStrategy::OriginOnly);
         assert!(key > PULL_KEY_BASE && key < UPLOAD_KEY_BASE);
         assert_eq!(files.pull_id_of(key), Some(7));
         let row = |f: &FilesState| f.transfers.iter().find(|t| t.id == key).cloned().unwrap();
@@ -704,17 +718,38 @@ mod tests {
             (TransferStatus::Done, 100)
         );
 
+        assert_eq!(
+            row(&files).source_strategy,
+            Some(crate::send::SourceStrategy::OriginOnly)
+        );
+        // A fast completion can arrive before the acceptance callback. Adding
+        // the person's chosen policy must preserve that ending and progress.
+        files.apply(&push(8, pull_state::DONE, 300, 0));
+        let fast = files.pull_started(
+            8,
+            "fast tapes",
+            300,
+            crate::send::SourceStrategy::SwarmWhenAvailable,
+        );
+        let fast = files.transfers.iter().find(|t| t.id == fast).unwrap();
+        assert_eq!((fast.status, fast.done), (TransferStatus::Done, 300));
+        assert_eq!(
+            fast.source_strategy,
+            Some(crate::send::SourceStrategy::SwarmWhenAvailable)
+        );
+
         // A status for a pull the app did not start here still gets a row.
         files.apply(&push(9, pull_state::FAILED, 30, pull_reason::OVER_QUOTA));
         let other = files.pulls[&9];
         let other = files.transfers.iter().find(|t| t.id == other).unwrap();
+        assert_eq!(other.source_strategy, None);
         assert_eq!(other.name, "from Scratch");
         assert_eq!(other.status, TransferStatus::Failed);
         assert_eq!(
             other.error.as_deref(),
             Some("It would have gone over your space here.")
         );
-        assert_eq!(files.pulls.len(), 2);
+        assert_eq!(files.pulls.len(), 3);
     }
 
     #[test]
@@ -990,6 +1025,7 @@ mod tests {
             hash: None,
             error: None,
             sources: None,
+            source_strategy: None,
             node_id: None,
             retryable: true,
         };

@@ -13,6 +13,46 @@ use rabbithole_proto::ErrorCode;
 
 use crate::files::human_size;
 
+/// A person's permission for this send, not a claim about sources actually used.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourceStrategy {
+    OriginOnly,
+    #[default]
+    SwarmWhenAvailable,
+}
+
+impl SourceStrategy {
+    pub fn wire(self) -> u8 {
+        use rabbithole_proto::filelib::pull_sources;
+        match self {
+            Self::OriginOnly => pull_sources::ORIGIN_ONLY,
+            Self::SwarmWhenAvailable => pull_sources::SWARM_WHEN_AVAILABLE,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OriginOnly => "Origin only",
+            Self::SwarmWhenAvailable => "Swarm when available",
+        }
+    }
+
+    pub fn explanation(self) -> &'static str {
+        match self {
+            Self::OriginOnly => "Fetch directly from the original burrow, without asking for or contacting its swarm peers.",
+            Self::SwarmWhenAvailable => "Use swarm peers when both burrow operators allow it. Fetch anything they cannot supply from the original burrow.",
+        }
+    }
+
+    pub fn permits_legacy(self) -> bool {
+        self == Self::SwarmWhenAvailable
+    }
+}
+
+pub fn source_choice_unsupported(dest: &str) -> String {
+    format!("{dest} cannot accept an origin-only send. Its operator may need to update it or enable inter-burrow pulls. Nothing was sent; keep this choice and try later, or choose Swarm when available.")
+}
+
 fn quoted(name: &str) -> String {
     format!("\u{201c}{name}\u{201d}")
 }
@@ -191,6 +231,17 @@ impl Place {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_swarm_choice_can_retry_an_older_destination() {
+        use super::SourceStrategy;
+        assert!(!SourceStrategy::OriginOnly.permits_legacy());
+        assert!(SourceStrategy::default().permits_legacy());
+        assert!(SourceStrategy::SwarmWhenAvailable
+            .explanation()
+            .contains("both burrow operators"));
+        assert!(super::source_choice_unsupported("Old Burrow").contains("Nothing was sent"));
+    }
+
     use super::*;
 
     fn status(state: u8, done: u32, missing: u32, reason: u8) -> RemotePullStatus {

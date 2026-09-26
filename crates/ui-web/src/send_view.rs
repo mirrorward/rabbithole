@@ -10,14 +10,14 @@
 use leptos::*;
 use rabbithole_proto::filelib::{
     AreaList, AreaListRequest, FileAreaView, FolderListRequest, NodeList, PullGrantAsk,
-    PullGrantIssued, PullGrantRequest, RemotePull, RemotePullAccepted,
+    PullGrantIssued, PullGrantRequest, RemotePull, RemotePullAccepted, RemotePullWithSources,
 };
 use rabbithole_proto::ErrorCode;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::app::{AppState, SendAsk, ServerId};
 use crate::files::KIND_FOLDER;
-use crate::send::{self, Place};
+use crate::send::{self, Place, SourceStrategy};
 use crate::toasts::ToastKind;
 
 /// A folder on the destination, as the picker lists it.
@@ -36,6 +36,7 @@ pub fn SendDialog() -> impl IntoView {
     let areas = create_rw_signal(Vec::<FileAreaView>::new());
     let subs = create_rw_signal(Vec::<Sub>::new());
     let place = create_rw_signal(Place::default());
+    let sources = create_rw_signal(SourceStrategy::default());
     let loading = create_rw_signal(false);
     let busy = create_rw_signal(false);
     let problem = create_rw_signal(None::<String>);
@@ -47,6 +48,7 @@ pub fn SendDialog() -> impl IntoView {
             areas.set(Vec::new());
             subs.set(Vec::new());
             place.set(Place::default());
+            sources.set(SourceStrategy::default());
             problem.set(None);
             busy.set(false);
             crate::a11y::focus_id("rh-send-cancel");
@@ -101,7 +103,15 @@ pub fn SendDialog() -> impl IntoView {
         }
         busy.set(true);
         problem.set(None);
-        start(app, ask_now, to, place.get_untracked(), busy, problem);
+        start(
+            app,
+            ask_now,
+            to,
+            place.get_untracked(),
+            sources.get_untracked(),
+            busy,
+            problem,
+        );
     };
 
     view! {
@@ -263,6 +273,24 @@ pub fn SendDialog() -> impl IntoView {
                         </div>
                     </Show>
 
+                    <label class="rh-send-step" for="rh-send-sources">"Sources for this send"</label>
+                    <select
+                        id="rh-send-sources"
+                        class="rh-select"
+                        aria-describedby="rh-send-sources-help"
+                        disabled=move || busy.get()
+                        prop:value=move || sources.get().wire().to_string()
+                        on:change=move |ev| sources.set(if event_target_value(&ev) == "0" {
+                            SourceStrategy::OriginOnly
+                        } else {
+                            SourceStrategy::SwarmWhenAvailable
+                        })
+                    >
+                        <option value="1">"Swarm when available"</option>
+                        <option value="0">"Origin only"</option>
+                    </select>
+                    <p class="rh-send-lead" id="rh-send-sources-help">{move || sources.get().explanation()}</p>
+
                     <Show when=move || problem.with(Option::is_some) fallback=|| ()>
                         <p class="rh-send-problem" role="alert">{move || problem.get()}</p>
                     </Show>
@@ -374,6 +402,7 @@ fn start(
     ask: SendAsk,
     to: ServerId,
     place: Place,
+    sources: SourceStrategy,
     busy: RwSignal<bool>,
     problem: RwSignal<Option<String>>,
 ) {
@@ -428,9 +457,24 @@ fn start(
         let Some(issued) = issued else {
             return fail(send::grant_refusal(None, &ask.name, &from_name, &to_name));
         };
-        let reply = to_ws
-            .call(&RemotePull::new(issued.grant.clone(), area, folder))
+        let mut reply = to_ws
+            .call(&RemotePullWithSources::new(
+                issued.grant.clone(),
+                area.clone(),
+                folder.clone(),
+                sources.wire(),
+            ))
             .await;
+        if reply.as_ref().and_then(|f| f.error) == Some(ErrorCode::Unsupported) {
+            if !sources.permits_legacy() {
+                return fail(send::source_choice_unsupported(&to_name));
+            }
+            // Legacy destinations already permit operator-enabled swarm use.
+            // Only that choice can safely retry; origin-only never broadens.
+            reply = to_ws
+                .call(&RemotePull::new(issued.grant.clone(), area, folder))
+                .await;
+        }
         let accepted = match reply {
             Some(f) if f.error.is_none() => f.decode::<RemotePullAccepted>().and_then(Result::ok),
             Some(f) => {
@@ -465,7 +509,7 @@ fn start(
             ));
         };
         dest.files.update(|f| {
-            f.pull_started(accepted.pull_id, &ask.name, accepted.bytes);
+            f.pull_started(accepted.pull_id, &ask.name, accepted.bytes, sources);
         });
         busy.set(false);
         app.sending.set(None);

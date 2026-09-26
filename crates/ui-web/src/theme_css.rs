@@ -1108,7 +1108,7 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 .rh-card-actions{display:flex;flex-wrap:wrap;gap:var(--rh-space-2)}\
 .rh-confirm.rh-send{width:min(34rem,100%)}\
 .rh-send .rh-send-lead{margin:.25rem 0 0;color:var(--rh-muted);font-size:var(--rh-font-sm)}\
-.rh-send .rh-send-step{margin:var(--rh-space-4) 0 var(--rh-space-2);font-size:var(--rh-font-xs);font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--rh-muted)}\
+.rh-send .rh-send-step{display:block;margin:var(--rh-space-4) 0 var(--rh-space-2);font-size:var(--rh-font-xs);font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--rh-muted)}\
 .rh-send-burrows{display:flex;flex-wrap:wrap;gap:var(--rh-space-2)}\
 .rh-send-burrow{appearance:none;border:1px solid color-mix(in srgb,var(--rh-text) 14%,transparent);background:none;color:var(--rh-text);font:inherit;font-size:var(--rh-font-sm);padding:.4rem .8rem;border-radius:var(--rh-radius-full);cursor:pointer}\
 .rh-send-burrow:hover{border-color:var(--rh-accent)}\

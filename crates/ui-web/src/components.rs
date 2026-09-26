@@ -973,7 +973,7 @@ pub fn Transfers() -> impl IntoView {
                     <ul class="rh-xfers">
                         <For
                             each=move || app.all_transfers()
-                            key=|(burrow, t)| (burrow.clone(), t.id, t.done, t.status, t.error.clone())
+                            key=|(burrow, t)| (burrow.clone(), t.id, t.done, t.status, t.error.clone(), t.source_strategy)
                             children=move |(burrow, t)| {
                                 let pct = if let Some(pct) = t.done.min(t.total).saturating_mul(100)
                                     .checked_div(t.total)
@@ -1039,6 +1039,9 @@ pub fn Transfers() -> impl IntoView {
                                         </div>
                                         <div class="rh-xfer-detail">
                                             {hash.map(|h| view! { <span class="rh-xfer-hash">{h}</span> })}
+                                            {t.source_strategy.map(|sources| view! {
+                                                <span class="rh-swarmpill" title=sources.explanation()>{sources.label()}</span>
+                                            })}
                                             // What this transfer actually used.
                                             // A real count when the swarm
                                             // reported one; the honest
@@ -5282,7 +5285,7 @@ fn TransferQueue() -> impl IntoView {
             <ul class="rh-queue">
                 <For
                     each=move || files.with(|f| f.transfers.clone())
-                    key=|t| format!("{}:{}:{:?}:{:?}", t.id, t.percent(), t.status, t.error)
+                    key=|t| format!("{}:{}:{:?}:{:?}:{:?}", t.id, t.percent(), t.status, t.error, t.source_strategy)
                     children=move |t| {
                         let pct = t.percent();
                         let (badge, bar) = match t.status {
@@ -5325,6 +5328,9 @@ fn TransferQueue() -> impl IntoView {
                                         </button>
                                     })}
                                 </div>
+                                {t.source_strategy.map(|sources| view! {
+                                    <p class="rh-queue-why" title=sources.explanation()>{sources.label()}</p>
+                                })}
                                 {why.map(|why| view! { <p class="rh-queue-why">{why}</p> })}
                                 <div
                                     class="rh-bar"

@@ -63,7 +63,8 @@ use crate::filelib::{
     FileAdded, FileContent, FileDownloadRequest, FileUpload, FolderCreate, FolderListRequest,
     NodeDelete, NodeGet, NodeList, NodeMove, NodeRename, NodeReply, PullGrantAsk, PullGrantIssued,
     PullGrantRequest, RateFile, RemotePull, RemotePullAccepted, RemotePullCancel, RemotePullStatus,
-    SearchRequest, SearchResults, SetMetadata, UploadLimits, UploadLimitsRequest,
+    RemotePullWithSources, SearchRequest, SearchResults, SetMetadata, UploadLimits,
+    UploadLimitsRequest,
 };
 use crate::hello::{Hello, HelloAck, KeyProof, PullSessionOpen};
 use crate::keybundle::{KeyBundle, KeyBundlePublish, KeyBundleRequest};
@@ -172,7 +173,7 @@ wire_registry! {
     SearchRequest, SearchResults, RateFile, AliasCreate, FileAdded,
     AreaUpdate, AreaDelete, NodeRename, NodeMove, UploadLimitsRequest, UploadLimits,
     PullGrantRequest, PullGrantIssued, RemotePull, RemotePullAccepted, RemotePullCancel,
-    RemotePullStatus, PullGrantAsk,
+    RemotePullStatus, PullGrantAsk, RemotePullWithSources,
     TransferOpen, TransferTicket, TransferResume, UploadFinish, TransferAbort,
     FolderManifestRequest, FolderManifest, FileChunkRequest, FileChunk, FileChunkPut,
     ProvedRangeRequest, ProvedRange,
@@ -218,7 +219,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 250;
+pub const EXPECTED: usize = 251;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

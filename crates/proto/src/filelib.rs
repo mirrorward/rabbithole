@@ -780,6 +780,54 @@ impl Message for RemotePull {
     const MESSAGE_TYPE: u16 = 35;
 }
 
+/// Sources permitted for one inter-burrow send. These choices never override
+/// either operator's swarm, address, or grant policies.
+pub mod pull_sources {
+    /// Fetch directly from the burrow that issued the grant, without asking
+    /// for or contacting its swarm peers.
+    pub const ORIGIN_ONLY: u8 = 0;
+    /// Permit swarm peers when both operators allow them, falling back to
+    /// the origin for anything the peers cannot supply.
+    pub const SWARM_WHEN_AVAILABLE: u8 = 1;
+}
+
+/// [`RemotePull`] with an explicit per-send source policy. →
+/// [`RemotePullAccepted`], then the same [`RemotePullStatus`] pushes.
+/// Unknown `sources` values are `BadRequest` before the grant is spent.
+/// Older destinations return `Unsupported`: only SWARM_WHEN_AVAILABLE may
+/// safely retry legacy RemotePull, whose policy permits operator-enabled
+/// swarm use. ORIGIN_ONLY must not silently downgrade to that request.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePullWithSources {
+    pub grant: Vec<u8>,
+    pub area: String,
+    pub folder: Option<String>,
+    /// One of [`pull_sources`].
+    pub sources: u8,
+}
+
+impl RemotePullWithSources {
+    pub fn new(
+        grant: Vec<u8>,
+        area: impl Into<String>,
+        folder: Option<String>,
+        sources: u8,
+    ) -> Self {
+        Self {
+            grant,
+            area: area.into(),
+            folder,
+            sources,
+        }
+    }
+}
+
+impl Message for RemotePullWithSources {
+    const FAMILY: Family = Family::FILE;
+    const MESSAGE_TYPE: u16 = 47;
+}
+
 /// Reply to [`RemotePull`]: the pull is under way.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -914,4 +962,31 @@ impl PullGrantAsk {
 impl Message for PullGrantAsk {
     const FAMILY: Family = Family::FILE;
     const MESSAGE_TYPE: u16 = 39;
+}
+
+#[cfg(test)]
+mod source_choice_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_sources_use_a_new_message_and_preserve_the_legacy_payload() {
+        let old = RemotePull::new(vec![7, 8], "inbox", None);
+        let bytes = postcard::to_allocvec(&old).unwrap();
+        assert_eq!(bytes, [2, 7, 8, 5, b'i', b'n', b'b', b'o', b'x', 0]);
+        for sources in [
+            pull_sources::ORIGIN_ONLY,
+            pull_sources::SWARM_WHEN_AVAILABLE,
+        ] {
+            let new = RemotePullWithSources::new(vec![7, 8], "inbox", None, sources);
+            let encoded = postcard::to_allocvec(&new).unwrap();
+            assert_eq!(
+                postcard::from_bytes::<RemotePullWithSources>(&encoded).unwrap(),
+                new
+            );
+            assert_eq!(&encoded[..bytes.len()], &bytes);
+            assert_eq!(encoded[bytes.len()], sources);
+        }
+        assert_eq!(RemotePull::MESSAGE_TYPE, 35);
+        assert_eq!(RemotePullWithSources::MESSAGE_TYPE, 47);
+    }
 }
