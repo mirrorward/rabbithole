@@ -81,11 +81,152 @@ use rabbithole_store_server::repo3::{dm_receipts_enabled, BlocksRepo, DmsRepo};
 use rabbithole_store_server::repo4::PostRow;
 use rabbithole_store_server::repo6::FileNodeRow;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::broadcast::{error::RecvError, error::TryRecvError, Receiver};
 
 use crate::{doors, Shared};
 
 /// Failed logins allowed before the connection is closed.
 const MAX_ATTEMPTS: u32 = 3;
+
+/// Authenticated text screens share one mail subscription. Door processes and
+/// binary transfers receive only `stream`, so their bytes cannot be mixed
+/// with asynchronous notices. The bounded bus retains mail until text resumes.
+struct BbsTerminal<S> {
+    stream: TelnetStream<S>,
+    mail: Receiver<ServerEvent>,
+    account_id: i64,
+    can_read_mail: bool,
+    mail_closed: bool,
+    /// Only the current output line, capped at 256 characters; never retain
+    /// an entire welcome screen, board listing or message body for redraw.
+    prompt: String,
+}
+
+enum BbsInput {
+    Line(Option<String>),
+    Mail(Box<Result<ServerEvent, RecvError>>),
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> BbsTerminal<S> {
+    fn new(stream: TelnetStream<S>, shared: &Shared, authed: &AuthedUser) -> Self {
+        Self {
+            stream,
+            mail: shared.bus.subscribe(),
+            account_id: authed.account.id,
+            can_read_mail: authed.subject.role != Role::Guest,
+            mail_closed: false,
+            prompt: String::new(),
+        }
+    }
+
+    async fn write_str(&mut self, text: &str) -> io::Result<()> {
+        self.stream.write_str(text).await?;
+        let prior = if text.contains('\n') {
+            ""
+        } else {
+            &self.prompt
+        };
+        let tail = text.rsplit('\n').next().unwrap_or("");
+        let chars: Vec<_> = tail
+            .chars()
+            .rev()
+            .chain(prior.chars().rev())
+            .take(256)
+            .collect();
+        self.prompt = chars.into_iter().rev().collect();
+        Ok(())
+    }
+
+    /// Only reads here: callers selecting against room events must write the
+    /// notice after their select has chosen, so another event cannot cancel
+    /// a partially written notification or consume one without displaying it.
+    async fn next_input(&mut self, echo: Echo) -> io::Result<BbsInput> {
+        if self.mail_closed || echo == Echo::Hidden {
+            let line = self.stream.read_line(echo).await?;
+            self.prompt.clear();
+            return Ok(BbsInput::Line(line));
+        }
+        tokio::select! {
+            line = self.stream.read_line(echo) => {
+                self.prompt.clear();
+                Ok(BbsInput::Line(line?))
+            }
+            event = self.mail.recv() => Ok(BbsInput::Mail(Box::new(event))),
+        }
+    }
+
+    async fn read_line(&mut self, echo: Echo) -> io::Result<Option<String>> {
+        if echo == Echo::On {
+            // Flush deferred mail before accepting the next text command.
+            // Bound this pass so unrelated busy-room traffic cannot starve
+            // input; subsequent reads fairly select input and live events.
+            for _ in 0..64 {
+                let event = match self.mail.try_recv() {
+                    Ok(event) => Ok(event),
+                    Err(TryRecvError::Lagged(n)) => Err(RecvError::Lagged(n)),
+                    Err(TryRecvError::Closed) => Err(RecvError::Closed),
+                    Err(TryRecvError::Empty) => break,
+                };
+                self.mail_event(event).await?;
+                if self.mail_closed {
+                    break;
+                }
+            }
+        }
+        loop {
+            match self.next_input(echo).await? {
+                BbsInput::Line(line) => return Ok(line),
+                BbsInput::Mail(event) => self.mail_event(*event).await?,
+            }
+        }
+    }
+
+    async fn mail_event(&mut self, event: Result<ServerEvent, RecvError>) -> io::Result<()> {
+        match event {
+            Ok(ServerEvent::Dm {
+                to_account,
+                message,
+            }) if self.can_read_mail && to_account == self.account_id => {
+                // DmSend already enforces bilateral blocks before publishing.
+                // Intentional mail from an invisible sender is still mail:
+                // reveal neither online state nor body/ciphertext here, and
+                // leave read receipts to explicitly opening the conversation.
+                let sender = clip(&single_line(&message.from), 100);
+                let encoding = self.stream.encoding();
+                let mut encoded = Vec::new();
+                rabbithole_legacy_telnet::encoding::encode_into(encoding, &sender, &mut encoded);
+                let exact = sender == message.from
+                    && rabbithole_legacy_telnet::encoding::decode(encoding, &encoded) == sender;
+                let route = if exact {
+                    format!("At the main menu, type D {sender}.")
+                } else {
+                    "At the main menu, type D and choose the conversation.".into()
+                };
+                self.notice(&format!("New direct mail from {sender}. {route}"))
+                    .await?;
+            }
+            Err(RecvError::Lagged(_)) if self.can_read_mail => {
+                self.notice(
+                    "Some live notices were missed. At the main menu, type D to check mail.",
+                )
+                .await?;
+            }
+            Err(RecvError::Closed) => self.mail_closed = true,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn notice(&mut self, text: &str) -> io::Result<()> {
+        let pending = single_line(&self.stream.pending_line());
+        let prompt = single_line(&self.prompt);
+        // Bypass prompt tracking: neither the notice nor echoed input is a
+        // new prompt. RH-24 keeps incomplete, un-echoed UTF-8 out of pending.
+        self.stream
+            .write_str(&format!("\n({text})\n{prompt}{pending}"))
+            .await
+    }
+}
 
 /// Run one telnet session over `io` to completion (quit, login lockout, or
 /// disconnect). Burrow calls this once per accepted socket; the caller keeps
@@ -114,6 +255,9 @@ where
     if t.terminal().is_some_and(cp437_terminal) {
         t.set_encoding(Encoding::Cp437);
     }
+    // Subscribe before publishing presence: mail arriving during welcome
+    // rendering is retained for the first authenticated text prompt.
+    let mut t = BbsTerminal::new(t, shared, &authed);
     greet(&mut t, &authed).await?;
 
     // Join the shared world — presence + the chat lobby — exactly like a
@@ -293,16 +437,16 @@ where
 }
 
 /// Post-login greeting, including what negotiation learned about the peer.
-async fn greet<S>(t: &mut TelnetStream<S>, authed: &AuthedUser) -> io::Result<()>
+async fn greet<S>(t: &mut BbsTerminal<S>, authed: &AuthedUser) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut line = format!("\nWelcome, {}!", authed.persona.screen_name);
     let mut details = Vec::new();
-    if let Some(term) = t.terminal() {
+    if let Some(term) = t.stream.terminal() {
         details.push(term.to_string());
     }
-    if let Some((cols, rows)) = t.window() {
+    if let Some((cols, rows)) = t.stream.window() {
         details.push(format!("{cols}x{rows}"));
     }
     if !details.is_empty() {
@@ -316,7 +460,7 @@ where
 /// operator's logo art first (verbatim for ANSI-capable terminals, glyphs
 /// only otherwise), then the widget list top to bottom.
 async fn show_welcome<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     session_id: u64,
@@ -326,7 +470,7 @@ where
 {
     let logo = shared.config.read().theme_logo_ansi;
     if !logo.trim().is_empty() {
-        let art = if ansi_terminal(t.terminal()) {
+        let art = if ansi_terminal(t.stream.terminal()) {
             logo
         } else {
             // Execute the ANSI program, keep only the glyphs.
@@ -408,7 +552,7 @@ fn radio_now_playing_line(
 }
 
 async fn menu_loop<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     session_id: u64,
@@ -480,7 +624,7 @@ where
             ("m" | "qwk", _) => qwk_packet(t, shared, authed).await?,
             ("o" | "doors", None) => list_doors(t, shared).await?,
             ("door" | "doors" | "open", Some(id)) => {
-                doors::run_door(t, shared, authed, id).await?;
+                doors::run_door(&mut t.stream, shared, authed, id).await?;
             }
             ("/go" | "go", word) => {
                 pending = go_command(t, shared, word.unwrap_or("")).await?;
@@ -518,7 +662,7 @@ enum GoTarget {
 /// keywords, an unknown word explains itself, a resolved word returns the
 /// target for the caller to bubble up to [`menu_loop`].
 async fn go_command<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     word: &str,
 ) -> io::Result<Option<GoTarget>>
@@ -542,7 +686,7 @@ where
 }
 
 /// `/go` with no argument: the operator keyword map, plus what else works.
-async fn list_keywords<S>(t: &mut TelnetStream<S>, shared: &Arc<Shared>) -> io::Result<()>
+async fn list_keywords<S>(t: &mut BbsTerminal<S>, shared: &Arc<Shared>) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -622,7 +766,7 @@ async fn resolve_go(shared: &Arc<Shared>, word: &str) -> Option<GoTarget> {
 /// Land a teleport on its surface. May itself return the *next* hop (a
 /// `/go` typed inside the destination shell).
 async fn jump<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     session_id: u64,
@@ -636,7 +780,7 @@ where
         GoTarget::Board(slug) => board_view(t, shared, authed, peer_ip, &slug).await,
         GoTarget::FileArea(area) => browse_files(t, shared, authed, peer_ip, Some(area)).await,
         GoTarget::Door(id) => {
-            doors::run_door(t, shared, authed, &id).await?;
+            doors::run_door(&mut t.stream, shared, authed, &id).await?;
             Ok(None)
         }
         GoTarget::Room(room) => chat_shell(t, shared, authed, session_id, &room).await,
@@ -705,7 +849,7 @@ impl FileCursor {
 /// the same per-IP legacy budget as the main menu. `start_area` (a `/go`
 /// teleport) opens the browser inside that area.
 async fn browse_files<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     peer_ip: Option<IpAddr>,
@@ -789,7 +933,7 @@ where
 /// paged, plain ASCII, hiding what the caller can't SEE and the contents of
 /// drop boxes (mirroring Hotline's GetFileNameList).
 async fn list_level<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     cur: &FileCursor,
@@ -877,7 +1021,7 @@ where
 /// `cd ..` walks up. Nodes the caller can't SEE read as nonexistent — hide,
 /// don't tease.
 async fn change_dir<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     cur: &mut FileCursor,
@@ -941,7 +1085,7 @@ where
 /// checks the link-minting `get` previously left entirely to the HTTP hop).
 /// Writes the refusal itself; `None` means refused.
 async fn authorize_download<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     area: &str,
@@ -1026,7 +1170,7 @@ where
 /// then print the HTTP handoff link — or explain that link handoffs aren't
 /// available when `files_http_base` is unset (zget still works).
 async fn hand_off<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     cur: &FileCursor,
@@ -1070,7 +1214,7 @@ where
 /// in-band over ZMODEM (see [`crate::zmodem::send_file`]). Starts spend
 /// from the shared per-account `transfer` budget, like every transfer-open.
 async fn zget_cmd<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     cur: &FileCursor,
@@ -1094,7 +1238,7 @@ where
     let Some(target) = authorize_download(t, shared, authed, area, &folder, arg).await? else {
         return Ok(());
     };
-    crate::zmodem::send_file(t, shared, authed, &target).await
+    crate::zmodem::send_file(&mut t.stream, shared, authed, &target).await
 }
 
 /// `zput`: receive a ZMODEM upload into the current folder (see
@@ -1103,7 +1247,7 @@ where
 /// boxes very much included — uploading *into* one is the classic use),
 /// and the shared per-account `transfer` budget.
 async fn zput_cmd<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     cur: &FileCursor,
@@ -1135,12 +1279,12 @@ where
         return t.write_str("\nRate limited; slow down.\n").await;
     }
     let folder_opt = (!folder.is_empty()).then_some(folder.as_str());
-    crate::zmodem::receive_files(t, shared, authed, area, folder_opt).await
+    crate::zmodem::receive_files(&mut t.stream, shared, authed, area, folder_opt).await
 }
 
 /// Write `rows` in pages of [`FILES_PAGE_ROWS`], pausing with a More prompt
 /// between pages (Enter continues, `q` stops).
-async fn page_out<S>(t: &mut TelnetStream<S>, rows: &[String]) -> io::Result<()>
+async fn page_out<S>(t: &mut BbsTerminal<S>, rows: &[String]) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -1213,7 +1357,7 @@ fn url_encode_path(path: &str) -> String {
 /// unset → the no-transfers-on-telnet notice. ZIP bundling, HTTP serving of
 /// the spool, and a zmodem path are documented follow-ups in [`crate::qwk`].
 async fn qwk_packet<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
 ) -> io::Result<()>
@@ -1278,7 +1422,7 @@ where
 }
 
 /// Print the door menu (insertion order = the sysop's `[[doors]]` order).
-async fn list_doors<S>(t: &mut TelnetStream<S>, shared: &Arc<Shared>) -> io::Result<()>
+async fn list_doors<S>(t: &mut BbsTerminal<S>, shared: &Arc<Shared>) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -1327,7 +1471,7 @@ async fn visible_boards(
 
 /// The `[B]` sub-shell: pick a board by number or slug.
 async fn boards_shell<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     peer_ip: Option<IpAddr>,
@@ -1411,7 +1555,7 @@ where
 
 /// The board list as a paged table.
 async fn print_board_list<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     boards: &[rabbithole_store_server::repo4::BoardRow],
 ) -> io::Result<()>
 where
@@ -1429,7 +1573,7 @@ where
 
 /// One board: paged thread list, `n` new thread, `<n>` read a thread.
 async fn board_view<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     peer_ip: Option<IpAddr>,
@@ -1520,7 +1664,7 @@ const THREAD_LIST_LIMIT: i64 = 200;
 
 /// Print the paged thread table; returns the rows for number selection.
 async fn render_threads<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     slug: &str,
 ) -> io::Result<Vec<(PostRow, i64, i64)>>
@@ -1564,7 +1708,7 @@ where
 
 /// One thread: every post, paged; `r` replies.
 async fn thread_view<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     peer_ip: Option<IpAddr>,
@@ -1631,7 +1775,7 @@ const THREAD_POSTS_LIMIT: i64 = 500;
 /// Print a thread's posts (paged); returns the root subject, or `None`
 /// when the thread has no posts.
 async fn render_posts<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     root: &[u8; 32],
 ) -> io::Result<Option<String>>
@@ -1679,7 +1823,7 @@ const MAX_POST_BYTES: usize = 32 * 1024;
 /// account `post` budget, posting through BoardService as the logged-in
 /// user (QWK-ingest author-seed derivation).
 async fn post_editor<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     slug: &str,
@@ -1791,23 +1935,18 @@ fn single_line(text: &str) -> String {
 
 /// Put asynchronous notices on their own line without losing or visually
 /// splitting a chat message that the person is still typing.
-async fn chat_notice<S>(t: &mut TelnetStream<S>, text: &str) -> io::Result<()>
+async fn chat_notice<S>(t: &mut BbsTerminal<S>, text: &str) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let pending = t.pending_line();
-    t.write_str(&format!("\n({text})\n")).await?;
-    if !pending.is_empty() {
-        t.write_str(&single_line(&pending)).await?;
-    }
-    Ok(())
+    t.notice(text).await
 }
 
 /// The `[C]` chat screen for `room` (the lobby from the menu; any joinable
 /// room via `/go`). Typed lines send (`CHAT_SEND` + the per-account `msg`
 /// budget); `/q` leaves; incoming bus lines stream in between keystrokes.
 async fn chat_shell<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     session_id: u64,
@@ -1858,9 +1997,14 @@ where
 
     let result = loop {
         tokio::select! {
-            line = t.read_line(Echo::On) => {
-                let Some(line) = line? else {
-                    break Ok(None); // peer went away
+            input = t.next_input(Echo::On) => {
+                let line = match input? {
+                    BbsInput::Line(Some(line)) => line,
+                    BbsInput::Line(None) => break Ok(None), // peer went away
+                    BbsInput::Mail(event) => {
+                        t.mail_event(*event).await?;
+                        continue;
+                    }
                 };
                 let text = line.trim();
                 if text.is_empty() {
@@ -1919,7 +2063,7 @@ where
                     Ok(ServerEvent::RoomKicked { account, room: changed_room, banned })
                         if account == authed.account.id && changed_room.eq_ignore_ascii_case(room) =>
                     {
-                        t.discard_line();
+                        t.stream.discard_line();
                         let action = if banned { "banned" } else { "removed" };
                         t.write_str(&format!(
                             "\n(You were {action} from {}.)\n",
@@ -1970,7 +2114,7 @@ where
 
 /// The `[D]` sub-shell: conversation list.
 async fn dm_shell<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     peer_ip: Option<IpAddr>,
@@ -2051,7 +2195,7 @@ where
 
 /// Print the conversation table; returns peer names for number selection.
 async fn print_dm_threads<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     account_id: i64,
 ) -> io::Result<Vec<String>>
@@ -2103,7 +2247,7 @@ const DM_PAGE_LIMIT: i64 = 100;
 /// One conversation: page it (marking it read, with receipts when the
 /// account has them on), then `r` to reply.
 async fn dm_thread<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     peer_ip: Option<IpAddr>,
@@ -2182,7 +2326,7 @@ where
 /// Print a conversation oldest-first and mark it read (publishing the read
 /// receipt when the account has receipts enabled, like the native path).
 async fn render_dm_history<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     partner: &rabbithole_store_server::repo2::PersonaRow,
@@ -2245,7 +2389,7 @@ where
 /// the durable store, the bus, and the away auto-response — the identical
 /// path the native DmSend handler walks.
 async fn send_dm<S>(
-    t: &mut TelnetStream<S>,
+    t: &mut BbsTerminal<S>,
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     partner: &rabbithole_store_server::repo2::PersonaRow,

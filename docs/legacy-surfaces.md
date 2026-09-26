@@ -50,6 +50,14 @@ disables that class.
   fragments remain buffered until complete, and the 1024-byte input limit
   accepts only whole characters. Editing is scalar-based; combining sequences
   and terminal display-cell widths do not receive special treatment.
+  Incoming direct mail shows a sender-only notice at authenticated text
+  prompts, including boards, composing, pagers, files and chat, then restores
+  the prompt and unfinished input. Notices do not show bodies, ciphertext or
+  online status and do not mark mail read. At the main menu, `D <name>` opens
+  that conversation; names that cannot be displayed exactly use the `D` mail
+  list instead. Door games and ZMODEM receive no asynchronous notice bytes;
+  queued mail appears at the next text prompt. If the bounded event queue
+  overflows, a generic hint directs the member to check durable mail with `D`.
 - **Doors**: `doors_enabled`, `doors_dir` (default `doors/`, relative to
   `data_dir`), `doors_max_nodes` (default 4; 0 refuses every launch),
   `doors_session_max_secs` (default 3600; 0 = unlimited; a door's own
