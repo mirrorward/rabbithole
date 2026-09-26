@@ -629,9 +629,41 @@ impl WsClient {
     /// Ask a station something as a listener.
     pub fn dispatch_radio_ask(&self, ask: &crate::wire::RadioAsk) {
         let ask = ask.clone();
+        let Ok(current) = self.inner.try_borrow() else {
+            return;
+        };
+        let generation = current.generation;
+        drop(current);
         self.when_free(move |b| {
+            if !b.alive || b.generation != generation || !b.auth.borrow().authenticated() {
+                return;
+            }
             let id = b.next_request_id();
             if let Ok(frame) = wire::radio_ask_to_frame(&ask, id) {
+                if let Ok(bytes) = encode_frame(&frame) {
+                    Self::write(b, &bytes);
+                }
+            }
+        });
+    }
+
+    /// One optional watch per socket. Older servers can refuse this additive
+    /// request silently; the existing list/reply path still supplies a queue.
+    pub fn watch_radio_requests(&self, station: Option<String>) {
+        let Ok(current) = self.inner.try_borrow() else {
+            return;
+        };
+        let generation = current.generation;
+        drop(current);
+        self.when_free(move |b| {
+            if !b.alive || b.generation != generation || !b.auth.borrow().authenticated() {
+                return;
+            }
+            let id = b.next_request_id();
+            if let Ok(frame) = Frame::request(
+                id,
+                &rabbithole_proto::radio::RadioRequestsWatch::new(station),
+            ) {
                 if let Ok(bytes) = encode_frame(&frame) {
                     Self::write(b, &bytes);
                 }
@@ -1288,6 +1320,15 @@ impl WsClient {
                         if let Some(resolve) = awaited {
                             let copy = Uint8Array::from(bytes.as_slice());
                             let _ = resolve.call1(&JsValue::NULL, &copy);
+                            return;
+                        }
+                        // Watch acknowledgements (including Unsupported from
+                        // older servers) are transport-only. The subsequent
+                        // ordinary queue read remains the compatible fallback.
+                        if is_reply
+                            && frame.family == rabbithole_proto::Family::RADIO
+                            && matches!(frame.message_type, 13 | 14)
+                        {
                             return;
                         }
                         let auth_reply = b.auth.borrow_mut().reply(generation, &frame);

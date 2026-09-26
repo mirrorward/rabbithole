@@ -1214,6 +1214,7 @@ impl AppState {
                 state.update(|s| {
                     if c != crate::conn::ConnState::Online {
                         s.chat_history.reset();
+                        s.radio_requests = Default::default();
                     }
                     s.set_conn(c);
                 });
@@ -1256,7 +1257,9 @@ impl AppState {
             ws.on_radio_requests(std::rc::Rc::new(move |answer| {
                 if let Some(app) = current() {
                     if let Some(session) = app.session_at(&requests_endpoint) {
-                        app.requests_answered(session, answer);
+                        if session.state == state {
+                            app.requests_answered(session, answer);
+                        }
                     }
                 }
             }));
@@ -1493,8 +1496,17 @@ impl AppState {
                     listing_app.radio_prefs_changed();
                 });
             }));
+            let notice_endpoint = endpoint.clone();
             ws.on_notice(std::rc::Rc::new(move |route| match route {
                 crate::wire::NoticeRoute::Radio(u) => {
+                    if let crate::radio::RadioUpdate::Off(station) = &u {
+                        state.update(|s| s.radio_requests.forget(station));
+                    }
+                    // A push from another connected burrow cannot alter the
+                    // station model whose listing currently owns the player.
+                    if radio.with_untracked(|r| r.endpoint().is_some_and(|ep| ep != notice_endpoint)) {
+                        return;
+                    }
                     let mut track_changed = false;
                     radio.update(|r| track_changed = r.apply_update(u));
                     // A new track has a new cover: ask for the picture again.
@@ -2690,6 +2702,44 @@ impl AppState {
         });
     }
 
+    /// The Radio panel watches exactly one station at its owning burrow.
+    /// Closing it, changing owners, or disconnecting invalidates old replies.
+    pub fn watch_requests(&self, target: Option<(String, String)>) {
+        let sessions = self.sessions.get_untracked();
+        for (id, session) in sessions {
+            let wanted = target
+                .as_ref()
+                .filter(|(endpoint, _)| *endpoint == id.0)
+                .map(|(_, station)| station.clone());
+            let mut changed = false;
+            session
+                .state
+                .update(|s| changed = s.radio_requests.watch(wanted.clone()));
+            if changed {
+                #[cfg(target_arch = "wasm32")]
+                if session.live.get_untracked() {
+                    let ws = session.ws;
+                    let ready = session.ready.get_untracked();
+                    let endpoint = id.0.clone();
+                    let app = *self;
+                    defer(move || {
+                        if app
+                            .session_at(&endpoint)
+                            .is_some_and(|current| current.state == session.state)
+                            && session.authenticated.get_untracked()
+                            && session.ready.get_untracked() == ready
+                            && session.state.with_untracked(|s| {
+                                s.radio_requests.watching() == wanted.as_deref()
+                            })
+                        {
+                            ws.with_value(|c| c.watch_radio_requests(wanted));
+                        }
+                    });
+                }
+            }
+        }
+    }
+
     /// Look through what a station can be asked for.
     pub fn look_for_songs(&self, station: &str, search: &str) {
         if let Some(session) = self.radio_session() {
@@ -2751,7 +2801,18 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         if session.live.get_untracked() {
             let ws = session.ws;
-            defer(move || ws.with_value(|c| c.dispatch_radio_ask(&ask)));
+            let ready = session.ready.get_untracked();
+            defer(move || {
+                if session.authenticated.try_get_untracked() == Some(true)
+                    && session.ready.try_get_untracked() == Some(ready)
+                    && session
+                        .state
+                        .try_with_untracked(|s| s.radio_requests.watching() == Some(ask.station()))
+                        == Some(true)
+                {
+                    ws.with_value(|c| c.dispatch_radio_ask(&ask));
+                }
+            });
             return;
         }
         let me = session.handle.get_untracked();

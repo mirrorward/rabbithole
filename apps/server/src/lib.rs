@@ -865,6 +865,9 @@ async fn refresh_radio_library(
         match outcome {
             radio::Refreshed::Unchanged => {}
             radio::Refreshed::Changed { dropped, started } => {
+                shared.bus.publish(ServerEvent::RadioRequestsChanged {
+                    station: plan.slug.clone(),
+                });
                 tracing::info!(
                     mount = %plan.slug,
                     area = %plan.area,

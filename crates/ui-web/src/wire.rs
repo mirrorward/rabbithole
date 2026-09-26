@@ -4059,7 +4059,12 @@ mod tests {
         let view = RadioRequests::new("jukebox", true, false, Vec::new());
         assert_eq!(
             frame_to_radio_answer(&Frame::reply_to(&list, &view).unwrap()),
-            Some(RadioAnswer::Requests(view))
+            Some(RadioAnswer::Requests(view.clone()))
+        );
+        assert_eq!(
+            frame_to_radio_answer(&Frame::push(&view).unwrap()),
+            Some(RadioAnswer::Requests(view)),
+            "a personalized live snapshot follows the same queue reducer"
         );
         let look = radio_ask_to_frame(&asks[1], RequestId(2)).unwrap();
         let offer = RadioOffer::new("jukebox", "dawn", Vec::new(), 3);

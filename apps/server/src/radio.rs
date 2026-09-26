@@ -2394,6 +2394,16 @@ pub fn is_held(shared: &Shared, track: &Track) -> bool {
         || shared.moderation.is_denied(&track.source.0)
 }
 
+/// Moderation changes can affect any rotation. Send only invalidations;
+/// each session rebuilds only its one watched queue, with current filtering.
+pub fn requests_moderation_changed(shared: &Shared) {
+    for station in shared.radio.program_slugs() {
+        shared
+            .bus
+            .publish(ServerEvent::RadioRequestsChanged { station });
+    }
+}
+
 /// Bind + serve the DJ **source ingest** surface (SOURCE/PUT). Distinct from
 /// [`spawn_radio`], which is the listener *delivery* surface. Returns the bound
 /// address and the accept-loop handle. Mirrors the other legacy spawn helpers.

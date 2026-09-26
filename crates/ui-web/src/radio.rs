@@ -414,6 +414,8 @@ pub mod storage {
 /// stations, and one burrow's "ambient" is not another's.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequestsState {
+    /// Only answers for the current panel are accepted, including pushes.
+    watching: Option<String>,
     /// Each station's queue as last answered, by station. Kept per station
     /// so a late answer about one does not stand in for another.
     pub views: BTreeMap<String, rabbithole_proto::radio::RadioRequests>,
@@ -429,6 +431,31 @@ pub struct RequestsState {
 }
 
 impl RequestsState {
+    pub fn watching(&self) -> Option<&str> {
+        self.watching.as_deref()
+    }
+
+    /// Switching station/closing the panel discards its queue and offers.
+    pub fn watch(&mut self, station: Option<String>) -> bool {
+        if self.watching == station {
+            return false;
+        }
+        *self = Self {
+            watching: station,
+            ..Self::default()
+        };
+        true
+    }
+
+    pub fn forget(&mut self, station: &str) {
+        if self.watching() == Some(station) {
+            *self = Self::default();
+        }
+        self.views.remove(station);
+        self.offers.remove(station);
+        self.searching.remove(station);
+    }
+
     /// This person asks `station` for a song, or joins a request: what it
     /// said about the last one no longer stands.
     pub fn asking(&mut self, station: &str) {
@@ -466,7 +493,9 @@ impl RequestsState {
         use crate::wire::RadioAnswer;
         match answer {
             RadioAnswer::Requests(view) => {
-                self.views.insert(view.station.clone(), view);
+                if self.watching() == Some(&view.station) {
+                    self.views.insert(view.station.clone(), view);
+                }
                 None
             }
             RadioAnswer::Offer(offer) => {
@@ -474,7 +503,7 @@ impl RequestsState {
                     .searching
                     .get(&offer.station)
                     .is_none_or(|search| *search == offer.search);
-                if current {
+                if current && self.watching() == Some(&offer.station) {
                     self.offers.insert(offer.station.clone(), offer);
                 }
                 None
@@ -587,6 +616,7 @@ mod tests {
         use rabbithole_proto::radio::{RadioOffer, RadioRequests};
         use rabbithole_proto::ErrorCode as E;
         let mut state = RequestsState::default();
+        state.watch(Some("jukebox".into()));
 
         // The pane's own look being refused says nothing and asks nothing.
         state.asking("jukebox");
@@ -665,6 +695,44 @@ mod tests {
             0,
         )));
         assert_eq!(state.offers["jukebox"].search, said);
+    }
+
+    #[test]
+    fn queue_replies_cannot_revive_a_station_after_switch_signoff_or_disconnect() {
+        use crate::wire::RadioAnswer;
+        use rabbithole_proto::radio::{RadioOffer, RadioRequests};
+        let mut state = RequestsState::default();
+        let snapshot =
+            || RadioAnswer::Requests(RadioRequests::new("first", true, false, Vec::new()));
+        state.watch(Some("first".into()));
+        state.answered(snapshot());
+        state.looking("first", "song");
+        state.answered(RadioAnswer::Offer(RadioOffer::new(
+            "first",
+            "song",
+            Vec::new(),
+            0,
+        )));
+        assert!(state.views.contains_key("first"));
+        assert!(state.offers.contains_key("first"));
+        assert!(
+            !state.watch(Some("first".into())),
+            "a track refresh keeps the current view"
+        );
+        state.watch(Some("second".into()));
+        state.answered(snapshot());
+        assert!(state.views.is_empty() && state.offers.is_empty());
+        state.watch(Some("first".into()));
+        state.answered(snapshot());
+        state.forget("first");
+        state.answered(snapshot());
+        assert!(state.views.is_empty());
+        assert_eq!(state.watching(), None);
+        state.watch(Some("first".into()));
+        state.answered(snapshot());
+        state = RequestsState::default(); // socket lost
+        state.answered(snapshot());
+        assert!(state.views.is_empty());
     }
 
     use super::*;

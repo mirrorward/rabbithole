@@ -53,7 +53,7 @@ real service workers and gives each fixture its own writable copy of the app. No
 | `npx playwright test tests/bookmarks.spec.ts` | Opt-in account bookmarks, two users on one burrow, legacy migration, independent expiry/removal, and storage failures. |
 | `npm run test:chat` | Recent chat history for a second client, room isolation, and reconnection. |
 | `npm run test:keynav` | Focus recovery in Members after filtering, no focus stealing, route disposal/remount, and Boards Tab order with arrow, Enter, pointer and modified-click navigation. |
-| `npm run test:radio` | Radio playback refusal, retry, stream errors, stale outcomes, and optional chime ducking with persisted settings, overlapping chimes, volume/mute edits, and silent-message cases. |
+| `npm run test:radio` | Radio playback refusal, retry, stream errors, stale outcomes, optional chime ducking, and two-listener request/vote convergence with station isolation, reconnect, disappearing stations, and older peers. |
 | `npm run test:pwa` | Real service-worker updates, explicit reload, cached offline navigation, connection recovery, and native exclusion. |
 | `npm run test:keepalive` | Initial app load and immediate reload with every production connection/request rate limit unchanged. |
 
@@ -68,6 +68,15 @@ the preference tests also exercise the shipped controls and verify the account
 flag stored by the real server. An intercepted `Unsupported` reply models older
 peers, and a held real preference reply exercises stale-read protection. Route
 tests observe token resumption after reload without another password submission.
+
+Radio queue tests seed isolated library metadata with audio delivery disabled,
+then hold the mounts with real local source-ingest sessions. The server runtime
+and WebSocket requests/votes drive both browser clients. They
+do not verify uploads or media decoding. An intercepted watch refusal models an
+older server, and redelivery of a captured queue reply checks station-switch
+isolation. Reconnect closes an observed native WebSocket while offline emulation
+holds subsequent attempts; another listener mutates the queue before real token
+resume. Playback and ducking are exercised separately by `radio.spec.ts`.
 
 Appearance offers a device-wide Full/Minimal/Off default and an override for the
 current burrow/account. Overrides use the canonical endpoint and original login;

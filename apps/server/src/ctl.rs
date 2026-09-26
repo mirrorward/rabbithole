@@ -291,6 +291,7 @@ async fn dispatch(shared: &Arc<Shared>, req: &Value) -> Result<Value, String> {
                 .deny_add(&hash, reason, "ctl")
                 .await
                 .map_err(|e| e.to_string())?;
+            crate::radio::requests_moderation_changed(shared);
             Ok(json!({"denied": hex::encode(hash), "reason": reason}))
         }
         "hash-allow" => {
@@ -300,6 +301,9 @@ async fn dispatch(shared: &Arc<Shared>, req: &Value) -> Result<Value, String> {
                 .deny_remove(&hash, "ctl")
                 .await
                 .map_err(|e| e.to_string())?;
+            if removed {
+                crate::radio::requests_moderation_changed(shared);
+            }
             Ok(json!({"removed": removed}))
         }
         "hash-deny-list" => {

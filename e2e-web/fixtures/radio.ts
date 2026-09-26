@@ -38,7 +38,7 @@ export class RadioFixture {
       res.end(wav.subarray(start, end + 1));
     });
   }
-  static async create(server: TestBurrow): Promise<RadioFixture> {
+  static async create(server: TestBurrow, stations: readonly (readonly [string, string])[] = [["first", "First station"], ["second", "Second station"]]): Promise<RadioFixture> {
     const fixture = new RadioFixture(server);
     try {
       fixture.delivery.listen(0, "127.0.0.1");
@@ -46,8 +46,7 @@ export class RadioFixture {
       const address = fixture.delivery.address();
       if (!address || typeof address === "string") throw new Error("No audio fixture port");
       await server.ctl("config-set", "radio_public_base", `http://127.0.0.1:${address.port}`);
-      await fixture.station("first", "First station");
-      await fixture.station("second", "Second station");
+      for (const [slug, name] of stations) await fixture.station(slug, name);
       return fixture;
     } catch (error) { await fixture.dispose(); throw error; }
   }

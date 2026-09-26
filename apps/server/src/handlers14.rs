@@ -9,7 +9,7 @@
 //! Open to every session, guests included. It reveals nothing the pushes and
 //! the public stream listener do not already, and tuning in needs no account.
 //!
-//! Requests (types 7..12): what is waiting on a station and what it can be
+//! Requests (types 7..14): what is waiting on a station and what it can be
 //! asked for — only what it can play, a page at a time, nothing a moderator
 //! is holding back — open to anybody who can see the listing; asking for a
 //! track and voting for one need an account (not a guest) that may talk on
@@ -21,6 +21,8 @@
 //! what is no longer waiting), `AlreadyExists` (it is playing now),
 //! `TooLarge` (this person's share is waiting), `Unavailable` (the station's
 //! queue is full), `RateLimited` (the posting budget).
+//! An optional connection watch (13 → 14) pushes personalized queue snapshots
+//! only for that one station; ordinary reads remain compatible with old peers.
 
 use std::sync::Arc;
 
@@ -71,6 +73,25 @@ pub async fn handle(
     // Requests: what is waiting, what a station can be asked for, asking,
     // and joining in. What a moderator is holding back is not there.
     let held = |t: &rabbithole_radio::Track| crate::radio::is_held(shared, t);
+    if let Some(Ok(req)) = frame.decode::<pradio::RadioRequestsWatch>() {
+        // Replace even a refused watch, so a vanished station cannot leave
+        // the old one subscribed. Existence also bounds stored slug length.
+        _ctx.radio_requests_watch = None;
+        if let Some(station) = &req.station {
+            if shared.radio.requests(station, &_ctx.login, held).is_none() {
+                conn.send(Frame::error_reply(frame, ErrorCode::NotFound))
+                    .await?;
+                return Ok(true);
+            }
+        }
+        _ctx.radio_requests_watch = req.station;
+        conn.send(Frame::reply_to(
+            frame,
+            &pradio::RadioRequestsWatching::new(_ctx.radio_requests_watch.clone()),
+        )?)
+        .await?;
+        return Ok(true);
+    }
     if let Some(Ok(req)) = frame.decode::<pradio::RadioRequestsRequest>() {
         match shared.radio.requests(&req.station, &_ctx.login, held) {
             Some(view) => conn.send(Frame::reply_to(frame, &view)?).await?,
@@ -135,6 +156,11 @@ pub async fn handle(
             conn.send(Frame::error_reply(frame, code)).await?;
             return Ok(true);
         }
+        shared
+            .bus
+            .publish(rabbithole_server_core::ServerEvent::RadioRequestsChanged {
+                station: station.clone(),
+            });
         match shared.radio.requests(&station, &_ctx.login, held) {
             Some(view) => conn.send(Frame::reply_to(frame, &view)?).await?,
             None => {

@@ -12,6 +12,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Family, Message};
 
+/// Watch one station's request queue on this connection, replacing any prior
+/// watch. `None` stops watching. Replies with [`RadioRequestsWatching`]; queue
+/// changes then arrive as personalized [`RadioRequests`] pushes. Reconnects
+/// must watch and fetch again. Older servers may refuse this additive message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RadioRequestsWatch {
+    pub station: Option<String>,
+}
+
+impl RadioRequestsWatch {
+    pub fn new(station: Option<String>) -> Self {
+        Self { station }
+    }
+}
+
+impl Message for RadioRequestsWatch {
+    const FAMILY: Family = Family::RADIO;
+    const MESSAGE_TYPE: u16 = 13;
+}
+
+/// The request queue now watched on this connection (at most one).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RadioRequestsWatching {
+    pub station: Option<String>,
+}
+
+impl RadioRequestsWatching {
+    pub fn new(station: Option<String>) -> Self {
+        Self { station }
+    }
+}
+
+impl Message for RadioRequestsWatching {
+    const FAMILY: Family = Family::RADIO;
+    const MESSAGE_TYPE: u16 = 14;
+}
+
 /// Push: a station's now-playing changed (a track rotated, a DJ took over, or
 /// the listener count moved). Server → client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,6 +269,37 @@ impl Message for RadioStations {
 mod tests {
     use super::*;
     use crate::Frame;
+
+    #[test]
+    fn one_optional_queue_watch_roundtrips_without_changing_existing_reads() {
+        for station in [Some("jukebox".to_string()), None] {
+            let request = Frame::request(
+                crate::RequestId(3),
+                &RadioRequestsWatch::new(station.clone()),
+            )
+            .unwrap();
+            assert_eq!(request.message_type, 13);
+            assert_eq!(
+                request
+                    .decode::<RadioRequestsWatch>()
+                    .unwrap()
+                    .unwrap()
+                    .station,
+                station
+            );
+            let reply =
+                Frame::reply_to(&request, &RadioRequestsWatching::new(station.clone())).unwrap();
+            assert_eq!(reply.message_type, 14);
+            assert_eq!(
+                reply
+                    .decode::<RadioRequestsWatching>()
+                    .unwrap()
+                    .unwrap()
+                    .station,
+                station
+            );
+        }
+    }
 
     #[test]
     fn the_station_listing_roundtrips_as_a_reply() {
@@ -476,7 +546,8 @@ impl Message for RadioRequestsRequest {
 }
 
 /// A station's queue of requests, in the order they will play. The answer
-/// to asking about it, requesting and voting alike. Small by construction:
+/// to asking about it, requesting and voting alike, and a personalized,
+/// ephemeral push while watching it. Small by construction:
 /// a station holds a bounded number of requests. What can be asked for is
 /// [`RadioOffer`], which is looked through rather than sent whole.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

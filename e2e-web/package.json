@@ -14,7 +14,7 @@
     "cleanup": "node scripts/cleanup-fixtures.mjs",
     "test:keynav": "playwright test tests/keynav.spec.ts",
     "test:pwa": "playwright test tests/pwa.spec.ts",
-    "test:radio": "playwright test tests/radio.spec.ts"
+    "test:radio": "playwright test tests/radio.spec.ts tests/radio-requests.spec.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1"

@@ -5755,10 +5755,17 @@ fn RadioRequestsPanel() -> impl IntoView {
     let search = create_rw_signal(String::new());
     let may_ask = move || owner().is_some_and(|s| !s.is_guest.get() && !s.handle.get().is_empty());
     create_effect(move |_| {
-        if let Some((_, station, _playing)) = shown.get() {
+        let target = shown.get().and_then(|(endpoint, station, _)| {
+            let session = app.session_at_tracked(&endpoint)?;
+            session.ready.get();
+            (!session.live.get() || session.authenticated.get()).then_some((endpoint, station))
+        });
+        app.watch_requests(target.clone());
+        if let Some((_, station)) = target {
             app.load_requests(&station);
         }
     });
+    on_cleanup(move || app.watch_requests(None));
     // Another burrow's stations on show: what was being looked for on the
     // last one is closed, since it may not be one this person can ask of.
     let endpoint = create_memo(move |_| shown.get().map(|(endpoint, _, _)| endpoint));

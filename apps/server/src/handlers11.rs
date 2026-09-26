@@ -144,7 +144,12 @@ pub async fn handle(
             .quarantine_set(req.subject_kind, &req.subject_ref, &req.reason, &ctx.login)
             .await
         {
-            Ok(()) => conn.send(Frame::ack(frame)).await?,
+            Ok(()) => {
+                if req.subject_kind == padm::subject_kind::FILE {
+                    crate::radio::requests_moderation_changed(shared);
+                }
+                conn.send(Frame::ack(frame)).await?;
+            }
             Err(e) => fail!(map_err(e)),
         }
         return Ok(true);
@@ -157,7 +162,12 @@ pub async fn handle(
             .quarantine_clear(req.subject_kind, &req.subject_ref, &ctx.login)
             .await
         {
-            Ok(true) => conn.send(Frame::ack(frame)).await?,
+            Ok(true) => {
+                if req.subject_kind == padm::subject_kind::FILE {
+                    crate::radio::requests_moderation_changed(shared);
+                }
+                conn.send(Frame::ack(frame)).await?;
+            }
             Ok(false) => fail!(ErrorCode::NotFound),
             Err(e) => fail!(map_err(e)),
         }
@@ -204,7 +214,10 @@ pub async fn handle(
             .deny_add(&req.hash, &req.reason, &ctx.login)
             .await
         {
-            Ok(()) => conn.send(Frame::ack(frame)).await?,
+            Ok(()) => {
+                crate::radio::requests_moderation_changed(shared);
+                conn.send(Frame::ack(frame)).await?;
+            }
             Err(e) => fail!(map_err(e)),
         }
         return Ok(true);
@@ -213,7 +226,10 @@ pub async fn handle(
     if let Some(Ok(req)) = frame.decode::<padm::DenyHashRemove>() {
         moderators_only!();
         match shared.moderation.deny_remove(&req.hash, &ctx.login).await {
-            Ok(true) => conn.send(Frame::ack(frame)).await?,
+            Ok(true) => {
+                crate::radio::requests_moderation_changed(shared);
+                conn.send(Frame::ack(frame)).await?;
+            }
             Ok(false) => fail!(ErrorCode::NotFound),
             Err(e) => fail!(map_err(e)),
         }

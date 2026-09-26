@@ -78,8 +78,8 @@ use crate::presence::{
 };
 use crate::radio::{
     RadioNowPlaying, RadioOff, RadioOffer, RadioOfferRequest, RadioRequest, RadioRequestVote,
-    RadioRequests, RadioRequestsRequest, RadioStations, RadioStationsRequest, RadioStatus,
-    RadioStatusRequest,
+    RadioRequests, RadioRequestsRequest, RadioRequestsWatch, RadioRequestsWatching, RadioStations,
+    RadioStationsRequest, RadioStatus, RadioStatusRequest,
 };
 use crate::session::{
     AgreementAccept, AuthGuest, AuthOk, AuthPassword, AuthResume, Ping, Pong, ServerNotice, Welcome,
@@ -205,7 +205,7 @@ wire_registry! {
     // ── Family 9: RADIO ──────────────────────────────────────────────────
     RadioNowPlaying, RadioOff, RadioStationsRequest, RadioStations,
     RadioStatusRequest, RadioStatus, RadioRequestsRequest, RadioRequests, RadioRequest,
-    RadioRequestVote, RadioOfferRequest, RadioOffer,
+    RadioRequestVote, RadioOfferRequest, RadioOffer, RadioRequestsWatch, RadioRequestsWatching,
 
     // ── Family 10: WISHING_WELL ──────────────────────────────────────────
     WishListRequest, WishList, WishCreate, WishVote, WishSetStatus, WishReply, WishUpdated,
@@ -218,7 +218,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 248;
+pub const EXPECTED: usize = 250;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {

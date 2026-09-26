@@ -18,6 +18,9 @@ use tokio::sync::broadcast;
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
+    /// A station's queue changed. Only live watchers receive a fresh view,
+    /// built for their own login; never broadcast somebody else's `mine` flags.
+    RadioRequestsChanged { station: String },
     /// A session authenticated and joined (Wave 1 fills the fields out).
     SessionOpened {
         session_id: u64,

@@ -29,6 +29,8 @@ use rabbithole_store_server::repo::AccountsRepo;
 
 /// Mutable per-session state shared by all request handlers.
 pub struct SessionCtx {
+    /// A bounded, ephemeral watch; never restored from a session token.
+    pub radio_requests_watch: Option<String>,
     pub session_id: u64,
     pub account_id: i64,
     pub login: String,
@@ -75,6 +77,23 @@ impl SessionCtx {
         }
         shared.perms.allows(&self.subject(shared), resource, needed)
     }
+}
+
+/// A watched queue is always projected for this login and re-filtered against
+/// the current moderation state. It never enters the durable push log.
+fn radio_requests_push(shared: &Shared, ctx: &mut SessionCtx) -> Option<Frame> {
+    let station = ctx.radio_requests_watch.clone()?;
+    // In particular, recover a sign-off lost when the broadcast ring lagged.
+    // A disabled DJ mount can remain in the registry after it went silent.
+    if shared.radio.now_playing(&station).is_none() {
+        ctx.radio_requests_watch = None;
+        return Frame::push(&pradio::RadioOff::new(station)).ok();
+    }
+    let view = shared
+        .radio
+        .requests(&station, &ctx.login, |t| crate::radio::is_held(shared, t))
+        .unwrap_or_else(|| pradio::RadioRequests::new(station, false, false, Vec::new()));
+    Frame::push(&view).ok()
 }
 
 /// Whether what is asked for is only looking: seeing a thing is there,
@@ -345,6 +364,7 @@ pub async fn run_session(
         _ => agreement,
     };
     let mut ctx = SessionCtx {
+        radio_requests_watch: None,
         session_id,
         account_id: authed.account.id,
         login: authed.account.login.clone(),
@@ -446,6 +466,26 @@ pub async fn run_session(
                             break;
                         }
                         Ok(ev) => {
+                            if let ServerEvent::RadioRequestsChanged { station } = &ev {
+                                if ctx.radio_requests_watch.as_deref() == Some(station) {
+                                    if let Some(push) = radio_requests_push(&shared, &mut ctx) {
+                                        conn.send(push).await?;
+                                    }
+                                }
+                                continue; // Personalized, ephemeral; never replayed.
+                            }
+                            if let ServerEvent::RadioOff { station } = &ev {
+                                if ctx.radio_requests_watch.as_deref() == Some(station) {
+                                    ctx.radio_requests_watch = None;
+                                }
+                            }
+                            if let ServerEvent::RadioNowPlaying { station, .. } = &ev {
+                                if ctx.radio_requests_watch.as_deref() == Some(station) {
+                                    if let Some(push) = radio_requests_push(&shared, &mut ctx) {
+                                        conn.send(push).await?;
+                                    }
+                                }
+                            }
                             if matches!(&ev, ServerEvent::ThemeChanged { .. }) && !theme_updates {
                                 continue;
                             }
@@ -472,6 +512,10 @@ pub async fn run_session(
                         }
                         Err(RecvError::Lagged(n)) => {
                             tracing::warn!(session_id, missed = n, "session lagged behind the bus");
+                            // A bounded snapshot recovers missed queue mutations.
+                            if let Some(push) = radio_requests_push(&shared, &mut ctx) {
+                                conn.send(push).await?;
+                            }
                         }
                         Err(RecvError::Closed) => break,
                     }
