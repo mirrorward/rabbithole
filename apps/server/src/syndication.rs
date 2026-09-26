@@ -29,6 +29,8 @@
 //! ([`MAX_BODY_BYTES`]) and a whole-fetch timeout. `Content-Length` and
 //! `chunked` framing precede bounded gzip content decoding. Both encoded and
 //! expanded bodies must fit the cap; corrupt content never reaches ingestion.
+//! Bracketed IPv6 literals use an unbracketed socket/TLS address and a
+//! bracketed HTTP `Host`; DNS hosts retain ordinary resolver behavior.
 //!
 //! **TLS roots decision:** `webpki-roots` was already in the workspace
 //! dependency graph (sqlx's rustls stack pulls it), so per the Wave 10 plan it
@@ -61,8 +63,6 @@
 //! ## Deliberately deferred
 //!
 //! - **Calendar-aligned hints**: syndication-module `updateBase` is ignored.
-//! - **IPv6 literal hosts** in feed URLs are accepted as `[::1]` /
-//!   `[2001:db8::1]:8080` (same authority split as directory discovery).
 //! - **Other content encodings**: only identity and a single gzip coding
 //!   (`x-gzip` alias included) are supported; stacked codings are refused.
 
@@ -513,6 +513,11 @@ pub struct FeedUrl {
 impl FeedUrl {
     /// Parse `http://host[:port]/path` / `https://…`, including bracketed IPv6.
     pub fn parse(url: &str) -> Result<FeedUrl> {
+        // URL bytes become HTTP request-line/header bytes; encoded whitespace
+        // stays encoded, but literal whitespace/control characters cannot.
+        if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            bail!("invalid character in feed URL");
+        }
         let (tls, rest) = if let Some(r) = url.strip_prefix("https://") {
             (true, r)
         } else if let Some(r) = url.strip_prefix("http://") {
@@ -520,9 +525,9 @@ impl FeedUrl {
         } else {
             bail!("unsupported feed URL scheme");
         };
-        let (authority, path) = match rest.find('/') {
+        let (authority, suffix) = match rest.find(['/', '?', '#']) {
             Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, "/"),
+            None => (rest, ""),
         };
         if authority.is_empty() {
             bail!("feed URL has no host");
@@ -536,11 +541,19 @@ impl FeedUrl {
         if host.is_empty() {
             bail!("feed URL has no host");
         }
+        // A fragment is client-side metadata. A query without a path still
+        // uses the HTTP origin-form target `/?query`.
+        let path = suffix.split('#').next().unwrap_or("");
+        let path = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{path}")
+        };
         Ok(FeedUrl {
             tls,
             host,
             port,
-            path: path.to_string(),
+            path,
         })
     }
 
@@ -563,39 +576,51 @@ impl FeedUrl {
 
 /// Split `host`, `host:port`, `[v6]`, or `[v6]:port`. Host is unbracketed.
 ///
-/// Twin of `rabbithole_directory::split_authority`. Not shared: the directory
-/// crate is dependency-free by design, and burrow depending on it just to
-/// parse feed URLs would couple syndication to discovery. Keep the two
-/// parsers in step when the authority rules change.
+/// Brackets identify an IPv6 literal, never a DNS name. The socket/TLS host
+/// omits them; only the HTTP Host header puts them back. Scoped zone IDs and
+/// IPvFuture addresses are not supported by this feed transport.
 fn split_feed_authority(authority: &str, default_port: u16) -> Result<(String, u16)> {
-    let a = authority.trim();
-    if let Some(rest) = a.strip_prefix('[') {
+    if authority.is_empty()
+        || authority
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace())
+        || authority.contains(['/', '?', '#', '@', '\\'])
+    {
+        bail!("invalid feed URL authority");
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
         let close = rest
             .find(']')
             .ok_or_else(|| anyhow!("broken IPv6 literal"))?;
-        let host = rest[..close].to_string();
-        if host.is_empty() {
-            bail!("empty IPv6 host");
-        }
+        let host = &rest[..close];
+        host.parse::<std::net::Ipv6Addr>()
+            .map_err(|_| anyhow!("invalid IPv6 literal"))?;
         let after = &rest[close + 1..];
         if after.is_empty() {
-            return Ok((host, default_port));
+            return Ok((host.to_string(), default_port));
         }
         let port = after
             .strip_prefix(':')
             .ok_or_else(|| anyhow!("unexpected text after IPv6 literal"))?;
-        let port: u16 = port.parse().map_err(|_| anyhow!("invalid feed URL port"))?;
-        return Ok((host, port));
+        return Ok((host.to_string(), feed_port(port)?));
     }
-    if a.matches(':').count() == 1 {
-        if let Some((h, p)) = a.rsplit_once(':') {
-            if !h.is_empty() && !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) {
-                let port: u16 = p.parse().map_err(|_| anyhow!("invalid feed URL port"))?;
-                return Ok((h.to_string(), port));
-            }
+    if authority.contains(['[', ']']) || authority.matches(':').count() > 1 {
+        bail!("IPv6 feed hosts must be bracketed");
+    }
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if host.is_empty() {
+            bail!("feed URL has no host");
         }
+        return Ok((host.to_string(), feed_port(port)?));
     }
-    Ok((a.to_string(), default_port))
+    Ok((authority.to_string(), default_port))
+}
+
+fn feed_port(port: &str) -> Result<u16> {
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        bail!("invalid feed URL port");
+    }
+    port.parse().map_err(|_| anyhow!("invalid feed URL port"))
 }
 
 /// Resolve a `Location` header against the current URL: absolute URLs are
@@ -603,6 +628,9 @@ fn split_feed_authority(authority: &str, default_port: u16) -> Result<(String, u
 /// onto the current path's directory.
 fn resolve_location(current: &FeedUrl, location: &str) -> Result<FeedUrl> {
     let loc = location.trim();
+    if loc.is_empty() || loc.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        bail!("invalid redirect location");
+    }
     if loc.starts_with("http://") || loc.starts_with("https://") {
         return FeedUrl::parse(loc);
     }
@@ -611,15 +639,21 @@ fn resolve_location(current: &FeedUrl, location: &str) -> Result<FeedUrl> {
         let scheme = if current.tls { "https://" } else { "http://" };
         return FeedUrl::parse(&format!("{scheme}{rest}"));
     }
+    let loc = loc.split('#').next().unwrap_or("");
+    if loc.is_empty() {
+        return Ok(next); // fragment-only reference keeps the request target
+    }
     if loc.starts_with('/') {
         next.path = loc.to_string();
         return Ok(next);
     }
-    if loc.is_empty() {
-        bail!("empty redirect location");
+    let path = current.path.split('?').next().unwrap_or("/");
+    if loc.starts_with('?') {
+        next.path = format!("{path}{loc}");
+        return Ok(next);
     }
-    let dir_end = current.path.rfind('/').unwrap_or(0);
-    next.path = format!("{}/{}", &current.path[..dir_end], loc);
+    let dir_end = path.rfind('/').unwrap_or(0);
+    next.path = format!("{}/{}", &path[..dir_end], loc);
     Ok(next)
 }
 
@@ -802,12 +836,22 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
 }
 
 /// `https` request/response: drive a sans-IO [`rustls::ClientConnection`]
-/// over the tokio socket (no tokio-rustls in the workspace graph, and this is
-/// the only TLS-over-TCP client). Ends with a close_notify + socket shutdown.
-async fn tls_exchange(mut tcp: TcpStream, host: &str, request: &[u8]) -> Result<Vec<u8>> {
+/// over the tokio socket. Ends with a close_notify + socket shutdown.
+async fn tls_exchange(tcp: TcpStream, host: &str, request: &[u8]) -> Result<Vec<u8>> {
+    tls_exchange_with_config(tcp, host, request, tls_config()).await
+}
+
+// Supplying a private config keeps fixture roots local to the TLS tests;
+// production always enters through tls_exchange with the Mozilla root set.
+async fn tls_exchange_with_config(
+    mut tcp: TcpStream,
+    host: &str,
+    request: &[u8],
+    config: Arc<rustls::ClientConfig>,
+) -> Result<Vec<u8>> {
     let name = rustls_pki_types::ServerName::try_from(host.to_string())
         .map_err(|_| anyhow!("invalid feed TLS server name"))?;
-    let mut conn = rustls::ClientConnection::new(tls_config(), name)?;
+    let mut conn = rustls::ClientConnection::new(config, name)?;
     std::io::Write::write_all(&mut conn.writer(), request)?;
 
     let mut response = Vec::new();
@@ -997,6 +1041,10 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 #[cfg(test)]
+#[path = "syndication/ipv6_tests.rs"]
+mod ipv6_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1040,9 +1088,9 @@ mod tests {
     }
 
     #[test]
-    fn feed_authorities_match_the_directory_parser() {
-        // Twin of `rabbithole_directory::split_authority`. A new crate for
-        // forty lines would be worse; this test is what keeps them in step.
+    fn valid_feed_authorities_match_the_directory_parser() {
+        // Shared valid forms remain compatible. Feed transport additionally
+        // validates literal syntax before putting an authority on the wire.
         const CASES: &[(&str, u16)] = &[
             ("warren.example", 80),
             ("warren.example:8080", 80),
