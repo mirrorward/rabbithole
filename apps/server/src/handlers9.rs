@@ -26,10 +26,13 @@ use rabbithole_proto::transfer as pt;
 use rabbithole_proto::{ErrorCode, Frame};
 use rabbithole_server_core::files::KIND_FILE;
 use rabbithole_server_core::ratelimit::{class as rl, Scope};
-use rabbithole_server_core::{Caps, FileError, ServerEvent};
+use rabbithole_server_core::{Caps, FileError, FileService, ServerEvent};
 
 use crate::session::SessionCtx;
 use crate::Shared;
+
+#[cfg(test)]
+mod manifest_tests;
 
 /// Max bytes a single chunk carries (well under the 1 MiB control-frame cap).
 const CHUNK_MAX: usize = 256 * 1024;
@@ -300,6 +303,83 @@ fn resource(area: &str, path: Option<&str>) -> String {
         Some(p) if !p.is_empty() => format!("files/{area}/{p}"),
         _ => format!("files/{area}"),
     }
+}
+
+/// A manifest is metadata: downloads retain their own authorization. Resolve
+/// the canonical root first, then filter every file using its own inherited
+/// visibility rules before disclosing IDs, paths, hashes, sizes or MIME types.
+async fn visible_manifest(
+    files: &FileService,
+    requested_area: &str,
+    path: Option<&str>,
+    allows: impl Fn(&str, Caps) -> bool,
+    quarantined: impl Fn(Option<&[u8; 32]>) -> bool,
+) -> Result<Vec<pt::ManifestEntry>, ErrorCode> {
+    let area = files
+        .area(requested_area)
+        .await
+        .map_err(|_| ErrorCode::NotFound)?
+        .slug;
+    let root = resource(&area, path);
+    if !allows(&root, Caps::SEE) {
+        return Err(ErrorCode::NotFound);
+    }
+    if !allows(&root, Caps::FILE_LIST) {
+        return Err(ErrorCode::Forbidden);
+    }
+    if let Some(path) = path.filter(|path| !path.is_empty()) {
+        let folder = files
+            .node_by_path(&area, path)
+            .await
+            .map_err(|_| ErrorCode::NotFound)?
+            .ok_or(ErrorCode::NotFound)?;
+        let nested = files
+            .in_dropbox(&folder)
+            .await
+            .map_err(|_| ErrorCode::NotFound)?;
+        if (folder.is_dropbox || nested)
+            && !allows(
+                &resource(&folder.area, Some(&folder.path)),
+                Caps::DROPBOX_VIEW,
+            )
+            && !allows(&resource(&folder.area, None), Caps::FILE_MANAGE)
+        {
+            return Err(ErrorCode::Forbidden);
+        }
+    }
+    let candidates = files
+        .manifest(&area, path)
+        .await
+        .map_err(|_| ErrorCode::NotFound)?;
+    let sees_quarantined = allows("moderation", Caps::MODERATE);
+    let mut entries = Vec::new();
+    for (node, rel) in candidates {
+        let res = resource(&node.area, Some(&node.path));
+        if !allows(&res, Caps::SEE | Caps::FILE_LIST)
+            || (!sees_quarantined && quarantined(node.blob_id.as_ref()))
+        {
+            continue;
+        }
+        // RH-169: a row can move after enumeration. Check current ancestry
+        // before advertising it, and leave disappeared/broken rows out.
+        let hidden = match files.in_dropbox(&node).await {
+            Ok(hidden) => hidden,
+            Err(_) => continue,
+        };
+        if hidden
+            && !allows(&res, Caps::DROPBOX_VIEW)
+            && !allows(&resource(&node.area, None), Caps::FILE_MANAGE)
+        {
+            continue;
+        }
+        if let Some(blob) = node.blob_id {
+            entries.push(
+                pt::ManifestEntry::new(node.id, rel, blob, node.size.max(0) as u64)
+                    .with_mime(node.mime),
+            );
+        }
+    }
+    Ok(entries)
 }
 
 fn staging_path(shared: &Shared, id: u64) -> PathBuf {
@@ -864,71 +944,18 @@ pub async fn handle(
 
     // ---- Folder manifest (pipelined transfers) ---------------------------
     if let Some(Ok(req)) = frame.decode::<pt::FolderManifestRequest>() {
-        let area = match shared.files.area(&req.area).await {
-            Ok(area) => area.slug,
-            Err(_) => fail!(ErrorCode::NotFound),
+        let entries = match visible_manifest(
+            &shared.files,
+            &req.area,
+            req.path.as_deref(),
+            |res, caps| ctx.allows(shared, res, caps),
+            |blob| shared.moderation.file_quarantined(blob),
+        )
+        .await
+        {
+            Ok(entries) => entries,
+            Err(code) => fail!(code),
         };
-        if !ctx.allows(
-            shared,
-            &resource(&area, req.path.as_deref()),
-            Caps::FILE_LIST,
-        ) {
-            fail!(ErrorCode::Forbidden);
-        }
-        if let Some(path) = req.path.as_deref().filter(|path| !path.is_empty()) {
-            let folder = match shared.files.node_by_path(&area, path).await {
-                Ok(Some(node)) => node,
-                _ => fail!(ErrorCode::NotFound),
-            };
-            let nested = match shared.files.in_dropbox(&folder).await {
-                Ok(hidden) => hidden,
-                Err(_) => fail!(ErrorCode::NotFound),
-            };
-            if (folder.is_dropbox || nested)
-                && !ctx.allows(
-                    shared,
-                    &resource(&folder.area, Some(&folder.path)),
-                    Caps::DROPBOX_VIEW,
-                )
-                && !ctx.allows(shared, &resource(&folder.area, None), Caps::FILE_MANAGE)
-            {
-                fail!(ErrorCode::Forbidden);
-            }
-        }
-        let files = match shared.files.manifest(&area, req.path.as_deref()).await {
-            Ok(f) => f,
-            Err(_) => fail!(ErrorCode::NotFound),
-        };
-        // Quarantined content is left out of manifests for non-moderators.
-        let sees_quarantined = ctx.allows(shared, "moderation", Caps::MODERATE);
-        let mut entries = Vec::new();
-        for (node, rel) in files {
-            if !sees_quarantined && shared.moderation.file_quarantined(node.blob_id.as_ref()) {
-                continue;
-            }
-            // A row can move after enumeration: check its current ancestry
-            // before advertising it, just as direct content lookup does.
-            let hidden = match shared.files.in_dropbox(&node).await {
-                Ok(hidden) => hidden,
-                Err(_) => continue,
-            };
-            if hidden
-                && !ctx.allows(
-                    shared,
-                    &resource(&node.area, Some(&node.path)),
-                    Caps::DROPBOX_VIEW,
-                )
-                && !ctx.allows(shared, &resource(&node.area, None), Caps::FILE_MANAGE)
-            {
-                continue;
-            }
-            if let Some(blob) = node.blob_id {
-                entries.push(
-                    pt::ManifestEntry::new(node.id, rel, blob, node.size.max(0) as u64)
-                        .with_mime(node.mime),
-                );
-            }
-        }
         reply!(&pt::FolderManifest::new(entries));
         return Ok(true);
     }
