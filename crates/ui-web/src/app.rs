@@ -858,6 +858,8 @@ impl AppState {
         let dm_handle = my_handle.clone();
         let sound_on = self.sound_on;
         let dm_sound_on = self.sound_on;
+        #[cfg(target_arch = "wasm32")]
+        let chime_app = *self;
         let notify_name = self.focused().name;
         // Sightings + friendship need `self` inside the sinks; `AppState` is
         // Copy, so clone the handle rather than borrowing across the closures.
@@ -1040,7 +1042,7 @@ impl AppState {
                         }
                         if crate::sound::should_chime(sound_on.get_untracked(), focused, from, &me)
                         {
-                            crate::sound::play(crate::sound::Chime::Chat);
+                            chime_app.play_chime(crate::sound::Chime::Chat);
                         }
                     }
                     _ => {}
@@ -1214,7 +1216,7 @@ impl AppState {
                 }
                 if crate::sound::should_chime(dm_sound_on.get_untracked(), focused, &msg.from, &me)
                 {
-                    crate::sound::play(crate::sound::Chime::Dm);
+                    chime_app.play_chime(crate::sound::Chime::Dm);
                 }
                 state.update(|s| s.receive_dm(&peer, msg))
             }));
@@ -4172,6 +4174,27 @@ impl AppState {
     pub fn set_radio_muted(&self, muted: bool) {
         self.radio_prefs.update(|p| p.muted = muted);
         self.radio_prefs_changed();
+    }
+
+    pub fn set_radio_ducking(&self, enabled: bool) {
+        self.radio_prefs.update(|p| p.ducking = enabled);
+        self.radio_prefs_changed();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn play_chime(&self, chime: crate::sound::Chime) {
+        let player = self.player;
+        crate::sound::play_with(chime, move |duration| {
+            player.try_update_value(|p| p.duck_for_chime(duration));
+        });
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn preview_chime(&self) -> impl std::future::Future<Output = Result<(), &'static str>> {
+        let player = self.player;
+        crate::sound::preview_with(crate::sound::Chime::Dm, move |duration| {
+            player.try_update_value(|p| p.duck_for_chime(duration));
+        })
     }
 
     /// Set the playback volume (clamped into `0.0..=1.0`), persist, re-sync.

@@ -10,10 +10,10 @@ test.setTimeout(90_000);
 async function localOnly(context: BrowserContext) {
   await context.route((url) => !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname), (route) => route.abort());
 }
-async function signIn(page: Page, server: TestBurrow) {
+async function signIn(page: Page, server: TestBurrow, handle = "theme-viewer") {
   await page.goto(server.httpURL);
   await page.locator("#rh-login-server").fill(server.wsURL);
-  await page.locator("#rh-login-handle").fill("theme-viewer");
+  await page.locator("#rh-login-handle").fill(handle);
   await page.locator("#rh-login-password").fill("theme-e2e-password");
   await page.getByLabel("Save sign-in to bookmark").check();
   await page.locator('.rh-login button[type="submit"]').click();
@@ -160,5 +160,268 @@ test("injected late playback results and old media events cannot overwrite a new
   } finally {
     await fixture?.dispose(); await server.dispose();
     await test.info().attach("radio-lifecycle-server-log", { body: server.logs(), contentType: "text/plain" });
+  }
+});
+
+const ducking = (page: Page) => page.getByRole("checkbox", { name: "Lower radio volume during message chimes", exact: true });
+const previewChime = (page: Page) => page.getByRole("button", { name: "Preview chime", exact: true });
+const automaticChimes = (page: Page) => page.getByRole("checkbox", { name: "Play a chime for new messages while I'm away", exact: true });
+async function soundSettings(page: Page) {
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.clock.runFor(32);
+  await expect(ducking(page)).toBeVisible();
+}
+async function setRange(page: Page, name: string, value: string) {
+  await page.getByRole("slider", { name, exact: true }).evaluate((input: HTMLInputElement, value) => {
+    input.value = value; input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, value);
+}
+async function audioVolume(page: Page) {
+  return page.evaluate(() => (window as any).__radioProbe.elements.at(-1).volume as number);
+}
+async function chimeStarts(page: Page) {
+  return page.evaluate(() => (window as any).__duckProbe.starts as number);
+}
+// Native media decoding and Web Audio nodes remain in use. Only the JS clock,
+// focus policy input, and explicit resume refusal are controlled. This tests
+// the shipped envelope against a real stream, without claiming OS audibility
+// or a particular browser's native autoplay policy.
+async function observeDucking(context: BrowserContext) {
+  await observeAudio(context);
+  await context.addInitScript(() => {
+    const NativeContext = window.AudioContext;
+    const probe = { starts: 0, mode: "native", focused: true, volumes: [] as number[] };
+    (window as any).__duckProbe = probe;
+    document.hasFocus = () => probe.focused;
+    const volume = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "volume")!;
+    Object.defineProperty(HTMLMediaElement.prototype, "volume", {
+      ...volume,
+      set(value: number) { probe.volumes.push(value); volume.set!.call(this, value); },
+    });
+    window.AudioContext = class extends NativeContext {
+      get state(): AudioContextState { return probe.mode === "refuse" ? "suspended" : super.state; }
+      resume() {
+        return probe.mode === "refuse"
+          ? Promise.reject(new DOMException("Injected chime resume refusal", "NotAllowedError"))
+          : super.resume();
+      }
+      createOscillator() {
+        const node = super.createOscillator(), start = node.start.bind(node);
+        node.start = (when) => { probe.starts++; start(when); };
+        return node;
+      }
+    };
+  });
+}
+async function freezeEnvelopeClock(page: Page) {
+  // Install before app startup so performance.now() never moves backward when
+  // switching clocks. Pausing changes JS timers, not native media/audio time.
+  await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now() + 1000)));
+}
+async function burrowRoute(page: Page, server: TestBurrow, route: "radio" | "lobby") {
+  if (await page.locator(`.rh-subnav a[href="/${route}"]`).count() === 0) {
+    await page.getByRole("navigation", { name: "Burrows", exact: true }).getByRole("button", { name: new RegExp(`^${server.name} —`) }).click();
+    await page.clock.runFor(32);
+  }
+  await page.locator(`.rh-subnav a[href="/${route}"]`).click();
+  await page.clock.runFor(32);
+}
+async function expectBaseVolume(page: Page, volume = 0.8) {
+  await page.clock.runFor(600);
+  expect(await audioVolume(page)).toBeCloseTo(volume, 5);
+}
+async function duckingPictures(page: Page) {
+  await page.locator('.rh-toasts button').evaluateAll((buttons) => buttons.forEach((button) => (button as HTMLButtonElement).click()));
+  for (const [size, width, height] of [["desktop", 1280, 900], ["mobile", 390, 844]] as const) {
+    await page.setViewportSize({ width, height });
+    await ducking(page).scrollIntoViewIfNeeded();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await expect(ducking(page)).toBeVisible();
+    const png = await page.screenshot({ path: test.info().outputPath(`radio-ducking-settings-${size}.png`) });
+    await test.info().attach(`radio-ducking-settings-${size}`, { body: png, contentType: "image/png" });
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+}
+
+test("radio ducking is opt-in, persists, and envelopes previews without restarting the stream", async ({ context, page }) => {
+  await localOnly(context); await observeDucking(context);
+  await page.clock.install();
+  // Upgrade an actual old preference record: it must retain the old choices
+  // while the newly introduced option starts off. Do not reseed on reload.
+  await context.addInitScript(() => {
+    if (!localStorage.getItem("rh-radio")) localStorage.setItem("rh-radio", JSON.stringify({ enabled: false, volume: 0.8, muted: false, station: "first" }));
+  });
+  const server = await TestBurrow.create("Radio Ducking", "a34700", { radio: true });
+  let fixture: RadioFixture | undefined;
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  try {
+    fixture = await RadioFixture.create(server);
+    await signIn(page, server); await soundSettings(page);
+    await expect(ducking(page)).not.toBeChecked();
+    await ducking(page).check();
+    await automaticChimes(page).uncheck();
+    await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("rh-radio")!).ducking)).toBe(true);
+    await page.reload(); await soundSettings(page);
+    await expect(ducking(page)).toBeChecked();
+    await expect(automaticChimes(page)).not.toBeChecked();
+    await duckingPictures(page);
+    await burrowRoute(page, server, "radio");
+    await player(page).getByRole("button", { name: "Listen", exact: true }).click();
+    await expect(status(page)).toHaveText("Listening");
+    await expect.poll(() => page.evaluate(() => (window as any).__radioProbe.elements.at(-1).currentTime)).toBeGreaterThan(0);
+    const playbackCalls = await calls(page);
+    await soundSettings(page); await freezeEnvelopeClock(page);
+    await page.evaluate(() => { (window as any).__duckProbe.volumes = []; });
+    await previewChime(page).click();
+    await expect.poll(() => chimeStarts(page)).toBe(2);
+    await page.clock.runFor(64);
+    expect(await audioVolume(page)).toBeCloseTo(0.2, 5);
+    expect(await page.evaluate(() => (window as any).__duckProbe.volumes.some((v: number) => v > 0.2 && v < 0.8))).toBe(true);
+    // A second audible chime extends the quiet interval, including beyond the
+    // first one's release deadline; it never adds another audio element.
+    await page.clock.runFor(100);
+    await previewChime(page).click();
+    await expect.poll(() => chimeStarts(page)).toBe(4);
+    await page.clock.runFor(100);
+    expect(await audioVolume(page)).toBeCloseTo(0.2, 5);
+    // A system clock correction must not stall gain recovery: the envelope
+    // follows elapsed performance time instead of Date's wall clock.
+    await page.clock.setSystemTime(new Date(await page.evaluate(() => Date.now() - 3_600_000)));
+    await expectBaseVolume(page);
+    expect(await calls(page)).toBe(playbackCalls);
+
+    // User edits while ducked are authoritative. They must not restart the
+    // stream or be overwritten by the eventual recovery callback.
+    await previewChime(page).click();
+    await expect.poll(() => chimeStarts(page)).toBe(6);
+    await page.clock.runFor(64);
+    await burrowRoute(page, server, "radio");
+    await setRange(page, "Volume", "40");
+    expect(await audioVolume(page)).toBeCloseTo(0.1, 5);
+    await player(page).getByRole("button", { name: "Mute", exact: true }).click();
+    expect(await page.evaluate(() => (window as any).__radioProbe.elements.at(-1).muted)).toBe(true);
+    await expectBaseVolume(page, 0.4);
+    expect(await page.evaluate(() => (window as any).__radioProbe.elements.at(-1).muted)).toBe(true);
+    await player(page).getByRole("button", { name: "Unmute", exact: true }).click();
+    expect(await audioVolume(page)).toBeCloseTo(0.4, 5);
+
+    await soundSettings(page);
+    await previewChime(page).click();
+    await expect.poll(() => chimeStarts(page)).toBe(8);
+    await page.clock.runFor(64);
+    expect(await audioVolume(page)).toBeCloseTo(0.1, 5);
+    await ducking(page).uncheck();
+    await expectBaseVolume(page, 0.4);
+    await previewChime(page).click();
+    await expect.poll(() => chimeStarts(page)).toBe(10);
+    await page.clock.runFor(64);
+    expect(await audioVolume(page)).toBeCloseTo(0.4, 5);
+    expect(await calls(page)).toBe(playbackCalls);
+    expect(await page.evaluate(() => new Set((window as any).__radioProbe.elements).size)).toBe(1);
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem("rh-radio")!))).toMatchObject({ ducking: false, volume: 0.4, muted: false });
+    await burrowRoute(page, server, "radio");
+    await player(page).getByRole("button", { name: "Stop", exact: true }).click();
+    await page.reload(); await soundSettings(page);
+    await expect(ducking(page)).not.toBeChecked();
+    expect(errors).toEqual([]);
+  } finally {
+    await fixture?.dispose(); await server.dispose();
+    await test.info().attach("radio-ducking-server-log", { body: server.logs(), contentType: "text/plain" });
+  }
+});
+
+test("real incoming messages duck only when their chime is audible and playback is active", async ({ browser, context, page }) => {
+  await localOnly(context); await observeDucking(context);
+  await page.clock.install();
+  const server = await TestBurrow.create("Message Ducking", "a34700", { radio: true });
+  const senderContext = await browser.newContext({ serviceWorkers: "block" });
+  await localOnly(senderContext);
+  let fixture: RadioFixture | undefined;
+  try {
+    fixture = await RadioFixture.create(server);
+    await server.ctl("account-create", "chime-sender", "theme-e2e-password", "user");
+    const sender = await senderContext.newPage();
+    await signIn(sender, server, "chime-sender");
+    await signIn(page, server); await soundSettings(page);
+    await ducking(page).check();
+    // Prime real Web Audio with a user gesture before messages arrive.
+    await previewChime(page).click();
+    await expect.poll(() => chimeStarts(page)).toBe(2);
+    await burrowRoute(page, server, "radio");
+    await player(page).getByRole("button", { name: "Listen", exact: true }).click();
+    await expect(status(page)).toHaveText("Listening");
+    const playbackCalls = await calls(page);
+    await freezeEnvelopeClock(page);
+    const send = async (text: string) => {
+      const input = sender.getByRole("textbox", { name: "Message #lobby", exact: true });
+      await input.fill(text); await input.press("Enter");
+      await expect(page.getByRole("log", { name: "Chat messages" }).getByText(text, { exact: true })).toBeVisible();
+    };
+    await burrowRoute(page, server, "lobby");
+    await page.evaluate(() => { (window as any).__duckProbe.focused = false; });
+    await send("An audible incoming room message");
+    await expect.poll(() => chimeStarts(page)).toBe(3);
+    await page.clock.runFor(64);
+    expect(await audioVolume(page)).toBeCloseTo(0.2, 5);
+    await expectBaseVolume(page);
+
+    await page.evaluate(() => { (window as any).__duckProbe.mode = "refuse"; (window as any).__duckProbe.volumes = []; });
+    await send("A message whose chime cannot resume");
+    await page.clock.runFor(600);
+    expect(await chimeStarts(page)).toBe(3);
+    expect(await audioVolume(page)).toBeCloseTo(0.8, 5);
+    expect(await page.evaluate(() => (window as any).__duckProbe.volumes.every((v: number) => Math.abs(v - 0.8) < 0.00001))).toBe(true);
+    await page.evaluate(() => { (window as any).__duckProbe.mode = "native"; });
+
+    await soundSettings(page); await setRange(page, "Chime volume", "0");
+    await expect(previewChime(page)).toBeDisabled();
+    await burrowRoute(page, server, "lobby");
+    await send("Zero chime volume is silent");
+    await page.clock.runFor(64);
+    expect(await chimeStarts(page)).toBe(3);
+    expect(await audioVolume(page)).toBeCloseTo(0.8, 5);
+
+    await soundSettings(page); await setRange(page, "Chime volume", "60");
+    await automaticChimes(page).uncheck();
+    await burrowRoute(page, server, "lobby");
+    await send("Disabled message sounds are silent");
+    await page.clock.runFor(64);
+    expect(await chimeStarts(page)).toBe(3);
+    expect(await audioVolume(page)).toBeCloseTo(0.8, 5);
+    await soundSettings(page); await automaticChimes(page).check();
+    await burrowRoute(page, server, "lobby");
+    await page.evaluate(() => { (window as any).__duckProbe.focused = true; });
+    await send("Focused messages are silent");
+    await page.clock.runFor(64);
+    expect(await chimeStarts(page)).toBe(3);
+    expect(await audioVolume(page)).toBeCloseTo(0.8, 5);
+
+    // A muted radio remains muted when a real chime plays; unmuting later
+    // must reveal the base volume rather than a stale attenuation.
+    await burrowRoute(page, server, "radio");
+    await player(page).getByRole("button", { name: "Mute", exact: true }).click();
+    await burrowRoute(page, server, "lobby");
+    await page.evaluate(() => { (window as any).__duckProbe.focused = false; });
+    await send("A message while the radio is muted");
+    await expect.poll(() => chimeStarts(page)).toBe(4);
+    await page.clock.runFor(64);
+    expect(await audioVolume(page)).toBeCloseTo(0.8, 5);
+    expect(await page.evaluate(() => (window as any).__radioProbe.elements.at(-1).muted)).toBe(true);
+    await expectBaseVolume(page);
+    await burrowRoute(page, server, "radio");
+    await player(page).getByRole("button", { name: "Unmute", exact: true }).click();
+    expect(await audioVolume(page)).toBeCloseTo(0.8, 5);
+    expect(await calls(page)).toBe(playbackCalls);
+    await player(page).getByRole("button", { name: "Stop", exact: true }).click();
+    await burrowRoute(page, server, "lobby");
+    await send("A message while the radio is stopped");
+    await expect.poll(() => chimeStarts(page)).toBe(5);
+    await page.clock.runFor(600);
+    expect(await calls(page)).toBe(playbackCalls);
+    expect(await page.evaluate(() => (window as any).__radioProbe.elements.every((audio: HTMLMediaElement) => audio.paused && !audio.hasAttribute("src")))).toBe(true);
+  } finally {
+    await senderContext.close(); await fixture?.dispose(); await server.dispose();
+    await test.info().attach("message-ducking-server-log", { body: server.logs(), contentType: "text/plain" });
   }
 });

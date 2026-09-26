@@ -69,7 +69,7 @@ pub fn SoundSettings() -> impl IntoView {
                     #[cfg(target_arch = "wasm32")]
                     {
                         previewing.set(true);
-                        let playback = crate::sound::preview(crate::sound::Chime::Dm);
+                        let playback = app.preview_chime();
                         wasm_bindgen_futures::spawn_local(async move {
                             if let Err(error) = playback.await {
                                 preview_error.try_set(error.to_string());
@@ -104,6 +104,17 @@ pub fn SoundSettings() -> impl IntoView {
                 <output for="rh-sound-volume">{move || format!("{}%", prefs.get().volume())}</output>
             </div>
         </div>
+        <label class="rh-settings-check">
+            <input
+                type="checkbox"
+                prop:checked=move || app.radio_prefs.with(|p| p.ducking)
+                on:change=move |_| {
+                    let enabled = !app.radio_prefs.with_untracked(|p| p.ducking);
+                    app.set_radio_ducking(enabled);
+                }
+            />
+            <span>"Lower radio volume during message chimes"</span>
+        </label>
         <p class="rh-settings-note">
             {move || if prefs.get().volume() == 0 {
                 "Chime volume is zero. Raise it to hear messages or a preview."

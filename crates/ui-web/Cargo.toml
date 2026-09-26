@@ -64,6 +64,7 @@ web-sys = { workspace = true, features = [
     # the Icecast delivery mount. Media controls live on HtmlMediaElement.
     "HtmlAudioElement",
     "HtmlMediaElement",
+    "Performance",
     # PWA install-readiness (`src/pwa.rs`): navigator.serviceWorker.register.
     "Navigator",
     "ServiceWorkerContainer",

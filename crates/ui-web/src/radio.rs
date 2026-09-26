@@ -289,6 +289,9 @@ pub struct RadioPrefs {
     pub volume: f32,
     /// Whether playback is muted (volume is remembered underneath).
     pub muted: bool,
+    /// Briefly lower radio volume during audible message chimes.
+    #[serde(default)]
+    pub ducking: bool,
     /// The selected station slug, if any.
     pub station: Option<String>,
 }
@@ -299,6 +302,7 @@ impl Default for RadioPrefs {
             enabled: false,
             volume: DEFAULT_VOLUME,
             muted: false,
+            ducking: false,
             station: None,
         }
     }
@@ -770,6 +774,7 @@ mod tests {
             enabled: true,
             volume: 0.35,
             muted: true,
+            ducking: true,
             station: Some("live".into()),
         };
         assert_eq!(prefs_from_str(&prefs_to_str(&prefs)), Some(prefs));
@@ -787,6 +792,10 @@ mod tests {
         let raw = "{\"enabled\":true,\"volume\":7.5,\"muted\":false,\
                    \"station\":\"  \",\"base\":\" http://h:8000 \"}";
         let prefs = prefs_from_str(raw).unwrap();
+        assert!(
+            !prefs.ducking,
+            "legacy profiles preserve normal radio volume"
+        );
         assert_eq!(prefs.volume, 1.0);
         assert_eq!(prefs.station, None);
     }

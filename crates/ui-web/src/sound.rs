@@ -194,16 +194,27 @@ mod browser {
     /// automatic notification policy or opt-in. Start resume synchronously, while
     /// the button's user activation is still available to the browser.
     pub fn preview(chime: Chime) -> impl std::future::Future<Output = Result<(), &'static str>> {
-        playback(chime, preferences())
+        preview_with(chime, |_| {})
+    }
+
+    pub fn preview_with(
+        chime: Chime,
+        on_started: impl FnOnce(u32) + 'static,
+    ) -> impl std::future::Future<Output = Result<(), &'static str>> {
+        playback(chime, preferences(), on_started)
     }
 
     /// Called only after the automatic notification policy passes.
     pub fn play(chime: Chime) {
+        play_with(chime, |_| {});
+    }
+
+    pub fn play_with(chime: Chime, on_started: impl FnOnce(u32) + 'static) {
         let prefs = preferences();
         if prefs.volume() == 0 {
             return;
         }
-        let playback = playback(chime, prefs);
+        let playback = playback(chime, prefs, on_started);
         spawn_local(async move {
             // An unsolicited sound must never become an unsolicited error toast.
             let _ = playback.await;
@@ -213,6 +224,7 @@ mod browser {
     fn playback(
         chime: Chime,
         prefs: SoundPrefs,
+        on_started: impl FnOnce(u32) + 'static,
     ) -> impl std::future::Future<Output = Result<(), &'static str>> {
         let context = context().ok_or("This browser cannot play chimes.");
         let resume = context.as_ref().ok().map(|ctx| ctx.resume());
@@ -237,6 +249,9 @@ mod browser {
                 .await
                 .map_err(|_| "Sound could not start. Select Preview chime to try again.")?;
             }
+            if ctx.state() != web_sys::AudioContextState::Running {
+                return Err("Sound could not start. Select Preview chime to try again.");
+            }
             let (notes, _) = preset_notes(prefs.preset, chime);
             let now = ctx.current_time();
             let mut nodes = Vec::new();
@@ -255,15 +270,27 @@ mod browser {
                 let _ = g.set_value_at_time(0.0, start);
                 let _ = g.linear_ramp_to_value_at_time(prefs.peak_gain(chime), start + 0.012);
                 let _ = g.exponential_ramp_to_value_at_time(0.0001, end);
-                let _ = osc.connect_with_audio_node(&gain);
-                let _ = gain.connect_with_audio_node(&ctx.destination());
-                let _ = osc.start_with_when(start);
-                let _ = osc.stop_with_when(end);
-                nodes.push((osc, gain));
+                if osc.connect_with_audio_node(&gain).is_ok()
+                    && gain.connect_with_audio_node(&ctx.destination()).is_ok()
+                    && osc.start_with_when(start).is_ok()
+                    && osc.stop_with_when(end).is_ok()
+                {
+                    nodes.push((osc, gain));
+                } else {
+                    let _ = osc.disconnect();
+                    let _ = gain.disconnect();
+                }
             }
             if nodes.is_empty() {
                 return Err("Sound could not start. Select Preview chime to try again.");
             }
+            // The player should duck only for audio that was actually scheduled,
+            // not for a blocked resume, a silent preference, or a policy refusal.
+            let duration = notes
+                .last()
+                .map(|(_, offset)| offset + NOTE_SECS)
+                .unwrap_or(0.0);
+            on_started((f64::from(duration) * 1000.0).ceil() as u32);
             // Stop times run on the audio clock; this only releases the finished
             // graph. A throttled background timer cannot lengthen a note.
             spawn_local(async move {
@@ -279,7 +306,9 @@ mod browser {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use browser::{enabled, play, preferences, preview, set_enabled, set_preferences};
+pub use browser::{
+    enabled, play, play_with, preferences, preview, preview_with, set_enabled, set_preferences,
+};
 
 #[cfg(test)]
 mod tests {

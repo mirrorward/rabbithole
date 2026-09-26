@@ -2,7 +2,7 @@
 //! Preferences express intent; a play promise or media error tells us what
 //! actually happened. The host-tested reducer rejects obsolete answers.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
@@ -11,6 +11,70 @@ use web_sys::{Event, HtmlAudioElement};
 
 use crate::playback::{Playback, PlaybackAction, PlaybackStatus};
 use crate::radio::RadioPrefs;
+
+/// The envelope never saves a volume to restore: every frame uses current intent.
+/// A weak animation task cannot retain the player after its owner is disposed.
+#[derive(Default)]
+struct Volume {
+    audio: RefCell<Option<HtmlAudioElement>>,
+    prefs: RefCell<RadioPrefs>,
+    ducking: RefCell<crate::ducking::Ducking>,
+    animating: Cell<bool>,
+}
+
+impl Volume {
+    fn now() -> Option<f64> {
+        // Wall-clock corrections must never prolong a quiet interval.
+        Some(web_sys::window()?.performance()?.now())
+    }
+
+    fn apply(&self) -> bool {
+        let mut envelope = self.ducking.borrow_mut();
+        let gain = if let Some(now) = Self::now() {
+            envelope.gain(now)
+        } else {
+            // No monotonic clock: retain ordinary volume rather than ducking.
+            *envelope = crate::ducking::Ducking::default();
+            1.0
+        };
+        if let Some(audio) = self.audio.borrow().as_ref() {
+            let prefs = self.prefs.borrow();
+            audio.set_volume(f64::from(crate::radio::clamp_volume(prefs.volume)) * gain);
+            audio.set_muted(prefs.muted);
+        }
+        envelope.active()
+    }
+
+    fn sync(&self, prefs: &RadioPrefs) {
+        *self.prefs.borrow_mut() = prefs.clone();
+        if !prefs.ducking {
+            if let Some(now) = Self::now() {
+                self.ducking.borrow_mut().release(now);
+            }
+        }
+        self.apply();
+    }
+
+    fn chime(self: &Rc<Self>, duration_ms: u32) {
+        let Some(now) = Self::now() else { return };
+        self.ducking.borrow_mut().chime(now, duration_ms);
+        self.apply();
+        if self.animating.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        spawn_local(async move {
+            loop {
+                gloo_timers::future::TimeoutFuture::new(16).await;
+                let Some(volume) = weak.upgrade() else { break };
+                if !volume.apply() {
+                    volume.animating.set(false);
+                    break;
+                }
+            }
+        });
+    }
+}
 
 struct Shared {
     model: RefCell<Playback>,
@@ -31,6 +95,7 @@ pub struct RadioPlayer {
     audio: Option<HtmlAudioElement>,
     listeners: Vec<(&'static str, Closure<dyn FnMut(Event)>)>,
     shared: Rc<Shared>,
+    volume: Rc<Volume>,
 }
 
 impl RadioPlayer {
@@ -46,10 +111,13 @@ impl RadioPlayer {
                 model: RefCell::new(Playback::default()),
                 changed: Box::new(changed),
             }),
+            volume: Rc::new(Volume::default()),
         }
     }
 
     fn release(&mut self) {
+        self.volume.audio.borrow_mut().take();
+        *self.volume.ducking.borrow_mut() = crate::ducking::Ducking::default();
         if let Some(audio) = self.audio.take() {
             for (event, callback) in self.listeners.drain(..) {
                 let _ = audio
@@ -75,6 +143,8 @@ impl RadioPlayer {
         audio.set_preload("none");
         audio.set_volume(f64::from(crate::radio::clamp_volume(prefs.volume)));
         audio.set_muted(prefs.muted);
+        *self.volume.audio.borrow_mut() = Some(audio.clone());
+        self.volume.sync(prefs);
         for event in ["error", "ended"] {
             let weak = Rc::downgrade(&self.shared);
             let callback = Closure::wrap(Box::new(move |_: Event| {
@@ -131,10 +201,7 @@ impl RadioPlayer {
             PlaybackAction::Stop => self.release(),
             PlaybackAction::None => {}
         }
-        if let Some(audio) = &self.audio {
-            audio.set_volume(f64::from(crate::radio::clamp_volume(prefs.volume)));
-            audio.set_muted(prefs.muted);
-        }
+        self.volume.sync(prefs);
     }
 
     pub fn sync(&mut self, prefs: &RadioPrefs, url: Option<String>) {
@@ -146,6 +213,20 @@ impl RadioPlayer {
     pub fn retry(&mut self, prefs: &RadioPrefs) {
         let action = self.shared.model.borrow_mut().retry();
         self.apply(action, prefs);
+    }
+
+    /// Called only once a non-silent chime has actually started successfully.
+    pub fn duck_for_chime(&self, duration_ms: u32) {
+        let prefs = self.volume.prefs.borrow();
+        if prefs.ducking
+            && prefs.enabled
+            && !prefs.muted
+            && prefs.volume > 0.0
+            && self.shared.model.borrow().status() == PlaybackStatus::Playing
+        {
+            drop(prefs);
+            self.volume.chime(duration_ms);
+        }
     }
 }
 

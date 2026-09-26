@@ -107,6 +107,8 @@ pub mod conn;
 pub mod connect;
 pub mod demo_config;
 pub mod demo_files;
+#[cfg(any(target_arch = "wasm32", test))]
+mod ducking;
 pub mod files;
 pub mod friend;
 pub mod icons;
