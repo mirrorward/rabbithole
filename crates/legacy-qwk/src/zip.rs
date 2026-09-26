@@ -167,4 +167,52 @@ mod tests {
         assert!(zip.starts_with(&0x0605_4b50u32.to_le_bytes()));
         assert!(read_store_zip(&zip).is_empty());
     }
+
+    #[test]
+    fn packet_members_and_message_readers_work_with_or_without_bulletins() {
+        use crate::{build_packet, ControlDat, MessagesDat, QwkMessage};
+        let messages = vec![QwkMessage::new(1, 1, "ALL", "SYSOP", "News", "One message")];
+        let mut packet = build_packet(
+            ControlDat {
+                conferences: vec![(1, "Main".into())],
+                ..ControlDat::default()
+            },
+            messages.clone(),
+            None,
+        );
+        for bulletins in [
+            vec![],
+            vec![b"Caf\x82\r\n".to_vec(), b"Second\r\n".to_vec()],
+        ] {
+            packet.set_bulletins(bulletins.clone()).unwrap();
+            let archive = packet.to_zip();
+            let entries = read_store_zip(&archive);
+            assert_eq!(entries.len(), 4 + bulletins.len());
+            let member = |name: &str| {
+                entries
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .unwrap()
+                    .1
+                    .as_slice()
+            };
+            assert_eq!(
+                MessagesDat::decode(member("MESSAGES.DAT"))
+                    .unwrap()
+                    .messages,
+                messages
+            );
+            assert_eq!(
+                ControlDat::parse(member("CONTROL.DAT"))
+                    .unwrap()
+                    .total_messages,
+                1
+            );
+            let index = crate::ndx::decode(member("001.NDX")).unwrap();
+            assert_eq!(index[0].number, 2);
+            for (offset, bytes) in bulletins.iter().enumerate() {
+                assert_eq!(member(&format!("BLT-0.{}", offset + 1)), bytes);
+            }
+        }
+    }
 }

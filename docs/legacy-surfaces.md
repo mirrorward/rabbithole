@@ -71,6 +71,17 @@ disables that class.
   boards (sorted by slug, numbered 1–255); message selection and read pointers
   share the Wave-3 offline-read subsystem. REP ingest posts with the user's
   author seed and dedupes on `SeenKey::QwkReply`.
+  Optional `qwk_bulletins` is a TOML-only array of inline text; restart after
+  editing it. Each entry becomes a global `BLT-0.1`, `BLT-0.2`, ... member in
+  array order (no filename or source path is accepted). Content is CP437 with
+  CRLF line endings; unsupported Unicode characters become `?`, and existing
+  ASCII ANSI escape sequences are preserved. Builds allow at most 32
+  bulletins, 64 KiB per entry and 256 KiB combined, checked against both the
+  UTF-8 configuration text and final encoded bytes. Invalid content rejects
+  the build before replacing the previous spool or advancing read pointers.
+  An empty array omits bulletins; the next successful build removes old ones.
+  Bulletins are separate from message indexes and `CONTROL.DAT` screen-file
+  slots, following the [QWK bulletin convention](https://wmcbrine.com/mmail/specs/qwkmay.html).
 - **Radio**: `radio_enabled`, `radio_addr`, `radio_source_enabled`,
   `radio_source_addr`, `radio_source_user`, `radio_source_password`,
   `radio_library_areas` (mount slug → file-area slug, *TOML-only*) — each

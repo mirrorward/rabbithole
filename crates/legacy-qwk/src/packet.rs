@@ -17,6 +17,8 @@
 //! - `NNN.NDX` — one per conference that carries messages, each entry pointing at
 //!   the 1-based `MESSAGES.DAT` block of a message header (via [`ndx`]/[`mbf`]).
 //! - `DOOR.ID` — a QWKE-advertising door id (caller-supplied or a default).
+//! - `BLT-0.<number>` — optional global bulletins, added with
+//!   [`QwkPacket::set_bulletins`].
 //!
 //! [`mbf`]: crate::mbf
 
@@ -51,11 +53,32 @@ pub struct QwkPacket {
     pub door_id: Vec<u8>,
     /// Per-conference `.NDX` members, sorted by conference number.
     pub indexes: Vec<NdxFile>,
+    /// Validated contents with canonical names; changed only through the
+    /// bounded setter so raw paths cannot become packet or spool members.
+    bulletins: Vec<(String, Vec<u8>)>,
 }
 
 impl QwkPacket {
+    /// Replace the optional global bulletins with already encoded ASCII /
+    /// CP437 / ANSI contents. Names are `BLT-0.1`, `BLT-0.2`, ... in input
+    /// order, with no padding, always safe DOS 8.3 names. Empty input removes
+    /// all bulletins. On any limit error the packet is unchanged.
+    ///
+    /// Bulletins do not modify `CONTROL.DAT`'s welcome/news/goodbye slots,
+    /// `MESSAGES.DAT`, or any message index.
+    pub fn set_bulletins(&mut self, contents: Vec<Vec<u8>>) -> Result<(), crate::QwkError> {
+        crate::bulletin::validate_sizes(contents.iter().map(Vec::len))?;
+        self.bulletins = contents
+            .into_iter()
+            .enumerate()
+            .map(|(index, bytes)| (format!("BLT-0.{}", index + 1), bytes))
+            .collect();
+        Ok(())
+    }
+
     /// All members as `(canonical filename, bytes)` pairs, in a stable order
-    /// (`MESSAGES.DAT`, `CONTROL.DAT`, `DOOR.ID`, then each `.NDX`).
+    /// (`MESSAGES.DAT`, `CONTROL.DAT`, `DOOR.ID`, each `.NDX`, then bulletins
+    /// in numeric order).
     ///
     /// Convenient for a ZIP-bundling layer that just needs to iterate the files.
     pub fn members(&self) -> Vec<(&str, &[u8])> {
@@ -66,6 +89,9 @@ impl QwkPacket {
         ];
         for idx in &self.indexes {
             out.push((idx.filename.as_str(), &idx.bytes));
+        }
+        for (name, bytes) in &self.bulletins {
+            out.push((name.as_str(), bytes));
         }
         out
     }
@@ -124,6 +150,7 @@ pub fn build_packet(
         control_dat,
         door_id,
         indexes,
+        bulletins: Vec::new(),
     }
 }
 
@@ -260,5 +287,84 @@ mod tests {
                 "005.NDX"
             ]
         );
+    }
+
+    #[test]
+    fn bulletins_are_safe_ordered_members_without_changing_mail_or_indexes() {
+        let baseline = build_packet(control(), messages(), None);
+        let mut packet = baseline.clone();
+        packet
+            .set_bulletins(vec![b"Welcome\r\n".to_vec(), b"../not-a-path".to_vec()])
+            .unwrap();
+        assert_eq!(packet.messages_dat, baseline.messages_dat);
+        assert_eq!(packet.control_dat, baseline.control_dat);
+        assert_eq!(packet.door_id, baseline.door_id);
+        assert_eq!(packet.indexes, baseline.indexes);
+        let members = packet.members();
+        assert_eq!(
+            &members[members.len() - 2..],
+            &[
+                ("BLT-0.1", b"Welcome\r\n".as_slice()),
+                ("BLT-0.2", b"../not-a-path".as_slice()),
+            ]
+        );
+        assert_eq!(packet.to_zip(), packet.to_zip(), "deterministic ZIP");
+        packet.set_bulletins(Vec::new()).unwrap();
+        assert_eq!(
+            packet, baseline,
+            "omitting bulletins preserves existing packets"
+        );
+    }
+
+    #[test]
+    fn bulletin_limits_reject_atomically_and_accept_the_boundary() {
+        use crate::bulletin::{MAX_BULLETINS, MAX_BULLETINS_BYTES, MAX_BULLETIN_BYTES};
+        let mut packet = build_packet(control(), messages(), None);
+        packet.set_bulletins(vec![b"kept".to_vec()]).unwrap();
+        let before = packet.clone();
+        for (contents, limit) in [
+            (vec![Vec::new(); MAX_BULLETINS + 1], "count"),
+            (
+                vec![vec![b'x'; MAX_BULLETIN_BYTES + 1]],
+                "bytes per bulletin",
+            ),
+            (
+                {
+                    let mut contents = vec![
+                        vec![b'x'; MAX_BULLETIN_BYTES];
+                        MAX_BULLETINS_BYTES / MAX_BULLETIN_BYTES
+                    ];
+                    contents.push(vec![b'x']);
+                    contents
+                },
+                "total bytes",
+            ),
+        ] {
+            assert!(
+                matches!(packet.set_bulletins(contents), Err(crate::QwkError::BulletinLimit { limit: got, .. }) if got == limit)
+            );
+            assert_eq!(
+                packet, before,
+                "a rejected replacement leaves the packet intact"
+            );
+        }
+        packet
+            .set_bulletins(vec![
+                vec![b'x'; MAX_BULLETIN_BYTES];
+                MAX_BULLETINS_BYTES / MAX_BULLETIN_BYTES
+            ])
+            .unwrap();
+        packet
+            .set_bulletins(vec![Vec::new(); MAX_BULLETINS])
+            .unwrap();
+        let names: Vec<_> = packet
+            .members()
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+        assert_eq!(names.last().unwrap(), "BLT-0.32");
+        assert!(names
+            .iter()
+            .all(|name| !name.contains('/') && !name.contains('\\')));
     }
 }

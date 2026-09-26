@@ -282,6 +282,11 @@ pub struct ServerConfig {
     /// login, rebuilt on every `qwk` build). Relative paths resolve under
     /// `data_dir`.
     pub qwk_spool_dir: PathBuf,
+    /// Optional global QWK bulletins as inline text, in packet order.
+    /// TOML-only; restart after editing. Builds enforce 32 entries, 64 KiB
+    /// each and 256 KiB total, for both source text and CP437/CRLF output.
+    /// Names are generated (`BLT-0.1`, ...); values are never file paths.
+    pub qwk_bulletins: Vec<String>,
     /// Where a snapshot made from the console (or by `ctl backup` with no
     /// destination) is written. Relative paths resolve under `data_dir`.
     pub backup_dir: PathBuf,
@@ -550,6 +555,7 @@ impl Default for ServerConfig {
             ftn_areas: std::collections::HashMap::new(),
             qwk_enabled: false,
             qwk_spool_dir: PathBuf::from("qwk"),
+            qwk_bulletins: Vec::new(),
             backup_dir: PathBuf::from("backups"),
             syndication_enabled: false,
             syndication_feeds: std::collections::HashMap::new(),
@@ -831,6 +837,14 @@ impl ServerConfig {
             "ftn_outbound_dir" => self.ftn_outbound_dir.display().to_string(),
             "qwk_enabled" => self.qwk_enabled.to_string(),
             "qwk_spool_dir" => self.qwk_spool_dir.display().to_string(),
+            "qwk_bulletins" => toml::Value::Array(
+                self.qwk_bulletins
+                    .iter()
+                    .cloned()
+                    .map(toml::Value::String)
+                    .collect(),
+            )
+            .to_string(),
             "backup_dir" => self.backup_dir.display().to_string(),
             "syndication_enabled" => self.syndication_enabled.to_string(),
             "syndication_poll_secs" => self.syndication_poll_secs.to_string(),
@@ -1569,6 +1583,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "ftn_outbound_dir",
     "qwk_enabled",
     "qwk_spool_dir",
+    "qwk_bulletins",
     "backup_dir",
     "syndication_enabled",
     "syndication_poll_secs",
@@ -2042,6 +2057,7 @@ mod tests {
                 "ws_allowed_origins",
                 "announce_trackers",
                 "data_dir",
+                "qwk_bulletins",
                 "federation_origin",
                 "theme_applied_at_unix",
                 "theme_applied_by"
@@ -2334,6 +2350,30 @@ mod tests {
             live.set_key("qwk_enabled", "maybe"),
             Err(ConfigError::BadValue { .. })
         ));
+    }
+
+    #[test]
+    fn qwk_bulletins_are_inline_toml_only_and_described_read_only() {
+        let mut cfg: ServerConfig =
+            toml::from_str(r#"qwk_bulletins = ["First\nline", "Café"]"#).unwrap();
+        assert_eq!(cfg.qwk_bulletins, ["First\nline", "Café"]);
+        let saved = toml::to_string(&cfg).unwrap();
+        let back: ServerConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(back.qwk_bulletins, cfg.qwk_bulletins);
+        let info = cfg
+            .describe()
+            .into_iter()
+            .find(|entry| entry.key == "qwk_bulletins")
+            .unwrap();
+        assert_eq!(info.default, "[]");
+        assert!(info.read_only);
+        assert!(!info.applies_live);
+        assert!(info.value.contains("Café"));
+        assert!(matches!(
+            cfg.set_key("qwk_bulletins", "[]"),
+            Err(ConfigError::UnknownKey(_))
+        ));
+        assert_eq!(cfg.qwk_bulletins, back.qwk_bulletins);
     }
 
     #[test]

@@ -3,10 +3,8 @@
 //! A pure, dependency-light codec for the classic **QWK** offline-mail packet
 //! format and its **QWKE** extensions, so vintage offline readers can exchange
 //! mail with a RabbitHole server. This crate is *only* the byte-level codec:
-//! there is **no networking, no ZIP bundling, and no board wiring** here. A
-//! `.QWK`/`.REP` file is a ZIP of the members this crate encodes/decodes; the
-//! bundling and delivery layers wire this codec in during later Wave 10 slices.
-//! That ZIP boundary is the deliberate seam this slice leaves open.
+//! there is **no networking or board wiring** here. A deterministic STORE ZIP
+//! writer bundles the encoded members; delivery remains the server's job.
 //!
 //! QWK is a **legacy** format with hand-rolled, fixed-width binary records and
 //! its own oddities (128-byte blocks, a `0xE3` end-of-line marker, and
@@ -30,6 +28,7 @@
 //! - [`packet`] — a pure high-level builder assembling the outbound QWK packet
 //!   members (`MESSAGES.DAT` / `CONTROL.DAT` / `*.NDX` / `DOOR.ID`) from messages
 //!   and conference metadata, for CLI/web export.
+//! - [`bulletin`] — bounded optional `BLT-0.<number>` bulletin members.
 //!
 //! ## The 128-byte message header (0-based offsets)
 //!
@@ -54,6 +53,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bulletin;
 pub mod control;
 pub mod error;
 pub mod mbf;

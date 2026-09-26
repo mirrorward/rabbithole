@@ -285,6 +285,12 @@ hotline_enabled = true
 
 # qwk_enabled = false
 # qwk_spool_dir = "qwk"                # per-user packet members (under data_dir)
+# Optional inline global bulletins (TOML-only; restart after editing).
+# Fixed names BLT-0.1, BLT-0.2, ...; these strings are content, never paths.
+# CP437 + CRLF output; unsupported Unicode becomes ?. At most 32 entries,
+# 64 KiB each and 256 KiB total (both source UTF-8 and encoded byte counts).
+# Invalid bulletin content refuses a build without replacing the old packet.
+# qwk_bulletins = ["Welcome to the warren!\nBe excellent to each other.", "News from the sysop."]
 
 
 # -----------------------------------------------------------------------------

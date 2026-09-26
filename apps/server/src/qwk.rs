@@ -88,6 +88,38 @@ pub const TOTAL_CAP: usize = 1000;
 /// so boards beyond the first 255 (by slug order) are not packed.
 pub const MAX_CONFERENCES: usize = 255;
 
+/// Inline configuration is encoded deliberately for classic readers, not
+/// copied as UTF-8 or interpreted as filesystem paths. Check source bounds
+/// before allocating, then final bounds after CRLF expansion.
+fn configured_bulletins(texts: &[String]) -> Result<Vec<Vec<u8>>, QwkGateError> {
+    use rabbithole_legacy_qwk::bulletin::validate_sizes;
+    validate_sizes(texts.iter().map(String::len)).map_err(QwkGateError::Packet)?;
+    let contents: Vec<Vec<u8>> = texts
+        .iter()
+        .map(|text| {
+            let mut bytes = Vec::with_capacity(text.len());
+            let mut chars = text.chars().peekable();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '\r' => {
+                        if chars.peek() == Some(&'\n') {
+                            chars.next();
+                        }
+                        bytes.extend_from_slice(b"\r\n");
+                    }
+                    '\n' => bytes.extend_from_slice(b"\r\n"),
+                    // ASCII controls (notably ANSI ESC) retain their byte values.
+                    ch if ch.is_ascii() => bytes.push(ch as u8),
+                    ch => bytes.push(rabbithole_art::cp437::unicode_to_cp437_lossy(ch)),
+                }
+            }
+            bytes
+        })
+        .collect();
+    validate_sizes(contents.iter().map(Vec::len)).map_err(QwkGateError::Packet)?;
+    Ok(contents)
+}
+
 /// Why a QWK operation was refused. Plain enum (burrow carries no derive
 /// crate for errors); telnet matches on the variants to phrase refusals.
 #[derive(Debug)]
@@ -205,6 +237,10 @@ pub async fn build_for(shared: &Shared, account: &Account) -> Result<QwkBuild, Q
         return Err(QwkGateError::Forbidden);
     }
 
+    // Reject an invalid bulletin configuration before replacing an existing
+    // spool or advancing any message read pointers.
+    let bulletins = configured_bulletins(&cfg.qwk_bulletins)?;
+
     let confs = conferences(shared).await?;
     let marks = ReadMarksRepo(&shared.pool);
     let mut messages: Vec<QwkMessage> = Vec::new();
@@ -282,7 +318,10 @@ pub async fn build_for(shared: &Shared, account: &Account) -> Result<QwkBuild, Q
         conferences: confs.iter().map(|(n, b)| (*n, b.slug.clone())).collect(),
         files: Vec::new(),
     };
-    let packet = build_packet(control, messages, None);
+    let mut packet = build_packet(control, messages, None);
+    packet
+        .set_bulletins(bulletins)
+        .map_err(QwkGateError::Packet)?;
 
     // Spool the members: <qwk_spool_dir>/<login>/, wiped per build so stale
     // members from a previous (larger) packet never linger.
@@ -506,6 +545,29 @@ fn problems_text(problems: &[ReplyProblem]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulletin_text_is_cp437_with_crlf_and_final_byte_caps() {
+        let bytes = configured_bulletins(&["Café\nSnowman ☃\r\nLast\r\x1b[0m".into()]).unwrap();
+        assert_eq!(bytes, [b"Caf\x82\r\nSnowman ?\r\nLast\r\n\x1b[0m".to_vec()]);
+        use rabbithole_legacy_qwk::bulletin::{
+            MAX_BULLETINS, MAX_BULLETINS_BYTES, MAX_BULLETIN_BYTES,
+        };
+        for texts in [
+            vec![String::new(); MAX_BULLETINS + 1],
+            vec!["x".repeat(MAX_BULLETIN_BYTES + 1)],
+            vec!["\n".repeat(MAX_BULLETIN_BYTES / 2 + 1)],
+            vec!["\n".repeat(MAX_BULLETIN_BYTES / 2); MAX_BULLETINS_BYTES / MAX_BULLETIN_BYTES + 1],
+        ] {
+            assert!(matches!(
+                configured_bulletins(&texts),
+                Err(QwkGateError::Packet(
+                    rabbithole_legacy_qwk::QwkError::BulletinLimit { .. }
+                ))
+            ));
+        }
+        assert!(configured_bulletins(&["\n".repeat(MAX_BULLETIN_BYTES / 2)]).is_ok());
+    }
 
     #[test]
     fn bbs_id_uppercases_and_bounds() {

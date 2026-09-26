@@ -12,6 +12,16 @@
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum QwkError {
+    /// Optional bulletin content exceeds a packet resource bound.
+    #[error("QWK bulletin {limit} limit: {actual} exceeds {maximum}")]
+    BulletinLimit {
+        /// The bound that failed (count, individual bytes, or total bytes).
+        limit: &'static str,
+        /// Largest accepted value.
+        maximum: usize,
+        /// Value supplied by the caller.
+        actual: usize,
+    },
     /// The input ended before a fixed- or declared-length region was complete.
     ///
     /// `need` is how many more bytes were required; `have` is how many were

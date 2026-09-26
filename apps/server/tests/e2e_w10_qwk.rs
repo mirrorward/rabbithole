@@ -215,6 +215,129 @@ async fn qwk_build_members_decode_and_pointers_advance() {
 }
 
 #[tokio::test]
+async fn configured_bulletins_are_bounded_safe_and_removed_on_rebuild() {
+    use rabbithole_legacy_qwk::bulletin::MAX_BULLETIN_BYTES;
+    use rabbithole_store_server::repo4::ReadMarksRepo;
+
+    let work = tempfile::tempdir().unwrap();
+    let mut cfg = test_config(&work.path().join("srv"));
+    cfg.qwk_bulletins = vec![
+        "Café\nSnowman ☃\r\nLast\r".into(),
+        "../../not-a-file".into(),
+    ];
+    let burrow = Burrow::start(cfg.clone()).await.unwrap();
+    let alice = burrow
+        .shared
+        .auth
+        .create_account("alice", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    seed_boards(&burrow).await;
+    seed_post(&burrow, "alpha", "First", "ordinary mail", 1000).await;
+    let first = burrow::qwk::build_for(&burrow.shared, &alice)
+        .await
+        .unwrap();
+    assert_eq!(first.total_messages, 1);
+    let names: Vec<_> = first
+        .members
+        .iter()
+        .map(|member| member.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "MESSAGES.DAT",
+            "CONTROL.DAT",
+            "DOOR.ID",
+            "001.NDX",
+            "BLT-0.1",
+            "BLT-0.2"
+        ]
+    );
+    let bulletin = first.spool_dir.join("BLT-0.1");
+    assert_eq!(
+        std::fs::read(&bulletin).unwrap(),
+        b"Caf\x82\r\nSnowman ?\r\nLast\r\n"
+    );
+    assert_eq!(
+        std::fs::read(first.spool_dir.join("BLT-0.2")).unwrap(),
+        b"../../not-a-file"
+    );
+    assert!(first
+        .members
+        .iter()
+        .all(|member| member.path.parent() == Some(first.spool_dir.as_path())));
+    let control =
+        ControlDat::parse(&std::fs::read(first.spool_dir.join("CONTROL.DAT")).unwrap()).unwrap();
+    assert!(
+        control.files.is_empty(),
+        "bulletins are not welcome/news/goodbye slots"
+    );
+    let index = rabbithole_legacy_qwk::ndx::decode(
+        &std::fs::read(first.spool_dir.join("001.NDX")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(index[0].number, 2);
+    assert_eq!(
+        ReadMarksRepo(&burrow.shared.pool)
+            .get(alice.id, "alpha")
+            .await
+            .unwrap(),
+        1000
+    );
+    let original_zip = std::fs::read(&first.packet_path).unwrap();
+    burrow.shutdown().await;
+
+    // Source text fits, but CRLF encoding exceeds the per-bulletin cap.
+    // TOML-only edits take effect on restart, and a bad build is atomic.
+    cfg.qwk_bulletins = vec!["\n".repeat(MAX_BULLETIN_BYTES / 2 + 1)];
+    let burrow = Burrow::start(cfg.clone()).await.unwrap();
+    seed_post(&burrow, "alpha", "Second", "still unread", 2000).await;
+    let failed = burrow::qwk::build_for(&burrow.shared, &alice).await;
+    assert!(matches!(
+        failed,
+        Err(burrow::qwk::QwkGateError::Packet(
+            rabbithole_legacy_qwk::QwkError::BulletinLimit { .. }
+        ))
+    ));
+    assert_eq!(std::fs::read(&first.packet_path).unwrap(), original_zip);
+    assert!(
+        bulletin.exists(),
+        "failed replacement leaves the previous members intact"
+    );
+    assert_eq!(
+        ReadMarksRepo(&burrow.shared.pool)
+            .get(alice.id, "alpha")
+            .await
+            .unwrap(),
+        1000
+    );
+    burrow.shutdown().await;
+
+    cfg.qwk_bulletins.clear();
+    let burrow = Burrow::start(cfg).await.unwrap();
+    let next = burrow::qwk::build_for(&burrow.shared, &alice)
+        .await
+        .unwrap();
+    assert_eq!(
+        next.total_messages, 1,
+        "failed build did not eat the next message"
+    );
+    assert!(
+        !bulletin.exists(),
+        "removed bulletin does not linger in the spool"
+    );
+    assert!(next
+        .members
+        .iter()
+        .all(|member| !member.name.starts_with("BLT-")));
+    let messages =
+        MessagesDat::decode(&std::fs::read(next.spool_dir.join("MESSAGES.DAT")).unwrap()).unwrap();
+    assert_eq!(messages.messages[0].subject, "Second");
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
 async fn rep_ingest_posts_threads_dedupes_and_rejects() {
     let work = tempfile::tempdir().unwrap();
     let burrow = Burrow::start(test_config(&work.path().join("srv")))

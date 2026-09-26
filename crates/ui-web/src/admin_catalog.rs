@@ -773,6 +773,14 @@ pub const SECTIONS: &[Section] = &[
                         "Where packets are built, one folder per person. A relative path is \
                          inside the data folder.",
                     ),
+                    item(
+                        "qwk_bulletins",
+                        "Packet bulletins",
+                        "Optional notices included with every packet. Edit the text list in \
+                         the server configuration file, then restart the server. Up to 32 \
+                         bulletins, 64 KiB each and 256 KiB total.",
+                    )
+                    .long(),
                 ],
             },
             Group {

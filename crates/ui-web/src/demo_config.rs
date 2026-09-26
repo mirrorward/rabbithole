@@ -84,6 +84,7 @@ pub const DEMO_SCHEMA: &[(&str, &str, u8, u8)] = &[
     ("ftn_outbound_dir", "ftn/outbound", 0, 1),
     ("qwk_enabled", "false", 1, 1),
     ("qwk_spool_dir", "qwk", 0, 1),
+    ("qwk_bulletins", "[]", 0, 8),
     ("backup_dir", "backups", 0, 1),
     ("syndication_enabled", "false", 1, 1),
     ("syndication_poll_secs", "1800", 2, 1),
