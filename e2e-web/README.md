@@ -104,3 +104,11 @@ before stopping any surviving fixture, preserving its log, and removing its
 temporary data. This is a backstop for interrupted workers; ordinary local
 tests clean up without it. `npm run cleanup` invokes that Linux-only backstop
 when both `BURROW_E2E_ROOT` and `BURROW_BIN` are set.
+
+## Personal settings
+
+`tests/customization.spec.ts` exercises persisted appearance and chime settings,
+live OS appearance, High Contrast, and nested text-editing keys in the real SPA.
+The audio case uses native Web Audio nodes with explicitly injected resume
+refusal/pending promises for recovery and route-disposal coverage; it does not
+claim to reproduce a browser's autoplay policy.

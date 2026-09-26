@@ -1,0 +1,53 @@
+/* Personal preferences use the same quiet rows as the native file browser. */
+.rh-settings { padding: 1.75rem 2rem 3rem; }
+.rh-settings > * { max-width: 52rem; }
+.rh-settings > .rh-panel-title { font-family: var(--rh-font-sans); font-size: 1.5rem; margin-bottom: 1.5rem; }
+.rh-settings > .rh-person-h2 { padding-top: 1.5rem; margin-top: 1.5rem; border-top: 1px solid color-mix(in srgb,var(--rh-text) 12%,transparent); }
+.rh-pref-section { scroll-margin-top: 1rem; }
+.rh-pref-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .35rem; }
+.rh-pref-heading h3 { font-size: 1rem; font-weight: 650; margin: 0; }
+.rh-pref-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 3.4rem; padding: .65rem 0; border-bottom: 1px solid color-mix(in srgb,var(--rh-text) 8%,transparent); }
+.rh-pref-label { font-size: var(--rh-font-sm); font-weight: 550; flex: 1; min-width: 7rem; }
+.rh-pref-row > .rh-input { width: 15rem; max-width: 100%; min-height: 2.25rem; padding: .4rem .65rem; font-size: var(--rh-font-sm); }
+.rh-pref-row .rh-seg { margin: 0; flex: none; }
+.rh-pref-row .rh-seg-btn { min-height: 2.25rem; }
+.rh-pref-check { min-height: 2.75rem; padding: .65rem 0; align-items: flex-start; }
+.rh-settings-check input[type=checkbox] { accent-color: var(--rh-accent); width: 1rem; height: 1rem; flex: none; margin-top: .2rem; }
+.rh-pref-check small { display: block; font-size: var(--rh-font-sm); color: var(--rh-muted); margin-top: .15rem; font-weight: 400; }
+.rh-accent-options { display: flex; flex-wrap: wrap; gap: .2rem; }
+.rh-accent-option { display: flex; flex-direction: column; align-items: center; gap: .2rem; min-width: 3rem; min-height: 3rem; padding: .35rem; border: 1px solid transparent; border-radius: var(--rh-radius-sm); background: transparent; color: var(--rh-muted); font: inherit; font-size: var(--rh-font-xs); cursor: pointer; }
+.rh-accent-option:hover { background: color-mix(in srgb,var(--rh-text) 5%,transparent); color: var(--rh-text); }
+.rh-accent-option[aria-pressed=true] { border-color: var(--rh-accent); color: var(--rh-text); background: color-mix(in srgb,var(--rh-accent) 8%,transparent); }
+.rh-accent-option:disabled { opacity: .45; cursor: default; }
+.rh-accent-dot { width: 1.1rem; height: 1.1rem; border-radius: 50%; }
+.rh-pref-slider { display: flex; align-items: center; gap: .8rem; width: 15rem; max-width: 100%; }
+.rh-pref-slider input { min-width: 0; flex: 1; accent-color: var(--rh-accent); }
+.rh-pref-slider output { width: 3.2rem; text-align: right; font-size: var(--rh-font-sm); font-variant-numeric: tabular-nums; }
+.rh-chat-preview { margin-top: .75rem; background: var(--rh-surface); border: 1px solid color-mix(in srgb,var(--rh-text) 12%,transparent); border-radius: var(--rh-radius); padding: .85rem; }
+.rh-preview-heading { font-size: var(--rh-font-xs); color: var(--rh-muted); margin-bottom: .5rem; }
+.rh-lines { font-family: var(--rh-chat-font,var(--rh-font-sans)); font-size: var(--rh-chat-size,1rem); }
+.rh-line { overflow-wrap: anywhere; }
+.rh-app.rh-no-chat-icons .rh-line-mark { display: none; }
+.rh-app.rh-times-always .rh-line-time { opacity: 1; }
+.rh-app.rh-times-hidden .rh-line-time { display: none; }
+.rh-app.rh-times-hidden .rh-line { padding-right: .6rem; }
+.rh-app.rh-compact .rh-line { padding-top: .15rem; padding-bottom: .15rem; }
+.rh-app.rh-compact .rh-line-head { margin-top: .2rem; }
+.rh-app.rh-compact .rh-row { min-height: 2.1rem; padding-top: .25rem; padding-bottom: .25rem; }
+.rh-app.rh-compact .rh-who li { padding-top: .2rem; padding-bottom: .2rem; }
+.rh-app.rh-reduce-motion *, .rh-app.rh-reduce-motion *::before, .rh-app.rh-reduce-motion *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+.rh-app { accent-color: var(--rh-accent); caret-color: var(--rh-accent); }
+@media (max-width: 900px) {
+  .rh-settings { padding: 1.25rem; }
+  .rh-pref-row:has(.rh-accent-options) { align-items: flex-start; flex-direction: column; gap: .5rem; }
+}
+@media (max-width: 480px) {
+  .rh-settings { padding: 1rem 1rem 2rem; }
+  .rh-pref-row { flex-direction: column; align-items: stretch; gap: .45rem; padding: .85rem 0; }
+  .rh-pref-row > .rh-input, .rh-pref-slider { width: 100%; min-height: 2.75rem; }
+  .rh-pref-row .rh-seg { display: flex; }
+  .rh-pref-row .rh-seg-btn { flex: 1; min-height: 2.75rem; padding-inline: .5rem; }
+  .rh-accent-options { justify-content: space-between; width: 100%; }
+  .rh-accent-option { min-width: 2.7rem; }
+  .rh-chat-preview { padding: .65rem; }
+}

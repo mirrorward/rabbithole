@@ -22,7 +22,7 @@ use crate::a11y;
 use crate::app::AppState;
 use crate::files::{human_size, node_kind_label, TransferStatus, KIND_FOLDER};
 use crate::syndication_admin::{feed_stat_line, last_poll_label, FeedsStatus};
-use crate::theme_css::{mode_name, pack_label};
+use crate::theme_css::pack_label;
 use crate::theme_editor::{contrast_warnings, EditorAction, EditorState};
 use crate::wire::AdminCommand;
 
@@ -453,49 +453,7 @@ pub fn Settings() -> impl IntoView {
             <section class="rh-panel rh-settings">
                 <h2 class="rh-panel-title">"Settings"</h2>
 
-                <h3 class="rh-person-h2">"Appearance"</h3>
-                <div class="rh-seg" role="radiogroup" aria-label="Theme">
-                    {[
-                        rabbithole_core::theme::ThemePack::Clean,
-                        rabbithole_core::theme::ThemePack::Retro,
-                        rabbithole_core::theme::ThemePack::HighContrast,
-                    ]
-                    .into_iter()
-                    .map(|pack| view! {
-                        <button
-                            type="button"
-                            class="rh-seg-btn"
-                            class:on=move || app.theme.get().pack == pack
-                            role="radio"
-                            aria-checked=move || (app.theme.get().pack == pack).to_string()
-                            on:click=move |_| app.set_pack(pack)
-                        >
-                            {if pack == rabbithole_core::theme::ThemePack::HighContrast { "High contrast" } else { pack_label(pack) }}
-                        </button>
-                    })
-                    .collect_view()}
-                </div>
-                <div class="rh-seg" role="radiogroup" aria-label="Light or dark">
-                    {[
-                        crate::theme_css::ModeChoice::System,
-                        crate::theme_css::ModeChoice::Light,
-                        crate::theme_css::ModeChoice::Dark,
-                    ]
-                    .into_iter()
-                    .map(|mode| view! {
-                        <button
-                            type="button"
-                            class="rh-seg-btn"
-                            class:on=move || app.theme.get().mode == mode
-                            role="radio"
-                            aria-checked=move || (app.theme.get().mode == mode).to_string()
-                            on:click=move |_| app.set_mode(mode)
-                        >
-                            {if mode == crate::theme_css::ModeChoice::System { "Match system" } else { mode_name(mode) }}
-                        </button>
-                    })
-                    .collect_view()}
-                </div>
+                <crate::appearance::AppearanceSettings/>
 
                 <h3 class="rh-person-h2">"Trackers"</h3>
                 <p class="rh-settings-note">
@@ -710,19 +668,7 @@ pub fn Settings() -> impl IntoView {
                     />
                     <span>"Notify me about direct messages while I'm away"</span>
                 </label>
-                <label class="rh-settings-check">
-                    <input
-                        type="checkbox"
-                        prop:checked=move || app.sound_on.get()
-                        on:change=move |_| {
-                            let on = !app.sound_on.get_untracked();
-                            app.sound_on.set(on);
-                            #[cfg(target_arch = "wasm32")]
-                            crate::sound::set_enabled(on);
-                        }
-                    />
-                    <span>"Play a chime for new messages"</span>
-                </label>
+                <crate::sound_settings::SoundSettings/>
             </section>
         </main>
     }

@@ -103,6 +103,7 @@ web-sys = { workspace = true, features = [
     "HtmlInputElement",
     # Chimes (`src/sound.rs`): short synthesised tones, no audio assets.
     "AudioContext",
+    "AudioContextState",
     "BaseAudioContext",
     "AudioNode",
     "AudioParam",

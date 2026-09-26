@@ -109,7 +109,7 @@ test("signed themes update, clear, reconnect and stay scoped to their burrow", a
     expect(page.url()).toBe(connectedURL);
 
     await page.getByRole("button", { name: "Settings", exact: true }).click();
-    await page.getByRole("radio", { name: "High contrast", exact: true }).click();
+    await page.getByRole("button", { name: "High contrast", exact: true }).click();
     await expect.poll(async () => (await tokens(page))["--rh-accent"]).not.toBe("#0055aa");
     const highContrast = await tokens(page);
     expect(highContrast["--rh-accent"]).not.toBe("#0055aa");
@@ -117,7 +117,7 @@ test("signed themes update, clear, reconnect and stay scoped to their burrow", a
     await a.ctl("config-set", "theme_accent", "704099");
     await expect.poll(() => replies.accepted).toBeGreaterThan(beforeUpdate);
     expect(await tokens(page)).toEqual(highContrast);
-    await page.getByRole("radio", { name: "Clean", exact: true }).click();
+    await page.getByRole("button", { name: "Clean", exact: true }).click();
     await expectAccent(page, "#704099");
     await page.keyboard.press("Escape");
 

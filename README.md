@@ -86,6 +86,14 @@ E2EE thread wiring; federation flood-fill/attestation; Tauri desktop + mobile
 shells. QWK offline-mail delivery is wired to the telnet `[M]` menu and `ctl`,
 not to a standalone listener.
 
+## Make it yours
+
+The shared desktop and web client now has personal appearance and sound controls
+in **Settings**: accent colours, chat font and text size, compact spacing,
+timestamps, profile icons in chat, reduced motion, and three chime voices with
+volume and preview. Changes are remembered on this device. System appearance
+follows light/dark changes live; High Contrast keeps its own palette.
+
 ## Surfaces & default ports
 
 Native transports and rate limiting are the only things on out of the box;

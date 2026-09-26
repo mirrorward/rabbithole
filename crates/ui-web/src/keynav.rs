@@ -216,6 +216,25 @@ mod removal {
     }
 }
 
+/// A descendant with its own focus (an input, select, or secondary action)
+/// is distinct from entering the list through its single tab stop.
+#[derive(Clone, Copy)]
+#[cfg(any(target_arch = "wasm32", test))]
+enum ListFocus {
+    Container,
+    Row(usize),
+    Other,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn next_for_focus(focus: ListFocus, len: usize, key: &str) -> Option<usize> {
+    match focus {
+        ListFocus::Container => next_index(None, len, key),
+        ListFocus::Row(index) => next_index(Some(index), len, key),
+        ListFocus::Other => None,
+    }
+}
+
 /// Handle a keydown that happened inside a list: move focus to the row
 /// `next_index` picks among the elements matching `row_selector` under the
 /// event's own `currentTarget`.
@@ -232,8 +251,8 @@ mod removal {
 /// **rows carry `tabindex="-1"`** (skipped by Tab, focusable by arrows). Tab
 /// lands on the list, ↓ enters at the first row, Tab again leaves past it —
 /// instead of one stop per row, forty presses to cross a file table.
-/// Non-navigation keys fall through untouched; typing in an input inside the
-/// list is unaffected because those keys are never claimed.
+/// Only the list and its rows own navigation keys. Inputs and other separately
+/// focused descendants retain arrows, Home, and End for their own editing.
 #[cfg(target_arch = "wasm32")]
 pub fn handle(ev: &leptos::ev::KeyboardEvent, row_selector: &str) {
     use wasm_bindgen::JsCast;
@@ -241,7 +260,13 @@ pub fn handle(ev: &leptos::ev::KeyboardEvent, row_selector: &str) {
     // Modified keys are never ours: ⌘↓ is "end of document", ⌥/⇧-arrows are
     // selection and word movement. Swallowing those turns system-wide muscle
     // memory into single-row moves (WAI-ARIA APG: pass modified keys through).
-    if ev.alt_key() || ev.ctrl_key() || ev.meta_key() || ev.shift_key() {
+    if ev.default_prevented()
+        || ev.is_composing()
+        || ev.alt_key()
+        || ev.ctrl_key()
+        || ev.meta_key()
+        || ev.shift_key()
+    {
         return;
     }
     let key = ev.key();
@@ -261,12 +286,27 @@ pub fn handle(ev: &leptos::ev::KeyboardEvent, row_selector: &str) {
     let active = web_sys::window()
         .and_then(|w| w.document())
         .and_then(|d| d.active_element());
+    // A contenteditable row can match row_selector too. Its caret, along
+    // with native form controls, takes precedence over list navigation.
+    if active.as_ref().is_some_and(|element| {
+        matches!(element.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+            || element
+                .dyn_ref::<web_sys::HtmlElement>()
+                .is_some_and(|element| element.is_content_editable())
+    }) {
+        return;
+    }
     let current = active.as_ref().and_then(|a| {
         (0..rows.length())
             .find(|i| rows.get(*i).as_deref() == Some(a.as_ref()))
             .map(|i| i as usize)
     });
-    let Some(next) = next_index(current, len, &key) else {
+    let focus = match current {
+        Some(index) => ListFocus::Row(index),
+        None if active.as_ref() == Some(&list) => ListFocus::Container,
+        None => ListFocus::Other,
+    };
+    let Some(next) = next_for_focus(focus, len, &key) else {
         return;
     };
     if let Some(row) = rows
@@ -359,5 +399,20 @@ mod tests {
         for key in ["ArrowDown", "ArrowUp", "Home", "End"] {
             assert_eq!(next_index(None, 0, key), None, "{key} on empty");
         }
+    }
+
+    #[test]
+    fn independently_focused_descendants_keep_all_editing_keys() {
+        // A nested input/select/secondary button is not the list's tab stop:
+        // Home/End must keep moving its caret, and arrows keep its own action.
+        for key in ["ArrowDown", "ArrowUp", "Home", "End", "a", "Enter"] {
+            assert_eq!(next_for_focus(ListFocus::Other, 5, key), None, "{key}");
+        }
+        // The same keys still drive the list when its own container or a row
+        // has focus, so protecting descendants does not disable navigation.
+        assert_eq!(next_for_focus(ListFocus::Container, 5, "Home"), Some(0));
+        assert_eq!(next_for_focus(ListFocus::Container, 5, "End"), Some(4));
+        assert_eq!(next_for_focus(ListFocus::Row(2), 5, "ArrowDown"), Some(3));
+        assert_eq!(next_for_focus(ListFocus::Row(2), 5, "Home"), Some(0));
     }
 }

@@ -26,7 +26,7 @@ use crate::radio::{clamp_volume, RadioPrefs, RadioState};
 use crate::server_theme::ServerOverlay;
 use crate::state::UiState;
 use crate::syndication_admin::SynAdminState;
-use crate::theme_css::{next_mode, next_pack, resolve_root_style, ThemeChoice, STYLESHEET};
+use crate::theme_css::{next_mode, next_pack, ThemeChoice, STYLESHEET};
 use crate::wire::{AdminCommand, AdminEvent, FileCommand, FileEvent, NoticeRoute};
 
 /// Identifies one connected burrow (a live server session). For now the initial
@@ -145,7 +145,7 @@ pub struct AppState {
     /// The portable identity (public face), set once at launch. `None` until
     /// loaded (and always `None` in host tests, which have no browser storage).
     pub you: RwSignal<Option<crate::identity::You>>,
-    /// Chimes on/off (persisted; off until the user opts in).
+    /// Chimes on/off (on by default; a saved choice takes precedence).
     pub sound_on: RwSignal<bool>,
     /// The full signing identity (holds the secret seed), loaded at launch.
     /// Needed to *sign* friendship attestations; `you` is the public face.
@@ -224,6 +224,8 @@ pub struct AppState {
     /// plus mode policy (System/Light/Dark). The effective [`Mode`] is
     /// derived from this plus the OS hint via [`AppState::mode`].
     pub theme: RwSignal<ThemeChoice>,
+    /// Live operating-system appearance, so System follows changes without a reload.
+    pub system_dark: RwSignal<bool>,
     /// The theme editor's **custom pack override slot**: when set, these
     /// tokens replace the built-in pack for this session (mode resolution
     /// still applies). Session-local and unpersisted — Apply is a preview,
@@ -314,6 +316,7 @@ impl AppState {
             sending: create_rw_signal(None),
             toasts: create_rw_signal(crate::toasts::ToastQueue::default()),
             theme: create_rw_signal(initial_theme_choice()),
+            system_dark: create_rw_signal(os_prefers_dark()),
             custom_pack: create_rw_signal(None),
             radio: create_rw_signal(RadioState::default()),
             radio_prefs: create_rw_signal(initial_radio_prefs()),
@@ -580,11 +583,12 @@ impl AppState {
     /// [`ThemeChoice`] and the OS `prefers-color-scheme` hint. Reactive on the
     /// theme signal.
     pub fn mode(&self) -> Mode {
-        crate::theme_css::effective_mode(self.theme.get().mode, os_prefers_dark())
+        crate::theme_css::effective_mode(self.theme.get().mode, self.system_dark.get())
     }
 
     /// Choose a theme pack outright (Settings) and persist it.
     pub fn set_pack(&self, pack: rabbithole_core::theme::ThemePack) {
+        self.custom_pack.set(None);
         self.theme.update(|c| c.pack = pack);
         self.persist_theme();
     }
@@ -4058,6 +4062,8 @@ pub fn App() -> impl IntoView {
     let app = AppState::new();
     provide_context(app);
     set_current(app);
+    #[cfg(target_arch = "wasm32")]
+    crate::appearance::watch_system_mode(app.system_dark);
 
     // In the native shell, listen for swarm download progress and fold it into
     // the Transfers reducer. No-op on the web build.
@@ -4129,18 +4135,23 @@ pub fn App() -> impl IntoView {
 
     let style = move || {
         let (pack, mode) = (app.theme.get().pack, app.mode());
-        // A verified burrow theme layers over the user's defaults where the
-        // selected pack permits it. The editor's live preview layers above
-        // both; account opt-out is honored by the server's ThemeGet response.
+        let appearance = app.settings.get().appearance;
         app.custom_pack.with(|custom| {
-            app.focused_tracked()
-                .server_theme
-                .with(|server| resolve_root_style(custom.as_ref(), server.as_ref(), pack, mode))
+            app.focused_tracked().server_theme.with(|server| {
+                crate::appearance::resolve_style(
+                    &appearance,
+                    custom.as_ref(),
+                    server.as_ref(),
+                    pack,
+                    mode,
+                )
+            })
         })
     };
 
     view! {
         <style>{STYLESHEET}</style>
+        <style>{crate::appearance::STYLES}</style>
         // Re-paint the page itself with the theme's background. index.html
         // paints `html` with a fixed dark pre-boot backdrop (no white flash on
         // first frame); once the theme is resolved, anywhere the app fails to
@@ -4159,7 +4170,12 @@ pub fn App() -> impl IntoView {
             // hidden there, so the app's header takes over that job (drag
             // region, room for the traffic lights). In a browser tab none of
             // that applies and the class is absent.
-            <div class="rh-app" class:native=is_native() style=style>
+            <div class="rh-app" class:native=is_native() style=style
+                class:rh-compact=move || app.settings.get().appearance.density == crate::appearance::Density::Compact
+                class:rh-times-always=move || app.settings.get().appearance.timestamps == crate::appearance::Timestamps::Always
+                class:rh-times-hidden=move || app.settings.get().appearance.timestamps == crate::appearance::Timestamps::Hidden
+                class:rh-no-chat-icons=move || !app.settings.get().appearance.show_avatars
+                class:rh-reduce-motion=move || app.settings.get().appearance.reduce_motion>
                 // The desktop title bar. A real element carrying
                 // `data-tauri-drag-region`, because that attribute is the only
                 // thing Tauri's WKWebView drag handler looks for —

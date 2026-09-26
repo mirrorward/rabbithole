@@ -1,5 +1,10 @@
 # RabbitHole — Implementation Tracker
 
+**Client customization (2026-09-24):** personal appearance controls with live OS
+appearance, persistent chat typography/density/timestamps, global server-theme
+opt-out and High Contrast protection; configurable chime voices, volume and
+preview. List navigation leaves nested input editing keys alone.
+
 > Distilled from `PLAN.md` (read that first — it has the specs, rationale, and
 > dependency graph). Check items off as they land. Waves must respect the
 > dependency edges shown in PLAN.md §15. ⛔ = do not start until PLAN.md is

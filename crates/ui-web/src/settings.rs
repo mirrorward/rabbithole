@@ -44,6 +44,9 @@ pub const MAX_SOURCES_CEILING: u32 = 32;
 /// Everything on the Settings page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
+    /// Personal presentation choices, preserved when older settings are loaded.
+    #[serde(default)]
+    pub appearance: crate::appearance::Appearance,
     /// Discovery trackers, in query order.
     pub trackers: Vec<Tracker>,
     /// Reconnect to the burrows you were in when the app last closed.
@@ -132,6 +135,7 @@ fn default_max_sources() -> u32 {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            appearance: crate::appearance::Appearance::default(),
             trackers: vec![Tracker::new(DEFAULT_TRACKER)],
             reconnect_on_launch: true,
             notifications: true,
