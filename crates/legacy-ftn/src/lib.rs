@@ -6,7 +6,7 @@
 //! services on top as pure transforms over in-memory structures:
 //!
 //! - [`tosser`] — split an inbound packet into echomail vs netmail, dedupe by
-//!   MSGID, expand SEEN-BY / PATH loop control.
+//!   MSGID or original-message fingerprint, expand SEEN-BY / PATH loop control.
 //! - [`scanner`] — group outbound messages by destination into packets and
 //!   compute Binkley-Style Outbound (BSO) file names.
 //! - [`arcmail`] — day-coded compressed-mail bundle names with collision

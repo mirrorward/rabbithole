@@ -218,6 +218,177 @@ async fn inbound_netmail_becomes_dm() {
 }
 
 #[tokio::test]
+async fn binkp_missing_msgid_reimports_keep_distinct_areas_recipients_and_content() {
+    let work = tempfile::tempdir().unwrap();
+    let mut config = ftn_config(work.path(), true);
+    config.ftn_areas.insert("R20.OTHER".into(), "other".into());
+    let burrow = Burrow::start(config).await.unwrap();
+    for slug in ["rabbit", "other"] {
+        burrow
+            .shared
+            .boards
+            .create_board(slug, slug, "", 2, None, 0)
+            .await
+            .unwrap();
+    }
+    let alice = burrow
+        .shared
+        .auth
+        .create_account("alice", "hunter2hunter2", Role::User)
+        .await
+        .unwrap();
+    let bob = burrow
+        .shared
+        .auth
+        .create_account("bob", "hunter2hunter2", Role::User)
+        .await
+        .unwrap();
+
+    fn without_id(bytes: &[u8]) -> PackedMessage {
+        let mut message = Packet::decode(bytes).unwrap().messages.remove(0);
+        let mut parsed = message.parse_body();
+        parsed.kludges.retain(|line| !line.starts_with("MSGID:"));
+        message.set_body(&parsed);
+        assert!(message.parse_body().msgid().is_none());
+        message
+    }
+    async fn send_packet(burrow: &Burrow, work: &std::path::Path, packet: &Packet, name: &str) {
+        let bytes = packet.encode();
+        let received = tokio::time::timeout(Duration::from_secs(10), async {
+            let stream = TcpStream::connect(burrow.ftn_addr.unwrap()).await.unwrap();
+            ftn::run_originating(
+                stream,
+                vec![BinkpAddress::new(2, 280, 464, 0).with_domain("fidonet")],
+                String::new(),
+                vec![(FileInfo::new(name, bytes.len() as u64, 1000), bytes)],
+                &work.join("client-in"),
+            )
+            .await
+            .unwrap()
+        })
+        .await
+        .expect("bounded binkp transfer");
+        assert!(received.is_empty());
+    }
+    async fn wait_for_dm(shared: &burrow::Shared, account: i64, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if DmsRepo(&shared.pool)
+                    .thread(0, account, 0, 20)
+                    .await
+                    .unwrap()
+                    .len()
+                    >= count
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("final DM proves packet delivery finished");
+    }
+
+    let echo_bytes = echo_pkt(
+        "R20.GENERAL",
+        "Kevin",
+        "Legacy echo",
+        "same content",
+        "unused",
+    );
+    let echo = without_id(&echo_bytes);
+    let mail = without_id(&netmail_pkt("alice", "Kevin", "Private", "same content"));
+    let first = Packet {
+        header: Packet::decode(&echo_bytes).unwrap().header,
+        messages: vec![echo.clone(), echo.clone(), mail.clone()],
+    };
+    send_packet(&burrow, work.path(), &first, "first.pkt").await;
+    wait_for_dm(&burrow.shared, alice.id, 1).await;
+
+    let mut forwarded = echo.clone();
+    forwarded
+        .body
+        .extend_from_slice(b"\rSEEN-BY: 280/9\r\x01PATH: 280/9\r\x01Via 2:280/9\r");
+    forwarded.attribute = 0x010c;
+    forwarded.cost = 12;
+    let other_area = without_id(&echo_pkt(
+        "R20.OTHER",
+        "Kevin",
+        "Legacy echo",
+        "same content",
+        "unused",
+    ));
+    let other_content = without_id(&echo_pkt(
+        "R20.GENERAL",
+        "Kevin",
+        "Legacy echo",
+        "changed content",
+        "unused",
+    ));
+    let other_recipient = PackedMessage {
+        to: "bob".into(),
+        ..mail.clone()
+    };
+    let last = without_id(&netmail_pkt(
+        "alice",
+        "Kevin",
+        "Private",
+        "completion marker",
+    ));
+    let mut second = Packet {
+        header: first.header.clone(),
+        messages: vec![
+            forwarded,
+            mail,
+            other_area,
+            other_content,
+            other_recipient,
+            last,
+        ],
+    };
+    second.header.date_time.year = 2027;
+    second.header.password = *b"repacked";
+    // A second socket exercises the listener's shared live tosser, not a
+    // test-only instance. The final new DM is after all echo and earlier DM
+    // deliveries, so exact counts need no timing-based "nothing happened" wait.
+    send_packet(&burrow, work.path(), &second, "second.pkt").await;
+    wait_for_dm(&burrow.shared, alice.id, 2).await;
+    assert_eq!(
+        burrow
+            .shared
+            .boards
+            .threads("rabbit", 100)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        burrow
+            .shared
+            .boards
+            .threads("other", 100)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let alice_mail = DmsRepo(&burrow.shared.pool)
+        .thread(0, alice.id, 0, 20)
+        .await
+        .unwrap();
+    assert_eq!(alice_mail.len(), 2);
+    assert!(alice_mail.iter().any(|row| row.text == "completion marker"));
+    let bob_mail = DmsRepo(&burrow.shared.pool)
+        .thread(0, bob.id, 0, 20)
+        .await
+        .unwrap();
+    assert_eq!(bob_mail.len(), 1);
+    assert_eq!(bob_mail[0].text, "same content");
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
 async fn scan_local_post_stages_outbound_packet() {
     let work = tempfile::tempdir().unwrap();
     let burrow = Burrow::start(ftn_config(work.path(), true)).await.unwrap();

@@ -1,5 +1,5 @@
 //! Inbound mail **tosser**: split a decoded packet into individual messages,
-//! classify each as echomail or netmail, drop MSGID duplicates, and surface the
+//! classify each as echomail or netmail, drop duplicates, and surface the
 //! SEEN-BY / PATH loop-control lines in a structured form.
 //!
 //! A tosser is the inbound half of an FTN mail pipeline. It consumes packets
@@ -8,7 +8,7 @@
 //! ```text
 //!   .PKT bundle ──▶ [ tosser ] ──▶ echomail  (has an AREA: line; SEEN-BY/PATH)
 //!                                └▶ netmail   (no AREA:; explicit dest node)
-//!                                └▶ duplicates (MSGID already seen)
+//!                                └▶ duplicates (message identity already seen)
 //! ```
 //!
 //! Classification follows FTS-0004: a message is **echomail** iff its body
@@ -19,9 +19,13 @@
 //! **Dupe detection** keys on the `MSGID` kludge (FTS-0009): a rolling set of
 //! seen ids is kept on the [`Tosser`], so a message whose MSGID was already
 //! tossed — in this bundle or an earlier one — is diverted to
-//! [`TossedBatch::duplicates`] instead of being filed again. Messages with no
-//! MSGID are never treated as duplicates here (a body-hash fallback belongs to a
-//! later slice).
+//! [`TossedBatch::duplicates`] instead of being filed again. Without MSGID,
+//! a versioned BLAKE3 fingerprint covers the original date, names, subject,
+//! packed/resolved addresses and body bytes. Transit control lines (SEEN-BY, PATH, Via,
+//! TID) and the final CR delimiter are ignored; no visible text is normalized.
+//! Message attributes/cost, packet dates, passwords and transport metadata
+//! are not message identity.
+//! These sets live for the tosser's lifetime; they are not a durable dupe log.
 //!
 //! Everything is pure: [`Tosser::toss`] operates on an already-decoded
 //! [`Packet`], and [`Tosser::toss_bytes`] layers packet decoding on top. No
@@ -84,17 +88,21 @@ pub struct TossedBatch {
     pub echomail: Vec<EchoMail>,
     /// Netmail messages, in packet order.
     pub netmail: Vec<NetMail>,
-    /// MSGID values of records dropped as duplicates, in packet order.
+    /// MSGID values, or `fallback:blake3:<hex>` fingerprints for missing IDs,
+    /// of records dropped as duplicates, in packet order.
     pub duplicates: Vec<String>,
 }
 
-/// Stateful inbound tosser holding the rolling MSGID dupe set.
+/// Stateful inbound tosser holding MSGID and original-message dupe sets.
 ///
 /// Reuse a single `Tosser` across many packets so duplicates that arrive in
 /// separate bundles are still caught.
 #[derive(Debug, Clone, Default)]
 pub struct Tosser {
     seen_msgids: HashSet<String>,
+    // A distinct namespace: an arbitrary literal MSGID cannot poison fallback
+    // identity, even if it spells the fingerprint's diagnostic label.
+    seen_fallbacks: HashSet<[u8; 32]>,
 }
 
 impl Tosser {
@@ -112,6 +120,7 @@ impl Tosser {
     {
         Tosser {
             seen_msgids: ids.into_iter().map(Into::into).collect(),
+            seen_fallbacks: HashSet::new(),
         }
     }
 
@@ -120,14 +129,14 @@ impl Tosser {
         self.seen_msgids.contains(msgid)
     }
 
-    /// Number of distinct MSGIDs remembered so far.
+    /// Number of distinct message identities remembered so far.
     pub fn known_count(&self) -> usize {
-        self.seen_msgids.len()
+        self.seen_msgids.len() + self.seen_fallbacks.len()
     }
 
     /// Toss one already-decoded packet.
     ///
-    /// Each message is classified and MSGID-deduped; the dupe set is updated in
+    /// Each message is classified and deduped; the dupe sets are updated in
     /// place. Never panics.
     pub fn toss(&mut self, packet: &Packet) -> TossedBatch {
         let mut batch = TossedBatch::default();
@@ -135,11 +144,19 @@ impl Tosser {
             let parsed = message.parse_body();
             let msgid = parsed.msgid().map(str::to_string);
 
-            // Dupe check: only meaningful when a MSGID is present. `insert`
-            // returns false when the id was already in the set.
+            // A present MSGID remains authoritative, regardless of content.
+            // `insert` returns false when the identity was already seen.
             if let Some(id) = &msgid {
                 if !self.seen_msgids.insert(id.clone()) {
                     batch.duplicates.push(id.clone());
+                    continue;
+                }
+            } else {
+                let fingerprint = fallback_identity(&packet.header, message, &parsed);
+                if !self.seen_fallbacks.insert(*fingerprint.as_bytes()) {
+                    batch
+                        .duplicates
+                        .push(format!("fallback:blake3:{}", fingerprint.to_hex()));
                     continue;
                 }
             }
@@ -172,6 +189,79 @@ impl Tosser {
         let packet = Packet::decode(buf)?;
         Ok(self.toss(&packet))
     }
+}
+
+/// Hash original message data, never an import timestamp or the packet's
+/// changing envelope. Length framing keeps adjacent strings/lines unambiguous.
+fn fallback_identity(
+    header: &PacketHeader,
+    message: &PackedMessage,
+    parsed: &Message,
+) -> blake3::Hash {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"rabbithole-ftn-missing-msgid-v1\0");
+    let (orig, dest) = resolve_netmail_addrs(header, message, parsed);
+    for field in [
+        orig.zone,
+        orig.net,
+        orig.node,
+        orig.point,
+        dest.zone,
+        dest.net,
+        dest.node,
+        dest.point,
+        message.orig_net,
+        message.orig_node,
+        message.dest_net,
+        message.dest_node,
+    ] {
+        hash.update(&field.to_le_bytes());
+    }
+    let mut field = |bytes: &[u8]| {
+        hash.update(&(bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    };
+    for text in [
+        &message.date_time,
+        &message.to,
+        &message.from,
+        &message.subject,
+    ] {
+        field(text.as_bytes());
+    }
+    // Appending transport lines normally adds a CR after the final content
+    // line. Treat that terminal delimiter consistently, retaining empty lines
+    // inside the body and all non-transit bytes (including raw CP437).
+    let body = message.body.strip_suffix(b"\r").unwrap_or(&message.body);
+    for line in body
+        .split(|&byte| byte == b'\r')
+        .filter(|_| !body.is_empty())
+    {
+        if !is_transit_line(line) {
+            field(line);
+        }
+    }
+    hash.finalize()
+}
+
+fn is_transit_line(line: &[u8]) -> bool {
+    let line = line.strip_prefix(b"\n").unwrap_or(line);
+    if line
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"SEEN-BY:"))
+    {
+        return true;
+    }
+    let Some(kludge) = line.strip_prefix(b"\x01") else {
+        return false;
+    };
+    let tag = kludge
+        .split(|byte| *byte == b':' || byte.is_ascii_whitespace())
+        .next()
+        .unwrap_or_default();
+    [b"PATH".as_slice(), b"Via".as_slice(), b"TID".as_slice()]
+        .iter()
+        .any(|known| tag.eq_ignore_ascii_case(known))
 }
 
 /// Resolve the origin and destination addresses of a netmail record.
@@ -372,23 +462,199 @@ mod tests {
     }
 
     #[test]
-    fn messages_without_msgid_are_never_dupes() {
+    fn missing_msgid_reimports_dedupe_within_and_across_repackaged_packets() {
         let mut m = PackedMessage {
             dest_node: 1,
             dest_net: 104,
+            date_time: "02 Jul 26  13:30:45".into(),
             ..Default::default()
         };
         m.set_body(&Message {
             text: b"no id here".to_vec(),
             ..Default::default()
         });
-        let pkt = Packet {
+        let mut pkt = Packet {
             header: header(),
             messages: vec![m.clone(), m],
         };
-        let batch = Tosser::new().toss(&pkt);
-        assert_eq!(batch.netmail.len(), 2);
+        let mut tosser = Tosser::new();
+        let batch = tosser.toss(&pkt);
+        assert_eq!(batch.netmail.len(), 1);
+        assert_eq!(batch.netmail[0].msgid, None);
+        assert_eq!(batch.duplicates.len(), 1);
+        assert!(batch.duplicates[0].starts_with("fallback:blake3:"));
+        // Identity has no random state, import clock, or packet envelope data.
+        assert_eq!(Tosser::new().toss(&pkt).duplicates, batch.duplicates);
+        pkt.messages.truncate(1);
+        pkt.header.date_time.year = 2027;
+        pkt.header.orig_node = 777;
+        pkt.header.dest_node = 888;
+        pkt.header.product_code_low = 42;
+        pkt.header.password = *b"repacked";
+        pkt.messages[0].attribute = 0x010c; // received/sent/transit state
+        pkt.messages[0].cost = 123;
+        let again = tosser.toss_bytes(&pkt.encode()).unwrap();
+        assert!(again.netmail.is_empty());
+        assert_eq!(again.duplicates, batch.duplicates);
+        assert_eq!(tosser.known_count(), 1);
+    }
+
+    #[test]
+    fn missing_id_fingerprint_ignores_only_transit_lines() {
+        let mut original = netmail_record("unused");
+        original.body = b"\x01INTL 1:104/1 2:280/464\r\x01PID: Writer\rhi\x82\r\rthere".to_vec();
+        let mut forwarded = original.clone();
+        forwarded.body.extend_from_slice(
+            b"\rSEEN-BY: 104/1 2\r\x01PATH: 104/1\r\x01Via 2:280/9 @date\r\x01TID: Transport\r",
+        );
+        let mut content_changed = forwarded.clone();
+        let index = content_changed
+            .body
+            .iter()
+            .position(|&b| b == 0x82)
+            .unwrap();
+        content_changed.body[index] = 0x83;
+        let mut authoring_changed = original.clone();
+        authoring_changed
+            .body
+            .extend_from_slice(b"\r\x01REPLY: different-parent\r");
+        let packet = Packet {
+            header: header(),
+            messages: vec![original, forwarded, content_changed, authoring_changed],
+        };
+        let batch = Tosser::new().toss(&packet);
+        assert_eq!(batch.netmail.len(), 3);
+        assert_eq!(batch.duplicates.len(), 1);
+    }
+
+    #[test]
+    fn missing_id_keeps_original_fields_and_routing_distinct() {
+        let original = PackedMessage {
+            orig_net: 280,
+            orig_node: 464,
+            dest_net: 104,
+            dest_node: 1,
+            to: "Alice".into(),
+            from: "Kevin".into(),
+            subject: "A note".into(),
+            date_time: "02 Jul 26  13:30:45".into(),
+            body: b"same content".to_vec(),
+            ..Default::default()
+        };
+        let mut variants = vec![original.clone()];
+        for changed in [
+            PackedMessage {
+                to: "Bob".into(),
+                ..original.clone()
+            },
+            PackedMessage {
+                from: "Another author".into(),
+                ..original.clone()
+            },
+            PackedMessage {
+                subject: "Other subject".into(),
+                ..original.clone()
+            },
+            PackedMessage {
+                date_time: "03 Jul 26  13:30:45".into(),
+                ..original.clone()
+            },
+            PackedMessage {
+                dest_node: 2,
+                ..original.clone()
+            },
+            PackedMessage {
+                body: b"\x01INTL 3:104/1 2:280/464\rsame content".to_vec(),
+                ..original.clone()
+            },
+            PackedMessage {
+                body: b"\x01TOPT 5\rsame content".to_vec(),
+                ..original.clone()
+            },
+            PackedMessage {
+                body: b"AREA:AREA.A\rsame content".to_vec(),
+                ..original.clone()
+            },
+            PackedMessage {
+                body: b"AREA:AREA.B\rsame content".to_vec(),
+                ..original.clone()
+            },
+        ] {
+            variants.push(changed);
+        }
+        let packet = Packet {
+            header: header(),
+            messages: variants,
+        };
+        let mut tosser = Tosser::new();
+        let batch = tosser.toss(&packet);
+        assert_eq!(
+            batch.netmail.len() + batch.echomail.len(),
+            packet.messages.len()
+        );
         assert!(batch.duplicates.is_empty());
+        assert_eq!(tosser.toss(&packet).duplicates.len(), packet.messages.len());
+
+        let mut zone = packet.clone();
+        zone.messages = vec![original];
+        zone.header.dest_zone += 1;
+        assert_eq!(tosser.toss(&zone).netmail.len(), 1);
+    }
+
+    #[test]
+    fn fallback_namespace_and_field_boundaries_do_not_collide() {
+        let mut message = PackedMessage {
+            from: "ab".into(),
+            subject: "c".into(),
+            ..Default::default()
+        };
+        let fingerprint = fallback_identity(&header(), &message, &message.parse_body());
+        let label = format!("fallback:blake3:{}", fingerprint.to_hex());
+        let mut tosser = Tosser::with_known_msgids([label.clone()]);
+        let packet = Packet {
+            header: header(),
+            messages: vec![message.clone()],
+        };
+        assert_eq!(tosser.toss(&packet).netmail.len(), 1);
+        assert_eq!(tosser.toss(&packet).duplicates, vec![label]);
+        message.from = "a".into();
+        message.subject = "bc".into();
+        assert_eq!(
+            tosser
+                .toss(&Packet {
+                    header: header(),
+                    messages: vec![message]
+                })
+                .netmail
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn explicit_msgid_stays_authoritative_over_changed_content_and_destination() {
+        let mut original = echo_record("authoritative", "AREA.A");
+        let mut changed = echo_record("authoritative", "AREA.B");
+        changed.dest_node += 1;
+        changed.body.extend_from_slice(b"changed text\r");
+        let mut tosser = Tosser::new();
+        let batch = tosser.toss(&Packet {
+            header: header(),
+            messages: vec![original.clone(), changed],
+        });
+        assert_eq!(batch.echomail.len(), 1);
+        assert_eq!(batch.duplicates, vec!["2:280/464 authoritative"]);
+        // A present but empty MSGID keeps the pre-existing MSGID behavior too.
+        original.set_body(&Message {
+            kludges: vec!["MSGID:".into()],
+            ..Default::default()
+        });
+        let batch = tosser.toss(&Packet {
+            header: header(),
+            messages: vec![original.clone(), original],
+        });
+        assert_eq!(batch.netmail.len(), 1);
+        assert_eq!(batch.duplicates, vec![""]);
     }
 
     #[test]

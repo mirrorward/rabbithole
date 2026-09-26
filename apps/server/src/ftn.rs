@@ -23,8 +23,10 @@
 //!                          (config AREA↔slug map)      (scanner naming)   (originating FSM)
 //! ```
 //!
-//! MSGID de-duplication is the tosser's ([`TossedBatch::duplicates`]); a message
-//! already tossed is never posted twice. The outbound scanner only stages
+//! MSGID or missing-ID fingerprint de-duplication is the tosser's
+//! ([`TossedBatch::duplicates`]); repeated messages are suppressed for this
+//! gateway's lifetime (the dupe sets are not persisted across restarts).
+//! The outbound scanner only stages
 //! *locally* authored posts (`@{origin}`), so echomail injected inbound is not
 //! reflected straight back — the echomail↔board loop is broken by author origin.
 //!
@@ -141,7 +143,7 @@ pub struct FtnGateway {
     inbound_dir: PathBuf,
     /// Outbound BSO directory for staged PKT files.
     outbound_dir: PathBuf,
-    /// Rolling MSGID dupe set, shared across all inbound sessions.
+    /// MSGID and missing-ID dupe sets, shared across all inbound sessions.
     tosser: tokio::sync::Mutex<Tosser>,
 }
 
