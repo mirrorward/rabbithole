@@ -1269,7 +1269,7 @@ pub fn You() -> impl IntoView {
                                         class="rh-btn ghost small"
                                         on:click=move |_| picking.update(|p| *p = !*p)
                                     >
-                                        {move || if picking.get() { "Done" } else { "Change mark" }}
+                                        {move || if picking.get() { "Done" } else { "Change local mark" }}
                                     </button>
                                 </div>
                                 <div class="rh-you-ident">
@@ -1303,9 +1303,8 @@ pub fn You() -> impl IntoView {
                             <Show when=move || picking.get() fallback=|| ()>
                                 <h3 class="rh-person-h2">"Your mark"</h3>
                                 <p class="rh-settings-note">
-                                    "Pick a face and a colour, or keep the one your key draws. \
-                                     This is local for now \u{2014} the wire carries no mark, so \
-                                     other people still see the one your identity derives."
+                                    "Pick a face and a colour for this device. To share it, choose \
+                                     Use my local mark in your burrow profile below, then save."
                                 </p>
                                 <div class="rh-mark-picker">
                                     {(0..crate::avatar::GLYPH_COUNT).map(|g| {
@@ -1316,6 +1315,7 @@ pub fn You() -> impl IntoView {
                                                     app.my_mark.get().map(|m| m.glyph) == Some(g)
                                                 }
                                                 title=crate::avatar::glyph_name(g)
+                                                aria-pressed=move || (app.my_mark.get().map(|m| m.glyph) == Some(g)).to_string()
                                                 aria-label=crate::avatar::glyph_name(g)
                                                 on:click=move |_| {
                                                     let color = app
@@ -1348,6 +1348,7 @@ pub fn You() -> impl IntoView {
                                                 class:on=move || {
                                                     app.my_mark.get().map(|m| m.color) == Some(c)
                                                 }
+                                                aria-pressed=move || (app.my_mark.get().map(|m| m.color) == Some(c)).to_string()
                                                 aria-label=format!("Colour {}", c + 1)
                                                 style=format!(
                                                     "background:{}",
@@ -1373,6 +1374,8 @@ pub fn You() -> impl IntoView {
                                     >"Use my key's mark"</button>
                                 </div>
                             </Show>
+
+                            <crate::profile_edit::ProfileEditor/>
 
                             // What the key is for, in plain sections rather
                             // than one intimidating paragraph.

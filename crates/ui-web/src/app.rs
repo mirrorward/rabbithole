@@ -165,6 +165,9 @@ pub struct AppState {
     /// App settings: trackers and the handful of choices that are yours rather
     /// than a burrow's ([`crate::settings`]). Persisted.
     pub settings: RwSignal<crate::settings::Settings>,
+    /// Unpublished profile edits, kept only for this app session and scoped
+    /// to the burrow plus the server-confirmed persona.
+    pub profile_drafts: StoredValue<crate::profile_edit::DraftCache>,
     /// Signed friendships and half-offers, persisted ([`crate::friend`]).
     pub friends: RwSignal<Vec<crate::friend::Friendship>>,
     /// The web-admin model, folded from admin events.
@@ -282,6 +285,7 @@ impl AppState {
             art_open: create_rw_signal(None),
             friends: create_rw_signal(Vec::new()),
             settings: create_rw_signal(crate::settings::Settings::default()),
+            profile_drafts: store_value(crate::profile_edit::DraftCache::default()),
             my_mark: create_rw_signal(None),
             #[cfg(target_arch = "wasm32")]
             sound_on: create_rw_signal(crate::sound::enabled()),

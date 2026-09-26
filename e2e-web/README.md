@@ -119,3 +119,10 @@ claim to reproduce a browser's autoplay policy.
 Tauri IPC boundary. It checks menu navigation, palette dismissal, fragment
 history, reload and fullscreen events. The separate Node shim suite runs in CI.
 These checks do not claim native AppKit/WKWebView event delivery.
+
+## Public profiles
+
+`tests/profile.spec.ts` exercises the actual editor: draft navigation/revert,
+text and icon publication, hard-reload persistence, and explicit clearing.
+The server profile integration test separately verifies observer reads, restart,
+burrow/persona isolation and guest refusal through real WebSocket clients.

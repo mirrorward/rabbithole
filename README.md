@@ -94,6 +94,14 @@ timestamps, profile icons in chat, reduced motion, and three chime voices with
 volume and preview. Changes are remembered on this device. System appearance
 follows light/dark changes live; High Contrast keeps its own palette.
 
+In **You → Your burrow profile**, signed-in accounts can edit pronouns, location,
+interests, a short quote and `.plan`, control directory visibility, and publish
+one of 16 icons in eight colours. Save applies to the active persona on that
+burrow; other personas and burrows keep their own profiles. The local identity
+mark remains separate, with an explicit **Use my local mark** action for sharing
+it as a public profile icon. Unsaved profile drafts survive navigation during the
+current app session; **Revert changes** restores the saved profile.
+
 On macOS, the **Go** menu exposes app destinations and Back/Forward; **View →
 Appearance** opens personal settings. Settings and navigation always target the
 main window, leaving About in its own window.

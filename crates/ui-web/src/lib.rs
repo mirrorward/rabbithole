@@ -119,6 +119,7 @@ pub mod packs;
 pub mod palette;
 pub mod playback;
 pub mod probe;
+pub mod profile_edit;
 pub mod pwa;
 pub mod radio;
 pub mod radio_admin;

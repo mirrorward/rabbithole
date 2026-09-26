@@ -39,6 +39,9 @@ ed25519-dalek.workspace = true
 blake3.workspace = true
 hex.workspace = true
 postcard.workspace = true
+# Public profile icons are the same authored sprites as the local mark,
+# encoded as small PNG blobs so every client can display them.
+png.workspace = true
 
 # The browser WebSocket transport (`src/ws.rs`) plus the wasm-only DOM glue in
 # `src/art.rs` (canvas) and `src/theme.rs` (localStorage / matchMedia). These
@@ -120,11 +123,7 @@ gloo-timers.workspace = true
 # requirement at compile time.
 getrandom = { version = "0.2", features = ["js"] }
 
-# Host-only: the `#[ignore]`d icon regenerator and the icons-match-generator
-# test in `src/pwa.rs` encode/decode the checked-in PNGs. Pure Rust, and a
-# dev-dependency, so the shipped wasm bundle never carries it.
 [dev-dependencies]
-png.workspace = true
-# Also host-only: the console's catalog and the demo burrow's settings are
+# Host-only: the console's catalog and the demo burrow's settings are
 # checked against the server's own key list, so neither can drift from it.
 rabbithole-server-core.workspace = true

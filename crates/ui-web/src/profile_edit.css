@@ -1,0 +1,22 @@
+.rh-profile-editor{margin-block:var(--rh-space-6,1.5rem);max-width:70ch}
+.rh-profile-editor .rh-person-h2{margin-top:0}
+.rh-profile-edit-name{font-weight:600;margin-block:1rem .75rem}
+.rh-profile-edit-fields{min-width:0;margin:0;padding:0;border:0}
+.rh-profile-edit-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.875rem 1rem;margin-bottom:.875rem}
+.rh-profile-edit-field{display:flex;flex-direction:column;gap:.375rem;min-width:0;font-size:var(--rh-font-sm)}
+.rh-profile-edit-field .rh-input,.rh-profile-edit-field .rh-textarea{width:100%;min-width:0;box-sizing:border-box}
+.rh-profile-edit-field .rh-textarea{resize:vertical;min-height:6rem}
+.rh-profile-edit-fields>.rh-field-hint{margin-top:.375rem}
+.rh-profile-edit-actions{display:flex;flex-wrap:wrap;align-items:center;gap:.625rem;margin-block:1rem .5rem}
+.rh-profile-edit-fields:disabled{opacity:.65}
+.rh-profile-icon{margin-bottom:1rem}
+.rh-profile-icon-line{display:flex;align-items:center;gap:1rem}
+.rh-profile-icon-preview{display:block;width:64px;height:64px;object-fit:contain;flex:none;image-rendering:pixelated}
+.rh-profile-icon-label{display:block;font-weight:600;margin-bottom:.25rem}
+.rh-profile-icon .rh-profile-edit-actions{margin-block:.5rem 0}
+.rh-profile-icon .rh-mark-picker{margin-top:1rem}
+@media(max-width:560px){
+  .rh-profile-edit-grid{grid-template-columns:1fr}
+  .rh-profile-editor .rh-btn,.rh-profile-editor .rh-input,.rh-profile-editor .rh-settings-check{min-height:44px}
+  .rh-profile-editor .rh-mark-choice,.rh-profile-editor .rh-mark-color{min-width:44px;min-height:44px}
+}

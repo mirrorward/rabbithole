@@ -589,6 +589,77 @@ pub fn frame_to_members(frame: &Frame) -> Option<Vec<crate::state::Member>> {
     )
 }
 
+/// Decode the account's persona list and select exactly the active persona.
+/// Never fall back to the first entry: that could edit a different identity.
+pub fn own_persona_reply(
+    frame: Option<&Frame>,
+) -> Result<rabbithole_proto::persona::PersonaInfo, String> {
+    let frame = profile_reply_frame(frame)?;
+    let list = frame
+        .decode::<rabbithole_proto::persona::PersonaList>()
+        .and_then(Result::ok)
+        .ok_or_else(|| "The burrow could not load your profile. Try again.".to_string())?;
+    list.personas
+        .into_iter()
+        .find(|persona| persona.id == list.active_id)
+        .ok_or_else(|| "Your active profile was not found. Sign in again to reload it.".to_string())
+}
+
+/// Accept a save only when the acknowledgement names the persona edited.
+pub fn updated_persona_reply(
+    frame: Option<&Frame>,
+    expected_id: i64,
+) -> Result<rabbithole_proto::persona::PersonaInfo, String> {
+    let frame = profile_reply_frame(frame)?;
+    frame
+        .decode::<rabbithole_proto::persona::PersonaReply>()
+        .and_then(Result::ok)
+        .map(|reply| reply.persona)
+        .filter(|persona| persona.id == expected_id)
+        .ok_or_else(|| {
+            "The burrow did not confirm this profile. Your edits are kept; try saving again."
+                .to_string()
+        })
+}
+
+fn profile_reply_frame(frame: Option<&Frame>) -> Result<&Frame, String> {
+    use rabbithole_proto::{ErrorCode, FrameKind};
+    let frame = frame.ok_or_else(|| {
+        "The connection closed before the burrow answered. Reconnect and try again.".to_string()
+    })?;
+    if let Some(code) = &frame.error {
+        let words = match code {
+            ErrorCode::Forbidden => "The burrow did not allow that profile change. Sign in with an account and try again.",
+            ErrorCode::NotFound => "This profile is no longer available. Sign in again to reload it.",
+            ErrorCode::RateLimited => "Too many requests at once. Wait a moment and try again.",
+            _ => "The burrow could not save that profile. Your edits are kept; try again.",
+        };
+        return Err(words.to_string());
+    }
+    if frame.kind != FrameKind::Reply {
+        return Err("The burrow did not confirm this profile. Try again.".to_string());
+    }
+    Ok(frame)
+}
+
+/// A public avatar is content addressed. Accept only a BlobRef for the
+/// exact PNG uploaded before referring to it from a persona update.
+pub fn avatar_blob_reply(frame: Option<&Frame>, bytes: &[u8]) -> Result<[u8; 32], String> {
+    let frame = profile_reply_frame(frame)?;
+    let id = frame
+        .decode::<rabbithole_proto::blob::BlobRef>()
+        .and_then(Result::ok)
+        .map(|blob| blob.id)
+        .ok_or_else(|| "The burrow did not accept your icon. Try saving again.".to_string())?;
+    if id != *blake3::hash(bytes).as_bytes() {
+        return Err(
+            "The burrow returned a different icon. Your profile was not changed; try again."
+                .to_string(),
+        );
+    }
+    Ok(id)
+}
+
 /// Build a [`ProfileGet`] frame for one member's full card.
 pub fn profile_get_request(screen_name: &str, id: RequestId) -> Result<Frame, ProtoError> {
     Frame::request(id, &ProfileGet::new(screen_name))
@@ -3991,5 +4062,65 @@ mod chat_history_tests {
         )
         .unwrap();
         assert_eq!(frame_to_chat_history(&oversized, "lobby"), None);
+    }
+}
+
+#[cfg(test)]
+mod own_profile_tests {
+    use super::*;
+    use rabbithole_proto::persona::{PersonaInfo, PersonaList, PersonaListRequest, PersonaReply};
+    use rabbithole_proto::ErrorCode;
+
+    #[test]
+    fn avatar_upload_accepts_only_the_exact_content_address() {
+        use rabbithole_proto::blob::{BlobPurpose, BlobPut, BlobRef};
+        let bytes = crate::avatar::glyph_png(3, 2).unwrap();
+        let request = Frame::request(
+            RequestId(92),
+            &BlobPut::new(BlobPurpose::Avatar, bytes.clone()),
+        )
+        .unwrap();
+        let decoded = request.decode::<BlobPut>().unwrap().unwrap();
+        assert_eq!(decoded.purpose, BlobPurpose::Avatar);
+        assert_eq!(decoded.bytes, bytes);
+        let expected = *blake3::hash(&bytes).as_bytes();
+        let accepted = Frame::reply_to(&request, &BlobRef::new(expected)).unwrap();
+        assert_eq!(avatar_blob_reply(Some(&accepted), &bytes), Ok(expected));
+        let wrong = Frame::reply_to(&request, &BlobRef::new([0; 32])).unwrap();
+        assert!(avatar_blob_reply(Some(&wrong), &bytes).is_err());
+        let denied = Frame::error_reply(&request, ErrorCode::Forbidden);
+        assert!(avatar_blob_reply(Some(&denied), &bytes).is_err());
+    }
+
+    #[test]
+    fn selects_active_persona_instead_of_first_and_rejects_missing_active() {
+        let request = Frame::request(RequestId(90), &PersonaListRequest).unwrap();
+        let first = PersonaInfo::new(1, "alice");
+        let active = PersonaInfo::new(2, "owl");
+        let reply = Frame::reply_to(
+            &request,
+            &PersonaList::new(vec![first.clone(), active.clone()], 2),
+        )
+        .unwrap();
+        assert_eq!(own_persona_reply(Some(&reply)).unwrap(), active);
+        let missing = Frame::reply_to(&request, &PersonaList::new(vec![first], 2)).unwrap();
+        assert!(own_persona_reply(Some(&missing)).is_err());
+    }
+
+    #[test]
+    fn save_requires_matching_success_and_explains_refused_or_lost_replies() {
+        let request = Frame::request(RequestId(91), &PersonaListRequest).unwrap();
+        let persona = PersonaInfo::new(2, "owl");
+        let reply = Frame::reply_to(&request, &PersonaReply::new(persona.clone())).unwrap();
+        assert_eq!(updated_persona_reply(Some(&reply), 2).unwrap(), persona);
+        assert!(updated_persona_reply(Some(&reply), 1).is_err());
+        let denied = Frame::error_reply(&request, ErrorCode::Forbidden);
+        assert!(updated_persona_reply(Some(&denied), 2)
+            .unwrap_err()
+            .contains("Sign in"));
+        assert!(updated_persona_reply(None, 2)
+            .unwrap_err()
+            .contains("Reconnect"));
+        assert!(own_persona_reply(Some(&request)).is_err());
     }
 }

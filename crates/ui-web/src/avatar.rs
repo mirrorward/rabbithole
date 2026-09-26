@@ -230,6 +230,42 @@ pub fn glyph_svg(i: usize, c: usize, size: u32) -> String {
     out
 }
 
+/// The authored sprite as a 64px PNG for a burrow's public avatar blob.
+/// Uses the same rows and colour calculations as [`glyph_svg`].
+pub fn glyph_png(i: usize, c: usize) -> Result<Vec<u8>, png::EncodingError> {
+    let color = PALETTE[c % PALETTE.len()];
+    let base = rgb(color);
+    let dark = rgb(&shade(color, 0.45));
+    let light = rgb(&tint(color, 0.62));
+    let rows = &GLYPHS[i % GLYPH_COUNT].1;
+    let mut pixels = Vec::with_capacity(64 * 64 * 4);
+    for y in 0..64_usize {
+        for x in 0..64_usize {
+            let (r, g, b, a) = match rows[y / 8].as_bytes()[x / 8] {
+                b'#' => (base.0, base.1, base.2, 255),
+                b'o' => (dark.0, dark.1, dark.2, 255),
+                b'*' => (light.0, light.1, light.2, 255),
+                _ => {
+                    let dx = (x as f32 + 0.5 - 32.0).abs() - 19.2;
+                    let dy = (y as f32 + 0.5 - 32.0).abs() - 19.2;
+                    let inside = dx.max(0.0).powi(2) + dy.max(0.0).powi(2) <= 12.8_f32.powi(2);
+                    (base.0, base.1, base.2, if inside { 41 } else { 0 })
+                }
+            };
+            pixels.extend_from_slice(&[r, g, b, a]);
+        }
+    }
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, 64, 64);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&pixels)?;
+    }
+    Ok(out)
+}
+
 /// Darken a `#rrggbb` toward black. Used for eyes and mouths, so they read as
 /// detail *within* the mark rather than as a second colour.
 fn shade(hex: &str, factor: f32) -> String {
@@ -448,5 +484,32 @@ mod tests {
             assert_ne!(tint(c, 0.62), c.to_string());
             assert!(shade(c, 0.45).len() == 7 && tint(c, 0.62).len() == 7);
         }
+    }
+}
+
+#[cfg(test)]
+mod public_icon_tests {
+    use super::*;
+
+    #[test]
+    fn public_sprites_are_small_valid_pngs_in_the_selected_colour() {
+        for glyph in 0..GLYPH_COUNT {
+            let bytes = glyph_png(glyph, 2).unwrap();
+            assert!(bytes.len() < 16 * 1024);
+            assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+            let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+                .read_info()
+                .unwrap();
+            let mut pixels = vec![0; reader.output_buffer_size()];
+            let info = reader.next_frame(&mut pixels).unwrap();
+            assert_eq!((info.width, info.height), (64, 64));
+            assert_eq!(info.color_type, png::ColorType::Rgba);
+            let (r, g, b) = rgb(PALETTE[2]);
+            assert!(pixels.chunks_exact(4).any(|pixel| pixel == [r, g, b, 255]));
+        }
+        assert_eq!(
+            glyph_png(GLYPH_COUNT, PALETTE.len()).unwrap(),
+            glyph_png(0, 0).unwrap()
+        );
     }
 }

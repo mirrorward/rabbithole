@@ -1,11 +1,16 @@
 # RabbitHole — Implementation Tracker
 
-**Client customization (2026-09-24):** personal appearance controls with live OS
-appearance, persistent chat typography/density/timestamps, global server-theme
-opt-out and High Contrast protection; configurable chime voices, volume and
-preview. List navigation leaves nested input editing keys alone.
-macOS View/Go/Help menus target only the main window, with app-local history;
-native menu actions dismiss the command palette and preserve skip-link history.
+**Client customization and native polish (2026-09-24):** personal appearance
+controls with live OS appearance, persistent chat typography/density/timestamps,
+global server-theme opt-out and High Contrast protection; configurable chime voices,
+volume and preview; per-burrow active-persona profile editing and public sprite
+icons through BlobPut → PersonaUpdate; explicit Save/Revert and failure recovery.
+macOS View/Go/Help menus target only the main window, preserve skip-link history,
+and dismiss the command palette. List navigation leaves nested editing keys alone.
+Profile publication has
+a real two-burrow regression covering observer reads, restart persistence,
+persona/burrow isolation, guest refusal and explicit clearing. Larger mobile,
+WebRTC, native server-wrapper and release/distribution work remains below.
 
 > Distilled from `PLAN.md` (read that first — it has the specs, rationale, and
 > dependency graph). Check items off as they land. Waves must respect the
