@@ -25,18 +25,38 @@ use crate::components::{EmptyState, StatusBar, SyndicationPanel, ThemeEditorPane
 #[component]
 pub fn Admin() -> impl IntoView {
     let app = expect_context::<AppState>();
-    let is_admin = app.focused().is_admin;
+    let is_admin = create_memo(move |_| app.focused_tracked().is_admin.get());
     let params = use_params_map();
     let section = create_memo(move |_| {
         params.with(|p| catalog::section(p.get("section").map(String::as_str)).id)
     });
 
     create_effect(move |_| {
-        if is_admin.get() {
-            app.load_config();
-            app.load_classes();
-            app.load_accounts();
-            app.load_syndication();
+        let session = app.focused_tracked();
+        let ready = session.ready.get();
+        if is_admin.get() && (!session.live.get() || session.authenticated.get()) {
+            let owner = app.focused_endpoint();
+            let load = move || {
+                if app.focused_endpoint() != owner
+                    || app.focused().ready != session.ready
+                    || session.ready.get_untracked() != ready
+                    || !session.is_admin.get_untracked()
+                    || (session.live.get_untracked() && !session.authenticated.get_untracked())
+                {
+                    return;
+                }
+                app.load_config();
+                app.load_classes();
+                app.load_accounts();
+                app.load_syndication();
+            };
+            // Authentication is announced inside the socket borrow. Defer
+            // all pane reads and re-check ownership when that borrow is free.
+            if session.live.get_untracked() {
+                crate::app::defer(load);
+            } else {
+                load();
+            }
         }
     });
 

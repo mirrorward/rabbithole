@@ -81,12 +81,12 @@ use rabbithole_proto::admin::{
     BackupMade, BackupVerified, BackupVerify, Broadcast, ClassEntry, ClassList, ClassListRequest,
     ClassSet, ConfigApplied, ConfigDescribeRequest, ConfigDescription, ConfigGet, ConfigKeyInfo,
     ConfigSet, ConfigValue, DenyHashAdd, DenyHashEntry, DenyHashList, DenyHashListRequest,
-    DenyHashRemove, GatewayStatsReply, GatewayStatsRequest, InviteCode, InviteCreate, InviteEntry,
-    InviteList, InviteListRequest, InviteRevoke, Kick, OriginEntry, OriginList, OriginListRequest,
-    OriginPin, PeerApprove, PeerEntry, PeerList, PeerListRequest, PeerRevoke, QuarantineClear,
-    QuarantineList, QuarantineListRequest, QuarantineSet, ReportEntry, ReportList,
-    ReportListRequest, ReportResolve, SurfaceInfo, SurfaceStatus, SurfaceStatusRequest,
-    ThemeBundleInfo, ThemeBundleSet,
+    DenyHashRemove, FeedMappingsReply, FeedMappingsRequest, GatewayStatsReply, GatewayStatsRequest,
+    InviteCode, InviteCreate, InviteEntry, InviteList, InviteListRequest, InviteRevoke, Kick,
+    OriginEntry, OriginList, OriginListRequest, OriginPin, PeerApprove, PeerEntry, PeerList,
+    PeerListRequest, PeerRevoke, QuarantineClear, QuarantineList, QuarantineListRequest,
+    QuarantineSet, ReportEntry, ReportList, ReportListRequest, ReportResolve, SurfaceInfo,
+    SurfaceStatus, SurfaceStatusRequest, ThemeBundleInfo, ThemeBundleSet,
 };
 use rabbithole_proto::board::{
     BoardCreate, BoardDelete, BoardKeeping, BoardKeepingRequest, BoardKept, BoardList,
@@ -2216,6 +2216,8 @@ pub enum AdminCommand {
     GetSurfaceStatus,
     /// Live syndication + gateway counters. → [`GatewayStatsReply`].
     GetGatewayStats,
+    /// Configured feed mappings with server-joined, redacted poll results.
+    GetFeedMappings,
     /// Publish a postcard [`rabbithole_proto::welcome::ThemeBundle`].
     /// Empty signature: the server signs at serve time.
     SetThemeBundle {
@@ -2291,6 +2293,7 @@ pub enum AdminEvent {
     Failed(String),
     /// A live gateway/feed snapshot arrived.
     GatewayStatsLoaded(GatewayStatsReply),
+    FeedMappingsLoaded(FeedMappingsReply),
     /// A theme bundle was applied (or inspected).
     ThemeBundleApplied(ThemeBundleInfo),
 }
@@ -2568,6 +2571,7 @@ pub fn admin_command_to_frame(
         },
         AdminCommand::GetSurfaceStatus => Frame::request(id, &SurfaceStatusRequest)?,
         AdminCommand::GetGatewayStats => Frame::request(id, &GatewayStatsRequest)?,
+        AdminCommand::GetFeedMappings => Frame::request(id, &FeedMappingsRequest)?,
         AdminCommand::SetThemeBundle { bundle } => {
             Frame::request(id, &ThemeBundleSet::new(bundle.clone(), Vec::new()))?
         }
@@ -2649,6 +2653,9 @@ pub fn frame_to_admin_events(frame: &Frame) -> Vec<AdminEvent> {
         return vec![AdminEvent::ConfigApplied {
             applied_live: m.applied_live,
         }];
+    }
+    if let Some(Ok(m)) = frame.decode::<FeedMappingsReply>() {
+        return vec![AdminEvent::FeedMappingsLoaded(m)];
     }
     if let Some(Ok(m)) = frame.decode::<GatewayStatsReply>() {
         return vec![AdminEvent::GatewayStatsLoaded(m)];
@@ -3659,6 +3666,7 @@ mod tests {
                 key: "server.name".into(),
             },
             AdminCommand::GetGatewayStats,
+            AdminCommand::GetFeedMappings,
             AdminCommand::SetThemeBundle {
                 bundle: vec![1, 2, 3],
             },
@@ -3846,6 +3854,32 @@ mod tests {
                 .map(|f| f.items_posted),
             Some(1)
         );
+
+        let mappings_req = admin_command_to_frame(&AdminCommand::GetFeedMappings, RequestId(11))
+            .unwrap()
+            .unwrap();
+        assert!(mappings_req.decode::<FeedMappingsRequest>().is_some());
+        let mappings = FeedMappingsReply {
+            generated_at_ms: 7,
+            feeds: vec![rabbithole_proto::admin::FeedMapping {
+                id: [95; 32],
+                url: "https://a.example/feed.xml".into(),
+                board: "announcements".into(),
+                stats: rabbithole_proto::admin::FeedPollStats {
+                    last_poll_ms: 7,
+                    items_posted: 1,
+                    ..Default::default()
+                },
+            }],
+        };
+        let frame = Frame::reply_to(&mappings_req, &mappings).unwrap();
+        let events = frame_to_admin_events(&frame);
+        assert_eq!(
+            events,
+            vec![AdminEvent::FeedMappingsLoaded(mappings.clone())]
+        );
+        syn.apply_mappings_reply(&events);
+        assert_eq!(syn.feed_rows(), mappings.feeds);
 
         let set = admin_command_to_frame(
             &AdminCommand::SetThemeBundle {

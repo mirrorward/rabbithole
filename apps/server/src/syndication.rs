@@ -252,14 +252,14 @@ impl SyndicationService {
         let stamp = chrono::Utc::now().timestamp_millis();
         let resp = match fetched {
             Ok(resp) => resp,
-            Err(e) => {
+            Err(_e) => {
                 let f = &mut self.feeds[idx];
                 let (next, _) =
                     f.poll
                         .on_transport_error(&self.poll_cfg, f.poll_interval_secs, now);
                 f.poll = next;
                 self.shared.stats.feed_poll(&url, stamp, "error");
-                tracing::warn!(feed = %url, failures = f.poll.failures, "syndication fetch failed: {e:#}");
+                tracing::warn!(feed = %crate::feed_display::url(&url), failures = f.poll.failures, "syndication fetch failed");
                 return 0;
             }
         };
@@ -271,14 +271,14 @@ impl SyndicationService {
                     self.feeds[idx].poll_interval_secs = feed.poll_interval_secs;
                     Some(feed)
                 }
-                Err(e) => {
+                Err(_e) => {
                     let f = &mut self.feeds[idx];
                     let (next, _) =
                         f.poll
                             .on_transport_error(&self.poll_cfg, f.poll_interval_secs, now);
                     f.poll = next;
                     self.shared.stats.feed_poll(&url, stamp, "error");
-                    tracing::warn!(feed = %url, "syndication: unparseable body: {e}");
+                    tracing::warn!(feed = %crate::feed_display::url(&url), "syndication: unparseable feed body");
                     return 0;
                 }
             }
@@ -302,12 +302,12 @@ impl SyndicationService {
             }
             PollDecision::NotModified => {
                 self.shared.stats.feed_poll(&url, stamp, "not_modified");
-                tracing::debug!(feed = %url, "syndication: not modified");
+                tracing::debug!(feed = %crate::feed_display::url(&url), "syndication: not modified");
                 0
             }
             PollDecision::Failed => {
                 self.shared.stats.feed_poll(&url, stamp, "error");
-                tracing::warn!(feed = %url, status = resp.status, "syndication fetch error status");
+                tracing::warn!(feed = %crate::feed_display::url(&url), status = resp.status, "syndication fetch error status");
                 0
             }
         }
@@ -347,8 +347,8 @@ impl SyndicationService {
                     posted += 1;
                 }
                 Ok(false) => {} // policy drop: retry on a later poll
-                Err(e) => {
-                    tracing::warn!(feed = %self.feeds[idx].url, "syndication post failed: {e:#}");
+                Err(_e) => {
+                    tracing::warn!(feed = %crate::feed_display::url(&self.feeds[idx].url), "syndication post failed");
                 }
             }
         }
@@ -518,20 +518,23 @@ impl FeedUrl {
         } else if let Some(r) = url.strip_prefix("http://") {
             (false, r)
         } else {
-            bail!("unsupported feed url scheme: {url}");
+            bail!("unsupported feed URL scheme");
         };
         let (authority, path) = match rest.find('/') {
             Some(i) => (&rest[..i], &rest[i..]),
             None => (rest, "/"),
         };
         if authority.is_empty() {
-            bail!("feed url has no host: {url}");
+            bail!("feed URL has no host");
+        }
+        if authority.contains('@') {
+            bail!("embedded feed URL credentials are not supported");
         }
         let default_port = if tls { 443 } else { 80 };
         let (host, port) = split_feed_authority(authority, default_port)
-            .map_err(|e| anyhow!("bad feed url {url}: {e}"))?;
+            .map_err(|_| anyhow!("invalid feed URL authority"))?;
         if host.is_empty() {
-            bail!("feed url has no host: {url}");
+            bail!("feed URL has no host");
         }
         Ok(FeedUrl {
             tls,
@@ -569,7 +572,7 @@ fn split_feed_authority(authority: &str, default_port: u16) -> Result<(String, u
     if let Some(rest) = a.strip_prefix('[') {
         let close = rest
             .find(']')
-            .ok_or_else(|| anyhow!("{a} is a broken IPv6 literal"))?;
+            .ok_or_else(|| anyhow!("broken IPv6 literal"))?;
         let host = rest[..close].to_string();
         if host.is_empty() {
             bail!("empty IPv6 host");
@@ -580,14 +583,14 @@ fn split_feed_authority(authority: &str, default_port: u16) -> Result<(String, u
         }
         let port = after
             .strip_prefix(':')
-            .ok_or_else(|| anyhow!("{a} has junk after the IPv6 literal"))?;
-        let port: u16 = port.parse().map_err(|_| anyhow!("bad port in {a}"))?;
+            .ok_or_else(|| anyhow!("unexpected text after IPv6 literal"))?;
+        let port: u16 = port.parse().map_err(|_| anyhow!("invalid feed URL port"))?;
         return Ok((host, port));
     }
     if a.matches(':').count() == 1 {
         if let Some((h, p)) = a.rsplit_once(':') {
             if !h.is_empty() && !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) {
-                let port: u16 = p.parse().map_err(|_| anyhow!("bad port in {a}"))?;
+                let port: u16 = p.parse().map_err(|_| anyhow!("invalid feed URL port"))?;
                 return Ok((h.to_string(), port));
             }
         }
@@ -754,7 +757,7 @@ fn build_request(
 pub(crate) async fn exchange(target: &FeedUrl, request: &[u8]) -> Result<Vec<u8>> {
     let tcp = TcpStream::connect((target.host.as_str(), target.port))
         .await
-        .map_err(|e| anyhow!("connect {}:{}: {e}", target.host, target.port))?;
+        .map_err(|e| anyhow!("feed connection failed: {}", e.kind()))?;
     if target.tls {
         tls_exchange(tcp, &target.host, request).await
     } else {
@@ -803,7 +806,7 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
 /// the only TLS-over-TCP client). Ends with a close_notify + socket shutdown.
 async fn tls_exchange(mut tcp: TcpStream, host: &str, request: &[u8]) -> Result<Vec<u8>> {
     let name = rustls_pki_types::ServerName::try_from(host.to_string())
-        .map_err(|_| anyhow!("invalid TLS server name: {host}"))?;
+        .map_err(|_| anyhow!("invalid feed TLS server name"))?;
     let mut conn = rustls::ClientConnection::new(tls_config(), name)?;
     std::io::Write::write_all(&mut conn.writer(), request)?;
 

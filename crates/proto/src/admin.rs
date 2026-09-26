@@ -1713,7 +1713,8 @@ impl Message for GatewayStatsRequest {
 /// monitor.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct FeedStat {
-    /// Feed URL (the row key).
+    /// Redacted display URL. May not be unique; new monitors use the
+    /// server-joined FeedMappingsReply rather than joining on display text.
     pub url: String,
     /// Last poll time, unix millis (0 = never polled this run).
     pub last_poll_ms: i64,
@@ -1753,9 +1754,93 @@ impl Message for GatewayStatsReply {
     const MESSAGE_TYPE: u16 = 46;
 }
 
+/// Read the configured feed-to-board mappings and their current counters.
+/// Requires CONFIG_ADMIN. Mappings remain TOML-only and need a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FeedMappingsRequest;
+impl Message for FeedMappingsRequest {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 65;
+}
+
+/// Feed counters without a URL key; joined to a configured mapping by the
+/// server using the exact private URL, before any display redaction.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FeedPollStats {
+    pub last_poll_ms: i64,
+    pub last_status: String,
+    pub items_seen: u64,
+    pub items_posted: u64,
+    pub dupes_dropped: u64,
+}
+
+/// One configured mapping. Two rows can have the same redacted display URL;
+/// consumers must key by id, never join counters on that display text.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FeedMapping {
+    /// Opaque burrow-scoped identity, stable for this exact configured URL.
+    pub id: [u8; 32],
+    /// Display only: userinfo, query and fragment are omitted. Not a fetch URL.
+    pub url: String,
+    pub board: String,
+    /// Zero/default before the first poll, including when polling is disabled.
+    pub stats: FeedPollStats,
+}
+
+/// A read-only snapshot. Editing burrow.toml takes effect after a restart;
+/// this reports the running process's configured mappings, not unstarted edits.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FeedMappingsReply {
+    pub generated_at_ms: i64,
+    pub feeds: Vec<FeedMapping>,
+}
+impl Message for FeedMappingsReply {
+    const FAMILY: Family = Family::ADMIN;
+    const MESSAGE_TYPE: u16 = 66;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feed_mappings_are_additive_and_legacy_stats_bytes_stay_fixed() {
+        let legacy = GatewayStatsReply {
+            generated_at_ms: 0,
+            feeds: vec![FeedStat {
+                url: "url".into(),
+                ..Default::default()
+            }],
+            gateways: vec![],
+        };
+        assert_eq!(
+            postcard::to_allocvec(&legacy).unwrap(),
+            [0, 1, 3, b'u', b'r', b'l', 0, 0, 0, 0, 0, 0]
+        );
+        let reply = FeedMappingsReply {
+            generated_at_ms: 7,
+            feeds: vec![FeedMapping {
+                id: [3; 32],
+                url: "https://example.test/feed".into(),
+                board: "news".into(),
+                stats: FeedPollStats {
+                    last_poll_ms: 4,
+                    last_status: "ok".into(),
+                    items_posted: 2,
+                    ..Default::default()
+                },
+            }],
+        };
+        let bytes = postcard::to_allocvec(&reply).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<FeedMappingsReply>(&bytes).unwrap(),
+            reply
+        );
+        assert_eq!(GatewayStatsRequest::MESSAGE_TYPE, 45);
+        assert_eq!(GatewayStatsReply::MESSAGE_TYPE, 46);
+        assert_eq!(FeedMappingsRequest::MESSAGE_TYPE, 65);
+        assert_eq!(FeedMappingsReply::MESSAGE_TYPE, 66);
+    }
 
     #[test]
     fn theme_admin_messages_roundtrip() {

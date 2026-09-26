@@ -203,9 +203,11 @@ pub struct AppState {
     pub moderation: RwSignal<crate::admin_moderation::ModerationState>,
     /// The Peers and Backups panes' lists ([`crate::admin_federation`]).
     pub federation: RwSignal<crate::admin_federation::FederationState>,
-    /// The Syndication & Gateways panel model, folded from paired config
-    /// get/set replies ([`crate::syndication_admin`]).
+    /// The Syndication & Gateways monitor: typed mappings and activity
+    /// snapshots owned by the current authenticated session.
     pub syndication: RwSignal<SynAdminState>,
+    /// Invalidates queued and in-flight reads across focus/auth changes.
+    syndication_revision: StoredValue<u64>,
     /// Whether the ⌘K command palette overlay is open. Shared so both the
     /// header affordance and the global key binding drive the one overlay.
     pub palette_open: RwSignal<bool>,
@@ -322,6 +324,7 @@ impl AppState {
             moderation: create_rw_signal(Default::default()),
             federation: create_rw_signal(Default::default()),
             syndication: create_rw_signal(SynAdminState::default()),
+            syndication_revision: store_value(0),
             palette_open: create_rw_signal(false),
             switcher_open: create_rw_signal(false),
             servers: create_rw_signal(crate::servers::sample_directory()),
@@ -619,6 +622,7 @@ impl AppState {
     /// skeleton up forever.
     fn set_focus(&self, id: ServerId) {
         if self.focused_id.get_untracked() != id {
+            self.clear_syndication();
             self.focused_id.set(id);
         }
     }
@@ -1115,6 +1119,7 @@ impl AppState {
                         // A pane that is already open asked this burrow
                         // before; whatever it asked for died with the old
                         // socket, so say plainly that this is a new one.
+                        if so_app.focused().state == state { so_app.clear_syndication(); }
                         session_ready.update(|n| *n += 1);
                         my_role.set(*role);
                         my_caps.set(*caps);
@@ -1196,6 +1201,7 @@ impl AppState {
             ws.on_conn(std::rc::Rc::new(move |c| {
                 if c != crate::conn::ConnState::Online {
                     session_authenticated.set(false);
+                    if so_app.focused().state == state { so_app.clear_syndication(); }
                 }
                 // Toast the drop edge exactly once (Online → Reconnecting);
                 // every backoff attempt re-emits Reconnecting, so guard on the
@@ -1414,17 +1420,12 @@ impl AppState {
                 }
             }));
             let admin_sig = self.admin;
-            let syn_sig = self.syndication;
             ws.on_admin(std::rc::Rc::new(move |(key, events)| {
                 admin_sig.update(|a| {
                     for event in &events {
                         a.apply(event);
                     }
                 });
-                // The feed pane reads config keys; a `*` marker is not one.
-                if !key.as_deref().is_some_and(|k| k.starts_with('*')) {
-                    syn_sig.update(|s| s.apply_live(key.as_deref(), &events));
-                }
                 if let Some(app) = current() {
                     app.fold_admin_reply(key.as_deref(), &events);
                 }
@@ -4293,34 +4294,87 @@ impl AppState {
         self.dispatch_admin(AdminCommand::SetThemeBundle { bundle });
     }
 
-    /// Drive one `GetConfig` for the Syndication & Gateways panel and fold
-    /// its replies — paired with the requested `key` so the reducer knows
-    /// which read failed (the wire's `Failed` carries no key).
-    fn dispatch_syn_get(&self, key: &str) {
-        let command = AdminCommand::GetConfig {
-            key: key.to_string(),
-        };
-        #[cfg(target_arch = "wasm32")]
-        if self.focused().live.get_untracked() {
-            self.focused()
-                .ws
-                .update_value(|c| c.dispatch_admin(&command));
-            return;
-        }
-        let syndication = self.syndication;
-        self.focused().client.update_value(|client| {
-            let events = client.dispatch_admin(command);
-            syndication.update(|s| s.apply_get_reply(key, &events));
-        });
+    fn clear_syndication(&self) {
+        self.syndication_revision
+            .update_value(|n| *n = n.wrapping_add(1));
+        self.syndication.set(Default::default());
     }
 
-    /// Load what the feeds pane reads: the syndication knobs, the TOML-only
-    /// `syndication_feeds` attempt, and the live gateway-stats snapshot.
+    /// Read a fresh snapshot for this authenticated session. These calls do
+    /// not use the global admin sink: every result is owned by its endpoint,
+    /// session signal, authentication generation, and this load revision.
     pub fn load_syndication(&self) {
-        for key in crate::syndication_admin::LOAD_KEYS {
-            self.dispatch_syn_get(key);
+        self.clear_syndication();
+        let commands = SynAdminState::load_commands();
+        #[cfg(target_arch = "wasm32")]
+        if self.focused().live.get_untracked() {
+            let app = *self;
+            let owner = self.focused_id.get_untracked();
+            let session = self.focused();
+            let ready = session.ready.get_untracked();
+            let revision = self.syndication_revision.get_value();
+            let ws = session.ws.get_value();
+            for command in commands {
+                let owner = owner.clone();
+                let ws = ws.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let current = || {
+                        app.focused_id.get_untracked() == owner
+                            && app.syndication_revision.get_value() == revision
+                            && app.session_of(&owner).is_some_and(|now| {
+                                now.ready == session.ready
+                                    && now.ready.get_untracked() == ready
+                                    && now.authenticated.get_untracked()
+                            })
+                    };
+                    if !current() {
+                        return;
+                    }
+                    use rabbithole_proto::admin::{
+                        ConfigGet, FeedMappingsRequest, GatewayStatsRequest,
+                    };
+                    let reply = match &command {
+                        AdminCommand::GetConfig { key } => {
+                            ws.call_with_timeout(&ConfigGet::new(key.clone()), 10_000)
+                                .await
+                        }
+                        AdminCommand::GetGatewayStats => {
+                            ws.call_with_timeout(&GatewayStatsRequest, 10_000).await
+                        }
+                        AdminCommand::GetFeedMappings => {
+                            ws.call_with_timeout(&FeedMappingsRequest, 10_000).await
+                        }
+                        _ => return,
+                    };
+                    if !current() {
+                        return;
+                    }
+                    let events = reply
+                        .map(|f| crate::wire::frame_to_admin_events(&f))
+                        .unwrap_or_else(|| {
+                            vec![AdminEvent::Failed("The read did not finish.".into())]
+                        });
+                    app.fold_syndication_read(&command, &events);
+                });
+            }
+            return;
         }
-        self.dispatch_admin(AdminCommand::GetGatewayStats);
+        for command in commands {
+            let mut events = Vec::new();
+            self.focused()
+                .client
+                .update_value(|client| events = client.dispatch_admin(command.clone()));
+            self.fold_syndication_read(&command, &events);
+        }
+    }
+
+    fn fold_syndication_read(&self, command: &AdminCommand, events: &[AdminEvent]) {
+        self.syndication.update(|s| match command {
+            AdminCommand::GetFeedMappings => s.apply_mappings_reply(events),
+            AdminCommand::GetConfig { key } => s.apply_get_reply(key, events),
+            AdminCommand::GetGatewayStats => s.apply_live(None, events),
+            _ => {}
+        });
     }
 
     /// Fold one routed notice: `[radio]` bridge updates feed the radio

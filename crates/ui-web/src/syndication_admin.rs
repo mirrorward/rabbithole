@@ -2,8 +2,8 @@
 //! **Federation & feeds** section.
 //!
 //! Like [`crate::admin`] and [`crate::theme_editor`], this module holds no
-//! Leptos or `web_sys` types: the feed table's model and the defensive
-//! `syndication_feeds` parser are unit-tested on the host with `cargo test`.
+//! Leptos or `web_sys` types: typed feed snapshots and their display state
+//! are unit-tested on the host with `cargo test`.
 //!
 //! It used to be a second settings editor as well: a gateway matrix with its
 //! own toggles, a poll-interval box with its own Save, and a table of which
@@ -11,33 +11,22 @@
 //! settings model's now ([`crate::admin_settings`]), where the burrow itself
 //! says what is live, and what is left here only reads.
 //!
-//! ## What the wire cannot say
-//!
-//! `syndication_feeds` (the feed URL → board-slug map) is **TOML-only**: the
-//! server's config get/set has no arm for it, so a `ConfigGet` answers
-//! `NotFound`. The pane still *asks* (a future server slice may expose a
-//! read-only serialization) and folds the outcome totally: a value parses
-//! into read-only [`FeedRow`]s via [`parse_feeds_value`]; a failure lands as
-//! [`FeedsStatus::Unavailable`] and the UI shows the honest "edit
-//! `burrow.toml`" hint. Either way feeds are never editable here.
-//!
-//! ## Feed monitor
-//!
-//! Live counters ride [`AdminCommand::GetGatewayStats`] →
-//! [`AdminEvent::GatewayStatsLoaded`] (ADMIN 45/46). The panel asks on load
-//! and folds last-poll / status / seen / posted / dupes per feed plus the
-//! per-gateway activity rows. Configured state (enabled + poll interval)
-//! remains the fallback when a snapshot has not arrived.
+//! Configured mappings and their exact-key-joined poll results ride ADMIN65/66.
+//! URLs are display-only and redacted server-side; opaque row IDs keep feeds
+//! with identical safe URLs distinct. Mutations remain TOML-only plus restart.
+//! Older servers get an explicit unavailable state, never speculative parsing
+//! of a raw configuration map. Gateway activity retains ADMIN45/46.
 
-use rabbithole_proto::admin::{FeedStat, GatewayStat, GatewayStatsReply};
+use rabbithole_proto::admin::{
+    FeedMapping, FeedPollStats, FeedStat, GatewayStat, GatewayStatsReply,
+};
 
 use crate::admin::ConfigEntry;
 use crate::wire::{AdminCommand, AdminEvent};
 
-/// Config key: master switch for the feed-poll task (restart-required — the
-/// poll task starts at boot).
+/// Config key: master switch for the feed-poll task.
 pub const KEY_ENABLED: &str = "syndication_enabled";
-/// Config key: base seconds between feed polls (restart-required).
+/// Config key: base seconds between feed polls, used at the next reschedule.
 pub const KEY_POLL_SECS: &str = "syndication_poll_secs";
 /// Config key: the feed URL → board-slug map. TOML-only on the server (no
 /// `ctl config` arm); see the module docs.
@@ -56,12 +45,11 @@ pub const POLL_FLOOR_SECS: i64 = 300;
 /// out than this (mirrors `PollConfig::default`).
 pub const POLL_CEILING_SECS: i64 = 86_400;
 
-/// Every config key the panel loads on entry, `syndication_feeds` included
-/// (see the module docs for why asking is still the right move).
-pub const LOAD_KEYS: &[&str] = &[KEY_ENABLED, KEY_POLL_SECS, KEY_FEEDS];
+/// Ordinary poller settings read alongside the dedicated mapping snapshot.
+pub const LOAD_KEYS: &[&str] = &[KEY_ENABLED, KEY_POLL_SECS];
 
-/// One configured feed: URL → destination board slug. Read-only in the panel
-/// (the map itself is TOML-only server-side).
+/// A legacy table-parser result. Live monitoring uses typed FeedMapping rows
+/// and does not request or display raw TOML values.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FeedRow {
     /// The feed URL (the map key in `burrow.toml`).
@@ -76,11 +64,14 @@ pub enum FeedsStatus {
     /// No reply folded yet.
     #[default]
     NotLoaded,
-    /// The server refused the key — the real server today: feeds are
-    /// TOML-only, edited in `burrow.toml` and applied by restart.
+    /// The server does not support the dedicated read API.
     Unavailable,
-    /// A value arrived and parsed (possibly to zero rows). Still read-only.
-    Listed(Vec<FeedRow>),
+    /// A typed, server-joined snapshot arrived (possibly empty).
+    Listed(Vec<FeedMapping>),
+    /// This account was refused, distinct from an older server.
+    Forbidden,
+    /// A failed or timed-out read; no stale rows remain.
+    Failed,
 }
 
 /// The Syndication & Gateways panel model. `Default` is the empty, unloaded
@@ -109,20 +100,18 @@ impl SynAdminState {
             })
             .collect();
         cmds.push(AdminCommand::GetGatewayStats);
+        cmds.push(AdminCommand::GetFeedMappings);
         cmds
     }
 
-    /// Fold the reply events of a `GetConfig` for `key`. Total: unknown or
-    /// out-of-family events are ignored; a failure for [`KEY_FEEDS`] is the
-    /// *expected* real-server outcome and marks the map
-    /// [`FeedsStatus::Unavailable`] rather than raising an error.
+    /// Fold ordinary poller config reads; raw mapping values are ignored.
+    /// The legacy KEY_FEEDS failure is retained for older mock callers.
     pub fn apply_get_reply(&mut self, key: &str, events: &[AdminEvent]) {
         for event in events {
             match event {
                 AdminEvent::ConfigLoaded { key: k, value } => {
-                    self.upsert_config(k, value);
-                    if k == KEY_FEEDS {
-                        self.feeds = FeedsStatus::Listed(parse_feeds_value(value));
+                    if k != KEY_FEEDS {
+                        self.upsert_config(k, value);
                     }
                 }
                 AdminEvent::Failed(detail) => {
@@ -136,6 +125,28 @@ impl SynAdminState {
                     self.stats = Some(reply.clone());
                 }
                 // Acks and other admin replies carry nothing for a get.
+                _ => {}
+            }
+        }
+    }
+
+    /// Fold only the reply to the dedicated mapping request. Refusals clear
+    /// rows instead of retaining a previous account's configuration.
+    pub fn apply_mappings_reply(&mut self, events: &[AdminEvent]) {
+        for event in events {
+            match event {
+                AdminEvent::FeedMappingsLoaded(reply) => {
+                    self.feeds = FeedsStatus::Listed(reply.feeds.clone())
+                }
+                AdminEvent::Failed(detail) => {
+                    self.feeds = if detail.contains("Unsupported") {
+                        FeedsStatus::Unavailable
+                    } else if detail.contains("Forbidden") {
+                        FeedsStatus::Forbidden
+                    } else {
+                        FeedsStatus::Failed
+                    }
+                }
                 _ => {}
             }
         }
@@ -194,7 +205,7 @@ impl SynAdminState {
     }
 
     /// The feed rows for the monitor, when listed.
-    pub fn feed_rows(&self) -> Vec<FeedRow> {
+    pub fn feed_rows(&self) -> Vec<FeedMapping> {
         match &self.feeds {
             FeedsStatus::Listed(rows) => rows.clone(),
             _ => Vec::new(),
@@ -213,7 +224,8 @@ impl SynAdminState {
         }
     }
 
-    /// Live stats for `url`, if the latest snapshot mentioned it.
+    /// Legacy snapshot lookup; the configured-feed table never joins on
+    /// these display URLs, which can collide after redaction.
     pub fn feed_stat(&self, url: &str) -> Option<&FeedStat> {
         self.stats.as_ref()?.feeds.iter().find(|f| f.url == url)
     }
@@ -261,6 +273,18 @@ pub fn feed_stat_line(stat: &FeedStat) -> String {
         "{status} · {} seen · {} posted · {} dupes",
         stat.items_seen, stat.items_posted, stat.dupes_dropped
     )
+}
+
+/// Format server-joined counters in the configured-feed table.
+pub fn mapped_stat_line(stat: &FeedPollStats) -> String {
+    feed_stat_line(&FeedStat {
+        url: String::new(),
+        last_poll_ms: stat.last_poll_ms,
+        last_status: stat.last_status.clone(),
+        items_seen: stat.items_seen,
+        items_posted: stat.items_posted,
+        dupes_dropped: stat.dupes_dropped,
+    })
 }
 
 /// Parse a server bool serialization, accepting the same spellings the
@@ -356,148 +380,90 @@ mod tests {
         }]
     }
 
-    /// A state with the full gateway/syndication key set loaded, mirroring
-    /// server defaults except where noted.
-    fn loaded_state() -> SynAdminState {
-        let mut s = SynAdminState::default();
-        for (key, value) in [
-            (KEY_ENABLED, "true"),
-            (KEY_POLL_SECS, "1800"),
-            ("nntp_enabled", "true"),
-            ("nntp_addr", "0.0.0.0:1119"),
-            ("nntp_tls_enabled", "false"),
-            ("nntp_tls_addr", "0.0.0.0:563"),
-            ("nntp_feed_enabled", "false"),
-            ("nntp_feed_addr", "0.0.0.0:1120"),
-            ("nntp_feed_tls_enabled", "false"),
-            ("nntp_feed_tls_addr", "0.0.0.0:1563"),
-            ("ftn_enabled", "true"),
-            ("ftn_addr", "0.0.0.0:24554"),
-            ("qwk_enabled", "true"),
-        ] {
-            s.apply_get_reply(key, &loaded(key, value));
-        }
-        s.apply_get_reply(
-            KEY_FEEDS,
-            &loaded(KEY_FEEDS, "\"https://a.example/feed.xml\" = \"general\"\n"),
-        );
-        s
+    #[test]
+    fn load_commands_read_typed_mappings_not_raw_config() {
+        let commands = SynAdminState::load_commands();
+        assert_eq!(commands.len(), LOAD_KEYS.len() + 2);
+        assert!(commands.contains(&AdminCommand::GetFeedMappings));
+        assert!(!LOAD_KEYS.contains(&KEY_FEEDS));
     }
 
     #[test]
-    fn load_commands_cover_every_panel_key() {
-        let cmds = SynAdminState::load_commands();
-        assert_eq!(cmds.len(), LOAD_KEYS.len() + 1);
-        for (cmd, key) in cmds.iter().zip(LOAD_KEYS) {
-            assert_eq!(
-                cmd,
-                &AdminCommand::GetConfig {
-                    key: (*key).to_string()
-                }
-            );
-        }
-        assert_eq!(cmds.last(), Some(&AdminCommand::GetGatewayStats));
-        // The feeds key is asked for even though today's server refuses it.
-        assert!(LOAD_KEYS.contains(&KEY_FEEDS));
-    }
-
-    #[test]
-    fn get_replies_upsert_by_key() {
-        let mut s = SynAdminState::default();
-        s.apply_get_reply(KEY_ENABLED, &loaded(KEY_ENABLED, "false"));
-        assert_eq!(s.enabled(), Some(false));
-        s.apply_get_reply(KEY_POLL_SECS, &loaded(KEY_POLL_SECS, "1800"));
-        assert_eq!(s.poll_secs(), Some(1800));
-        // A re-read updates in place (no duplicate entries).
-        s.apply_get_reply(KEY_ENABLED, &loaded(KEY_ENABLED, "true"));
-        assert_eq!(s.enabled(), Some(true));
-        assert_eq!(s.config.len(), 2);
-    }
-
-    #[test]
-    fn feeds_value_lists_rows_and_failure_marks_toml_only() {
-        let mut s = SynAdminState::default();
-        assert_eq!(s.feeds, FeedsStatus::NotLoaded);
-        // The real server today: ConfigGet(syndication_feeds) → NotFound.
-        s.apply_get_reply(
-            KEY_FEEDS,
-            &[AdminEvent::Failed("server error: NotFound".into())],
-        );
-        assert_eq!(s.feeds, FeedsStatus::Unavailable);
-        // Expected — no scary status line for the honest TOML-only outcome.
-        assert!(s.status.is_empty());
-        // A value (the mock, or a future read-only exposure) parses to rows.
-        s.apply_get_reply(
-            KEY_FEEDS,
-            &loaded(
-                KEY_FEEDS,
-                "\"https://b.example/rss\" = \"tech\"\n\"https://a.example/atom\" = \"general\"\n",
-            ),
-        );
+    fn mappings_keep_duplicate_display_urls_and_their_own_counters() {
+        use rabbithole_proto::admin::FeedMappingsReply;
+        let mut state = SynAdminState::default();
+        let mut a = FeedMapping {
+            id: [1; 32],
+            url: "https://example.test/feed".into(),
+            board: "a".into(),
+            ..Default::default()
+        };
+        a.stats.items_posted = 3;
+        let mut b = a.clone();
+        b.id = [2; 32];
+        b.board = "b".into();
+        b.stats.items_posted = 7;
+        state.apply_mappings_reply(&[AdminEvent::FeedMappingsLoaded(FeedMappingsReply {
+            generated_at_ms: 1,
+            feeds: vec![a, b],
+        })]);
+        let rows = state.feed_rows();
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].id, rows[1].id);
         assert_eq!(
-            s.feed_rows(),
-            vec![
-                FeedRow {
-                    url: "https://a.example/atom".into(),
-                    board: "general".into()
-                },
-                FeedRow {
-                    url: "https://b.example/rss".into(),
-                    board: "tech".into()
-                },
-            ]
+            (rows[0].stats.items_posted, rows[1].stats.items_posted),
+            (3, 7)
         );
+        for (reason, expected) in [
+            ("Unsupported", FeedsStatus::Unavailable),
+            ("Forbidden", FeedsStatus::Forbidden),
+            ("Connection lost", FeedsStatus::Failed),
+        ] {
+            state.apply_mappings_reply(&[AdminEvent::Failed(reason.into())]);
+            assert_eq!(state.feeds, expected);
+            assert!(state.feed_rows().is_empty());
+        }
     }
 
     #[test]
-    fn get_failure_on_ordinary_keys_surfaces_on_status() {
+    fn gateway_stats_cannot_replace_joined_mapping_results() {
         let mut s = SynAdminState::default();
-        s.apply_get_reply("nntp_enabled", &[AdminEvent::Failed("Forbidden".into())]);
-        assert!(s.status.contains("nntp_enabled"));
-        assert!(s.status.contains("Forbidden"));
+        s.apply_live(
+            None,
+            &[AdminEvent::GatewayStatsLoaded(GatewayStatsReply {
+                feeds: vec![FeedStat {
+                    url: "https://same.test/feed".into(),
+                    items_posted: 100,
+                    ..Default::default()
+                }],
+                gateways: vec![GatewayStat {
+                    name: "nntp".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })],
+        );
+        assert_eq!(s.feeds, FeedsStatus::NotLoaded);
+        assert_eq!(s.gateway_stats().len(), 1);
+        assert_eq!(mapped_stat_line(&FeedPollStats::default()), "never polled");
+        assert_eq!(last_poll_label(0, 1000), "never");
+        assert_eq!(last_poll_label(1000, 61000), "1m ago");
     }
 
     #[test]
-    fn feed_state_line_reads_from_config_only() {
+    fn config_reads_only_describe_the_poller() {
         let mut s = SynAdminState::default();
-        assert_eq!(s.feed_state_line(), "poller state unknown");
         s.apply_get_reply(KEY_ENABLED, &loaded(KEY_ENABLED, "false"));
         assert_eq!(s.feed_state_line(), "poller disabled");
         s.apply_get_reply(KEY_ENABLED, &loaded(KEY_ENABLED, "true"));
-        assert_eq!(s.feed_state_line(), "polling (interval unknown)");
         s.apply_get_reply(KEY_POLL_SECS, &loaded(KEY_POLL_SECS, "1800"));
         assert_eq!(s.feed_state_line(), "polling every 1800 s");
-    }
-
-    #[test]
-    fn live_stats_fold_onto_the_matching_feed() {
-        let mut s = loaded_state();
-        let reply = GatewayStatsReply {
-            generated_at_ms: 1_700_000_000_000,
-            feeds: vec![FeedStat {
-                url: "https://a.example/feed.xml".into(),
-                last_poll_ms: 1_700_000_000_000,
-                last_status: "ok".into(),
-                items_seen: 12,
-                items_posted: 9,
-                dupes_dropped: 3,
-            }],
-            gateways: vec![GatewayStat {
-                name: "nntp".into(),
-                enabled: true,
-                counters: vec![("posts".into(), 4), ("sessions".into(), 7)],
-            }],
-        };
-        s.apply_live(None, &[AdminEvent::GatewayStatsLoaded(reply)]);
-        let stat = s.feed_stat("https://a.example/feed.xml").expect("row");
-        assert_eq!(stat.items_posted, 9);
-        assert_eq!(feed_stat_line(stat), "ok · 12 seen · 9 posted · 3 dupes");
-        assert_eq!(s.gateway_stats().len(), 1);
-        assert_eq!(s.gateway_stats()[0].name, "nntp");
-        assert_eq!(last_poll_label(0, 1_700_000_000_000), "never");
-        assert_eq!(last_poll_label(1_783_780_507_000, 0), "14:35");
-        assert_eq!(last_poll_label(1_000, 61_000), "1m ago");
-        assert_eq!(feed_stat_line(&FeedStat::default()), "never polled");
+        s.apply_get_reply(
+            KEY_FEEDS,
+            &loaded(KEY_FEEDS, "https://user:secret@example.test/feed"),
+        );
+        assert!(s.value(KEY_FEEDS).is_none());
+        assert!(s.feed_rows().is_empty());
     }
 
     #[test]

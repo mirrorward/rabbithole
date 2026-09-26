@@ -2009,6 +2009,30 @@ impl MockClient {
                 ))]
             }
             AdminCommand::GetGatewayStats => admin_events(&Self::seeded_gateway_stats()),
+            AdminCommand::GetFeedMappings => {
+                use rabbithole_proto::admin::{FeedMapping, FeedMappingsReply, FeedPollStats};
+                let feeds = Self::seeded_gateway_stats()
+                    .feeds
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, s)| FeedMapping {
+                        id: [i as u8; 32],
+                        url: s.url,
+                        board: if i == 0 { "general" } else { "tech" }.into(),
+                        stats: FeedPollStats {
+                            last_poll_ms: s.last_poll_ms,
+                            last_status: s.last_status,
+                            items_seen: s.items_seen,
+                            items_posted: s.items_posted,
+                            dupes_dropped: s.dupes_dropped,
+                        },
+                    })
+                    .collect();
+                admin_events(&FeedMappingsReply {
+                    generated_at_ms: 1_783_780_507_000,
+                    feeds,
+                })
+            }
             AdminCommand::SetThemeBundle { bundle } => {
                 let name = postcard::from_bytes::<ThemeBundle>(&bundle)
                     .map(|b| b.name)
@@ -2830,6 +2854,8 @@ mod tests {
         }
         let stats = c.dispatch_admin(AdminCommand::GetGatewayStats);
         s.apply_live(None, &stats);
+        let mappings = c.dispatch_admin(AdminCommand::GetFeedMappings);
+        s.apply_mappings_reply(&mappings);
         assert_eq!(s.enabled(), Some(true));
         assert_eq!(s.poll_secs(), Some(1800));
         assert_eq!(
@@ -2837,8 +2863,7 @@ mod tests {
                 .map(|f| f.items_posted),
             Some(11)
         );
-        // The seeded TOML table body parses into read-only feed rows whose
-        // destinations are real seeded boards.
+        // Typed mappings have real seeded board destinations.
         let rows = s.feed_rows();
         assert_eq!(rows.len(), 2);
         assert!(matches!(&s.feeds, FeedsStatus::Listed(_)));

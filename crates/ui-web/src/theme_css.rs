@@ -1118,6 +1118,8 @@ html.rh-fullscreen .rh-app.native .rh-connect .rh-glass-head{padding-top:var(--r
 .rh-send-list{list-style:none;margin:0;padding:.25rem}\
 .rh-send-row{appearance:none;display:flex;align-items:center;gap:.5rem;width:100%;border:0;background:none;color:var(--rh-text);font:inherit;font-size:var(--rh-font-sm);text-align:left;padding:.4rem .5rem;border-radius:var(--rh-radius);cursor:pointer}\
 .rh-send-row:hover,.rh-send-row:focus-visible{background:color-mix(in srgb,var(--rh-accent) 10%,transparent)}\
+.rh-feed-table-wrap{max-width:100%;overflow-x:auto}\
+.rh-feed-table .rh-feed-url{overflow-wrap:anywhere;min-width:12rem;max-width:30rem}\
 .rh-send-note{margin-left:auto;color:var(--rh-muted);font-size:var(--rh-font-xs)}\
 .rh-send .rh-send-empty{padding:.6rem .5rem;color:var(--rh-muted);font-size:var(--rh-font-sm);list-style:none}\
 .rh-send .rh-send-problem{margin:var(--rh-space-3) 0 0;color:var(--rh-error);font-size:var(--rh-font-sm)}\

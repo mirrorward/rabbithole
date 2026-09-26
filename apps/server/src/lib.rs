@@ -11,6 +11,7 @@ pub mod doors;
 pub mod fed_catalog;
 pub mod fed_flood;
 pub mod federation;
+pub mod feed_display;
 pub mod ftn;
 pub mod handlers10;
 pub mod handlers11;

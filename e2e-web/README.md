@@ -54,6 +54,7 @@ real service workers and gives each fixture its own writable copy of the app. No
 | `npm run test:chat` | Recent chat history for a second client, room isolation, and reconnection. |
 | `npm run test:keynav` | Focus recovery in Members after filtering, no focus stealing, route disposal/remount, and Boards Tab order with arrow, Enter, pointer and modified-click navigation. |
 | `npx playwright test tests/send.spec.ts` | Per-send source choices, real two-burrow upload/pull/progress, desktop/mobile layout, and safe fallback with an older destination. |
+| `npx playwright test tests/feed-mappings.spec.ts` | Configured but unpolled feeds, redacted URL collisions with distinct real poll counts, TOML restart/reconnect updates, older-server fallback, and stale burrow/account replies. |
 | `npm run test:radio` | Radio playback refusal, retry, stream errors, stale outcomes, optional chime ducking, and two-listener request/vote convergence with station isolation, reconnect, disappearing stations, and older peers. |
 | `npm run test:pwa` | Real service-worker updates, explicit reload, cached offline navigation, connection recovery, and native exclusion. |
 | `npm run test:keepalive` | Initial app load and immediate reload with every production connection/request rate limit unchanged. |
@@ -76,6 +77,17 @@ being absent on an older destination; only the swarm-permitted choice retries
 legacy FILE35. Browser fixtures have no seeders, so actual swarm use and both
 operators’ policy gates are covered by native S2S integration tests. The progress
 label records the chosen permission, not a claim that peers supplied bytes.
+
+Feed monitor tests serve RSS from loopback HTTP endpoints and configure real
+boards and URL mappings through the fixture's TOML file while the burrow is
+stopped. Two query-bearing URLs redact to the same display URL but produce
+different real post counts. A credential-bearing URL is displayed safely and
+rejected by the fetcher. Disabled polling, restart-only mapping changes, and
+counter resets are exercised without advancing the production scheduler clock.
+The older API refusal uses WebSocket interception. Late-reply tests hold a real
+reply at the browser's native message-event boundary, then release it on the
+same socket after focus changes or replay its bytes on the new account socket.
+Authentication, configured rows and poll outcomes come from the real server.
 
 Radio queue tests seed isolated library metadata with audio delivery disabled,
 then hold the mounts with real local source-ingest sessions. The server runtime

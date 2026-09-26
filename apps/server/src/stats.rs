@@ -87,6 +87,22 @@ impl GatewayStats {
         self.feeds.lock().entry(url.to_string()).or_default();
     }
 
+    /// Join by the exact configured URL, before display redaction. Missing
+    /// runtime rows are normal when the poller has never started.
+    pub fn feed_stats(&self, url: &str) -> padm::FeedPollStats {
+        let feeds = self.feeds.lock();
+        let Some(s) = feeds.get(url) else {
+            return Default::default();
+        };
+        padm::FeedPollStats {
+            last_poll_ms: s.last_poll_ms,
+            last_status: s.last_status.clone(),
+            items_seen: s.items_seen,
+            items_posted: s.items_posted,
+            dupes_dropped: s.dupes_dropped,
+        }
+    }
+
     /// Build the wire snapshot. `enabled_gateways` names the surfaces that
     /// are on right now, so a gateway with zero counters still shows as
     /// enabled (and a disabled one with residual counters shows as off).
@@ -101,7 +117,7 @@ impl GatewayStats {
         let feed_rows = feeds
             .iter()
             .map(|(url, s)| padm::FeedStat {
-                url: url.clone(),
+                url: crate::feed_display::url(url),
                 last_poll_ms: s.last_poll_ms,
                 last_status: s.last_status.clone(),
                 items_seen: s.items_seen,

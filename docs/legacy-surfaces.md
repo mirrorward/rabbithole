@@ -167,6 +167,16 @@ disables that class.
   [HTTP content coding](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.4),
   [HTTP body framing](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3),
   and the [gzip member format](https://www.rfc-editor.org/rfc/rfc1952.html).
+  The Admin view's **Mapped feeds** monitor reads configured destinations and
+  per-feed results through the CONFIG_ADMIN-gated `FeedMappingsRequest` / reply
+  (ADMIN 65/66), including feeds that have never polled or are disabled.
+  Mapping edits still require changing `[syndication_feeds]` in `burrow.toml`
+  and restarting. Displayed URLs omit userinfo, queries and fragments; distinct
+  configured URLs keep separate rows and counters even when their safe labels
+  match. The existing ADMIN 45/46 and `ctl gateway-stats` snapshots also redact
+  feed URLs, and routine polling logs omit embedded URL secrets. URLs containing
+  userinfo are refused by the fetcher. Counters reset on restart; older servers
+  show an unavailable hint in the monitor instead of a speculative empty list.
 
 Not legacy, but adjacent: the S2S federation listener (`federation_enabled`,
 `federation_addr`, default port 4655, off by default) is documented in

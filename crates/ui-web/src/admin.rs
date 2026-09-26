@@ -174,7 +174,7 @@ impl AdminState {
             AdminEvent::Ack(msg) => self.status = msg.clone(),
             AdminEvent::Failed(detail) => self.status = format!("Error: {detail}"),
             // Live feed/gateway counters belong to the syndication panel.
-            AdminEvent::GatewayStatsLoaded(_) => {}
+            AdminEvent::GatewayStatsLoaded(_) | AdminEvent::FeedMappingsLoaded(_) => {}
             AdminEvent::ThemeBundleApplied(info) => {
                 self.status = if info.present {
                     format!("Published theme {}.", info.name)

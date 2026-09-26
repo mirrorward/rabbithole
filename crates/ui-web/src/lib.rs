@@ -61,10 +61,9 @@
 //!   [`PackTokens`](packs::PackTokens) with a validated action reducer, JSON
 //!   import/export, and a WCAG contrast checker that warns (never blocks).
 //! - [`syndication_admin`] is the DOM-free Syndication & Gateways panel model
-//!   ([`SynAdminState`](syndication_admin::SynAdminState)): gateway-matrix
-//!   derivation, the poll-interval editor with validation, and a total
-//!   `syndication_feeds` parser — all riding the existing ADMIN config
-//!   vocabulary in [`wire`].
+//!   ([`SynAdminState`](syndication_admin::SynAdminState)): server-joined feed
+//!   mappings and gateway activity, using the typed ADMIN vocabulary in
+//!   [`wire`]. Poller settings live in [`admin_settings`].
 //! - [`a11y`] is the accessibility layer: the shared landmark/heading id
 //!   vocabulary, label/input id pairing helpers, the wasm-gated
 //!   route-change focus helpers, and the audit checklist (what is

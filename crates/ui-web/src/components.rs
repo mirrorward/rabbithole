@@ -21,7 +21,7 @@ use rabbithole_core::theme::{Mode, ThemePack};
 use crate::a11y;
 use crate::app::AppState;
 use crate::files::{human_size, node_kind_label, TransferStatus, KIND_FOLDER};
-use crate::syndication_admin::{feed_stat_line, last_poll_label, FeedsStatus};
+use crate::syndication_admin::{last_poll_label, mapped_stat_line, FeedsStatus};
 use crate::theme_css::pack_label;
 use crate::theme_editor::{contrast_warnings, EditorAction, EditorState};
 use crate::wire::AdminCommand;
@@ -6178,18 +6178,27 @@ pub(crate) fn SyndicationPanel() -> impl IntoView {
         <h3 class="rh-adm-group-h">"Mapped feeds"</h3>
         <Show when=feeds_unavailable fallback=|| ()>
             <p class="rh-hint">
-                "This server does not expose syndication_feeds over the admin \
-                 wire \u{2014} the map is TOML-only. Edit the \
-                 [syndication_feeds] table in burrow.toml (feed URL = board \
-                 slug) and restart."
+                "This burrow cannot show its configured feed mappings here. Its operator can \
+                 edit [syndication_feeds] in burrow.toml and restart to apply changes."
             </p>
         </Show>
+        <Show when=move || syn.with(|s| s.feeds == FeedsStatus::NotLoaded) fallback=|| ()>
+            <p class="rh-hint">"Loading configured feeds…"</p>
+        </Show>
+        <Show when=move || syn.with(|s| s.feeds == FeedsStatus::Forbidden) fallback=|| ()>
+            <p class="rh-hint" role="status">"Your account cannot view feed mappings on this burrow."</p>
+        </Show>
+        <Show when=move || syn.with(|s| s.feeds == FeedsStatus::Failed) fallback=|| ()>
+            <p class="rh-hint" role="status">"Could not load the feed mappings. Try refreshing the monitor."</p>
+        </Show>
+        <button class="rh-btn ghost small" type="button" on:click=move |_| app.load_syndication()>"Refresh feed monitor"</button>
         <Show when=feeds_loaded fallback=|| ()>
             <Show
                 when=move || !feed_rows().is_empty()
                 fallback=|| view! { <p class="rh-empty">"(no feeds configured)"</p> }
             >
-                <table class="rh-table">
+                <div class="rh-feed-table-wrap">
+                <table class="rh-table rh-feed-table" aria-label="Mapped feeds">
                     <thead>
                         <tr>
                             <th scope="col">"Feed URL"</th>
@@ -6201,29 +6210,13 @@ pub(crate) fn SyndicationPanel() -> impl IntoView {
                     <tbody>
                         <For
                             each=feed_rows
-                            key=|f| f.url.clone()
+                            key=|f| (f.id, f.url.clone(), f.board.clone(), f.stats.last_poll_ms, f.stats.last_status.clone(), f.stats.items_seen, f.stats.items_posted, f.stats.dupes_dropped)
                             children=move |f| {
-                                let url = f.url.clone();
-                                let last = {
-                                    let url = url.clone();
-                                    move || syn.with(|s| match s.feed_stat(&url) {
-                                        Some(stat) => last_poll_label(
-                                            stat.last_poll_ms,
-                                            crate::clock::now_ms(),
-                                        ),
-                                        None => "\u{2014}".to_string(),
-                                    })
-                                };
-                                let state = {
-                                    let url = url.clone();
-                                    move || syn.with(|s| match s.feed_stat(&url) {
-                                        Some(stat) => feed_stat_line(stat),
-                                        None => s.feed_state_line(),
-                                    })
-                                };
+                                let last = last_poll_label(f.stats.last_poll_ms, crate::clock::now_ms());
+                                let state = mapped_stat_line(&f.stats);
                                 view! {
                                     <tr>
-                                        <td class="rh-member-name">{f.url}</td>
+                                        <td class="rh-feed-url">{f.url}</td>
                                         <td class="rh-member-handle">{f.board}</td>
                                         <td class="rh-file-meta">{last}</td>
                                         <td class="rh-file-meta">{state}</td>
@@ -6233,11 +6226,12 @@ pub(crate) fn SyndicationPanel() -> impl IntoView {
                         />
                     </tbody>
                 </table>
+                </div>
             </Show>
             <p class="rh-hint">
                 "Read-only here: the mapping itself is TOML-only \u{2014} edit \
                  the [syndication_feeds] table in burrow.toml and restart to \
-                 change it."
+                 change it. URLs omit credentials, queries and fragments. Poll counts reset on restart."
             </p>
         </Show>
 

@@ -34,12 +34,12 @@ use crate::admin::{
     BackupDelete, BackupList, BackupListRequest, BackupMade, BackupVerified, BackupVerify,
     Broadcast, ClassList, ClassListRequest, ClassSet, ConfigApplied, ConfigDescribeRequest,
     ConfigDescription, ConfigGet, ConfigSet, ConfigValue, DenyHashAdd, DenyHashList,
-    DenyHashListRequest, DenyHashRemove, GatewayStatsReply, GatewayStatsRequest, InviteCode,
-    InviteCreate, InviteList, InviteListRequest, InviteRevoke, Kick, OriginList, OriginListRequest,
-    OriginPin, PeerApprove, PeerList, PeerListRequest, PeerRevoke, QuarantineClear, QuarantineList,
-    QuarantineListRequest, QuarantineSet, ReportAck, ReportCreate, ReportList, ReportListRequest,
-    ReportResolve, SurfaceStatus, SurfaceStatusRequest, ThemeBundleClear, ThemeBundleGet,
-    ThemeBundleInfo, ThemeBundleSet,
+    DenyHashListRequest, DenyHashRemove, FeedMappingsReply, FeedMappingsRequest, GatewayStatsReply,
+    GatewayStatsRequest, InviteCode, InviteCreate, InviteList, InviteListRequest, InviteRevoke,
+    Kick, OriginList, OriginListRequest, OriginPin, PeerApprove, PeerList, PeerListRequest,
+    PeerRevoke, QuarantineClear, QuarantineList, QuarantineListRequest, QuarantineSet, ReportAck,
+    ReportCreate, ReportList, ReportListRequest, ReportResolve, SurfaceStatus,
+    SurfaceStatusRequest, ThemeBundleClear, ThemeBundleGet, ThemeBundleInfo, ThemeBundleSet,
 };
 use crate::blob::{BlobData, BlobGet, BlobPut, BlobRef};
 use crate::board::{
@@ -198,7 +198,7 @@ wire_registry! {
     QuarantineListRequest, QuarantineList, AccountDelete, AccountFindRequest,
     ReportCreate, ReportAck, ReportListRequest, ReportList, ReportResolve, QuarantineSet,
     QuarantineClear, DenyHashAdd, DenyHashRemove, DenyHashListRequest, DenyHashList, ThemeBundleSet,
-    ThemeBundleClear, ThemeBundleGet, ThemeBundleInfo, GatewayStatsRequest, GatewayStatsReply,
+    ThemeBundleClear, ThemeBundleGet, ThemeBundleInfo, GatewayStatsRequest, GatewayStatsReply, FeedMappingsRequest, FeedMappingsReply,
 
     // Family 8 (FEDERATION) is reserved: its S2S traffic rides the
     // FEDERATION frame family but is not part of the client message registry.
@@ -219,7 +219,7 @@ wire_registry! {
 /// it, or removing/registering one without updating this count, fails the
 /// test on purpose — forcing a conscious "did you mean to change the wire?"
 /// acknowledgement rather than a silent drift.
-pub const EXPECTED: usize = 251;
+pub const EXPECTED: usize = 253;
 
 /// Human-readable name for a family number, for the golden snapshot.
 fn family_label(family: Family) -> &'static str {
