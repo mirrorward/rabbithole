@@ -23,14 +23,14 @@
 //! message is capped — digests to [`MAX_DIGEST_ENTRIES`], wants to
 //! [`MAX_WANT_ENTRIES`], batches to [`MAX_GOSSIP_DATAGRAM`] encoded bytes.
 //! Gossiped entries carry the registry's normal TTL: they expire unless
-//! re-gossiped. Convergence for registries larger than a digest is
-//! best-effort (the digest covers a name-ordered prefix); good enough for a
-//! retro directory, revisit with sampling if it ever matters.
+//! re-gossiped. [`GossipCursor`] rotates advertisements and push replies in
+//! address order, so a registry larger than one digest or batch is covered
+//! over repeated rounds. Pull requests compare against the full local snapshot.
 //!
 //! We chose **UDP** (sharing nothing with the HTRK sockets; default port
 //! 4656) in the classic tracker spirit: every message fits one datagram,
-//! loss is harmless (the next tick repeats), and no connection state can be
-//! exhausted. The same socket accepts a fourth message, [`Announce`]: a
+//! lost pages recur on later rotations, and the listener bounds per-peer
+//! rotation bookkeeping. The same socket accepts a fourth message, [`Announce`]: a
 //! server submitting its own signed descriptor directly — the signed
 //! counterpart of the HTRK heartbeat.
 //!
@@ -182,21 +182,90 @@ impl GossipMessage {
     }
 }
 
-/// Builds the digest for a registry snapshot: signed entries only, capped at
-/// [`MAX_DIGEST_ENTRIES`] (the snapshot's stable name order picks the prefix).
+/// An address bookmark for bounded, repeating coverage of a live registry.
+/// Names and generations may change without restarting a traversal; removed
+/// addresses need not remain in the snapshot. No wire-format cursor is needed.
+#[derive(Debug, Default)]
+pub struct GossipCursor {
+    after: Option<SocketAddr>,
+}
+
+impl GossipCursor {
+    fn ordered<'a>(&self, entries: &'a [ServerEntry]) -> Vec<&'a ServerEntry> {
+        let mut signed: Vec<_> = entries.iter().filter(|e| e.signed.is_some()).collect();
+        signed.sort_unstable_by_key(|e| e.addr);
+        let start = self.after.map_or(0, |after| {
+            signed.iter().position(|e| e.addr > after).unwrap_or(0)
+        });
+        signed.rotate_left(start);
+        signed
+    }
+
+    /// The next signed page, bounded by both count and encoded datagram size.
+    pub fn digest(&mut self, entries: &[ServerEntry]) -> GossipDigest {
+        let mut digest = GossipDigest::default();
+        for entry in self.ordered(entries).into_iter().take(MAX_DIGEST_ENTRIES) {
+            digest.entries.push(DigestEntry {
+                addr: entry.addr,
+                server_key: entry.server_key().expect("signed entry"),
+                timestamp: entry.timestamp().expect("signed entry"),
+            });
+            if GossipMessage::Digest(digest.clone()).encode().len() > MAX_GOSSIP_DATAGRAM {
+                digest.entries.pop();
+                break;
+            }
+            self.after = Some(entry.addr);
+        }
+        digest
+    }
+
+    /// A rotating push reply to a peer's digest. Its partial advertisement
+    /// does not prove which other entries it already holds; duplicates are safe.
+    /// A descriptor that does not fit the remaining space goes first next time.
+    /// An entry too large even by itself is skipped, so it cannot block others.
+    pub fn push_batch(
+        &mut self,
+        entries: &[ServerEntry],
+        theirs: &GossipDigest,
+        peer: SocketAddr,
+        max_bytes: usize,
+    ) -> GossipBatch {
+        let held: HashMap<_, _> = theirs
+            .entries
+            .iter()
+            .map(|e| (e.addr, e.timestamp))
+            .collect();
+        let mut batch = GossipBatch::default();
+        for entry in self.ordered(entries).into_iter().take(MAX_WANT_ENTRIES) {
+            if entry.via != Some(peer)
+                && !held
+                    .get(&entry.addr)
+                    .is_some_and(|&ts| ts >= entry.timestamp().unwrap())
+            {
+                batch
+                    .descriptors
+                    .push(entry.signed.clone().expect("signed entry"));
+                if GossipMessage::Batch(batch.clone()).encode().len()
+                    > max_bytes.min(MAX_GOSSIP_DATAGRAM)
+                {
+                    batch.descriptors.pop();
+                    if !batch.is_empty() {
+                        // Do not advance past this entry: it gets the first
+                        // chance at a full datagram in the next exchange.
+                        break;
+                    }
+                }
+            }
+            self.after = Some(entry.addr);
+        }
+        batch
+    }
+}
+
+/// Builds the first signed page of a registry snapshot. Long-running callers
+/// should retain a [`GossipCursor`] to cover the remaining entries in later rounds.
 pub fn digest_of(entries: &[ServerEntry]) -> GossipDigest {
-    let entries = entries
-        .iter()
-        .filter_map(|e| {
-            Some(DigestEntry {
-                addr: e.addr,
-                server_key: e.server_key()?,
-                timestamp: e.timestamp()?,
-            })
-        })
-        .take(MAX_DIGEST_ENTRIES)
-        .collect();
-    GossipDigest { entries }
+    GossipCursor::default().digest(entries)
 }
 
 /// What `ours` should request from `theirs`: every slot they advertise that
@@ -204,8 +273,23 @@ pub fn digest_of(entries: &[ServerEntry]) -> GossipDigest {
 /// [`MAX_WANT_ENTRIES`]. (A key change at the same slot rides the timestamp:
 /// if theirs is newer we ask, and the registry's conflict policy decides.)
 pub fn diff(ours: &GossipDigest, theirs: &GossipDigest) -> Want {
-    let held: HashMap<SocketAddr, i64> =
-        ours.entries.iter().map(|e| (e.addr, e.timestamp)).collect();
+    wanted(ours.entries.iter().map(|e| (e.addr, e.timestamp)), theirs)
+}
+
+/// Pull missing/newer descriptors using the entire live local registry, not
+/// just the page currently being advertised. Otherwise each partial digest
+/// would repeatedly request already-held entries and crowd out missing ones.
+pub fn want_from(entries: &[ServerEntry], theirs: &GossipDigest) -> Want {
+    wanted(
+        entries
+            .iter()
+            .filter_map(|e| Some((e.addr, e.timestamp()?))),
+        theirs,
+    )
+}
+
+fn wanted(ours: impl Iterator<Item = (SocketAddr, i64)>, theirs: &GossipDigest) -> Want {
+    let held: HashMap<SocketAddr, i64> = ours.collect();
     let mut addrs = Vec::new();
     for entry in &theirs.entries {
         if addrs.len() >= MAX_WANT_ENTRIES {
@@ -213,7 +297,8 @@ pub fn diff(ours: &GossipDigest, theirs: &GossipDigest) -> Want {
         }
         match held.get(&entry.addr) {
             Some(&ts) if ts >= entry.timestamp => {}
-            _ => addrs.push(entry.addr),
+            _ if !addrs.contains(&entry.addr) => addrs.push(entry.addr),
+            _ => {}
         }
     }
     Want { addrs }
@@ -222,9 +307,9 @@ pub fn diff(ours: &GossipDigest, theirs: &GossipDigest) -> Want {
 /// Builds the batch answering `want` for `peer`, from a registry snapshot.
 ///
 /// Loop safety: entries learned *from* `peer` (their `via` marker names it)
-/// are never sent back. The batch stops growing once its encoded
-/// [`GossipMessage::Batch`] would exceed `max_bytes` — descriptors are
-/// size-limited at verification, so at least one always fits under
+/// are never sent back. Requests are handled in their advertised order, capped
+/// at [`MAX_WANT_ENTRIES`]. Entries that exceed the remaining encoded-byte budget
+/// are skipped without blocking later requests. The datagram is also capped at
 /// [`MAX_GOSSIP_DATAGRAM`].
 pub fn batch_for(
     entries: &[ServerEntry],
@@ -233,17 +318,25 @@ pub fn batch_for(
     max_bytes: usize,
 ) -> GossipBatch {
     let mut batch = GossipBatch::default();
-    for entry in entries {
+    let held: HashMap<_, _> = entries.iter().map(|e| (e.addr, e)).collect();
+    let mut seen = Vec::new();
+    for addr in want.addrs.iter().take(MAX_WANT_ENTRIES) {
+        if seen.contains(addr) {
+            continue;
+        }
+        seen.push(*addr);
+        let Some(entry) = held.get(addr) else {
+            continue;
+        };
         let Some(signed) = &entry.signed else {
             continue;
         };
-        if entry.via == Some(peer) || !want.addrs.contains(&entry.addr) {
+        if entry.via == Some(peer) {
             continue;
         }
         batch.descriptors.push(signed.clone());
-        if GossipMessage::Batch(batch.clone()).encode().len() > max_bytes {
+        if GossipMessage::Batch(batch.clone()).encode().len() > max_bytes.min(MAX_GOSSIP_DATAGRAM) {
             batch.descriptors.pop();
-            break;
         }
     }
     batch
@@ -335,11 +428,173 @@ mod tests {
         assert_eq!(digest.entries[0].server_key, sd.descriptor.server_key);
         assert_eq!(digest.entries[0].timestamp, 100);
 
-        // Over-full registries advertise a capped prefix.
+        // A single page remains capped even for an over-full registry.
         for seed in 2..(MAX_DIGEST_ENTRIES as u8 + 4) {
             entries.push(entry_of(&signed(seed, "S", 5500, 100), None));
         }
         assert_eq!(digest_of(&entries).entries.len(), MAX_DIGEST_ENTRIES);
+    }
+
+    #[test]
+    fn digest_rotation_covers_all_signed_addresses_despite_name_order_and_churn() {
+        let mut entries: Vec<_> = (1..=41)
+            .rev()
+            .map(|seed| {
+                entry_of(
+                    &signed(seed, &format!("name-{}", 42 - seed), 5500, 100),
+                    None,
+                )
+            })
+            .collect();
+        entries.push(ServerEntry::unsigned(
+            "Unsigned",
+            "",
+            ([10, 0, 0, 99], 5500).into(),
+            0,
+        ));
+        let mut cursor = GossipCursor::default();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..3 {
+            let digest = cursor.digest(&entries);
+            assert_eq!(digest.entries.len(), MAX_DIGEST_ENTRIES);
+            assert!(GossipMessage::Digest(digest.clone()).encode().len() <= MAX_GOSSIP_DATAGRAM);
+            seen.extend(digest.entries.iter().map(|e| e.addr));
+        }
+        assert_eq!(seen.len(), 41);
+        // Remove the exact bookmark and rename the remaining entries. The
+        // next address, not a shifted index or a display name, resumes progress.
+        let after = cursor.after.unwrap();
+        entries.retain(|e| e.addr != after);
+        for entry in &mut entries {
+            entry.name = "renamed".into();
+        }
+        let next = cursor.digest(&entries);
+        assert!(next.entries[0].addr > after);
+        assert!(cursor.digest(&[]).entries.is_empty());
+    }
+
+    #[test]
+    fn pull_compares_with_the_entire_registry_not_its_current_page() {
+        let entries: Vec<_> = (1..=40)
+            .map(|seed| entry_of(&signed(seed, "S", 5500, 100), None))
+            .collect();
+        let mut cursor = GossipCursor::default();
+        let first = cursor.digest(&entries);
+        let second = cursor.digest(&entries);
+        assert!(!diff(&first, &second).is_empty());
+        assert!(want_from(&entries, &second).is_empty());
+        let mut newer = second;
+        newer.entries[0].timestamp += 1;
+        assert_eq!(
+            want_from(&entries, &newer).addrs,
+            vec![newer.entries[0].addr]
+        );
+    }
+
+    #[test]
+    fn rotating_pushes_do_not_starve_entries_at_batch_boundaries() {
+        let peer: SocketAddr = ([192, 0, 2, 9], 4656).into();
+        let entries: Vec<_> = (1..=40)
+            .map(|seed| {
+                let sd = Descriptor::new("N".repeat(200), ([10, 0, 0, seed], 5500).into())
+                    .with_description("D".repeat(200))
+                    .sign(&IdentityKey::from_seed(&[seed; 32]))
+                    .unwrap();
+                entry_of(&sd, None)
+            })
+            .collect();
+        let mut cursor = GossipCursor::default();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..entries.len() {
+            let batch = cursor.push_batch(
+                &entries,
+                &GossipDigest::default(),
+                peer,
+                MAX_GOSSIP_DATAGRAM,
+            );
+            assert!(!batch.is_empty());
+            assert!(GossipMessage::Batch(batch.clone()).encode().len() <= MAX_GOSSIP_DATAGRAM);
+            seen.extend(batch.descriptors.iter().map(|s| s.descriptor.addr));
+        }
+        assert_eq!(seen.len(), entries.len());
+    }
+
+    #[test]
+    fn oversized_and_loop_excluded_entries_cannot_block_smaller_descriptors() {
+        let peer: SocketAddr = ([192, 0, 2, 9], 4656).into();
+        let large = Descriptor::new("N".repeat(255), ([10, 0, 0, 1], 5500).into())
+            .with_description("D".repeat(255))
+            .sign(&IdentityKey::from_seed(&[1; 32]))
+            .unwrap();
+        large.verify().unwrap();
+        let small = signed(2, "Small", 5500, 100);
+        let echo = signed(3, "Loop", 5500, 100);
+        let entries = vec![
+            entry_of(&large, None),
+            entry_of(&small, None),
+            entry_of(&echo, Some(peer)),
+        ];
+        let budget = GossipMessage::Batch(GossipBatch {
+            descriptors: vec![small.clone()],
+        })
+        .encode()
+        .len();
+        let want = Want {
+            addrs: entries.iter().map(|e| e.addr).collect(),
+        };
+        assert_eq!(
+            batch_for(&entries, &want, peer, budget).descriptors,
+            vec![small.clone()]
+        );
+        let mut cursor = GossipCursor::default();
+        for _ in 0..3 {
+            assert_eq!(
+                cursor
+                    .push_batch(&entries, &GossipDigest::default(), peer, budget)
+                    .descriptors,
+                vec![small.clone()]
+            );
+        }
+        let reversed = Want {
+            addrs: vec![
+                small.descriptor.addr,
+                large.descriptor.addr,
+                small.descriptor.addr,
+            ],
+        };
+        assert_eq!(
+            batch_for(&entries, &reversed, peer, MAX_GOSSIP_DATAGRAM).descriptors,
+            vec![small, large]
+        );
+    }
+
+    #[test]
+    fn maximum_ipv6_digest_and_want_fit_the_datagram_cap() {
+        let mut entries: Vec<_> = (1..=16)
+            .map(|seed| entry_of(&signed(seed, "S", u16::MAX, i64::MAX), None))
+            .collect();
+        for (index, entry) in entries.iter_mut().enumerate() {
+            entry.addr = SocketAddr::new(
+                std::net::Ipv6Addr::new(
+                    u16::MAX,
+                    u16::MAX,
+                    u16::MAX,
+                    u16::MAX,
+                    u16::MAX,
+                    u16::MAX,
+                    u16::MAX,
+                    index as u16,
+                )
+                .into(),
+                u16::MAX,
+            );
+        }
+        let digest = digest_of(&entries);
+        assert_eq!(digest.entries.len(), MAX_DIGEST_ENTRIES);
+        let want = diff(&GossipDigest::default(), &digest);
+        assert_eq!(want.addrs.len(), MAX_WANT_ENTRIES);
+        assert!(GossipMessage::Digest(digest).encode().len() <= MAX_GOSSIP_DATAGRAM);
+        assert!(GossipMessage::Want(want).encode().len() <= MAX_GOSSIP_DATAGRAM);
     }
 
     #[test]

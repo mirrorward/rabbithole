@@ -4,11 +4,12 @@
 //! `127.0.0.1` ports.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use looking_glass::descriptor::Descriptor;
-use looking_glass::gossip::GossipMessage;
+use looking_glass::gossip::{GossipMessage, MAX_GOSSIP_DATAGRAM};
 use looking_glass::{service, Registry, SignedDescriptor, DEFAULT_TTL};
 use rabbithole_identity::IdentityKey;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -162,4 +163,132 @@ async fn two_trackers_converge_via_gossip() {
     // A never learned anything back (B had nothing new to offer).
     assert_eq!(reg_a.len(), 1);
     assert_eq!(reg_a.snapshot()[0].via, None);
+}
+
+#[tokio::test]
+async fn large_directories_converge_through_loss_and_reordering_with_one_way_peering() {
+    let a = Arc::new(Registry::new(DEFAULT_TTL));
+    let b = Arc::new(Registry::new(DEFAULT_TTL));
+    let mut expected = Vec::new();
+    for seed in 1..=70 {
+        // Reverse display-name order and vary descriptor sizes: a fixed name
+        // prefix or repeatedly filling only the start of a page cannot pass.
+        let descriptor = Descriptor::new(
+            format!("Server-{:02}", 71 - seed),
+            ([127, 0, 0, 1], 6000 + u16::from(seed)).into(),
+        )
+        .with_description("d".repeat(if seed % 3 == 0 { 255 } else { 20 }))
+        .with_timestamp(100)
+        .sign(&IdentityKey::from_seed(&[seed; 32]))
+        .unwrap();
+        let origin = if seed <= 35 { &a } else { &b };
+        origin
+            .register_descriptor(descriptor.clone(), None)
+            .unwrap();
+        expected.push(descriptor);
+    }
+    // Keep an older generation on A while B advertises the newer signed one.
+    let newer = Descriptor::new("Updated", expected[6].descriptor.addr)
+        .with_timestamp(200)
+        .sign(&IdentityKey::from_seed(&[7; 32]))
+        .unwrap();
+    b.register_descriptor(newer.clone(), None).unwrap();
+    expected[6] = newer;
+
+    let socket_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr_a = socket_a.local_addr().unwrap();
+    let socket_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr_b = socket_b.local_addr().unwrap();
+    let proxy = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let reordered = Arc::new(AtomicUsize::new(0));
+    let max_wire = Arc::new(AtomicUsize::new(0));
+    let proxy_task = {
+        let dropped = dropped.clone();
+        let reordered = reordered.clone();
+        let max_wire = max_wire.clone();
+        tokio::spawn(async move {
+            let mut count = 0;
+            let mut pending: Option<(Vec<u8>, SocketAddr)> = None;
+            let mut flush = tokio::time::interval(Duration::from_millis(5));
+            let mut buf = [0; 4096];
+            loop {
+                tokio::select! {
+                    packet = proxy.recv_from(&mut buf) => {
+                        let (len, from) = packet.unwrap();
+                        assert!(from == addr_a || from == addr_b);
+                        max_wire.fetch_max(len, Ordering::Relaxed);
+                        GossipMessage::decode(&buf[..len]).unwrap();
+                        count += 1;
+                        if count % 5 == 0 {
+                            dropped.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                        let to = if from == addr_a { addr_b } else { addr_a };
+                        if let Some((earlier, earlier_to)) = pending.take() {
+                            // Deliver the later datagram first, then the held one.
+                            proxy.send_to(&buf[..len], to).await.unwrap();
+                            proxy.send_to(&earlier, earlier_to).await.unwrap();
+                            reordered.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            pending = Some((buf[..len].to_vec(), to));
+                        }
+                    }
+                    _ = flush.tick() => {
+                        if let Some((wire, to)) = pending.take() {
+                            proxy.send_to(&wire, to).await.unwrap();
+                        }
+                    }
+                }
+            }
+        })
+    };
+    // Only B is configured with a peer. A must rotate push replies to an
+    // inbound source rather than relying on a periodic outbound digest.
+    let task_a = tokio::spawn(service::run_gossip_udp(
+        socket_a,
+        a.clone(),
+        vec![],
+        Duration::from_secs(60),
+    ));
+    let task_b = tokio::spawn(service::run_gossip_udp(
+        socket_b,
+        b.clone(),
+        vec![proxy_addr],
+        Duration::from_millis(15),
+    ));
+    let converged = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let snapshots = [a.snapshot(), b.snapshot()];
+            if snapshots.iter().all(|snapshot| {
+                snapshot.len() == expected.len()
+                    && expected.iter().all(|wanted| {
+                        snapshot
+                            .iter()
+                            .any(|entry| entry.signed.as_ref() == Some(wanted))
+                    })
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    task_a.abort();
+    task_b.abort();
+    proxy_task.abort();
+    assert!(
+        converged.is_ok(),
+        "registries did not converge: A={}, B={}",
+        a.len(),
+        b.len()
+    );
+    assert!(dropped.load(Ordering::Relaxed) > 0);
+    assert!(reordered.load(Ordering::Relaxed) > 0);
+    assert!(max_wire.load(Ordering::Relaxed) <= MAX_GOSSIP_DATAGRAM);
+    for entry in a.snapshot().into_iter().chain(b.snapshot()) {
+        entry.signed.unwrap().verify().unwrap();
+        assert!(entry.via.is_none() || entry.via == Some(proxy_addr));
+    }
 }

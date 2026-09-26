@@ -18,6 +18,7 @@
 //! Malformed input never takes a listener down: bad datagrams are logged and
 //! dropped, bad TCP sessions are logged and closed.
 
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -40,6 +41,31 @@ const MAX_REGISTRATION_DATAGRAM: usize = 2048;
 /// Largest gossip datagram we read (a little above what we ever build, so a
 /// slightly chatty peer is decoded rather than silently truncated).
 const MAX_GOSSIP_READ: usize = 4096;
+
+/// UDP source addresses are untrusted: retain only a bounded number of push
+/// bookmarks. Recently active peers keep independent progress; evicted peers
+/// restart traversal when they next send a digest.
+const MAX_GOSSIP_PEER_CURSORS: usize = 256;
+
+#[derive(Default)]
+struct PushCursors(VecDeque<(SocketAddr, gossip::GossipCursor)>);
+
+impl PushCursors {
+    fn for_peer(&mut self, peer: SocketAddr) -> &mut gossip::GossipCursor {
+        let cursor = self
+            .0
+            .iter()
+            .position(|(addr, _)| *addr == peer)
+            .and_then(|position| self.0.remove(position))
+            .map(|(_, cursor)| cursor)
+            .unwrap_or_default();
+        if self.0.len() == MAX_GOSSIP_PEER_CURSORS {
+            self.0.pop_front();
+        }
+        self.0.push_back((peer, cursor));
+        &mut self.0.back_mut().expect("just inserted").1
+    }
+}
 
 /// Runs the HTRK registration listener: one UDP datagram per heartbeat.
 ///
@@ -392,8 +418,9 @@ fn sanitize(s: &str) -> String {
 
 /// Runs the gossip/announce listener: signed descriptors in and out.
 ///
-/// On every `interval` tick the tracker sends its [`gossip::digest_of`] to
-/// each static peer; inbound datagrams follow the push–pull exchange
+/// On every `interval` tick the tracker sends its next rotating digest page to
+/// each static peer; inbound digests receive independently rotating push replies,
+/// including peers not configured locally. Datagrams follow the push–pull exchange
 /// documented in [`crate::gossip`]. Everything is best-effort UDP — a lost
 /// datagram just waits for the next tick. Malformed datagrams and rejected
 /// descriptors are logged and dropped, never fatal.
@@ -406,13 +433,15 @@ pub async fn run_gossip_udp(
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut buf = vec![0u8; MAX_GOSSIP_READ];
+    let mut digest_cursor = gossip::GossipCursor::default();
+    let mut push_cursors = PushCursors::default();
     loop {
         tokio::select! {
             _ = ticker.tick() => {
                 if peers.is_empty() {
                     continue;
                 }
-                let digest = gossip::digest_of(&registry.snapshot());
+                let digest = digest_cursor.digest(&registry.snapshot());
                 let wire = GossipMessage::Digest(digest).encode();
                 for peer in &peers {
                     // Best-effort: an unreachable peer must not kill gossip.
@@ -423,14 +452,20 @@ pub async fn run_gossip_udp(
             }
             received = socket.recv_from(&mut buf) => {
                 let (len, from) = received?;
-                handle_gossip(&socket, &registry, &buf[..len], from).await;
+                handle_gossip(&socket, &registry, &buf[..len], from, &mut push_cursors).await;
             }
         }
     }
 }
 
 /// Handles one inbound gossip datagram (never errors, never panics).
-async fn handle_gossip(socket: &UdpSocket, registry: &Registry, buf: &[u8], from: SocketAddr) {
+async fn handle_gossip(
+    socket: &UdpSocket,
+    registry: &Registry,
+    buf: &[u8],
+    from: SocketAddr,
+    push_cursors: &mut PushCursors,
+) {
     let message = match GossipMessage::decode(buf) {
         Ok(message) => message,
         Err(err) => {
@@ -441,20 +476,21 @@ async fn handle_gossip(socket: &UdpSocket, registry: &Registry, buf: &[u8], from
     match message {
         GossipMessage::Digest(theirs) => {
             let snapshot = registry.snapshot();
-            let ours = gossip::digest_of(&snapshot);
             // Pull: ask for what they hold newer than us.
-            let want = gossip::diff(&ours, &theirs);
+            let want = gossip::want_from(&snapshot, &theirs);
             if !want.is_empty() {
                 send_best_effort(socket, &GossipMessage::Want(want), from).await;
             }
             // Push: send what the digest shows they are missing. A digest
             // never triggers a digest, so peers cannot storm each other.
-            let they_want = gossip::diff(&theirs, &ours);
-            if !they_want.is_empty() {
-                let batch = gossip::batch_for(&snapshot, &they_want, from, MAX_GOSSIP_DATAGRAM);
-                if !batch.is_empty() {
-                    send_best_effort(socket, &GossipMessage::Batch(batch), from).await;
-                }
+            let batch = push_cursors.for_peer(from).push_batch(
+                &snapshot,
+                &theirs,
+                from,
+                MAX_GOSSIP_DATAGRAM,
+            );
+            if !batch.is_empty() {
+                send_best_effort(socket, &GossipMessage::Batch(batch), from).await;
             }
         }
         GossipMessage::Want(want) => {
@@ -497,6 +533,53 @@ mod tests {
     use crate::registry::DEFAULT_TTL;
     use rabbithole_identity::IdentityKey;
     use std::time::Instant;
+
+    #[test]
+    fn push_rotation_is_independent_per_peer_and_bounds_untrusted_sources() {
+        let entries: Vec<_> = (1..=20)
+            .map(|seed| {
+                ServerEntry::from_signed(
+                    Descriptor::new("N".repeat(255), ([10, 0, 0, seed], 5500).into())
+                        .with_description("D".repeat(255))
+                        .sign(&IdentityKey::from_seed(&[seed; 32]))
+                        .unwrap(),
+                    None,
+                )
+            })
+            .collect();
+        let first: SocketAddr = ([192, 0, 2, 1], 4656).into();
+        let second: SocketAddr = ([192, 0, 2, 2], 4656).into();
+        let digest = gossip::GossipDigest::default();
+        let mut cursors = PushCursors::default();
+        let page =
+            cursors
+                .for_peer(first)
+                .push_batch(&entries, &digest, first, MAX_GOSSIP_DATAGRAM);
+        assert_eq!(
+            page,
+            cursors
+                .for_peer(second)
+                .push_batch(&entries, &digest, second, MAX_GOSSIP_DATAGRAM)
+        );
+        assert_ne!(
+            page,
+            cursors
+                .for_peer(first)
+                .push_batch(&entries, &digest, first, MAX_GOSSIP_DATAGRAM)
+        );
+        for port in 1..=MAX_GOSSIP_PEER_CURSORS as u16 {
+            cursors.for_peer(SocketAddr::from(([198, 51, 100, 1], port)));
+            assert!(cursors.0.len() <= MAX_GOSSIP_PEER_CURSORS);
+        }
+        assert_eq!(cursors.0.len(), MAX_GOSSIP_PEER_CURSORS);
+        assert!(!cursors.0.iter().any(|(addr, _)| *addr == first));
+        assert_eq!(
+            page,
+            cursors
+                .for_peer(first)
+                .push_batch(&entries, &digest, first, MAX_GOSSIP_DATAGRAM)
+        );
+    }
 
     /// A registry with one signed and one unsigned entry, both observed at
     /// `now` (injected time — no sleeps anywhere).
