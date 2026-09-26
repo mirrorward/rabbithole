@@ -46,6 +46,10 @@ disables that class.
   login. Cancellation or disconnect at that prompt spends one failed AUTH
   attempt; successful authentication spends none. The complete credentials,
   shared per-IP AUTH budget and live minimum role are rechecked before entry.
+  Backspace and Delete remove one CP437 character or one UTF-8 scalar. UTF-8
+  fragments remain buffered until complete, and the 1024-byte input limit
+  accepts only whole characters. Editing is scalar-based; combining sequences
+  and terminal display-cell widths do not receive special treatment.
 - **Doors**: `doors_enabled`, `doors_dir` (default `doors/`, relative to
   `data_dir`), `doors_max_nodes` (default 4; 0 refuses every launch),
   `doors_session_max_secs` (default 3600; 0 = unlimited; a door's own
