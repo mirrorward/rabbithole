@@ -19,6 +19,13 @@
 //!    expiry the session moves to `TimedOut` and the child is killed.
 //! 7. Release the node (the RAII lease drops) and audit-log the run.
 //!
+//! Daily limits accumulate per account and door in UTC calendar days. Before
+//! spawn, a durable reservation subtracts completed and concurrently reserved
+//! time. Normal completion refunds unused milliseconds; a crash conservatively
+//! retains the prepaid reservation. Daily-limited runs end at UTC midnight so
+//! the next run uses the new day's allowance. The global session cap still
+//! applies to every run; doors without a daily limit do not stop at midnight.
+//!
 //! ## `%`-token substitution
 //!
 //! Every element of a door's `command` argv (the program included) may use:
@@ -60,7 +67,7 @@ use rabbithole_legacy_doors::{
 use rabbithole_legacy_telnet::proto::escape_iac;
 use rabbithole_legacy_telnet::{Input, TelnetStream};
 use rabbithole_server_core::{security_level, AuthedUser, Caps, ServerConfig};
-use rabbithole_store_server::repo::AuditRepo;
+use rabbithole_store_server::{doors::DoorUsageRepo, repo::AuditRepo, SqlitePool};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, ChildStdout, Command};
 
@@ -74,6 +81,7 @@ pub struct DoorService {
     nodes: Arc<NodePool>,
     root: PathBuf,
     session_max_secs: u64,
+    pool: SqlitePool,
 }
 
 impl DoorService {
@@ -81,7 +89,11 @@ impl DoorService {
     /// validated (and duplicate ids rejected) — a misconfigured door list
     /// fails boot loudly rather than surfacing at first launch. When
     /// disabled, the list is ignored entirely.
-    pub fn from_config(cfg: &ServerConfig, data_dir: &Path) -> anyhow::Result<DoorService> {
+    pub fn from_config(
+        cfg: &ServerConfig,
+        data_dir: &Path,
+        pool: SqlitePool,
+    ) -> anyhow::Result<DoorService> {
         let mut registry = DoorRegistry::new();
         if cfg.doors_enabled {
             for def in &cfg.doors {
@@ -96,6 +108,7 @@ impl DoorService {
             nodes: Arc::new(NodePool::new(cfg.doors_max_nodes)),
             root: crate::resolve_dir(data_dir, &cfg.doors_dir),
             session_max_secs: cfg.doors_session_max_secs,
+            pool,
         })
     }
 
@@ -114,18 +127,126 @@ impl DoorService {
         self.registry.get(id)
     }
 
-    /// Effective wall-clock budget for one session of `def`: the smaller of
-    /// the global `doors_session_max_secs` cap and the door's own
-    /// `daily_limit_mins`. `None` = unlimited.
-    fn time_limit(&self, def: &DoorDef) -> Option<Duration> {
+    async fn reserve(
+        &self,
+        def: &DoorDef,
+        account: i64,
+        now: SystemTime,
+    ) -> anyhow::Result<Option<UsageLease>> {
         let global =
             (self.session_max_secs > 0).then(|| Duration::from_secs(self.session_max_secs));
-        let per_door = def
-            .daily_limit_mins
-            .map(|m| Duration::from_secs(u64::from(m) * 60));
-        match (global, per_door) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        let Some(minutes) = def.daily_limit_mins else {
+            return Ok(Some(UsageLease::unmetered(global)));
+        };
+        let window = DailyWindow::at(now)?;
+        let requested = global.map_or(window.remaining, |cap| cap.min(window.remaining));
+        let reservation = DoorUsageRepo(&self.pool)
+            .reserve(
+                account,
+                &def.id,
+                window.day,
+                u64::from(minutes) * 60_000,
+                duration_ms(requested),
+            )
+            .await?;
+        Ok(reservation.map(|reservation| UsageLease {
+            reservation: Some((self.pool.clone(), reservation.id)),
+            limit: Some(Duration::from_millis(reservation.granted_ms)),
+            day: Some(window.day),
+            started: None,
+        }))
+    }
+}
+
+const DAY_MILLIS: u64 = 86_400_000;
+
+struct DailyWindow {
+    day: i64,
+    remaining: Duration,
+}
+
+impl DailyWindow {
+    fn at(now: SystemTime) -> anyhow::Result<Self> {
+        let since_epoch = now.duration_since(SystemTime::UNIX_EPOCH)?;
+        let millis = u64::try_from(since_epoch.as_millis())?;
+        Ok(Self {
+            day: i64::try_from(millis / DAY_MILLIS)?,
+            remaining: Duration::from_millis(DAY_MILLIS - millis % DAY_MILLIS),
+        })
+    }
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    // Round up: quick exits/reconnects cannot accumulate free fractions.
+    u64::try_from(duration.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX)
+}
+
+/// Monotonic elapsed time controls refunds; wall time is used only to choose
+/// the UTC accounting window. Cancellation may attempt a refund, but a hard
+/// crash or database failure never erases the durable prepaid charge.
+struct UsageLease {
+    reservation: Option<(SqlitePool, i64)>,
+    limit: Option<Duration>,
+    day: Option<i64>,
+    started: Option<tokio::time::Instant>,
+}
+
+impl UsageLease {
+    fn unmetered(limit: Option<Duration>) -> Self {
+        Self {
+            reservation: None,
+            limit,
+            day: None,
+            started: None,
+        }
+    }
+
+    /// Recheck midnight after preparing the drop file, before starting a
+    /// process. Slow filesystem preparation cannot shift a prepaid run into
+    /// a new accounting day. Returns false when that window has already ended.
+    fn start(&mut self, now: SystemTime) -> anyhow::Result<bool> {
+        if let Some(day) = self.day {
+            let window = DailyWindow::at(now)?;
+            if window.day != day {
+                return Ok(false);
+            }
+            self.limit = self.limit.map(|limit| limit.min(window.remaining));
+        }
+        self.started = Some(tokio::time::Instant::now());
+        Ok(true)
+    }
+
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.started
+            .zip(self.limit)
+            .map(|(started, limit)| started + limit)
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.started.map_or(0, |start| duration_ms(start.elapsed()))
+    }
+
+    async fn finish(&mut self) {
+        if let Some((pool, id)) = self.reservation.take() {
+            if let Err(error) = DoorUsageRepo(&pool).settle(id, self.elapsed_ms()).await {
+                tracing::warn!(%error, "door usage settlement failed; prepaid time retained");
+            }
+        }
+    }
+}
+
+impl Drop for UsageLease {
+    fn drop(&mut self) {
+        let Some((pool, id)) = self.reservation.take() else {
+            return;
+        };
+        let elapsed = self.elapsed_ms();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Err(error) = DoorUsageRepo(&pool).settle(id, elapsed).await {
+                    tracing::warn!(%error, "cancelled door usage settlement failed; prepaid time retained");
+                }
+            });
         }
     }
 }
@@ -188,11 +309,27 @@ where
     };
     let node = lease.node();
     let drop_dir = doors.root.join(format!("node{node}"));
-    let limit = doors.time_limit(&def);
+    let mut usage = match doors
+        .reserve(&def, authed.account.id, SystemTime::now())
+        .await
+    {
+        Ok(Some(usage)) => usage,
+        Ok(None) => {
+            return t.write_str("\nNo daily time remains for this door (including time reserved by active runs). Try again later or after midnight UTC.\n").await;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "door daily allowance could not be reserved");
+            return t
+                .write_str(
+                    "\nThe door's daily allowance could not be checked. Please try again later.\n",
+                )
+                .await;
+        }
+    };
 
     let mut session = DoorSession::new(&def.id, node, &drop_dir, SystemTime::now());
     let (filename, contents) =
-        prepare_dropfile(&def, &door_context(shared, t, authed, limit), node);
+        prepare_dropfile(&def, &door_context(shared, t, authed, usage.limit), node);
     let dropfile = drop_dir.join(filename);
     let prepared = async {
         tokio::fs::create_dir_all(&drop_dir).await?;
@@ -201,6 +338,7 @@ where
     .await;
     if let Err(e) = prepared {
         let _ = session.abort();
+        usage.finish().await;
         audit(
             shared,
             &authed.account.login,
@@ -213,10 +351,23 @@ where
         return t.write_str("\nThe door failed to start.\n").await;
     }
 
+    match usage.start(SystemTime::now()) {
+        Ok(true) => {}
+        _ => {
+            usage.finish().await;
+            return t
+                .write_str(
+                    "\nThe daily time window changed while preparing the door. Please try again.\n",
+                )
+                .await;
+        }
+    }
     let mut child = match spawn_door(&def, &drop_dir, &dropfile, node) {
         Ok(c) => c,
         Err(e) => {
             let _ = session.abort();
+            usage.started = None; // no process ran: refund the whole reservation
+            usage.finish().await;
             audit(
                 shared,
                 &authed.account.login,
@@ -232,12 +383,18 @@ where
     session
         .start(SystemTime::now())
         .map_err(std::io::Error::other)?;
-    t.write_str(&format!("\nEntering {} (node {node})...\n\n", def.title))
-        .await?;
 
     // Always socket-mode: the remote leg is telnet (see the module docs).
     let mut bridge = BridgeBuffer::new(IoMode::Socket);
-    let outcome = pump(t, &mut child, &mut bridge, limit).await;
+    let outcome = drive(
+        t,
+        &mut child,
+        &mut bridge,
+        usage.deadline(),
+        &format!("\nEntering {} (node {node})...\n\n", def.title),
+    )
+    .await;
+    usage.finish().await;
 
     let (label, farewell) = match outcome {
         Outcome::Ended(code) => {
@@ -276,16 +433,41 @@ where
     Ok(())
 }
 
-/// The bidirectional byte pump: child stdout → (bridge, IAC-doubled) →
-/// telnet; telnet payload → (re-escaped, bridge) → child stdin. Ends on
-/// child exit, caller hangup, or the time budget expiring — the child is
-/// killed (and reaped) on the latter two.
-async fn pump<S>(
+/// The deadline encloses every await in the bridge, including the entering
+/// banner and backpressured writes. An inner select timer alone cannot stop a
+/// child while one of that select's branches is awaiting a slow peer.
+async fn drive<S>(
     t: &mut TelnetStream<S>,
     child: &mut Child,
     bridge: &mut BridgeBuffer,
-    limit: Option<Duration>,
+    deadline: Option<tokio::time::Instant>,
+    banner: &str,
 ) -> Outcome
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let run = async {
+        if t.write_str(banner).await.is_err() {
+            return Outcome::Hangup;
+        }
+        pump(t, child, bridge).await
+    };
+    let outcome = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, run)
+            .await
+            .unwrap_or(Outcome::TimedOut),
+        None => run.await,
+    };
+    if !matches!(outcome, Outcome::Ended(_)) {
+        let _ = child.kill().await; // kill also reaps before any refund or menu
+    }
+    outcome
+}
+
+/// The bidirectional byte pump: child stdout → (bridge, IAC-doubled) →
+/// telnet; telnet payload → (re-escaped, bridge) → child stdin. The enclosing
+/// driver owns the deadline and kills/reaps on timeout or hangup.
+async fn pump<S>(t: &mut TelnetStream<S>, child: &mut Child, bridge: &mut BridgeBuffer) -> Outcome
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -298,10 +480,6 @@ where
     // the first payload chunk we see starts with that dangling terminator.
     // Swallow it once — it belongs to the menu command, not to the door.
     let mut swallow_line_tail = true;
-    // A far-future default keeps the deadline arm inert when unlimited
-    // (roughly a year — no live telnet call outlasts it).
-    let deadline = tokio::time::sleep(limit.unwrap_or(Duration::from_secs(365 * 24 * 3600)));
-    tokio::pin!(deadline);
     loop {
         tokio::select! {
             status = child.wait() => {
@@ -334,7 +512,6 @@ where
                         wire.clear();
                         bridge.door_to_remote(&buf[..n], &mut wire);
                         if t.write_raw(&wire).await.is_err() {
-                            let _ = child.kill().await;
                             return Outcome::Hangup;
                         }
                     }
@@ -371,14 +548,9 @@ where
                     // NAWS / TTYPE updates mid-door: absorbed by the stream.
                     Ok(Some(_)) => {}
                     Ok(None) | Err(_) => {
-                        let _ = child.kill().await;
                         return Outcome::Hangup;
                     }
                 }
-            }
-            _ = &mut deadline => {
-                let _ = child.kill().await;
-                return Outcome::TimedOut;
             }
         }
     }
@@ -530,31 +702,149 @@ mod tests {
         assert_eq!(expand_tokens("%x%", dir, file, 3), "%x%");
     }
 
-    #[test]
-    fn time_limit_takes_the_smaller_budget() {
-        let svc = |secs: u64| DoorService {
-            enabled: true,
-            registry: DoorRegistry::new(),
-            nodes: Arc::new(NodePool::new(1)),
-            root: PathBuf::from("."),
-            session_max_secs: secs,
+    async fn fixture(secs: u64) -> (DoorService, i64) {
+        let pool = rabbithole_store_server::open_in_memory().await.unwrap();
+        let account = rabbithole_store_server::repo::AccountsRepo(&pool)
+            .create("alice", None, "Alice", 1, None)
+            .await
+            .unwrap()
+            .id;
+        let cfg = ServerConfig {
+            doors_session_max_secs: secs,
+            ..ServerConfig::default()
         };
-        // Global 3600s vs door 30min → 30min wins.
+        (
+            DoorService::from_config(&cfg, Path::new("."), pool).unwrap(),
+            account,
+        )
+    }
+
+    #[tokio::test]
+    async fn prior_usage_and_global_cap_both_reduce_the_next_budget() {
+        let (service, account) = fixture(600).await;
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10 * 86_400);
+        let usage = DoorUsageRepo(&service.pool);
+        let spent = usage
+            .reserve(account, "lord", 10, 1_800_000, 1_500_000)
+            .await
+            .unwrap()
+            .unwrap();
+        usage.settle(spent.id, spent.granted_ms).await.unwrap();
+        let mut lease = service
+            .reserve(&def(Some(30)), account, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.limit, Some(Duration::from_secs(300)));
+        lease.finish().await;
+        let mut next_day = service
+            .reserve(&def(Some(30)), account, now + Duration::from_secs(86_400))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            svc(3600).time_limit(&def(Some(30))),
-            Some(Duration::from_secs(1800))
+            next_day.limit,
+            Some(Duration::from_secs(600)),
+            "new day does not remove global session cap"
         );
-        // Global 600s vs door 30min → global wins.
+        next_day.finish().await;
+    }
+
+    #[tokio::test]
+    async fn midnight_bounds_limited_runs_and_preparation_cannot_cross_the_day() {
+        let (service, account) = fixture(600).await;
+        let midnight = SystemTime::UNIX_EPOCH + Duration::from_millis(11 * DAY_MILLIS);
+        let before = midnight - Duration::from_millis(900);
+        let mut lease = service
+            .reserve(&def(Some(1)), account, before)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.limit, Some(Duration::from_millis(900)));
+        assert!(lease.start(before + Duration::from_millis(100)).unwrap());
+        assert_eq!(lease.limit, Some(Duration::from_millis(800)));
+        lease.started = Some(tokio::time::Instant::now() - Duration::from_millis(250));
+        lease.finish().await;
+        let charged = DoorUsageRepo(&service.pool)
+            .charged_ms(account, "lord", 10)
+            .await
+            .unwrap();
+        assert!((250..=900).contains(&charged));
+        let mut expired = service
+            .reserve(&def(Some(1)), account, before)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!expired.start(midnight).unwrap());
+        expired.finish().await;
         assert_eq!(
-            svc(600).time_limit(&def(Some(30))),
-            Some(Duration::from_secs(600))
+            DoorUsageRepo(&service.pool)
+                .charged_ms(account, "lord", 10)
+                .await
+                .unwrap(),
+            charged
         );
-        // Unlimited global, unlimited door.
-        assert_eq!(svc(0).time_limit(&def(None)), None);
-        // Unlimited global, door budget applies.
-        assert_eq!(
-            svc(0).time_limit(&def(Some(1))),
-            Some(Duration::from_secs(60))
-        );
+        let mut fresh = service
+            .reserve(&def(Some(1)), account, midnight)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.limit, Some(Duration::from_secs(60)));
+        fresh.finish().await;
+    }
+
+    #[tokio::test]
+    async fn unlimited_daily_doors_ignore_midnight_and_synthetic_account_ids() {
+        let (service, _) = fixture(0).await;
+        let midnight = SystemTime::UNIX_EPOCH + Duration::from_millis(11 * DAY_MILLIS);
+        let mut lease = service
+            .reserve(&def(None), -42, midnight - Duration::from_millis(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.limit, None);
+        assert!(lease.start(midnight).unwrap());
+        assert!(lease.deadline().is_none());
+        assert!(service
+            .reserve(&def(Some(1)), 0, midnight)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(service
+            .reserve(&def(Some(1)), -42, midnight)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_leases_refund_once_and_database_failure_refuses_admission() {
+        let (service, account) = fixture(600).await;
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10 * 86_400);
+        let mut lease = service
+            .reserve(&def(Some(1)), account, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(lease.start(now).unwrap());
+        lease.started = Some(tokio::time::Instant::now() - Duration::from_secs(2));
+        drop(lease);
+        let charged = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let charged = DoorUsageRepo(&service.pool)
+                    .charged_ms(account, "lord", 10)
+                    .await
+                    .unwrap();
+                if charged < 60_000 {
+                    break charged;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!((2000..60_000).contains(&charged));
+        service.pool.close().await;
+        assert!(service.reserve(&def(Some(1)), account, now).await.is_err());
     }
 }

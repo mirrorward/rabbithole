@@ -296,7 +296,7 @@ impl Burrow {
             .flatten();
         let portmap_lifetime = config.portmap_lifetime_secs;
         // Door host: validates the `[[doors]]` list when doors are enabled.
-        let door_host = doors::DoorService::from_config(&config, &data_dir)?;
+        let door_host = doors::DoorService::from_config(&config, &data_dir, pool.clone())?;
 
         // Moderation suite: warm the quarantine/deny mirrors before any
         // session can read or upload.

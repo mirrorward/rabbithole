@@ -64,8 +64,17 @@ disables that class.
   Operator ANSI artwork and message-body rendering keep their own policies.
 - **Doors**: `doors_enabled`, `doors_dir` (default `doors/`, relative to
   `data_dir`), `doors_max_nodes` (default 4; 0 refuses every launch),
-  `doors_session_max_secs` (default 3600; 0 = unlimited; a door's own
-  `daily_limit_mins` lowers it), `[[doors]]` array (*TOML-only*).
+  `doors_session_max_secs` (default 3600; 0 = unlimited), `[[doors]]` array
+  (*TOML-only*). A door's `daily_limit_mins` is an accumulated allowance per
+  registered account and door, resetting at midnight UTC. Usage survives
+  reconnects and server restarts; simultaneous sessions share the remaining
+  allowance. Each launch reserves time, bounded by the global session maximum
+  and the current UTC day. Normal exits and hangups refund unused time, and a
+  failed launch refunds its whole reservation. A crash or failed accounting
+  write conservatively keeps the reserved time charged for that day. Runs with
+  a daily limit end at midnight UTC; the caller can start a new run against the
+  new day's allowance. Doors without a daily limit keep the global session
+  maximum without a midnight cutoff.
 - **Finger**: `finger_enabled`, `finger_addr`, `finger_min_role`.
 - **NNTP reader**: `nntp_enabled`, `nntp_addr`, `nntp_min_role`,
   `nntp_tls_enabled`, `nntp_tls_addr` (NNTPS, implicit TLS),

@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod doors;
 pub mod qwk;
 pub mod repo;
 pub mod repo2;
