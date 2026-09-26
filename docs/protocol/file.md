@@ -187,8 +187,23 @@ A download has no explicit "finish" message, so its ticket is retired when
 the last chunk is served (chunk path) or the dedicated stream drains (bulk
 path); **session teardown** is the backstop, removing any ticket a session
 left open and deleting its staging file — so an abandoned transfer never
-permanently holds a concurrency slot. Per-class overrides of these limits are
-a later refinement; today they are server-wide defaults.
+permanently holds a concurrency slot.
+
+`transfer_rate_by_class` overrides the download bandwidth cap for named
+account classes. It is a live inline TOML table, for example
+`{ member = 65536, vip = 0 }`. Names match stored class names exactly,
+including case. A missing mapping, no class, or a synthetic guest inherits
+`transfer_rate_bytes_per_sec`; an explicit `0` means unlimited, and a positive
+value replaces the server default. Upload quota and concurrency limits keep
+their existing server-wide policy.
+
+The server resolves the current account and class before each WebSocket
+chunk/proved-range request and each native QUIC download stream. Existing
+sessions therefore see class reassignment on their next request or stream,
+without signing in again. A running stream keeps the rate it started with;
+live rate edits apply at the same boundaries. Missing/disabled real accounts
+or database failures refuse the transfer before bytes are sent. The rate is
+**per transfer**, so concurrent transfers each receive their own cap.
 
 **The client queue** (`rabbithole-store-client` `transfer_queue`, driven by
 `rabbithole_core::queue::drain`) makes transfers durable and unattended:

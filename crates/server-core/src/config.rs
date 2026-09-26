@@ -5,6 +5,7 @@
 //! < runtime `ctl config set` edits. Listener addresses require a restart;
 //! identity/text fields (name, MOTD, agreement, guest policy) apply live.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -105,6 +106,9 @@ pub struct ServerConfig {
     pub max_concurrent_transfers: u32,
     /// Per-transfer download bandwidth cap in bytes/sec (0 = unlimited).
     pub transfer_rate_bytes_per_sec: u64,
+    /// Per-transfer download caps by exact account-class name. Missing classes
+    /// inherit `transfer_rate_bytes_per_sec`; explicit zero means unlimited.
+    pub transfer_rate_by_class: BTreeMap<String, u64>,
     /// Max TTL granted to a swarm advertisement, in seconds.
     pub swarm_advert_ttl_secs: u32,
     /// Max live swarm advertisements per account (0 = unlimited).
@@ -504,6 +508,7 @@ impl Default for ServerConfig {
             upload_quota_bytes: 0,
             max_concurrent_transfers: 0,
             transfer_rate_bytes_per_sec: 0,
+            transfer_rate_by_class: BTreeMap::new(),
             swarm_advert_ttl_secs: 3600,
             swarm_adverts_max: 4096,
             swarm_cache_max_bytes: 0,
@@ -661,6 +666,13 @@ pub enum ConfigError {
 }
 
 impl ServerConfig {
+    /// Class rates replace the server default, including an explicit zero.
+    pub fn transfer_rate_for_class(&self, class: Option<&str>) -> u64 {
+        class
+            .and_then(|name| self.transfer_rate_by_class.get(name).copied())
+            .unwrap_or(self.transfer_rate_bytes_per_sec)
+    }
+
     /// Load from a TOML file (missing file = defaults), then apply
     /// `RABBITHOLE_*` environment overrides.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
@@ -790,6 +802,18 @@ impl ServerConfig {
             "upload_quota_bytes" => self.upload_quota_bytes.to_string(),
             "max_concurrent_transfers" => self.max_concurrent_transfers.to_string(),
             "transfer_rate_bytes_per_sec" => self.transfer_rate_bytes_per_sec.to_string(),
+            "transfer_rate_by_class" => {
+                let entries: Vec<_> = self
+                    .transfer_rate_by_class
+                    .iter()
+                    .map(|(name, rate)| format!("{} = {rate}", toml::Value::String(name.clone())))
+                    .collect();
+                if entries.is_empty() {
+                    "{}".into()
+                } else {
+                    format!("{{ {} }}", entries.join(", "))
+                }
+            }
             "swarm_advert_ttl_secs" => self.swarm_advert_ttl_secs.to_string(),
             "swarm_adverts_max" => self.swarm_adverts_max.to_string(),
             "swarm_cache_max_bytes" => self.swarm_cache_max_bytes.to_string(),
@@ -1026,6 +1050,21 @@ impl ServerConfig {
                         key: key.into(),
                         detail: value.into(),
                     })?;
+                Ok(true)
+            }
+            "transfer_rate_by_class" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Rates {
+                    transfer_rate_by_class: BTreeMap<String, u64>,
+                }
+                let parsed: Rates = toml::from_str(&format!("transfer_rate_by_class = {value}"))
+                    .map_err(|_| ConfigError::BadValue {
+                        key: key.into(),
+                        detail: "expected a TOML table of class names and nonnegative byte rates"
+                            .into(),
+                    })?;
+                self.transfer_rate_by_class = parsed.transfer_rate_by_class;
                 Ok(true)
             }
             "swarm_advert_ttl_secs" => {
@@ -1536,6 +1575,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "upload_quota_bytes",
     "max_concurrent_transfers",
     "transfer_rate_bytes_per_sec",
+    "transfer_rate_by_class",
     "swarm_advert_ttl_secs",
     "swarm_adverts_max",
     "swarm_cache_max_bytes",
@@ -1891,6 +1931,74 @@ impl LiveConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_class_rates_inherit_replace_and_roundtrip_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("burrow.toml");
+        std::fs::write(
+            &path,
+            "# Operator's file\ntransfer_rate_bytes_per_sec = 4096\n",
+        )
+        .unwrap();
+        let live = LiveConfig::new(ServerConfig::load(Some(&path)).unwrap());
+        assert!(live
+            .set_key(
+                "transfer_rate_by_class",
+                r#"{ member = 8192, vip = 0, "A \\\"class" = 7 }"#
+            )
+            .unwrap());
+        let cfg = live.read();
+        for class in [None, Some("unknown"), Some("Member")] {
+            assert_eq!(cfg.transfer_rate_for_class(class), 4096);
+        }
+        assert_eq!(cfg.transfer_rate_for_class(Some("member")), 8192);
+        assert_eq!(cfg.transfer_rate_for_class(Some("vip")), 0);
+        let printed = cfg.get_key("transfer_rate_by_class").unwrap();
+        let mut roundtrip = ServerConfig::default();
+        roundtrip
+            .set_key("transfer_rate_by_class", &printed)
+            .unwrap();
+        assert_eq!(roundtrip.transfer_rate_by_class, cfg.transfer_rate_by_class);
+        let loaded = ServerConfig::load(Some(&path)).unwrap();
+        assert_eq!(loaded.transfer_rate_by_class, cfg.transfer_rate_by_class);
+        let meta = cfg
+            .describe()
+            .into_iter()
+            .find(|m| m.key == "transfer_rate_by_class")
+            .unwrap();
+        assert_eq!(meta.kind, KeyKind::Text);
+        assert!(meta.applies_live && !meta.read_only);
+        assert_eq!(meta.default, "{}");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        for bad in [
+            "{ member = -1 }",
+            "{ member = 1.5 }",
+            "{ member = 'fast' }",
+            "[]",
+            "{}\nname = 'injected'",
+            "{ member = 1, member = 2 }",
+        ] {
+            assert!(
+                live.set_key("transfer_rate_by_class", bad).is_err(),
+                "{bad}"
+            );
+            assert_eq!(
+                live.read().transfer_rate_by_class,
+                cfg.transfer_rate_by_class
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        }
+        live.set_key("transfer_rate_by_class", "{}").unwrap();
+        assert_eq!(live.read().transfer_rate_for_class(Some("vip")), 4096);
+        assert!(ServerConfig::load(Some(&path))
+            .unwrap()
+            .transfer_rate_by_class
+            .is_empty());
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("# Operator's file"));
+    }
 
     #[test]
     fn env_overrides_and_validation() {

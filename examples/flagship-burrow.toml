@@ -116,6 +116,12 @@ advertise_host = "rabbithole.example"
 # Per-transfer download bandwidth cap in bytes/sec (0 = unlimited). (live)
 # transfer_rate_bytes_per_sec = 0
 
+# Override the per-transfer rate by exact stored account-class name. (live)
+# An absent class entry inherits the default above; an explicit 0 is unlimited.
+# Applied at each WebSocket chunk/proved-range request or native stream start.
+# Unlike TOML-only maps below, this also accepts a live inline TOML table via ctl.
+# transfer_rate_by_class = { member = 65536, vip = 0 }
+
 
 # -----------------------------------------------------------------------------
 # The Warren (swarm)

@@ -37,6 +37,7 @@ pub const DEMO_SCHEMA: &[(&str, &str, u8, u8)] = &[
     ("upload_quota_bytes", "0", 2, 1),
     ("max_concurrent_transfers", "0", 2, 1),
     ("transfer_rate_bytes_per_sec", "0", 2, 1),
+    ("transfer_rate_by_class", "{}", 0, 1),
     ("swarm_advert_ttl_secs", "3600", 2, 1),
     ("swarm_adverts_max", "4096", 2, 1),
     ("swarm_cache_max_bytes", "0", 2, 1),

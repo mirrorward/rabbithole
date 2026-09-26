@@ -26,13 +26,36 @@ use rabbithole_proto::transfer as pt;
 use rabbithole_proto::{ErrorCode, Frame};
 use rabbithole_server_core::files::KIND_FILE;
 use rabbithole_server_core::ratelimit::{class as rl, Scope};
-use rabbithole_server_core::{Caps, FileError, FileService, ServerEvent};
+use rabbithole_server_core::{Caps, FileError, FileService, LiveConfig, ServerEvent};
+use rabbithole_store_server::{repo::AccountsRepo, SqlitePool};
 
 use crate::session::SessionCtx;
 use crate::Shared;
 
 #[cfg(test)]
 mod manifest_tests;
+#[cfg(test)]
+mod rate_tests;
+
+/// Read the account's current class, not a login-time permission snapshot.
+/// A request (or dedicated stream) keeps its selected per-transfer cap; later
+/// requests observe both account reassignment and live operator policy edits.
+async fn download_rate(
+    pool: &SqlitePool,
+    config: &LiveConfig,
+    account_id: i64,
+) -> Result<u64, ErrorCode> {
+    // Guest account IDs are synthetic and negative, with no persistent class.
+    if account_id < 0 {
+        return Ok(config.read().transfer_rate_for_class(None));
+    }
+    let class = AccountsRepo(pool)
+        .active_class_name(account_id)
+        .await
+        .map_err(|_| ErrorCode::Unavailable)?
+        .ok_or(ErrorCode::Forbidden)?;
+    Ok(config.read().transfer_rate_for_class(class.as_deref()))
+}
 
 /// Max bytes a single chunk carries (well under the 1 MiB control-frame cap).
 const CHUNK_MAX: usize = 256 * 1024;
@@ -178,7 +201,10 @@ pub async fn serve_bulk_stream(
     match direction {
         pt::DIR_DOWNLOAD => {
             let Some(blob_id) = blob_id else { return };
-            let rate = shared.config.read().transfer_rate_bytes_per_sec;
+            let Ok(rate) = download_rate(&shared.pool, &shared.config, account_id).await else {
+                // Refuse before payload bytes; the ticket remains retryable.
+                return;
+            };
             let mut offset = pre.offset;
             while offset < size {
                 let want = ((size - offset).min(CHUNK_MAX as u64)) as usize;
@@ -613,6 +639,10 @@ pub async fn handle(
             Err(code) => fail!(code),
         };
         let len = (req.len as usize).min(CHUNK_MAX);
+        let rate = match download_rate(&shared.pool, &shared.config, ctx.account_id).await {
+            Ok(rate) => rate,
+            Err(code) => fail!(code),
+        };
         let blobs = shared.blobs.clone();
         let offset = req.offset;
         let bytes = match tokio::task::spawn_blocking(move || {
@@ -631,7 +661,6 @@ pub async fn handle(
             last,
             bytes
         ));
-        let rate = shared.config.read().transfer_rate_bytes_per_sec;
         throttle_after(rate, n).await;
         if last {
             // Whole file served: retire the (single-use) download ticket.
@@ -747,6 +776,10 @@ pub async fn handle(
         if req.len == 0 || req.len > pt::PROVED_RANGE_MAX || req.offset >= size {
             fail!(ErrorCode::BadRequest);
         }
+        let rate = match download_rate(&shared.pool, &shared.config, ctx.account_id).await {
+            Ok(rate) => rate,
+            Err(code) => fail!(code),
+        };
         // Its proofs are made in the background the first time: asked for
         // again shortly, nothing waits on them here.
         let stream =
@@ -769,7 +802,6 @@ pub async fn handle(
         // blocks and their proofs, however little was asked for); the ticket
         // stays open (a swarm fetch asks for the ranges it needs, in any
         // order), and closes with TransferAbort or the session.
-        let rate = shared.config.read().transfer_rate_bytes_per_sec;
         throttle_after(rate, sent).await;
         return Ok(true);
     }

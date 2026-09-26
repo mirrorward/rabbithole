@@ -447,6 +447,11 @@ pub const SECTIONS: &[Section] = &[
                     )
                     .unit(Unit::BytesPerSec)
                     .zero("no cap"),
+                    item(
+                        "transfer_rate_by_class",
+                        "Class download speed caps",
+                        "An inline TOML table of exact class names and bytes per second, such as { member = 65536, vip = 0 }. Missing classes use the download speed cap; zero means no cap.",
+                    ),
                 ],
             },
             Group {

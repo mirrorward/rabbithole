@@ -78,6 +78,20 @@ impl AccountsRepo<'_> {
             .map(|r| row_to_account(&r)))
     }
 
+    /// Current class name for an enabled account, read in one snapshot. The
+    /// outer Option distinguishes missing/disabled accounts from an account
+    /// with no surviving class (the inner None).
+    pub async fn active_class_name(&self, id: i64) -> Result<Option<Option<String>>, StoreError> {
+        Ok(sqlx::query(
+            "SELECT c.name FROM accounts a LEFT JOIN classes c ON c.id = a.class_id
+             WHERE a.id = ? AND a.disabled = 0",
+        )
+        .bind(id)
+        .fetch_optional(self.0)
+        .await?
+        .map(|r| r.get("name")))
+    }
+
     /// Which agreement this person has accepted here (the blake3 of the
     /// text they were shown), if any.
     pub async fn agreed_hash(&self, id: i64) -> Result<Option<[u8; 32]>, StoreError> {
