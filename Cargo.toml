@@ -136,6 +136,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # misc
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 toml = "0.8"
 # Writes one key back into an operator's burrow.toml without disturbing the
 # comments and layout around it. Already in the tree: `toml` is built on it.

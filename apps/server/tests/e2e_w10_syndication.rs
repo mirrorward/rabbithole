@@ -270,9 +270,9 @@ async fn enabled_burrow_polls_in_the_background() {
 
 /// One response per fetch, including an empty response for a transport
 /// failure. Request counts prove scheduling without negative wall-clock waits.
-async fn spawn_scripted_feed(
+async fn spawn_scripted_feed<T: AsRef<[u8]> + Send + 'static>(
     log: Arc<Mutex<Vec<String>>>,
-    responses: Vec<String>,
+    responses: Vec<T>,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -288,7 +288,7 @@ async fn spawn_scripted_feed(
                 assert!(buf.len() < 16_384);
             }
             log.lock().unwrap().push(String::from_utf8(buf).unwrap());
-            sock.write_all(response.as_bytes()).await.unwrap();
+            sock.write_all(response.as_ref()).await.unwrap();
             sock.shutdown().await.unwrap();
         }
     });
@@ -446,6 +446,141 @@ async fn bounded_hints_and_live_operator_interval_preserve_existing_deadlines() 
     assert_next_fetch(&mut svc, &log, now + 97_000, 4).await;
     assert_eq!(svc.poll_due(now + 97_299).await, 0);
     assert_eq!(log.lock().unwrap().len(), 5);
+    server.await.unwrap();
+    burrow.shutdown().await;
+}
+
+fn gzip_feed(body: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(body).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn encoded_feed_response(body: &[u8], encoding: &str, etag: &str, chunked: bool) -> Vec<u8> {
+    let framing = if chunked {
+        "Transfer-Encoding: chunked".into()
+    } else {
+        format!("Content-Length: {}", body.len())
+    };
+    let mut response = format!("HTTP/1.1 200 OK\r\n{framing}\r\nContent-Encoding: {encoding}\r\nETag: \"{etag}\"\r\nLast-Modified: Wed, 02 Jul 2003 05:00:00 GMT\r\n\r\n").into_bytes();
+    if chunked {
+        for chunk in body.chunks(13) {
+            response.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+            response.extend_from_slice(chunk);
+            response.extend_from_slice(b"\r\n");
+        }
+        response.extend_from_slice(b"0\r\n\r\n");
+    } else {
+        response.extend_from_slice(body);
+    }
+    response
+}
+
+#[tokio::test]
+async fn gzip_304_and_failed_decoding_preserve_validators_hints_and_atomic_ingestion() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let first = gzip_feed(
+        RSS.replace("<channel>", "<channel><ttl>120</ttl>")
+            .as_bytes(),
+    );
+    let updated = RSS.replace("</channel>", "<item><title>Third item</title><guid>urn:warren:3</guid><description>Only after a valid fetch.</description></item></channel>");
+    let mut corrupt = gzip_feed(updated.as_bytes());
+    let crc_offset = corrupt.len() - 8;
+    corrupt[crc_offset] ^= 1;
+    let mut oversized = updated.as_bytes().to_vec();
+    oversized.resize(burrow::syndication::MAX_BODY_BYTES + 1, b' ');
+    let recovered = gzip_feed(
+        updated
+            .replace("<channel>", "<channel><ttl>60</ttl>")
+            .as_bytes(),
+    );
+    let responses = vec![
+        encoded_feed_response(&first, "gzip", "v1", false),
+        format!("HTTP/1.1 304 Not Modified\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nETag: \"v1-refresh\"\r\n\r\n", first.len()).into_bytes(),
+        encoded_feed_response(&corrupt, "gzip", "bad-crc", false),
+        encoded_feed_response(updated.as_bytes(), "br", "unsupported", false),
+        encoded_feed_response(&gzip_feed(&oversized), "gzip", "too-large", false),
+        encoded_feed_response(&recovered, "x-gzip", "v2", true),
+        b"HTTP/1.1 304 Not Modified\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec(),
+        feed_response(&updated, "v3").into_bytes(),
+    ];
+    let (addr, server) = spawn_scripted_feed(log.clone(), responses).await;
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(syn_config(
+        work.path(),
+        &format!("http://{addr}/feed"),
+        false,
+    ))
+    .await
+    .unwrap();
+    burrow
+        .shared
+        .boards
+        .create_board("news", "News", "", 2, None, 0)
+        .await
+        .unwrap();
+    let mut svc = SyndicationService::new(burrow.shared.clone(), work.path().join("state"))
+        .await
+        .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    assert_eq!(svc.poll_due(now).await, 2);
+    assert_eq!(log.lock().unwrap().len(), 1);
+    // A 304 keeps the two-hour hint. CRC, unsupported-encoding and expansion
+    // failures back off 2x, 4x and 8x without accepting items or fresh validators.
+    for (previous, offset) in [7_200, 14_400, 28_800, 57_600].into_iter().enumerate() {
+        assert_next_fetch(&mut svc, &log, now + offset, previous + 1).await;
+        assert_eq!(
+            burrow
+                .shared
+                .boards
+                .threads("news", 100)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+    assert_eq!(svc.poll_due(now + 115_199).await, 0);
+    assert_eq!(log.lock().unwrap().len(), 5);
+    assert_eq!(
+        svc.poll_due(now + 115_200).await,
+        1,
+        "only validated recovery posts the third item"
+    );
+    assert_eq!(log.lock().unwrap().len(), 6);
+    assert_next_fetch(&mut svc, &log, now + 118_800, 6).await;
+    assert_next_fetch(&mut svc, &log, now + 122_400, 7).await;
+    let heads = log.lock().unwrap().clone();
+    for head in &heads {
+        assert!(head
+            .to_ascii_lowercase()
+            .contains("accept-encoding: gzip\r\n"));
+    }
+    assert!(heads[1]
+        .to_ascii_lowercase()
+        .contains("if-none-match: \"v1\""));
+    for head in &heads[2..6] {
+        assert!(head
+            .to_ascii_lowercase()
+            .contains("if-none-match: \"v1-refresh\""));
+        assert!(head
+            .to_ascii_lowercase()
+            .contains("if-modified-since: wed, 02 jul 2003 05:00:00 gmt"));
+    }
+    for head in &heads[6..8] {
+        assert!(head.to_ascii_lowercase().contains("if-none-match: \"v2\""));
+    }
+    assert_eq!(
+        burrow
+            .shared
+            .boards
+            .threads("news", 100)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
     server.await.unwrap();
     burrow.shutdown().await;
 }

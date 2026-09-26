@@ -321,6 +321,7 @@ dependencies = [
  "chrono",
  "clap",
  "data-encoding",
+ "flate2",
  "hex",
  "parking_lot",
  "postcard",

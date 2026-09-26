@@ -35,7 +35,7 @@ disables that class.
 | QWK / QWKE | — (no listener; telnet `[M]` + `ctl qwk-build`/`qwk-ingest`) | `qwk_enabled` | telnet's `telnet_min_role`; REP ingest posts under `BOARD_POST` per board | (telnet's) | HTTP spool serving, zmodem upload path, per-user scheduled packets |
 | Radio delivery (Icecast/ICY) | 8000 (`radio_addr`) | `radio_enabled` | listeners (`GET`) are anonymous; a `SOURCE`/`PUT` DJ on this port authenticates HTTP Basic against a **real account** and needs cap `BROADCAST` on the `radio` resource | conn, auth (failed source logins) | live sources are fanned out **verbatim** (no decode/transcode into the audio `Station` playout) |
 | Radio source ingest + updinfo | 8001 (`radio_source_addr`) | `radio_source_enabled` | shared credentials `radio_source_user` (default `"source"`) / `radio_source_password` — **empty password refuses every source and updinfo** (fail safe); guests never broadcast | conn, auth | same passthrough caveat as delivery |
-| Syndication fetcher (RSS/Atom) | — (outbound only, no listener) | `syndication_enabled` (+ non-empty `syndication_feeds`) | gateway posts under a member-baseline subject holding `BOARD_POST` | — (its own politeness floor + per-feed backoff) | calendar-aligned `sy:updateBase`, compressed responses (no `Accept-Encoding`) |
+| Syndication fetcher (RSS/Atom) | — (outbound only, no listener) | `syndication_enabled` (+ non-empty `syndication_feeds`) | gateway posts under a member-baseline subject holding `BOARD_POST` | — (its own politeness floor + per-feed backoff) | calendar-aligned `sy:updateBase`, content codings other than identity/gzip |
 
 ## Per-surface config keys
 
@@ -154,6 +154,19 @@ disables that class.
   replace the hint, including clearing it when hints are missing or invalid.
   These metadata are runtime-only and fetched afresh on restart. RSS 1.0/RDF
   documents and calendar-aligned `updateBase` scheduling remain unsupported.
+  The fetcher advertises `Accept-Encoding: gzip` and decodes a single gzip
+  content coding (including the `x-gzip` alias) after HTTP framing. Identity
+  responses remain supported; other or stacked content codings are refused.
+  Encoded and expanded bodies each have an independent 1 MiB cap, with 64 KiB
+  extra allowance for raw HTTP headers/framing. Concatenated gzip members share
+  the expanded cap and all members must pass checksum/trailer validation before
+  any items are ingested. Corrupt, truncated, trailing-junk, unsupported, and
+  oversized content backs off while retaining the last good validators and
+  polling hint. Bodyless 304 responses are never inflated, even when they carry
+  representation length or encoding metadata. These rules follow
+  [HTTP content coding](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.4),
+  [HTTP body framing](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3),
+  and the [gzip member format](https://www.rfc-editor.org/rfc/rfc1952.html).
 
 Not legacy, but adjacent: the S2S federation listener (`federation_enabled`,
 `federation_addr`, default port 4655, off by default) is documented in

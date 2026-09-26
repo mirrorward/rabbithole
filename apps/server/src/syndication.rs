@@ -27,8 +27,8 @@
 //! the [`PollState`] validators), `Connection: close` framing, 3xx redirects
 //! (capped at [`MAX_REDIRECTS`] hops), a response size cap
 //! ([`MAX_BODY_BYTES`]) and a whole-fetch timeout. `Content-Length` and
-//! `chunked` bodies are both handled; everything else about HTTP is out of
-//! scope.
+//! `chunked` framing precede bounded gzip content decoding. Both encoded and
+//! expanded bodies must fit the cap; corrupt content never reaches ingestion.
 //!
 //! **TLS roots decision:** `webpki-roots` was already in the workspace
 //! dependency graph (sqlx's rustls stack pulls it), so per the Wave 10 plan it
@@ -63,8 +63,8 @@
 //! - **Calendar-aligned hints**: syndication-module `updateBase` is ignored.
 //! - **IPv6 literal hosts** in feed URLs are accepted as `[::1]` /
 //!   `[2001:db8::1]:8080` (same authority split as directory discovery).
-//! - **Compressed responses**: no `Accept-Encoding` is sent, so servers must
-//!   reply with identity bodies (they do when the header is absent).
+//! - **Other content encodings**: only identity and a single gzip coding
+//!   (`x-gzip` alias included) are supported; stacked codings are refused.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -86,7 +86,7 @@ use crate::Shared;
 /// member-baseline pseudo-account so ACLs that gag members gag the gateway.
 const SYNDICATION_GATEWAY_ACCOUNT: i64 = 0;
 
-/// Response body cap: a feed document larger than this is refused.
+/// Independent caps on the encoded response body and expanded feed document.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
 
 /// Extra allowance over [`MAX_BODY_BYTES`] for the status line + headers
@@ -491,7 +491,7 @@ async fn append_seen(path: &Path, ids: &[String]) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// What the poll loop needs from a fetch: the status, the caching validators,
-/// and the (already de-framed) body.
+/// and the body after HTTP framing and content decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchResponse {
     pub status: u16,
@@ -622,7 +622,7 @@ fn resolve_location(current: &FeedUrl, location: &str) -> Result<FeedUrl> {
 
 /// Fetch `url` with a minimal conditional HTTP/1.1 GET, following up to
 /// [`MAX_REDIRECTS`] redirect hops, under `timeout` overall. Transport-level
-/// problems (connect/TLS/framing/size-cap) are `Err`; any HTTP status —
+/// problems (connect/TLS/framing/content-decoding/size-cap) are `Err`; any HTTP status —
 /// including an unresolvable 3xx — comes back as a [`FetchResponse`] for
 /// [`PollState::on_response`] to judge.
 pub async fn http_get(
@@ -659,13 +659,68 @@ async fn http_get_inner(
                 }
             }
         }
-        return Ok(FetchResponse {
-            status: resp.status,
-            etag: header(&resp.headers, "etag").map(str::to_string),
-            last_modified: header(&resp.headers, "last-modified").map(str::to_string),
-            body: resp.body,
-        });
+        // Keep bounded decompression off the async worker. The overall fetch
+        // timeout also covers waiting for this task; input/output caps bound
+        // its work if the caller times out while it is already running.
+        return tokio::task::spawn_blocking(move || decode_feed_response(resp))
+            .await
+            .map_err(|_| anyhow!("feed content decoder task failed"))?;
     }
+}
+
+/// Decode only the selected feed response. The shared HTTP framing parser is
+/// also used by directory announcements and deliberately leaves content alone.
+fn decode_feed_response(resp: HttpResponse) -> Result<FetchResponse> {
+    use std::io::Read;
+
+    let body = if response_has_no_body(resp.status) {
+        Vec::new()
+    } else {
+        if resp.body.len() > MAX_BODY_BYTES {
+            bail!("encoded body exceeds the {MAX_BODY_BYTES}-byte feed cap");
+        }
+        // Repeated field lines combine into one ordered list. Do not silently
+        // accept the first coding and pass a remaining layer to the XML parser.
+        let mut codings = resp
+            .headers
+            .iter()
+            .filter(|(name, _)| name == "content-encoding")
+            .flat_map(|(_, value)| value.split(','))
+            .map(str::trim)
+            .filter(|coding| !coding.is_empty());
+        let coding = codings.next();
+        if codings.next().is_some() {
+            bail!("stacked feed content encodings are unsupported");
+        }
+        match coding {
+            None => resp.body,
+            Some(coding) if coding.eq_ignore_ascii_case("identity") => resp.body,
+            Some(coding)
+                if coding.eq_ignore_ascii_case("gzip") || coding.eq_ignore_ascii_case("x-gzip") =>
+            {
+                // MultiGzDecoder checks every member's CRC and size trailer.
+                // One extra byte distinguishes exactly-at-cap from oversized;
+                // successful reads still reach EOF and validate all trailers.
+                let decoder = flate2::bufread::MultiGzDecoder::new(resp.body.as_slice());
+                let mut expanded = Vec::new();
+                decoder
+                    .take(MAX_BODY_BYTES as u64 + 1)
+                    .read_to_end(&mut expanded)
+                    .map_err(|_| anyhow!("invalid gzip feed content"))?;
+                if expanded.len() > MAX_BODY_BYTES {
+                    bail!("expanded body exceeds the {MAX_BODY_BYTES}-byte feed cap");
+                }
+                expanded
+            }
+            Some(_) => bail!("unsupported feed content encoding"),
+        }
+    };
+    Ok(FetchResponse {
+        status: resp.status,
+        etag: header(&resp.headers, "etag").map(str::to_string),
+        last_modified: header(&resp.headers, "last-modified").map(str::to_string),
+        body,
+    })
 }
 
 /// Serialize the request head. `Connection: close` keeps framing simple: the
@@ -676,7 +731,7 @@ fn build_request(
     if_modified_since: Option<&str>,
 ) -> String {
     let mut req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: rabbithole-burrow/{} (+syndication)\r\nAccept: application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5\r\nConnection: close\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: rabbithole-burrow/{} (+syndication)\r\nAccept: application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5\r\nAccept-Encoding: gzip\r\nConnection: close\r\n",
         target.path,
         target.host_header(),
         env!("CARGO_PKG_VERSION"),
@@ -834,6 +889,9 @@ pub fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str
 /// de-framed body and rejects truncated `Content-Length`/chunked bodies (a
 /// cut-off feed must back off, not half-post).
 pub fn parse_http_response(raw: &[u8]) -> Result<HttpResponse> {
+    if raw.len() > MAX_RESPONSE_BYTES {
+        bail!("response exceeds the {MAX_RESPONSE_BYTES}-byte response cap");
+    }
     let head_end = find_subslice(raw, b"\r\n\r\n").ok_or_else(|| anyhow!("no response head"))?;
     let head = String::from_utf8_lossy(&raw[..head_end]);
     let mut lines = head.split("\r\n");
@@ -853,6 +911,15 @@ pub fn parse_http_response(raw: &[u8]) -> Result<HttpResponse> {
             headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
         }
     }
+    // A 304 may describe the selected representation's length/encoding while
+    // carrying no body. Those metadata must not trigger framing or inflation.
+    if response_has_no_body(status) {
+        return Ok(HttpResponse {
+            status,
+            headers,
+            body: Vec::new(),
+        });
+    }
     let rest = &raw[head_end + 4..];
     let chunked = header(&headers, "transfer-encoding")
         .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
@@ -861,11 +928,17 @@ pub fn parse_http_response(raw: &[u8]) -> Result<HttpResponse> {
     } else if let Some(len) =
         header(&headers, "content-length").and_then(|v| v.parse::<usize>().ok())
     {
+        if len > MAX_BODY_BYTES {
+            bail!("encoded body exceeds the {MAX_BODY_BYTES}-byte feed cap");
+        }
         if rest.len() < len {
             bail!("truncated body: got {} of {len} bytes", rest.len());
         }
         rest[..len].to_vec()
     } else {
+        if rest.len() > MAX_BODY_BYTES {
+            bail!("encoded body exceeds the {MAX_BODY_BYTES}-byte feed cap");
+        }
         rest.to_vec()
     };
     if body.len() > MAX_BODY_BYTES {
@@ -876,6 +949,10 @@ pub fn parse_http_response(raw: &[u8]) -> Result<HttpResponse> {
         headers,
         body,
     })
+}
+
+fn response_has_no_body(status: u16) -> bool {
+    (100..200).contains(&status) || matches!(status, 204 | 304)
 }
 
 /// Decode a complete `Transfer-Encoding: chunked` body. Trailers are ignored;
@@ -899,10 +976,10 @@ pub fn decode_chunked(data: &[u8]) -> Result<Vec<u8>> {
             .checked_add(size)
             .filter(|&e| e <= data.len())
             .ok_or_else(|| anyhow!("truncated chunk data"))?;
-        out.extend_from_slice(&data[pos..end]);
-        if out.len() > MAX_BODY_BYTES {
+        if size > MAX_BODY_BYTES - out.len() {
             bail!("body exceeds the {MAX_BODY_BYTES}-byte feed cap");
         }
+        out.extend_from_slice(&data[pos..end]);
         pos = end;
         if data.get(pos..pos + 2) != Some(&b"\r\n"[..]) {
             bail!("missing chunk terminator");
@@ -1011,6 +1088,7 @@ mod tests {
         assert!(bare.starts_with("GET /f.xml HTTP/1.1\r\n"));
         assert!(bare.contains("Host: h.example\r\n"));
         assert!(bare.contains("Connection: close\r\n"));
+        assert!(bare.contains("Accept-Encoding: gzip\r\n"));
         assert!(!bare.contains("If-None-Match"));
         assert!(bare.ends_with("\r\n\r\n"));
 
@@ -1046,6 +1124,173 @@ mod tests {
 
         assert!(parse_http_response(b"SIP/2.0 200 OK\r\n\r\n").is_err());
         assert!(parse_http_response(b"HTTP/1.1 200").is_err(), "no head end");
+    }
+
+    fn gzip_bytes(body: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(body).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn encoded_response(coding: &str, body: Vec<u8>) -> HttpResponse {
+        HttpResponse {
+            status: 200,
+            headers: vec![
+                ("content-encoding".into(), coding.into()),
+                ("etag".into(), "v1".into()),
+            ],
+            body,
+        }
+    }
+
+    #[test]
+    fn bodyless_responses_ignore_representation_framing_and_encoding() {
+        for status in [100, 204, 304] {
+            for framing in ["Content-Length: 123456", "Transfer-Encoding: chunked"] {
+                let raw = format!("HTTP/1.1 {status} No Body\r\n{framing}\r\nContent-Encoding: gzip\r\nETag: v2\r\n\r\n");
+                let framed = parse_http_response(raw.as_bytes()).unwrap();
+                assert!(framed.body.is_empty());
+                let decoded = decode_feed_response(framed).unwrap();
+                assert!(decoded.body.is_empty());
+                assert_eq!(decoded.etag.as_deref(), Some("v2"));
+            }
+        }
+    }
+
+    #[test]
+    fn gzip_is_decoded_after_length_chunked_or_eof_framing() {
+        let feed = b"<rss><channel><title>compressed</title></channel></rss>";
+        let compressed = gzip_bytes(feed);
+        let mut length = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            compressed.len()
+        )
+        .into_bytes();
+        length.extend_from_slice(&compressed);
+        length.extend_from_slice(b"ignored outside content-length");
+        let mut chunked =
+            b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n"
+                .to_vec();
+        for chunk in compressed.chunks(7) {
+            chunked.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+            chunked.extend_from_slice(chunk);
+            chunked.extend_from_slice(b"\r\n");
+        }
+        chunked.extend_from_slice(b"0\r\n\r\n");
+        let mut eof = b"HTTP/1.0 200 OK\r\nContent-Encoding: gzip\r\n\r\n".to_vec();
+        eof.extend_from_slice(&compressed);
+        for raw in [length, chunked, eof] {
+            let framed = parse_http_response(&raw).unwrap();
+            assert_eq!(
+                framed.body, compressed,
+                "shared parser only removes framing"
+            );
+            assert_eq!(decode_feed_response(framed).unwrap().body, feed);
+        }
+    }
+
+    #[test]
+    fn gzip_aliases_multiple_members_and_identity_are_supported() {
+        let mut members = gzip_bytes(b"<rss>");
+        members.extend(gzip_bytes(b"<channel/></rss>"));
+        for coding in ["gzip", "GZip", " x-gzip "] {
+            let decoded = decode_feed_response(encoded_response(coding, members.clone())).unwrap();
+            assert_eq!(decoded.body, b"<rss><channel/></rss>");
+            assert_eq!(decoded.etag.as_deref(), Some("v1"));
+        }
+        assert_eq!(
+            decode_feed_response(encoded_response("identity", b"plain".to_vec()))
+                .unwrap()
+                .body,
+            b"plain"
+        );
+    }
+
+    #[test]
+    fn corrupt_truncated_or_trailing_gzip_is_rejected_atomically() {
+        let valid = gzip_bytes(
+            b"<rss><channel><item><title>never partly ingested</title></item></channel></rss>",
+        );
+        let mut bad_crc = valid.clone();
+        let crc_offset = bad_crc.len() - 8;
+        bad_crc[crc_offset] ^= 1;
+        let mut bad_size = valid.clone();
+        let size_offset = bad_size.len() - 4;
+        bad_size[size_offset] ^= 1;
+        let mut trailing = valid.clone();
+        trailing.extend_from_slice(b"junk");
+        let mut bad_second_member = valid.clone();
+        bad_second_member.extend_from_slice(&valid[..valid.len() - 1]);
+        for body in [
+            Vec::new(),
+            b"not gzip".to_vec(),
+            valid[..valid.len() - 1].to_vec(),
+            bad_crc,
+            bad_size,
+            trailing,
+            bad_second_member,
+        ] {
+            assert!(decode_feed_response(encoded_response("gzip", body)).is_err());
+        }
+    }
+
+    #[test]
+    fn unsupported_and_stacked_content_codings_do_not_reach_feed_parsing() {
+        for coding in [
+            "br",
+            "deflate",
+            "gzip, gzip",
+            "identity, gzip",
+            "gzip;level=1",
+        ] {
+            assert!(
+                decode_feed_response(encoded_response(coding, b"<rss/>".to_vec())).is_err(),
+                "{coding}"
+            );
+        }
+        let mut repeated = encoded_response("gzip", gzip_bytes(b"<rss/>"));
+        repeated
+            .headers
+            .push(("content-encoding".into(), "br".into()));
+        assert!(
+            decode_feed_response(repeated).is_err(),
+            "all field lines checked"
+        );
+    }
+
+    #[test]
+    fn encoded_and_expanded_caps_apply_independently_across_members() {
+        let exact = vec![b'x'; MAX_BODY_BYTES];
+        assert_eq!(
+            decode_feed_response(encoded_response("gzip", gzip_bytes(&exact)))
+                .unwrap()
+                .body,
+            exact
+        );
+        let over = vec![b'x'; MAX_BODY_BYTES + 1];
+        assert!(
+            decode_feed_response(encoded_response("gzip", gzip_bytes(&over)))
+                .unwrap_err()
+                .to_string()
+                .contains("expanded body")
+        );
+        let mut members = gzip_bytes(&exact);
+        members.extend(gzip_bytes(b"x"));
+        assert!(decode_feed_response(encoded_response("gzip", members)).is_err());
+        assert!(decode_feed_response(encoded_response("gzip", over.clone()))
+            .unwrap_err()
+            .to_string()
+            .contains("encoded body"));
+        for framing in [format!("Content-Length: {}\r\n", over.len()), String::new()] {
+            let mut raw = format!("HTTP/1.1 200 OK\r\n{framing}\r\n").into_bytes();
+            raw.extend_from_slice(&over);
+            assert!(parse_http_response(&raw).is_err());
+        }
+        let mut chunked = format!("{:x}\r\n", over.len()).into_bytes();
+        chunked.extend_from_slice(&over);
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+        assert!(decode_chunked(&chunked).is_err());
     }
 
     #[test]

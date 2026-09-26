@@ -44,6 +44,7 @@ rabbithole-legacy-icecast.workspace = true
 rabbithole-portmap.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
+flate2.workspace = true
 clap.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
