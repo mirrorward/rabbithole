@@ -1293,40 +1293,31 @@ where
     });
     let _ = shared.radio.registry.set_enabled(&slug, true);
 
-    wr.write_all(source_ok(req.method).as_bytes()).await?;
-    tracing::info!(mount = %slug, dj = %authed.persona.screen_name, "radio source live");
+    // Once claimed, every exit must release the mount, including an encoder
+    // that closes before reading its acknowledgement.
+    let result: Result<()> = async {
+        wr.write_all(source_ok(req.method).as_bytes()).await?;
+        tracing::info!(mount = %slug, dj = %authed.persona.screen_name, "radio source live");
 
-    // Tell everyone watching that the station is on the air. This surface
-    // used to go live in silence: listeners could tune in, but no client was
-    // told there was anything to tune in to until the DJ's encoder happened to
-    // send a title through the *other* port.
-    if let Some(np) = now_playing.lock().clone() {
-        let listeners = shared.radio.registry.listener_count(&slug).unwrap_or(0);
-        publish_status(
-            shared,
-            RadioStatus {
-                station: slug.clone(),
-                title: np.title,
-                artist: np.artist,
-                dj: np.dj,
-                listeners,
-                live: true,
-            },
-        );
-    }
+        if let Some(np) = now_playing.lock().clone() {
+            publish_playing(shared, &slug, np, true);
+        }
 
-    // Fan the body out verbatim until the source disconnects.
-    if !body.is_empty() {
-        let _ = tx.send(Arc::from(body.into_boxed_slice()));
+        // Fan the body out verbatim until the source disconnects.
+        if !body.is_empty() {
+            let _ = tx.send(Arc::from(body.into_boxed_slice()));
+        }
+        let mut chunk = vec![0u8; SOURCE_CHUNK];
+        loop {
+            let n = match rd.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let _ = tx.send(Arc::from(&chunk[..n]));
+        }
+        Ok(())
     }
-    let mut chunk = vec![0u8; SOURCE_CHUNK];
-    loop {
-        let n = match rd.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
-        };
-        let _ = tx.send(Arc::from(&chunk[..n]));
-    }
+    .await;
 
     // Source gone: drop the mount (closing every listener) and disable it.
     let _ = now_playing; // kept alive for the source's lifetime
@@ -1347,7 +1338,7 @@ where
         let _ = shared.radio.registry.set_enabled(&slug, false);
     }
     tracing::info!(mount = %slug, "radio source ended");
-    Ok(())
+    result
 }
 
 /// Serve a listener: negotiate metadata, then stream the mount, drop-behind.
@@ -1658,6 +1649,12 @@ pub(crate) fn publish_now_playing(shared: &Arc<Shared>, slug: &str, live: bool) 
     let Some(np) = shared.radio.now_playing(slug) else {
         return;
     };
+    publish_playing(shared, slug, np, live);
+}
+
+/// Publish the accepted source's metadata directly: a DJ-only mount has no
+/// library program to read, but its presence, listing and pushes are identical.
+fn publish_playing(shared: &Arc<Shared>, slug: &str, np: NowPlaying, live: bool) {
     let listeners = shared.radio.registry.listener_count(slug).unwrap_or(0);
     publish_status(
         shared,
@@ -2517,18 +2514,7 @@ where
 
     // Republish presence directly from the mount's now-playing so pure-DJ
     // mounts (no library program) update too.
-    let listeners = shared.radio.registry.listener_count(&slug).unwrap_or(0);
-    publish_status(
-        shared,
-        RadioStatus {
-            station: slug.clone(),
-            title: np.title,
-            artist: np.artist,
-            dj: np.dj,
-            listeners,
-            live: true,
-        },
-    );
+    publish_playing(shared, &slug, np, true);
     tracing::info!(mount = %slug, song = %update.song, "radio metadata updated");
     wr.write_all(metadata_update_ok().as_bytes()).await?;
     Ok(())
@@ -2635,27 +2621,31 @@ where
         enabled: true,
     });
     let _ = shared.radio.registry.set_enabled(&slug, true);
-    shared.radio.go_live(&slug, np);
-    publish_now_playing(shared, &slug, true);
+    shared.radio.go_live(&slug, np.clone());
+    publish_playing(shared, &slug, np, true);
     shared.stats.incr("radio", "sources_connected");
 
-    wr.write_all(source_ok(req.method).as_bytes()).await?;
-    tracing::info!(mount = %slug, dj = %dj_name, "DJ live source connected");
+    let result: Result<()> = async {
+        wr.write_all(source_ok(req.method).as_bytes()).await?;
+        tracing::info!(mount = %slug, dj = %dj_name, "DJ live source connected");
 
-    // Fan the body out verbatim and count bytes until the DJ disconnects.
-    if !body.is_empty() {
-        shared.radio.add_source_bytes(&slug, body.len() as u64);
-        let _ = tx.send(Arc::from(body.into_boxed_slice()));
+        // Fan the body out verbatim and count bytes until the DJ disconnects.
+        if !body.is_empty() {
+            shared.radio.add_source_bytes(&slug, body.len() as u64);
+            let _ = tx.send(Arc::from(body.into_boxed_slice()));
+        }
+        let mut chunk = vec![0u8; SOURCE_CHUNK];
+        loop {
+            let n = match rd.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            shared.radio.add_source_bytes(&slug, n as u64);
+            let _ = tx.send(Arc::from(&chunk[..n]));
+        }
+        Ok(())
     }
-    let mut chunk = vec![0u8; SOURCE_CHUNK];
-    loop {
-        let n = match rd.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
-        };
-        shared.radio.add_source_bytes(&slug, n as u64);
-        let _ = tx.send(Arc::from(&chunk[..n]));
-    }
+    .await;
 
     // DJ gone: drop the mount and resume the playlist (or take the station off
     // the air if it was a pure-DJ mount with no library rotation to fall back
@@ -2677,7 +2667,7 @@ where
         let _ = shared.radio.registry.set_enabled(&slug, false);
     }
     tracing::info!(mount = %slug, "DJ live source ended");
-    Ok(())
+    result
 }
 
 /// Spawn the playlist rotation driver: on a 1 s cadence it advances any
@@ -3617,5 +3607,106 @@ mod tests {
         stations.end_live("live", |_| false);
         assert!(!stations.is_live("live"));
         assert_eq!(stations.now_playing("live").unwrap().title, "auto track");
+    }
+
+    #[tokio::test]
+    async fn failed_source_ack_releases_the_mount_and_resumes_its_program() {
+        use rabbithole_server_core::{Role, ServerConfig};
+
+        let work = tempfile::tempdir().unwrap();
+        let burrow = crate::Burrow::start(ServerConfig {
+            quic_addr: "127.0.0.1:0".parse().unwrap(),
+            ws_addr: "127.0.0.1:0".parse().unwrap(),
+            data_dir: work.path().join("srv"),
+            radio_source_user: "source".into(),
+            radio_source_password: "source-password".into(),
+            ..ServerConfig::default()
+        })
+        .await
+        .unwrap();
+        burrow
+            .shared
+            .auth
+            .create_account("source", "source-password", Role::Admin)
+            .await
+            .unwrap();
+        for dedicated in [false, true] {
+            for library in [false, true] {
+                let slug = format!("ack-{dedicated}-{library}");
+                if library {
+                    burrow.shared.radio.install_program(
+                        &slug,
+                        "Automation",
+                        "",
+                        vec![Track::new(
+                            TrackId(1),
+                            "auto track",
+                            "",
+                            DEFAULT_TRACK_MS,
+                            BlobId::ZERO,
+                        )],
+                        None,
+                    );
+                }
+                let auth = data_encoding::BASE64.encode(b"source:source-password");
+                let head = format!(
+                    "PUT /{slug} HTTP/1.0\r\nAuthorization: Basic {auth}\r\nice-name: Unacknowledged DJ\r\n\r\n"
+                );
+                // Unlike an OS socket close, a dropped duplex peer reliably
+                // fails the first write on every supported platform.
+                let (mut writer, peer) = tokio::io::duplex(64);
+                drop(peer);
+                let mut reader = tokio::io::empty();
+                let result = if dedicated {
+                    ingest_source(
+                        head.as_bytes(),
+                        Vec::new(),
+                        &mut reader,
+                        &mut writer,
+                        &burrow.shared,
+                        None,
+                    )
+                    .await
+                } else {
+                    serve_source(
+                        head.as_bytes(),
+                        Vec::new(),
+                        &mut reader,
+                        &mut writer,
+                        &burrow.shared,
+                        None,
+                    )
+                    .await
+                };
+                let error = result.expect_err("source acknowledgement must fail");
+                assert_eq!(
+                    error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                    std::io::ErrorKind::BrokenPipe
+                );
+                assert!(
+                    !burrow.shared.radio.dj_holds(&slug),
+                    "failed ACK released {slug}"
+                );
+                assert!(!burrow.shared.radio.is_live(&slug));
+                assert!(!burrow.shared.radio.is_streaming(&slug));
+                assert_eq!(
+                    burrow.shared.radio.registry.is_enabled(&slug),
+                    Some(library)
+                );
+                let presence = burrow.shared.presence.radio_status(&slug);
+                if library {
+                    let presence = presence.expect("library resumes after failed ACK");
+                    assert_eq!(presence.title, "auto track");
+                    assert!(!presence.live);
+                    assert_eq!(
+                        burrow.shared.radio.now_playing(&slug).unwrap().title,
+                        "auto track"
+                    );
+                } else {
+                    assert!(presence.is_none(), "no ghost programless source");
+                }
+            }
+        }
+        burrow.shutdown().await;
     }
 }

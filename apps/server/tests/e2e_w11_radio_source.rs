@@ -72,6 +72,195 @@ async fn poll_until(label: &str, f: impl Fn() -> bool) {
     panic!("condition never held: {label}");
 }
 
+async fn read_response_head(sock: &mut TcpStream) -> String {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            head.push(sock.read_u8().await.expect("complete response head"));
+            assert!(head.len() <= 8192, "bounded response head");
+        }
+        String::from_utf8(head).unwrap()
+    })
+    .await
+    .expect("response head within five seconds")
+}
+
+async fn radio_push<M: rabbithole_proto::Message>(client: &mut rabbithole_core::Client) -> M {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let frame = client
+                .next_push()
+                .await
+                .expect("push connection remains readable")
+                .expect("push connection remains open");
+            if let Some(message) = frame.decode::<M>() {
+                break message.expect("valid typed radio push");
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{} push within five seconds", std::any::type_name::<M>()))
+}
+
+#[tokio::test]
+async fn programless_sources_announce_stream_update_and_depart_on_both_dialects() {
+    use rabbithole_core::Client;
+    use rabbithole_proto::radio::{RadioNowPlaying, RadioOff, RadioStations, RadioStationsRequest};
+
+    const AUDIO: &[u8] =
+        include_bytes!("../../../crates/radio/tests/fixtures/reference-8k-mono.flac");
+    let work = tempfile::tempdir().unwrap();
+    let mut config = source_config(&work.path().join("srv"));
+    config.radio_enabled = true;
+    config.radio_addr = "127.0.0.1:0".parse().unwrap();
+    // Two source dialects plus rejected contenders and metadata connections
+    // exercise more simultaneous connections than the default burst allows.
+    config.ratelimit_conn_burst = 32;
+    let burrow = Burrow::start(config).await.unwrap();
+    let ingest = burrow.radio_source_addr.unwrap();
+    let delivery = burrow.radio_addr.unwrap();
+    assert!(burrow.shared.radio.program_slugs().is_empty());
+
+    let mut viewer = Client::connect(
+        &format!("ws://{}", burrow.ws_addr),
+        None,
+        None,
+        "radio-source-test",
+        "0",
+    )
+    .await
+    .unwrap();
+    viewer.auth_guest(Some("listener".into())).await.unwrap();
+    viewer.expect_welcome().await.unwrap();
+
+    // Reuse the same mount after departure as well: an old source must not
+    // retain ownership or leave a ghost station behind.
+    for (method, acknowledgement) in [("PUT", "HTTP/1.0 200 OK"), ("SOURCE", "OK2")] {
+        let mut source = TcpStream::connect(ingest).await.unwrap();
+        let head = format!(
+            "{method} /solo HTTP/1.0\r\nAuthorization: Basic {}\r\nice-name: Solo FM\r\nice-genre: Ambient\r\ncontent-type: audio/flac\r\n\r\n",
+            basic_auth("source", "hackme")
+        );
+        source.write_all(head.as_bytes()).await.unwrap();
+        assert!(read_response_head(&mut source)
+            .await
+            .starts_with(acknowledgement));
+
+        // No library program, audio, or separate updinfo request has run.
+        // The source's acknowledgement is enough to discover and tune in.
+        let initial: RadioNowPlaying = radio_push(&mut viewer).await;
+        assert_eq!(
+            initial,
+            RadioNowPlaying::new("solo", "Solo FM", "Ambient", "source", 0, true)
+        );
+        let presence = burrow.shared.presence.radio_status("solo").unwrap();
+        assert_eq!(presence.title, initial.title);
+        assert_eq!(presence.artist, initial.artist);
+        assert_eq!(presence.dj, initial.dj);
+        assert!(presence.live);
+        let listing: RadioStations = viewer.request(&RadioStationsRequest).await.unwrap();
+        assert_eq!(listing.port, delivery.port());
+        assert_eq!(listing.stations.len(), 1);
+        let station = &listing.stations[0];
+        assert_eq!(station.station, "solo");
+        assert_eq!(station.name, "Solo FM");
+        assert_eq!(station.title, initial.title);
+        assert_eq!(station.dj, "source");
+        assert!(station.live && station.streaming);
+        assert_eq!(station.listeners, 0);
+
+        // Authentication and existing ownership are still enforced. Neither
+        // rejected connection may replace this source's metadata or fan-out.
+        for (user, expected) in [("wrong-user", "401"), ("source", "403")] {
+            let mut contender = TcpStream::connect(ingest).await.unwrap();
+            contender
+                .write_all(
+                    format!(
+                "PUT /solo HTTP/1.0\r\nAuthorization: Basic {}\r\nice-name: Intruder\r\n\r\n",
+                basic_auth(user, "hackme")
+            )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            assert!(read_response_head(&mut contender).await.contains(expected));
+            assert_eq!(
+                burrow.shared.presence.radio_status("solo").unwrap().title,
+                "Solo FM"
+            );
+        }
+
+        let mut listener = TcpStream::connect(delivery).await.unwrap();
+        listener
+            .write_all(b"GET /solo HTTP/1.0\r\n\r\n")
+            .await
+            .unwrap();
+        let head = read_response_head(&mut listener).await;
+        assert!(head.contains("200 OK"), "{head}");
+        assert!(head.contains("audio/flac"), "{head}");
+        assert!(head.contains("icy-name:Solo FM"), "{head}");
+        poll_until("the delivery listener is counted", || {
+            burrow.shared.radio.registry.listener_count("solo") == Some(1)
+        })
+        .await;
+        source.write_all(AUDIO).await.unwrap();
+        let mut heard = vec![0; AUDIO.len()];
+        tokio::time::timeout(Duration::from_secs(5), listener.read_exact(&mut heard))
+            .await
+            .expect("source audio arrives")
+            .unwrap();
+        assert_eq!(
+            heard, AUDIO,
+            "the actual FLAC fixture reaches the listener unchanged"
+        );
+
+        let mut metadata = TcpStream::connect(ingest).await.unwrap();
+        metadata.write_all(b"GET /admin/metadata?mode=updinfo&mount=/solo&pass=hackme&song=Artist+-+Next+track HTTP/1.0\r\n\r\n")
+            .await.unwrap();
+        assert!(read_response_head(&mut metadata).await.contains("200 OK"));
+        let update: RadioNowPlaying = radio_push(&mut viewer).await;
+        assert_eq!(
+            update,
+            RadioNowPlaying::new("solo", "Next track", "Artist", "source", 1, true)
+        );
+        let presence = burrow.shared.presence.radio_status("solo").unwrap();
+        assert_eq!(presence.title, update.title);
+        assert_eq!(presence.listeners, 1);
+        let listing: RadioStations = viewer.request(&RadioStationsRequest).await.unwrap();
+        assert_eq!(listing.stations[0].title, update.title);
+        assert_eq!(listing.stations[0].artist, update.artist);
+        assert_eq!(listing.stations[0].listeners, 1);
+        assert_eq!(listing.stations[0].recent[0].title, "Solo FM");
+
+        source.shutdown().await.unwrap();
+        drop(source);
+        let off: RadioOff = radio_push(&mut viewer).await;
+        assert_eq!(off.station, "solo");
+        assert!(burrow.shared.presence.radio_status("solo").is_none());
+        assert!(!burrow.shared.radio.is_streaming("solo"));
+        poll_until(
+            "departed source is disabled and its listener is released",
+            || {
+                burrow.shared.radio.registry.is_enabled("solo") == Some(false)
+                    && burrow.shared.radio.registry.listener_count("solo") == Some(0)
+            },
+        )
+        .await;
+        let listing: RadioStations = viewer.request(&RadioStationsRequest).await.unwrap();
+        assert!(listing.stations.is_empty(), "no stale station: {listing:?}");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), listener.read_u8())
+                .await
+                .expect("listener closes with its source")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+        assert!(burrow.shared.radio.program_slugs().is_empty());
+    }
+    burrow.shutdown().await;
+}
+
 /// Install a one-track library program for the mount so the DJ has something to
 /// pre-empt (and resume). Uses the real file-listing → track-list mapping.
 async fn install_live_program(burrow: &Burrow) {
