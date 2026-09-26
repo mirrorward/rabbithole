@@ -274,11 +274,16 @@ impl AuthService {
                     // Try it as a recovery code; burn it on success.
                     match check_recovery_code(code, &totp.recovery_hashes) {
                         Some(idx) => {
-                            let mut remaining = totp.recovery_hashes.clone();
-                            remaining.remove(idx);
-                            TotpRepo(&self.pool)
-                                .spend_recovery(account.id, &remaining)
-                                .await?;
+                            if !TotpRepo(&self.pool)
+                                .consume_recovery(
+                                    account.id,
+                                    &totp.secret,
+                                    &totp.recovery_hashes[idx],
+                                )
+                                .await?
+                            {
+                                return Err(AuthError::BadCredentials);
+                            }
                         }
                         None => return Err(AuthError::BadCredentials),
                     }
@@ -498,6 +503,79 @@ mod tests {
             svc.login_resume("garbage").await,
             Err(AuthError::SessionExpired)
         ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_recovery_logins_issue_only_the_winning_sessions() {
+        use rabbithole_identity::totp::generate_recovery_codes;
+
+        let svc = service().await;
+        let other = AuthService::new(svc.pool.clone(), 3600);
+        let account = svc
+            .create_account("alice", "secret", Role::User)
+            .await
+            .unwrap();
+        let enrollment = TotpEnrollment::generate("RabbitHole", "alice");
+        let codes = generate_recovery_codes(3);
+        TotpRepo(&svc.pool)
+            .begin(account.id, enrollment.secret())
+            .await
+            .unwrap();
+        TotpRepo(&svc.pool)
+            .confirm(account.id, &codes.iter().map(|c| c.1).collect::<Vec<_>>())
+            .await
+            .unwrap();
+
+        let (a, b) = tokio::join!(
+            svc.login_password("alice", "secret", Some(&codes[0].0)),
+            other.login_password("alice", "secret", Some(&codes[0].0)),
+        );
+        let winner = match (a, b) {
+            (Ok(user), Err(AuthError::BadCredentials))
+            | (Err(AuthError::BadCredentials), Ok(user)) => user,
+            unexpected => panic!("expected one successful recovery login: {unexpected:?}"),
+        };
+        assert!(winner.token.is_some());
+        assert_eq!(
+            SessionsRepo(&svc.pool)
+                .revoke_account(account.id)
+                .await
+                .unwrap(),
+            1
+        );
+
+        let (a, b) = tokio::join!(
+            svc.login_password("alice", "secret", Some(&codes[1].0)),
+            other.login_password("alice", "secret", Some(&codes[2].0)),
+        );
+        assert!(a.unwrap().token.is_some());
+        assert!(b.unwrap().token.is_some());
+        assert_eq!(
+            SessionsRepo(&svc.pool)
+                .revoke_account(account.id)
+                .await
+                .unwrap(),
+            2
+        );
+        for (code, _) in &codes {
+            assert!(matches!(
+                svc.login_password("alice", "secret", Some(code)).await,
+                Err(AuthError::BadCredentials)
+            ));
+        }
+        assert_eq!(
+            SessionsRepo(&svc.pool)
+                .revoke_account(account.id)
+                .await
+                .unwrap(),
+            0
+        );
+        // Exhausting recovery codes does not disable the normal TOTP path.
+        let code = enrollment.current_code().unwrap();
+        assert!(svc
+            .login_password("alice", "secret", Some(&code))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

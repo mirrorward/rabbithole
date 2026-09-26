@@ -235,7 +235,7 @@ lines), and the mobile builds (iOS simulator / Android NDK).
 ## Wave 2 — Community layer
 *Depends on: W1*
 
-- [x] Registration gating (open/invite/email), TOTP enrollment, key enrollment
+- [x] Registration gating (open/invite/email), TOTP enrollment, key enrollment. **Atomic recovery codes (RH-165)**: shared authentication consumes a recovery code under a SQLite write lock against the current confirmed enrollment before issuing a session. Concurrent use of one code has one winner; spending different codes cannot restore a used code. Duplicate stored hashes are removed together, and stale, replaced, removed or unconfirmed enrollments fail closed. Tests cover independent database pools, restart persistence, and issued-session counts.
 - [x] Class admin (create/edit/assign; live inheritance)
 - [x] Personas: multiple per account (cap configurable), switcher
 - [x] Profiles (location/interests/quote/free text/.plan), avatars + **banner images** (blob-backed, size-capped)

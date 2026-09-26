@@ -379,20 +379,46 @@ impl TotpRepo<'_> {
         Ok(())
     }
 
-    /// Burn one recovery code (by index into the stored list).
-    pub async fn spend_recovery(
+    /// Consume a code from the current confirmed enrollment, once. The
+    /// caller may have verified a stale snapshot, so acquire the database
+    /// write lock before reading and guard against enrollment replacement.
+    pub async fn consume_recovery(
         &self,
         account_id: i64,
-        remaining: &[[u8; 32]],
-    ) -> Result<(), StoreError> {
-        let json = serde_json::to_string(&remaining.iter().map(hex::encode).collect::<Vec<_>>())
-            .expect("serializable");
+        enrollment_secret: &[u8],
+        code_hash: &[u8; 32],
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
+        let current: Option<String> = sqlx::query_scalar(
+            "SELECT recovery_json FROM account_totp
+             WHERE account_id = ? AND confirmed = 1 AND secret = ?",
+        )
+        .bind(account_id)
+        .bind(enrollment_secret)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(current) = current else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        let mut hashes: Vec<String> = serde_json::from_str(&current).unwrap_or_default();
+        let before = hashes.len();
+        // Remove all copies if an old/imported list contains duplicates.
+        // Other codes are read under the same lock, never copied from the
+        // caller's snapshot (which could restore a concurrently spent code).
+        hashes.retain(|encoded| hex::decode(encoded).ok().as_deref() != Some(code_hash.as_slice()));
+        if hashes.len() == before {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        let json = serde_json::to_string(&hashes).expect("serializable");
         sqlx::query("UPDATE account_totp SET recovery_json = ? WHERE account_id = ?")
             .bind(json)
             .bind(account_id)
-            .execute(self.0)
+            .execute(&mut *tx)
             .await?;
-        Ok(())
+        tx.commit().await?;
+        Ok(true)
     }
 
     pub async fn remove(&self, account_id: i64) -> Result<(), StoreError> {
@@ -602,7 +628,10 @@ mod tests {
         assert!(row.confirmed);
         assert_eq!(row.recovery_hashes.len(), 2);
 
-        totp.spend_recovery(account_id, &[[2u8; 32]]).await.unwrap();
+        assert!(totp
+            .consume_recovery(account_id, b"secret-bytes-here!!!", &[1u8; 32])
+            .await
+            .unwrap());
         assert_eq!(
             totp.get(account_id)
                 .await
@@ -615,6 +644,91 @@ mod tests {
 
         totp.remove(account_id).await.unwrap();
         assert!(totp.get(account_id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn recovery_consumption_serializes_across_pools_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recovery.db");
+        let first = crate::open(&path).await.unwrap();
+        let second = crate::open(&path).await.unwrap();
+        let account = AccountsRepo(&first)
+            .create("alice", None, "alice", 1, None)
+            .await
+            .unwrap();
+        let one = TotpRepo(&first);
+        let two = TotpRepo(&second);
+        let secret = b"recovery-enrollment";
+        one.begin(account.id, secret).await.unwrap();
+        one.confirm(account.id, &[[1; 32], [1; 32], [2; 32], [3; 32]])
+            .await
+            .unwrap();
+        // Both callers already observed the code as unused. The operation
+        // must arbitrate in SQLite, across independent pools, not in a
+        // service-local lock or against either caller's stale list.
+        let a = one.get(account.id).await.unwrap().unwrap();
+        let b = two.get(account.id).await.unwrap().unwrap();
+        let (a_won, b_won) = tokio::join!(
+            one.consume_recovery(account.id, &a.secret, &a.recovery_hashes[0]),
+            two.consume_recovery(account.id, &b.secret, &b.recovery_hashes[0]),
+        );
+        assert_ne!(a_won.unwrap(), b_won.unwrap());
+        assert_eq!(
+            one.get(account.id).await.unwrap().unwrap().recovery_hashes,
+            vec![[2; 32], [3; 32]]
+        );
+        let (a_won, b_won) = tokio::join!(
+            one.consume_recovery(account.id, secret, &[2; 32]),
+            two.consume_recovery(account.id, secret, &[3; 32]),
+        );
+        assert!(a_won.unwrap());
+        assert!(b_won.unwrap());
+        assert!(!one
+            .consume_recovery(account.id, secret, &[1; 32])
+            .await
+            .unwrap());
+        first.close().await;
+        second.close().await;
+        let reopened = crate::open(&path).await.unwrap();
+        assert!(TotpRepo(&reopened)
+            .get(account.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .recovery_hashes
+            .is_empty());
+        reopened.close().await;
+    }
+
+    #[tokio::test]
+    async fn recovery_consumption_refuses_stale_or_unconfirmed_enrollment() {
+        let (pool, account) = pool_with_account().await;
+        let totp = TotpRepo(&pool);
+        let old = b"previous-enrollment";
+        let new = b"replacement-enrollment";
+        assert!(!totp.consume_recovery(account, old, &[1; 32]).await.unwrap());
+        totp.begin(account, old).await.unwrap();
+        totp.confirm(account, &[[1; 32]]).await.unwrap();
+        totp.begin(account, new).await.unwrap();
+        assert!(!totp.consume_recovery(account, old, &[1; 32]).await.unwrap());
+        // Even reusing a hash in the replacement enrollment cannot authorize
+        // a caller that verified the old enrollment's snapshot.
+        totp.confirm(account, &[[1; 32]]).await.unwrap();
+        assert!(!totp.consume_recovery(account, old, &[1; 32]).await.unwrap());
+        assert!(!totp.consume_recovery(account, new, &[9; 32]).await.unwrap());
+        assert_eq!(
+            totp.get(account)
+                .await
+                .unwrap()
+                .unwrap()
+                .recovery_hashes
+                .len(),
+            1
+        );
+        totp.begin(account, new).await.unwrap();
+        assert!(!totp.consume_recovery(account, new, &[1; 32]).await.unwrap());
+        totp.remove(account).await.unwrap();
+        assert!(!totp.consume_recovery(account, new, &[1; 32]).await.unwrap());
     }
 
     #[tokio::test]
