@@ -105,9 +105,9 @@
 //! topic set natively is not (yet) echoed as a 119, and a member dropping
 //! its connection is announced by the global roster delete (302) rather than
 //! a per-chat 118. Room mute / slow-mode (Wave 13) is *enforced* here — a
-//! refused SEND_CHAT gets a private ChatMsg refusal line — but the native
-//! `RoomMuted`/`RoomSlowModeChanged` change pushes are not projected into a
-//! classic transaction (there is none to map them to).
+//! refused SEND_CHAT gets a private ChatMsg refusal line. Native mute/unmute
+//! and slow-mode changes also appear as room-scoped ChatMsg notice lines;
+//! private-room notices require current membership and carry that chat's ID.
 //! The listener is opt-in via config (`hotline_enabled`) and off by default.
 
 use std::collections::HashMap;
@@ -3186,6 +3186,19 @@ fn user_broadcast(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> T
 /// protocol, so no self-filtering is applied here (private-room chat and
 /// invites are filtered by membership/recipient, of course).
 fn project_event(shared: &Shared, active: &Active, event: &ServerEvent) -> Option<Vec<u8>> {
+    if let Some((room, notice)) =
+        crate::chat_notice::for_session(&shared.chat, active.session_id, event)
+    {
+        let mut fields = Vec::with_capacity(2);
+        if !room.eq_ignore_ascii_case(LOBBY) {
+            fields.push(Field::int(
+                field::CHAT_ID,
+                shared.hotline.chat_id_for_room(room),
+            ));
+        }
+        fields.push(Field::text(field::CHAT_TEXT, &format!("\r({notice})")));
+        return Some(Transaction::request(transaction::CHAT_MSG, 0, fields).encode());
+    }
     match event {
         ServerEvent::Chat {
             room, from, text, ..

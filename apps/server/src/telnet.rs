@@ -1831,6 +1831,15 @@ where
                     {
                         t.write_str(&format!("<{from}> {text}\n")).await?;
                     }
+                    Ok(event @ (ServerEvent::RoomMuted { .. } | ServerEvent::RoomSlowModeChanged { .. })) => {
+                        if let Some((changed_room, notice)) =
+                            crate::chat_notice::for_session(&shared.chat, session_id, &event)
+                        {
+                            if changed_room.eq_ignore_ascii_case(room) {
+                                t.write_str(&format!("({notice})\n")).await?;
+                            }
+                        }
+                    }
                     Ok(ServerEvent::Shutdown) => {
                         t.write_str("The server is going down. Goodbye.\n").await?;
                         break Ok(None);

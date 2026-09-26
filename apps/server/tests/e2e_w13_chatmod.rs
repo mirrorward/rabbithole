@@ -12,12 +12,12 @@ use rabbithole_core::{Client, ClientError};
 use rabbithole_legacy_hotline::constants::{field, transaction};
 use rabbithole_legacy_hotline::{Field, Handshake, HandshakeReply, Transaction, TransactionHeader};
 use rabbithole_proto::chat::{
-    ChatMessage, RoomCreate, RoomInfoReply, RoomJoin, RoomModeration, RoomModerationRequest,
-    RoomMute, RoomMuted, RoomSlowMode, RoomSlowModeChanged, RoomUnmute,
+    ChatMessage, RoomCreate, RoomInfoReply, RoomInvite, RoomJoin, RoomKick, RoomModeration,
+    RoomModerationRequest, RoomMute, RoomMuted, RoomSlowMode, RoomSlowModeChanged, RoomUnmute,
 };
 use rabbithole_proto::presence::PresenceState;
 use rabbithole_proto::ErrorCode;
-use rabbithole_server_core::{Role, ServerConfig, LOBBY};
+use rabbithole_server_core::{Role, ServerConfig, ServerEvent, LOBBY};
 use rabbithole_store_server::repo::AuditRepo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -385,14 +385,28 @@ impl Hotline {
     }
 
     async fn read_until(&mut self, type_: u16) -> Transaction {
-        loop {
-            let txn = tokio::time::timeout(Duration::from_secs(5), self.read_txn())
-                .await
-                .expect("timed out waiting for transaction");
-            if txn.header.type_ == type_ {
-                return txn;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let txn = self.read_txn().await;
+                if txn.header.type_ == type_ {
+                    return txn;
+                }
             }
-        }
+        })
+        .await
+        .expect("timed out waiting for transaction")
+    }
+
+    async fn notice(&mut self, chat_id: Option<u32>, text: &str) {
+        let txn = self.read_until(transaction::CHAT_MSG).await;
+        assert_eq!(txn_text(&txn, field::CHAT_TEXT), format!("\r({text})"));
+        assert_eq!(txn_int(&txn, field::CHAT_ID), chat_id);
+    }
+
+    async fn chat_line(&mut self, chat_id: Option<u32>, text: &str) {
+        let txn = self.read_until(transaction::CHAT_MSG).await;
+        assert_eq!(txn_text(&txn, field::CHAT_TEXT), text);
+        assert_eq!(txn_int(&txn, field::CHAT_ID), chat_id);
     }
 
     async fn login(&mut self, user: &str, pass: &str, name: &str) -> Transaction {
@@ -420,6 +434,13 @@ fn txn_text(txn: &Transaction, id: u16) -> String {
         .find(|f| f.id == id)
         .map(|f| String::from_utf8_lossy(&f.data).into_owned())
         .unwrap_or_default()
+}
+
+fn txn_int(txn: &Transaction, id: u16) -> Option<u32> {
+    txn.fields
+        .iter()
+        .find(|f| f.id == id)
+        .and_then(|f| rabbithole_legacy_hotline::read_int(&f.data).ok())
 }
 
 /// The Hotline surface observes a mute set natively: the classic CHAT_SEND
@@ -453,6 +474,8 @@ async fn hotline_surface_observes_mute() {
     mo.request_ack(&RoomMute::new(LOBBY, "pest", None))
         .await
         .unwrap();
+    pest.notice(None, "pest was muted in lobby until unmuted.")
+        .await;
 
     // Pest's next line is refused: a private CHAT_MSG carries the refusal
     // text (ChatSend is a notify — there is no reply to carry an error).
@@ -478,7 +501,160 @@ async fn hotline_surface_observes_mute() {
         "muted line must not broadcast, got {text:?}"
     );
 
+    mo.request_ack(&RoomUnmute::new(LOBBY, "pest"))
+        .await
+        .unwrap();
+    pest.notice(None, "pest was unmuted in lobby.").await;
+    pest.send(
+        transaction::CHAT_SEND,
+        vec![Field::text(field::CHAT_TEXT, "voice restored")],
+    )
+    .await;
+    assert!(txn_text(
+        &pest.read_until(transaction::CHAT_MSG).await,
+        field::CHAT_TEXT
+    )
+    .contains("voice restored"));
+
+    mo.request_ack(&RoomSlowMode::new(LOBBY, 30)).await.unwrap();
+    pest.notice(None, "Slow mode in lobby: one message every 30 seconds.")
+        .await;
+    pest.send(
+        transaction::CHAT_SEND,
+        vec![Field::text(field::CHAT_TEXT, "first paced line")],
+    )
+    .await;
+    assert!(txn_text(
+        &pest.read_until(transaction::CHAT_MSG).await,
+        field::CHAT_TEXT
+    )
+    .contains("first paced line"));
+    pest.send(
+        transaction::CHAT_SEND,
+        vec![Field::text(field::CHAT_TEXT, "too soon")],
+    )
+    .await;
+    assert!(txn_text(
+        &pest.read_until(transaction::CHAT_MSG).await,
+        field::CHAT_TEXT
+    )
+    .contains("slow mode"));
+    mo.request_ack(&RoomSlowMode::new(LOBBY, 0)).await.unwrap();
+    pest.notice(None, "Slow mode in lobby is off.").await;
+    pest.send(
+        transaction::CHAT_SEND,
+        vec![Field::text(field::CHAT_TEXT, "pace restored")],
+    )
+    .await;
+    assert!(txn_text(
+        &pest.read_until(transaction::CHAT_MSG).await,
+        field::CHAT_TEXT
+    )
+    .contains("pace restored"));
+
     pest.close().await;
+    burrow.shutdown().await;
+}
+
+/// Native private-room moderation is tagged for the correct classic chat
+/// window, and only current members receive it. Lobby chat is an ordered
+/// bus sentinel for outsiders and the kicked client, so absence needs no sleep.
+#[tokio::test]
+async fn hotline_private_notices_reach_members_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = ServerConfig {
+        hotline_enabled: true,
+        hotline_addr: "127.0.0.1:0".parse().unwrap(),
+        ..test_config(dir.path())
+    };
+    let burrow = start(cfg).await;
+    let mut mo = login(&burrow, "mo").await;
+    let _: RoomInfoReply = mo.request(&RoomCreate::new("den", true)).await.unwrap();
+    let addr = burrow.hotline_addr.expect("hotline enabled");
+    let mut pest = Hotline::connect(addr).await;
+    assert_eq!(pest.login("pest", "pw-pw-pw", "pest").await.header.error, 0);
+    // A round trip through chat proves each session is subscribed before
+    // any private event is published.
+    pest.send(
+        transaction::CHAT_SEND,
+        vec![Field::text(field::CHAT_TEXT, "ready")],
+    )
+    .await;
+    pest.chat_line(None, "\rpest:  ready").await;
+    let mut outsider = Hotline::connect(addr).await;
+    assert_eq!(
+        outsider
+            .login("alice", "pw-pw-pw", "alice")
+            .await
+            .header
+            .error,
+        0
+    );
+    outsider
+        .send(
+            transaction::CHAT_SEND,
+            vec![Field::text(field::CHAT_TEXT, "outsider ready")],
+        )
+        .await;
+    outsider.chat_line(None, "\ralice:  outsider ready").await;
+    pest.chat_line(None, "\ralice:  outsider ready").await;
+
+    mo.request_ack(&RoomInvite::new("den", "pest"))
+        .await
+        .unwrap();
+    let invited = pest.read_until(transaction::INVITE_TO_CHAT).await;
+    let chat_id = txn_int(&invited, field::CHAT_ID).expect("private chat id");
+    let join_id = pest
+        .send(
+            transaction::JOIN_CHAT,
+            vec![Field::int(field::CHAT_ID, chat_id)],
+        )
+        .await;
+    let joined = pest.read_until(transaction::JOIN_CHAT).await;
+    assert_eq!(joined.header.id, join_id);
+    assert_eq!(joined.header.error, 0);
+
+    mo.request_ack(&RoomMute::new("den", "pest", Some(60)))
+        .await
+        .unwrap();
+    pest.notice(Some(chat_id), "pest was muted in den for 60 seconds.")
+        .await;
+    mo.request_ack(&RoomUnmute::new("den", "pest"))
+        .await
+        .unwrap();
+    pest.notice(Some(chat_id), "pest was unmuted in den.").await;
+    mo.request_ack(&RoomSlowMode::new("den", 1)).await.unwrap();
+    pest.notice(
+        Some(chat_id),
+        "Slow mode in den: one message every 1 second.",
+    )
+    .await;
+    mo.request_ack(&RoomSlowMode::new("den", 0)).await.unwrap();
+    pest.notice(Some(chat_id), "Slow mode in den is off.").await;
+
+    mo.chat_send(LOBBY, "outsider barrier").await.unwrap();
+    outsider.chat_line(None, "\rmo:  outsider barrier").await;
+    pest.chat_line(None, "\rmo:  outsider barrier").await;
+
+    mo.request_ack(&RoomKick::new("den", "pest", true))
+        .await
+        .unwrap();
+    let kicked = pest.read_until(transaction::NOTIFY_CHAT_DELETE_USER).await;
+    assert_eq!(txn_int(&kicked, field::CHAT_ID), Some(chat_id));
+    mo.request_ack(&RoomMute::new("den", "pest", None))
+        .await
+        .unwrap();
+    mo.request_ack(&RoomUnmute::new("den", "pest"))
+        .await
+        .unwrap();
+    mo.request_ack(&RoomSlowMode::new("den", 30)).await.unwrap();
+    mo.request_ack(&RoomSlowMode::new("den", 0)).await.unwrap();
+    mo.chat_send(LOBBY, "kicked barrier").await.unwrap();
+    pest.chat_line(None, "\rmo:  kicked barrier").await;
+    outsider.chat_line(None, "\rmo:  kicked barrier").await;
+
+    pest.close().await;
+    outsider.close().await;
     burrow.shutdown().await;
 }
 
@@ -505,6 +681,33 @@ impl Telnet {
             .write_all(format!("{line}\r\n").as_bytes())
             .await
             .unwrap();
+    }
+
+    async fn login(&mut self, user: &str) {
+        self.expect(b"login: ").await;
+        self.send(user).await;
+        self.expect(b"password: ").await;
+        self.send("pw-pw-pw").await;
+        self.expect(b"Command: ").await;
+    }
+
+    async fn notice(&mut self, text: &str) {
+        // TelnetStream translates the notice's newline to the wire CRLF.
+        self.expect(format!("({text})\r\n").as_bytes()).await;
+    }
+
+    async fn expect_without(&mut self, needle: &[u8], forbidden: &[&[u8]]) {
+        let start = self.pos;
+        self.expect(needle).await;
+        let observed = &self.buf[start..self.pos];
+        for text in forbidden {
+            assert!(
+                !observed.windows(text.len()).any(|window| window == *text),
+                "unexpected notice {:?} before sentinel: {:?}",
+                String::from_utf8_lossy(text),
+                String::from_utf8_lossy(observed)
+            );
+        }
     }
 
     async fn expect(&mut self, needle: &[u8]) {
@@ -552,43 +755,144 @@ async fn telnet_surface_observes_mute() {
         ..test_config(dir.path())
     };
     let burrow = start(cfg).await;
-    let pest_account = rabbithole_store_server::repo::AccountsRepo(&burrow.shared.pool)
-        .by_login("pest")
-        .await
-        .unwrap()
-        .expect("pest exists")
-        .id;
+    let mut mo = login(&burrow, "mo").await;
     let addr = burrow.telnet_addr.expect("telnet enabled");
 
     let mut pest = Telnet::connect(addr).await;
-    pest.expect(b"login: ").await;
-    pest.send("pest").await;
-    pest.expect(b"password: ").await;
-    pest.send("pw-pw-pw").await;
-    pest.expect(b"Command: ").await;
+    pest.login("pest").await;
     pest.send("c").await;
     pest.expect(b"--- Chat: lobby ---").await;
     pest.send("hello there").await;
     pest.expect(b"<pest> hello there").await;
 
-    // Muted (service-side, as a moderator would): the next line refuses.
-    let now = rabbithole_server_core::ratelimit::now_ms();
-    burrow
-        .shared
-        .chat
-        .mute(LOBBY, 0, true, pest_account, "pest", None, now)
+    // A real native moderator's action reaches the idle terminal before the
+    // person tries to speak, then the existing send gate still refuses.
+    mo.request_ack(&RoomMute::new(LOBBY, "pest", Some(60)))
+        .await
         .unwrap();
+    pest.notice("pest was muted in lobby for 60 seconds.").await;
     pest.send("can you hear me").await;
     pest.expect(b"(you are muted in this room)").await;
 
     // Unmute restores the flow.
-    burrow
-        .shared
-        .chat
-        .unmute(LOBBY, 0, true, pest_account, now)
+    mo.request_ack(&RoomUnmute::new(LOBBY, "pest"))
+        .await
         .unwrap();
+    pest.notice("pest was unmuted in lobby.").await;
     pest.send("im back").await;
     pest.expect(b"<pest> im back").await;
+
+    mo.request_ack(&RoomSlowMode::new(LOBBY, 30)).await.unwrap();
+    pest.notice("Slow mode in lobby: one message every 30 seconds.")
+        .await;
+    pest.send("first paced line").await;
+    pest.expect(b"<pest> first paced line").await;
+    pest.send("too soon").await;
+    pest.expect(b"(slow mode is on: wait ").await;
+    mo.request_ack(&RoomSlowMode::new(LOBBY, 0)).await.unwrap();
+    pest.notice("Slow mode in lobby is off.").await;
+    pest.send("pace restored").await;
+    pest.expect(b"<pest> pace restored").await;
+
+    burrow.shutdown().await;
+}
+
+/// Telnet moderation follows the active chat screen and current membership.
+/// Both a lobby outsider and a kicked session are checked through ordered
+/// bus sentinels, not an arbitrary period without receiving data.
+#[tokio::test]
+async fn telnet_notices_follow_active_room_and_current_membership() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = ServerConfig {
+        telnet_enabled: true,
+        telnet_addr: "127.0.0.1:0".parse().unwrap(),
+        // Private rooms are deliberately absent from public keyword lookup;
+        // an operator alias reaches the room's normal invite-checked join.
+        keywords: [("den".into(), "room:den".into())].into(),
+        ..test_config(dir.path())
+    };
+    let burrow = start(cfg).await;
+    let mut mo = login(&burrow, "mo").await;
+    let _: RoomInfoReply = mo.request(&RoomCreate::new("den", true)).await.unwrap();
+    let addr = burrow.telnet_addr.expect("telnet enabled");
+    let mut pest = Telnet::connect(addr).await;
+    pest.login("pest").await;
+    let mut outsider = Telnet::connect(addr).await;
+    outsider.login("alice").await;
+    mo.request_ack(&RoomInvite::new("den", "pest"))
+        .await
+        .unwrap();
+    pest.send("/go den").await;
+    pest.expect(b"--- Chat: den ---").await;
+    pest.expect(b"(no recent chat)\r\n").await;
+    outsider.send("c").await;
+    outsider.expect(b"--- Chat: lobby ---").await;
+    outsider.expect(b"(no recent chat)\r\n").await;
+
+    // Pest remains a lobby member, but its active screen is the private den.
+    mo.request_ack(&RoomMute::new(LOBBY, "alice", Some(60)))
+        .await
+        .unwrap();
+    outsider
+        .notice("alice was muted in lobby for 60 seconds.")
+        .await;
+    mo.request_ack(&RoomUnmute::new(LOBBY, "alice"))
+        .await
+        .unwrap();
+    outsider.notice("alice was unmuted in lobby.").await;
+    mo.request_ack(&RoomSlowMode::new(LOBBY, 1)).await.unwrap();
+    outsider
+        .notice("Slow mode in lobby: one message every 1 second.")
+        .await;
+    mo.request_ack(&RoomSlowMode::new(LOBBY, 0)).await.unwrap();
+    outsider.notice("Slow mode in lobby is off.").await;
+    mo.chat_send("den", "active room barrier").await.unwrap();
+    pest.expect_without(
+        b"<mo> active room barrier\r\n",
+        &[b"alice was", b"Slow mode in lobby"],
+    )
+    .await;
+
+    mo.request_ack(&RoomMute::new("den", "pest", Some(60)))
+        .await
+        .unwrap();
+    pest.notice("pest was muted in den for 60 seconds.").await;
+    mo.request_ack(&RoomUnmute::new("den", "pest"))
+        .await
+        .unwrap();
+    pest.notice("pest was unmuted in den.").await;
+    mo.request_ack(&RoomSlowMode::new("den", 1)).await.unwrap();
+    pest.notice("Slow mode in den: one message every 1 second.")
+        .await;
+    mo.request_ack(&RoomSlowMode::new("den", 0)).await.unwrap();
+    pest.notice("Slow mode in den is off.").await;
+    mo.chat_send(LOBBY, "outsider barrier").await.unwrap();
+    outsider
+        .expect_without(
+            b"<mo> outsider barrier\r\n",
+            &[b"pest was", b"Slow mode in den"],
+        )
+        .await;
+
+    mo.request_ack(&RoomKick::new("den", "pest", true))
+        .await
+        .unwrap();
+    mo.request_ack(&RoomMute::new("den", "pest", None))
+        .await
+        .unwrap();
+    mo.request_ack(&RoomUnmute::new("den", "pest"))
+        .await
+        .unwrap();
+    mo.request_ack(&RoomSlowMode::new("den", 30)).await.unwrap();
+    mo.request_ack(&RoomSlowMode::new("den", 0)).await.unwrap();
+    // Shutdown is consumed by every active chat screen, after all preceding
+    // room events, even when that session no longer belongs to its room.
+    burrow.shared.bus.publish(ServerEvent::Shutdown);
+    pest.expect_without(
+        b"The server is going down. Goodbye.\r\n",
+        &[b"pest was", b"Slow mode in den"],
+    )
+    .await;
 
     burrow.shutdown().await;
 }

@@ -5,6 +5,7 @@
 pub mod admin_store;
 pub mod announce;
 pub mod backup;
+mod chat_notice;
 pub mod ctl;
 pub mod doors;
 pub mod fed_catalog;
