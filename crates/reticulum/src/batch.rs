@@ -54,10 +54,10 @@
 //! # Token-bucket governor
 //!
 //! Each peer has an independent bucket: a `capacity` in bytes and a
-//! `refill_per_sec` rate. The bucket starts full; [`Batcher::plan_batches`]
-//! refills it for the elapsed time (integer math, `capacity` in *milli-bytes* so
-//! sub-byte-per-ms refill is exact) and spends the encoded size of each batch it
-//! emits. When the next batch would cost more bytes than remain, planning stops
+//! sustained [`ByteRate`]. The bucket starts full; [`Batcher::plan_batches`]
+//! refills it for the elapsed time (integer math, tokens in *micro-bytes* so
+//! rates down to 0.001 B/s accumulate exactly) and spends each batch's encoded
+//! size. When the next batch would cost more bytes than remain, planning stops
 //! and the messages stay queued — throttling the peer to its configured rate.
 //! Time advancing between calls refills the bucket, so a slow link drains its
 //! backlog gradually.
@@ -230,44 +230,83 @@ impl Batch {
     }
 }
 
+/// An exact sustained byte rate with 0.001-byte-per-second resolution.
+///
+/// Use [`Self::from_millibytes_per_sec`] for fractional rates: 300 means
+/// 0.3 B/s, and 1 is the smallest positive rate (one byte per 1,000 seconds).
+/// Zero disables refill. No floating-point conversion or rounding is involved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ByteRate {
+    millibytes_per_sec: u128,
+}
+
+impl ByteRate {
+    /// An integer number of bytes per second, including the full `u64` range.
+    pub const fn from_bytes_per_sec(bytes: u64) -> Self {
+        Self {
+            millibytes_per_sec: bytes as u128 * 1_000,
+        }
+    }
+
+    /// A number of thousandths of a byte per second.
+    pub const fn from_millibytes_per_sec(millibytes: u64) -> Self {
+        Self {
+            millibytes_per_sec: millibytes as u128,
+        }
+    }
+}
+
 /// A per-peer token-bucket byte-rate governor (injected clock).
 ///
-/// `capacity` is the burst size in bytes; `refill_per_sec` is the sustained
-/// byte rate. Tokens are tracked internally in *milli-bytes* so that the
-/// per-millisecond refill (`refill_per_sec` milli-bytes per ms) is exact integer
-/// arithmetic. All operations saturate, so a backwards or huge clock jump never
-/// panics or overflows. A `capacity` of 0 blocks all sending.
+/// `capacity` is the burst size in bytes; [`ByteRate`] is the sustained rate.
+/// Tokens use *micro-bytes*, so every millisecond of even the smallest positive
+/// rate accumulates exactly, independent of polling frequency. Bounded integer
+/// arithmetic caps credit at capacity, including after a huge clock jump.
+/// Backwards timestamps earn no credit and do not move the last refill time.
+/// A capacity of 0 blocks all nonzero spending.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TokenBucket {
-    capacity_milli: u64,
-    refill_per_sec: u64,
-    tokens_milli: u64,
+    capacity_micro: u128,
+    rate: ByteRate,
+    tokens_micro: u128,
     last_ms: u64,
 }
 
-/// Milli-bytes per byte (the internal token scale).
-const MILLI: u64 = 1_000;
+/// Micro-bytes per byte (the internal token scale).
+const MICRO: u128 = 1_000_000;
 
 impl TokenBucket {
-    /// Create a bucket that starts **full** at `now_ms`.
+    /// Create a bucket that starts **full** at `now_ms`, with an integer B/s rate.
+    /// Use [`Self::with_rate`] for fractional rates.
     pub fn new(capacity_bytes: u64, refill_per_sec: u64, now_ms: u64) -> Self {
-        let capacity_milli = capacity_bytes.saturating_mul(MILLI);
+        Self::with_rate(
+            capacity_bytes,
+            ByteRate::from_bytes_per_sec(refill_per_sec),
+            now_ms,
+        )
+    }
+
+    /// Create a bucket that starts **full** at `now_ms`, with an exact byte rate.
+    pub fn with_rate(capacity_bytes: u64, rate: ByteRate, now_ms: u64) -> Self {
+        let capacity_micro = u128::from(capacity_bytes) * MICRO;
         Self {
-            capacity_milli,
-            refill_per_sec,
-            tokens_milli: capacity_milli,
+            capacity_micro,
+            rate,
+            tokens_micro: capacity_micro,
             last_ms: now_ms,
         }
     }
 
-    /// Would-be token count (milli-bytes) after refilling to `now_ms`, without
+    /// Would-be token count (micro-bytes) after refilling to `now_ms`, without
     /// mutating the bucket.
-    fn peek_milli(&self, now_ms: u64) -> u64 {
+    fn peek_micro(&self, now_ms: u64) -> u128 {
         let elapsed = now_ms.saturating_sub(self.last_ms);
-        let refill = elapsed.saturating_mul(self.refill_per_sec);
-        self.tokens_milli
+        // milli-bytes/second * milliseconds = micro-bytes. Saturation can
+        // only occur far above the largest capacity (u64::MAX bytes).
+        let refill = u128::from(elapsed).saturating_mul(self.rate.millibytes_per_sec);
+        self.tokens_micro
             .saturating_add(refill)
-            .min(self.capacity_milli)
+            .min(self.capacity_micro)
     }
 
     /// Refill the bucket up to `now_ms`.
@@ -275,7 +314,7 @@ impl TokenBucket {
         // Only advance `last_ms` forward, so a backwards clock does not "steal"
         // refill on a later forward step.
         if now_ms > self.last_ms {
-            self.tokens_milli = self.peek_milli(now_ms);
+            self.tokens_micro = self.peek_micro(now_ms);
             self.last_ms = now_ms;
         }
     }
@@ -283,7 +322,8 @@ impl TokenBucket {
     /// Bytes currently available (after refilling to `now_ms`), without
     /// mutating the bucket.
     pub fn available_bytes(&self, now_ms: u64) -> u64 {
-        self.peek_milli(now_ms) / MILLI
+        // The capacity is a u64 number of bytes, so this quotient always fits.
+        (self.peek_micro(now_ms) / MICRO) as u64
     }
 
     /// Try to spend `bytes` at `now_ms`, refilling first. Returns `true` and
@@ -291,9 +331,9 @@ impl TokenBucket {
     /// untouched (beyond the refill) when there are not enough tokens.
     pub fn try_spend(&mut self, bytes: usize, now_ms: u64) -> bool {
         self.refill(now_ms);
-        let cost = (bytes as u64).saturating_mul(MILLI);
-        if self.tokens_milli >= cost {
-            self.tokens_milli -= cost;
+        let cost = bytes as u128 * MICRO;
+        if self.tokens_micro >= cost {
+            self.tokens_micro -= cost;
             true
         } else {
             false
@@ -320,7 +360,7 @@ struct PeerQueue {
 /// Bandwidth-aware, per-peer message batcher.
 ///
 /// Configured once with a batch size `budget`, a partial-flush `max_batch_age_ms`,
-/// and the per-peer token-bucket parameters (`capacity`, `refill_per_sec`) that
+/// and the per-peer token-bucket parameters (`capacity`, [`ByteRate`]) that
 /// every peer's bucket is created with. See the module docs for the packing,
 /// throttling, and flushing rules.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -328,7 +368,7 @@ pub struct Batcher {
     budget: usize,
     max_batch_age_ms: u64,
     capacity_bytes: u64,
-    refill_per_sec: u64,
+    rate: ByteRate,
     peers: BTreeMap<PeerId, PeerQueue>,
 }
 
@@ -337,19 +377,37 @@ impl Batcher {
     ///
     /// `budget` is clamped to `[BATCH_ENVELOPE_HEADER_LEN + TUNNEL_MESSAGE_HEADER_LEN,
     /// DEFAULT_BATCH_BUDGET]` so a batch always fits one packet and can always
-    /// hold at least one (minimal) message.
+    /// hold at least one (minimal) message. `refill_per_sec` is an integer B/s
+    /// rate; use [`Self::with_rate`] for fractional rates.
     pub fn new(
         budget: usize,
         max_batch_age_ms: u64,
         capacity_bytes: u64,
         refill_per_sec: u64,
     ) -> Self {
+        Self::with_rate(
+            budget,
+            max_batch_age_ms,
+            capacity_bytes,
+            ByteRate::from_bytes_per_sec(refill_per_sec),
+        )
+    }
+
+    /// Create a batcher with an explicit size budget and exact sustained rate.
+    /// The budget is clamped as in [`Self::new`]; the rate applies independently
+    /// to each peer, including fractional rates below one byte per second.
+    pub fn with_rate(
+        budget: usize,
+        max_batch_age_ms: u64,
+        capacity_bytes: u64,
+        rate: ByteRate,
+    ) -> Self {
         let min_budget = BATCH_ENVELOPE_HEADER_LEN + TUNNEL_MESSAGE_HEADER_LEN;
         Self {
             budget: budget.clamp(min_budget, DEFAULT_BATCH_BUDGET),
             max_batch_age_ms,
             capacity_bytes,
-            refill_per_sec,
+            rate,
             peers: BTreeMap::new(),
         }
     }
@@ -368,6 +426,26 @@ impl Batcher {
         )
     }
 
+    /// Create a batcher with the default budget and an exact sustained rate.
+    ///
+    /// ```
+    /// use rabbithole_reticulum::{Batcher, ByteRate, DEFAULT_BATCH_BUDGET};
+    ///
+    /// let batcher = Batcher::with_default_budget_and_rate(
+    ///     30_000,
+    ///     DEFAULT_BATCH_BUDGET as u64,
+    ///     ByteRate::from_millibytes_per_sec(300), // 0.3 encoded batch B/s
+    /// );
+    /// assert_eq!(batcher.budget(), DEFAULT_BATCH_BUDGET);
+    /// ```
+    pub fn with_default_budget_and_rate(
+        max_batch_age_ms: u64,
+        capacity_bytes: u64,
+        rate: ByteRate,
+    ) -> Self {
+        Self::with_rate(DEFAULT_BATCH_BUDGET, max_batch_age_ms, capacity_bytes, rate)
+    }
+
     /// The effective per-batch size budget (after clamping).
     pub fn budget(&self) -> usize {
         self.budget
@@ -379,10 +457,10 @@ impl Batcher {
     /// the body. Returns `true` if the id was newly queued.
     pub fn enqueue(&mut self, peer: PeerId, msg: TunnelMessage, now_ms: u64) -> bool {
         let capacity = self.capacity_bytes;
-        let refill = self.refill_per_sec;
+        let rate = self.rate;
         let pq = self.peers.entry(peer).or_insert_with(|| PeerQueue {
             queue: BTreeMap::new(),
-            bucket: TokenBucket::new(capacity, refill, now_ms),
+            bucket: TokenBucket::with_rate(capacity, rate, now_ms),
         });
         match pq.queue.get_mut(&msg.id) {
             Some(existing) => {
@@ -652,6 +730,101 @@ mod tests {
     }
 
     #[test]
+    fn fractional_refill_preserves_credit_across_small_polls_and_spending() {
+        let rate = ByteRate::from_millibytes_per_sec(300); // 0.3 B/s
+        let mut polled = TokenBucket::with_rate(10, rate, 0);
+        assert!(polled.try_spend(10, 0));
+        let mut idle = polled.clone();
+        // Repeated failed sends and explicit refills must not round away credit.
+        for now in 1..=3_333 {
+            polled.refill(now);
+            assert!(!polled.try_spend(1, now));
+        }
+        assert!(polled.try_spend(1, 3_334));
+        assert!(idle.try_spend(1, 3_334));
+        assert_eq!(polled, idle);
+        // The 0.0002-byte remainder from that spend is retained.
+        assert!(!polled.try_spend(2, 9_999));
+        assert!(polled.try_spend(2, 10_000));
+        assert_eq!(polled.available_bytes(10_000), 0);
+    }
+
+    #[test]
+    fn smallest_rate_accumulates_one_byte_without_rounding() {
+        let mut b = TokenBucket::with_rate(1, ByteRate::from_millibytes_per_sec(1), 0);
+        assert!(b.try_spend(1, 0));
+        for now in (1..1_000_000).step_by(137) {
+            b.refill(now);
+        }
+        assert!(!b.try_spend(1, 999_999));
+        assert!(b.try_spend(1, 1_000_000));
+    }
+
+    #[test]
+    fn fractional_refill_caps_idle_credit_at_the_burst_size() {
+        let mut b = TokenBucket::with_rate(2, ByteRate::from_millibytes_per_sec(500), 0);
+        assert!(!b.try_spend(3, 0));
+        assert!(b.try_spend(2, 0));
+        // Even a very long idle period earns only the two-byte burst.
+        assert_eq!(b.available_bytes(u64::MAX - 2_000), 2);
+        assert!(b.try_spend(2, u64::MAX - 2_000));
+        assert!(!b.try_spend(1, u64::MAX - 2_000));
+        assert!(!b.try_spend(1, u64::MAX - 1));
+        assert!(b.try_spend(1, u64::MAX));
+    }
+
+    #[test]
+    fn fractional_refill_ignores_backwards_time_without_double_credit() {
+        let mut b = TokenBucket::with_rate(2, ByteRate::from_millibytes_per_sec(500), 1_000);
+        assert!(b.try_spend(2, 1_000));
+        b.refill(2_000); // half a byte
+        let before = b.clone();
+        b.refill(0);
+        assert!(!b.try_spend(1, 1_999));
+        assert_eq!(b, before);
+        assert!(!b.try_spend(1, 2_999));
+        assert!(b.try_spend(1, 3_000));
+        assert!(!b.try_spend(1, 3_000)); // same timestamp earns nothing
+        assert!(b.try_spend(1, 5_000));
+    }
+
+    #[test]
+    fn extreme_capacity_rate_and_time_are_bounded() {
+        let mut b = TokenBucket::new(u64::MAX, u64::MAX, 0);
+        assert_eq!(b.available_bytes(0), u64::MAX);
+        assert!(b.try_spend(usize::MAX, 0));
+        assert_eq!(b.available_bytes(0), u64::MAX - usize::MAX as u64);
+        b.refill(u64::MAX); // rate * elapsed exceeds u128, but caps safely
+        assert_eq!(b.available_bytes(u64::MAX), u64::MAX);
+        assert!(b.try_spend(usize::MAX, u64::MAX));
+        assert_eq!(b.available_bytes(0), u64::MAX - usize::MAX as u64);
+        // A maximum-sized request cannot appear affordable by overflowing its cost.
+        let mut tiny = TokenBucket::new(1, u64::MAX, 0);
+        assert!(!tiny.try_spend(usize::MAX, u64::MAX));
+        assert_eq!(tiny.available_bytes(u64::MAX), 1);
+    }
+
+    #[test]
+    fn integer_and_fractional_rate_constructors_agree() {
+        assert_eq!(
+            ByteRate::from_bytes_per_sec(7),
+            ByteRate::from_millibytes_per_sec(7_000)
+        );
+        let mut integer = TokenBucket::new(50, 7, 100);
+        let mut fixed = TokenBucket::with_rate(50, ByteRate::from_millibytes_per_sec(7_000), 100);
+        for (bytes, now) in [(50, 100), (1, 200), (1, 243), (2, 600), (50, 99_000)] {
+            assert_eq!(integer.try_spend(bytes, now), fixed.try_spend(bytes, now));
+            assert_eq!(integer, fixed);
+        }
+        let mut zero = TokenBucket::with_rate(2, ByteRate::from_millibytes_per_sec(0), 0);
+        assert!(zero.try_spend(2, 0));
+        assert!(!zero.try_spend(1, u64::MAX));
+        let mut no_capacity = TokenBucket::with_rate(0, ByteRate::from_millibytes_per_sec(300), 0);
+        assert!(!no_capacity.try_spend(1, u64::MAX));
+        assert!(no_capacity.try_spend(0, u64::MAX));
+    }
+
+    #[test]
     fn bucket_try_spend_rejects_when_insufficient() {
         let mut b = TokenBucket::new(50, 0, 0); // no refill
         assert!(!b.try_spend(51, 0));
@@ -821,6 +994,57 @@ mod tests {
         let third = b.plan_batches(&peer(1), 2_000);
         assert_eq!(third.len(), 1);
         assert_eq!(b.queued_len(&peer(1)), 0);
+    }
+
+    #[test]
+    fn fractional_batch_rate_retains_queue_until_exact_credit_and_is_per_peer() {
+        let one_batch = BATCH_ENVELOPE_HEADER_LEN + TUNNEL_MESSAGE_HEADER_LEN;
+        let rate = ByteRate::from_millibytes_per_sec(500); // 0.5 B/s
+        let mut b = Batcher::with_rate(one_batch, 0, one_batch as u64, rate);
+        for p in [peer(1), peer(2)] {
+            for i in 0..3 {
+                b.enqueue(p, msg(i, 0, b""), 0);
+            }
+        }
+        // Each peer starts with its own one-batch burst.
+        assert_eq!(b.plan_batches(&peer(1), 0).len(), 1);
+        assert_eq!(b.available_bytes(&peer(2), 0), one_batch as u64);
+        assert_eq!(b.plan_batches(&peer(2), 0).len(), 1);
+        let refill_ms = one_batch as u64 * 2_000;
+        for now in 1..refill_ms {
+            assert!(b.plan_batches(&peer(1), now).is_empty());
+        }
+        assert_eq!(b.queued_len(&peer(1)), 2);
+        assert_eq!(
+            b.available_bytes(&peer(1), refill_ms - 1),
+            one_batch as u64 - 1
+        );
+        let batches = b.plan_batches(&peer(1), refill_ms);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].encoded_len(), one_batch);
+        assert_eq!(
+            Batch::decode(&batches[0].encode().unwrap()).unwrap(),
+            batches[0]
+        );
+        // Peer two's unpolled bucket accrues exactly the same amount.
+        assert_eq!(b.plan_batches(&peer(2), refill_ms), batches);
+        assert_eq!(b.queued_len(&peer(1)), 1);
+        assert!(b.plan_batches(&peer(1), 0).is_empty());
+        assert_eq!(b.plan_batches(&peer(1), refill_ms * 2).len(), 1);
+        assert_eq!(b.queued_len(&peer(1)), 0);
+    }
+
+    #[test]
+    fn default_budget_fractional_constructor_matches_explicit_budget() {
+        let rate = ByteRate::from_millibytes_per_sec(300);
+        assert_eq!(
+            Batcher::with_default_budget_and_rate(1_000, 441, rate),
+            Batcher::with_rate(DEFAULT_BATCH_BUDGET, 1_000, 441, rate)
+        );
+        assert_eq!(
+            Batcher::with_default_budget(1_000, 441, 3),
+            Batcher::with_default_budget_and_rate(1_000, 441, ByteRate::from_bytes_per_sec(3))
+        );
     }
 
     #[test]

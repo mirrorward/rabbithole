@@ -129,8 +129,8 @@ pub mod tunnel;
 
 pub use announce::{Announce, AnnounceCache, AnnounceVerdict};
 pub use batch::{
-    Batch, BatchError, Batcher, TokenBucket, BATCH_ENVELOPE_HEADER_LEN, BATCH_FRAMING_RESERVE,
-    BATCH_VERSION, DEFAULT_BATCH_BUDGET, MAX_BATCH_MESSAGES,
+    Batch, BatchError, Batcher, ByteRate, TokenBucket, BATCH_ENVELOPE_HEADER_LEN,
+    BATCH_FRAMING_RESERVE, BATCH_VERSION, DEFAULT_BATCH_BUDGET, MAX_BATCH_MESSAGES,
 };
 pub use destination::{
     Destination, DestinationHash, DestinationHashError, DESTINATION_HASH_LENGTH, NAME_HASH_LENGTH,

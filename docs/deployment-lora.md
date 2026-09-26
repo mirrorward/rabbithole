@@ -129,8 +129,9 @@ payload size. Continuous transmission (no duty cycle yet — see §3).
 | SF7 / 250 | 1375 | ~0.3 s | ~187 | (fast) |
 | SF7 / 500 | 2740 | ~0.16 s | ~372 | (fast) |
 
-These are **ceilings ignoring duty cycle**. On a regulated band the duty-cycle
-governor (§3) is what you actually deploy against, and it is far lower.
+These are **ceilings ignoring duty cycle**. Sustained byte pacing (§3) is much
+lower in a duty-limited deployment, and actual airtime accounting belongs in the
+radio adapter.
 
 ### 2d. Link establishment cost (facts) — prefer the tunnel on slow links
 
@@ -159,12 +160,12 @@ for faster SF7-class hops or for when the timeout is rescaled by the adapter.
 
 ## 3. Governor tuning
 
-The batcher (`batch.rs`) throttles each peer with an independent **token bucket**
-so a slow LoRa link is never overrun. All three knobs below are **policy, not
-protocol** (SPEC-CHECK in `batch.rs`) — tune them freely; the values here are
+The batcher (`batch.rs`) paces encoded batch bytes for each peer with an independent
+**token bucket**. All three knobs below are **policy, not protocol** (SPEC-CHECK
+in `batch.rs`) — tune them freely; the values here are
 **illustrative starting points**, not code defaults.
 
-### 3a. Per-peer `TokenBucket` → duty cycle
+### 3a. Per-peer `TokenBucket` → byte pacing
 
 `Batcher::new(budget, max_batch_age_ms, capacity_bytes, refill_per_sec)` creates
 each peer's bucket with:
@@ -172,27 +173,47 @@ each peer's bucket with:
 - **`capacity_bytes`** — the burst size. Start at `DEFAULT_BATCH_BUDGET` (441):
   "let one full packet burst, then throttle." Larger allows a burst of several
   packets after a quiet period.
-- **`refill_per_sec`** — the *sustained* byte rate. This is the knob you map to
-  your regulatory duty cycle.
+- **`refill_per_sec`** — the *sustained* byte rate in integer B/s. Use
+  `Batcher::with_rate(budget, max_batch_age_ms, capacity_bytes, rate)` or
+  `Batcher::with_default_budget_and_rate(max_batch_age_ms, capacity_bytes, rate)`
+  with a `ByteRate` for fractional B/s.
 
-The bucket tracks tokens in **milli-bytes** internally (`MILLI` = 1000), so
-sub-byte-per-second refill accumulates exactly — but `refill_per_sec` itself is
-an integer bytes/sec, so **1 B/s is the finest nonzero sustained rate**.
+`ByteRate::from_millibytes_per_sec(300)` represents **0.3 B/s**;
+`ByteRate::from_millibytes_per_sec(500)` represents **0.5 B/s**. The smallest
+positive rate is **0.001 B/s** (one byte per 1,000 seconds); zero disables refill
+but still permits the initial burst. `ByteRate::from_bytes_per_sec` and the
+existing integer constructors preserve whole-byte-per-second configuration.
 
-**Duty-cycle mapping.** For a band that permits an airtime fraction *d* (EU868
-default sub-bands are **1%**), the safe sustained byte rate is
+The bucket starts full and tracks tokens in **micro-bytes** using bounded integer
+arithmetic. Every elapsed millisecond earns exact credit, even when callers poll
+more often than a whole byte accrues. Backward timestamps earn nothing and do not
+reset the last refill time. Idle credit is capped at `capacity_bytes`; a long
+idle period never permits a burst above that capacity.
+
+```rust
+use rabbithole_reticulum::{Batcher, ByteRate, DEFAULT_BATCH_BUDGET};
+
+let batcher = Batcher::with_default_budget_and_rate(
+    30_000,                           // flush a partial batch after 30 seconds
+    DEFAULT_BATCH_BUDGET as u64,      // at most one full batch of burst credit
+    ByteRate::from_millibytes_per_sec(300), // sustained 0.3 encoded batch B/s
+);
+```
+
+**Illustrative airtime mapping.** Given an airtime fraction *d*, a rough byte
+pacing estimate is
 
 ```
-refill_per_sec  ≈  nominal_bytes_per_sec  ×  d
+bytes_per_second  ≈  nominal_bytes_per_sec  ×  d
 ```
 
-because airtime = bytes ÷ bytes-per-sec, and you may spend fraction *d* of each
-hour on air. EU868 1% = **36 s airtime/hour**:
+using the simplified airtime estimate bytes ÷ bytes-per-sec. An illustrative
+1% allowance is **36 s airtime/hour**:
 
-| SF / BW | ≈ B/s | Bytes/hour at 1% | Safe `refill_per_sec` (1%) |
+| SF / BW | ≈ B/s | Bytes/hour at 1% | Illustrative byte pacing |
 | --- | ---: | ---: | ---: |
-| SF12 / 125 | 31 | ~1125 | ~0.3 B/s → **see note** |
-| SF11 / 125 | 55 | ~1980 | ~0.5 B/s → **see note** |
+| SF12 / 125 | 31 | ~1125 | 0.3 B/s (`from_millibytes_per_sec(300)`) |
+| SF11 / 125 | 55 | ~1980 | 0.5 B/s (`from_millibytes_per_sec(500)`) |
 | SF10 / 125 | 122 | ~4410 | ~1 B/s |
 | SF9 / 125 | 220 | ~7920 | ~2 B/s |
 | SF8 / 125 | 390 | ~14060 | ~4 B/s |
@@ -200,13 +221,16 @@ hour on air. EU868 1% = **36 s airtime/hour**:
 | SF7 / 250 | 1375 | ~49500 | ~14 B/s |
 | SF7 / 500 | 2740 | ~98550 | ~27 B/s |
 
-> **Honest limit at the slowest SFs.** At SF12/125 and SF11/125 the 1% budget
-> works out to *below* 1 B/s, but `refill_per_sec` can go no finer than 1 B/s.
-> A refill of 1 B/s at SF12 = 3600 B/hour ≈ 116 s airtime/hour ≈ **3.2% duty** —
-> over the EU 1% limit. So on the two slowest data rates the token bucket alone
-> cannot enforce compliance; you must additionally rely on `max_batch_age_ms`
-> (below) plus the adapter's own per-hour airtime accounting to stay legal. This
-> is a real gap to close in the interface layer, not something the model hides.
+> **Byte pacing is not airtime accounting.** Fractional rates remove the former
+> 1 B/s floor, but these estimates do not prove real-radio duty-cycle compliance.
+> The bucket charges encoded batch bytes, excluding radio framing, preamble,
+> acknowledgements, retransmissions, and other traffic. Each peer has its own
+> bucket, so traffic to multiple peers can share one physical transmitter without
+> a shared byte cap. The bucket also starts full and can spend that initial burst
+> on top of later refill. The adapter must separately account for actual airtime
+> across the interface under the applicable regional rules. `max_batch_age_ms`
+> controls partial-batch latency, not a sustained rate or duty-cycle limit: full
+> batches bypass that age threshold.
 
 ### 3b. `max_batch_age_ms` — the latency/efficiency knob
 
@@ -285,9 +309,10 @@ TX power, MCU, and sleep support. What it *can* say is directional and firm:
     re-flooded announce.
   - **Hop limits** (`ttl_hops`) — bound how many times a message is retransmitted
     across the mesh.
-- **Duty-cycle compliance is power management too.** The token-bucket
-  `refill_per_sec` you set for legality (§3a) is also a hard cap on TX energy per
-  hour.
+- **Byte pacing can reduce transmit energy.** The token bucket (§3a) limits
+  encoded batch bytes per peer, which can reduce transmissions. It does not cap
+  total radio energy or prove duty-cycle compliance; those require interface-wide
+  airtime accounting and hardware measurements.
 - **Sleep between polls.** The whole tunnel core is **sans-I/O and reads no
   clock** — it never spins. The future adapter injects `now_ms` on each poll, so
   its loop is free to sleep the MCU/radio between polls; nothing in the model
