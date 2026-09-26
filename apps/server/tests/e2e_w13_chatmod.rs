@@ -17,7 +17,7 @@ use rabbithole_proto::chat::{
 };
 use rabbithole_proto::presence::PresenceState;
 use rabbithole_proto::ErrorCode;
-use rabbithole_server_core::{Role, ServerConfig, ServerEvent, LOBBY};
+use rabbithole_server_core::{Role, ServerConfig, LOBBY};
 use rabbithole_store_server::repo::AuditRepo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -799,7 +799,7 @@ async fn telnet_surface_observes_mute() {
 
 /// Telnet moderation follows the active chat screen and current membership.
 /// Both a lobby outsider and a kicked session are checked through ordered
-/// bus sentinels, not an arbitrary period without receiving data.
+/// output markers, not an arbitrary period without receiving data.
 #[tokio::test]
 async fn telnet_notices_follow_active_room_and_current_membership() {
     let dir = tempfile::tempdir().unwrap();
@@ -877,6 +877,7 @@ async fn telnet_notices_follow_active_room_and_current_membership() {
     mo.request_ack(&RoomKick::new("den", "pest", true))
         .await
         .unwrap();
+    pest.expect(b"Command: ").await;
     mo.request_ack(&RoomMute::new("den", "pest", None))
         .await
         .unwrap();
@@ -885,14 +886,11 @@ async fn telnet_notices_follow_active_room_and_current_membership() {
         .unwrap();
     mo.request_ack(&RoomSlowMode::new("den", 30)).await.unwrap();
     mo.request_ack(&RoomSlowMode::new("den", 0)).await.unwrap();
-    // Shutdown is consumed by every active chat screen, after all preceding
-    // room events, even when that session no longer belongs to its room.
-    burrow.shared.bus.publish(ServerEvent::Shutdown);
-    pest.expect_without(
-        b"The server is going down. Goodbye.\r\n",
-        &[b"pest was", b"Slow mode in den"],
-    )
-    .await;
+    // A room kick returns to the menu; later room notices must not leak
+    // through the abandoned chat screen while the session remains open.
+    pest.send("q").await;
+    pest.expect_without(b"Goodbye, pest!\r\n", &[b"pest was", b"Slow mode in den"])
+        .await;
 
     burrow.shutdown().await;
 }

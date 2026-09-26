@@ -117,6 +117,9 @@ where
     // Join the shared world — presence + the chat lobby — exactly like a
     // native or Hotline session, and leave it however the shell ends.
     let session_id = shared.next_session_id();
+    // Session kicks apply while any authenticated screen is open, including
+    // an idle chat or an unfinished line. Subscribe before announcing presence.
+    let mut session_events = shared.bus.subscribe();
     shared.presence.join(PresenceEntry {
         session_id,
         account_id: authed.account.id,
@@ -132,11 +135,31 @@ where
     shared
         .chat
         .join_lobby(session_id, &authed.persona.screen_name);
-    let result = async {
-        show_welcome(&mut t, shared, &authed, session_id).await?;
-        menu_loop(&mut t, shared, &authed, session_id, peer_ip).await
-    }
-    .await;
+    let result = tokio::select! {
+        result = async {
+            show_welcome(&mut t, shared, &authed, session_id).await?;
+            menu_loop(&mut t, shared, &authed, session_id, peer_ip).await
+        } => result,
+        reason = async {
+            loop {
+                match session_events.recv().await {
+                    Ok(ServerEvent::Kick { session_id: target, reason }) if target == session_id => {
+                        break Some(reason);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break None,
+                    _ => {}
+                }
+            }
+        } => {
+            match reason {
+                Some(reason) => t.write_str(&format!(
+                    "\nDisconnected by operator: {}\n",
+                    single_line(&reason),
+                )).await,
+                None => Ok(()),
+            }
+        }
+    };
     shared.chat.session_closed(session_id);
     shared.presence.leave(session_id);
     result
@@ -1719,6 +1742,26 @@ where
 /// Scrollback lines printed when entering a room.
 const CHAT_SCROLLBACK: usize = 15;
 
+/// Operator text is plain terminal output, never terminal control sequences
+/// or extra lines. This matches the legacy room-moderation notice formatter.
+fn single_line(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// Put asynchronous notices on their own line without losing or visually
+/// splitting a chat message that the person is still typing.
+async fn chat_notice<S>(t: &mut TelnetStream<S>, text: &str) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let pending = t.pending_line();
+    t.write_str(&format!("\n({text})\n")).await?;
+    if !pending.is_empty() {
+        t.write_str(&single_line(&pending)).await?;
+    }
+    Ok(())
+}
+
 /// The `[C]` chat screen for `room` (the lobby from the menu; any joinable
 /// room via `/go`). Typed lines send (`CHAT_SEND` + the per-account `msg`
 /// budget); `/q` leaves; incoming bus lines stream in between keystrokes.
@@ -1740,22 +1783,23 @@ where
         t.write_str("\nYou do not have access to chat.\n").await?;
         return Ok(None);
     }
-    let is_lobby = room.eq_ignore_ascii_case(LOBBY);
-    if !is_lobby {
-        if let Err(e) = shared.chat.join(
-            room,
-            session_id,
-            authed.account.id,
-            &authed.persona.screen_name,
-        ) {
-            t.write_str(&format!("\nCannot join {room}: {e}\n")).await?;
-            return Ok(None);
-        }
-    }
-    // Subscribe before printing scrollback so nothing said in between is
-    // lost (a line landing in that instant may print twice; better twice
-    // than never).
+    // Subscribe before joining so an immediate kick cannot fall between
+    // membership being granted and this screen observing room events.
     let mut rx = shared.bus.subscribe();
+    let is_lobby = room.eq_ignore_ascii_case(LOBBY);
+    // A prior room kick may have removed even the lobby membership. Rejoin
+    // through the normal invitation/ban gate instead of opening a stale screen.
+    if let Err(e) = shared.chat.join(
+        room,
+        session_id,
+        authed.account.id,
+        &authed.persona.screen_name,
+    ) {
+        t.write_str(&format!("\nCannot join {room}: {e}\n")).await?;
+        return Ok(None);
+    }
+    // A line landing between subscription and scrollback may print twice;
+    // retaining the subscription avoids missing it entirely.
     t.write_str(&format!(
         "\n--- Chat: {room} ---\nType to talk. /q leaves, /go <keyword> jumps.\n"
     ))
@@ -1827,9 +1871,27 @@ where
                 use tokio::sync::broadcast::error::RecvError;
                 match event {
                     Ok(ServerEvent::Chat { room: r, from, text, .. })
-                        if r.eq_ignore_ascii_case(room) =>
+                        if r.eq_ignore_ascii_case(room) && shared.chat.is_member(room, session_id) =>
                     {
                         t.write_str(&format!("<{from}> {text}\n")).await?;
+                    }
+                    Ok(ServerEvent::RoomKicked { account, room: changed_room, banned })
+                        if account == authed.account.id && changed_room.eq_ignore_ascii_case(room) =>
+                    {
+                        t.discard_line();
+                        let action = if banned { "banned" } else { "removed" };
+                        t.write_str(&format!(
+                            "\n(You were {action} from {}.)\n",
+                            single_line(room),
+                        )).await?;
+                        break Ok(None);
+                    }
+                    Ok(ServerEvent::Notice { text, from }) => {
+                        chat_notice(t, &format!(
+                            "Notice from {}: {}",
+                            single_line(&from),
+                            single_line(&text),
+                        )).await?;
                     }
                     Ok(event @ (ServerEvent::RoomMuted { .. } | ServerEvent::RoomSlowModeChanged { .. })) => {
                         if let Some((changed_room, notice)) =

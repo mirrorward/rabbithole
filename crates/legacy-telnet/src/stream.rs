@@ -110,6 +110,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TelnetStream<S> {
         self.terminal.as_deref()
     }
 
+    /// The decoded line being edited, for redrawing ordinary echoed input
+    /// after asynchronous output. Do not redraw hidden password input.
+    pub fn pending_line(&self) -> String {
+        decode(self.encoding, &self.line_buf)
+    }
+
+    /// Forget partially entered input when its prompt is no longer valid.
+    /// Negotiation state and subsequent input remain available to the next
+    /// prompt.
+    pub fn discard_line(&mut self) {
+        self.line_buf.clear();
+    }
+
     /// Open negotiation: offer ECHO + SGA, request SGA + NAWS + TTYPE.
     pub async fn start(&mut self) -> io::Result<()> {
         let mut out = Vec::new();
