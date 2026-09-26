@@ -441,7 +441,7 @@ async fn greet<S>(t: &mut BbsTerminal<S>, authed: &AuthedUser) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut line = format!("\nWelcome, {}!", authed.persona.screen_name);
+    let mut line = format!("\nWelcome, {}!", single_line(&authed.persona.screen_name));
     let mut details = Vec::new();
     if let Some(term) = t.stream.terminal() {
         details.push(term.to_string());
@@ -503,7 +503,8 @@ where
                 if sample.is_empty() {
                     out.push_str(&format!("\nOnline now: {count}.\n"));
                 } else {
-                    out.push_str(&format!("\nOnline now ({count}): {}\n", sample.join(", ")));
+                    let labels: Vec<_> = sample.iter().map(|name| single_line(name)).collect();
+                    out.push_str(&format!("\nOnline now ({count}): {}\n", labels.join(", ")));
                 }
             }
             pw::WelcomeWidget::Featured { title, body } => {
@@ -601,8 +602,11 @@ where
         let arg_opt = (!arg.is_empty()).then_some(arg);
         match (verb.as_str(), arg_opt) {
             ("q" | "quit" | "g" | "goodbye", _) => {
-                t.write_str(&format!("\nGoodbye, {}!\n", authed.persona.screen_name))
-                    .await?;
+                t.write_str(&format!(
+                    "\nGoodbye, {}!\n",
+                    single_line(&authed.persona.screen_name)
+                ))
+                .await?;
                 return Ok(());
             }
             ("", _) => {}
@@ -1927,8 +1931,9 @@ where
 /// Scrollback lines printed when entering a room.
 const CHAT_SCROLLBACK: usize = 15;
 
-/// Operator text is plain terminal output, never terminal control sequences
-/// or extra lines. This matches the legacy room-moderation notice formatter.
+/// A label is plain terminal output, never terminal control sequences or
+/// extra lines. Apply only when displaying it: identity lookup keeps the
+/// original name, and artwork/message bodies have separate rendering policy.
 fn single_line(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
@@ -2230,7 +2235,7 @@ where
         rows.push(format!(
             "{:>3}  {:<20} {:>6}  {:<6} {}",
             i + 1,
-            clip(&with, 20),
+            clip(&single_line(&with), 20),
             unread,
             fmt_age(now - last.at_ms),
             clip(last.text.lines().next().unwrap_or(""), 40)
@@ -2264,7 +2269,8 @@ where
     let partner = match PersonasRepo(&shared.pool).by_screen_name(peer).await {
         Ok(Some(p)) => p,
         Ok(None) => {
-            t.write_str(&format!("\nNo such user: {peer}\n")).await?;
+            t.write_str(&format!("\nNo such user: {}\n", single_line(peer)))
+                .await?;
             return Ok(None);
         }
         Err(e) => {
@@ -2280,7 +2286,7 @@ where
     }
     render_dm_history(t, shared, authed, &partner).await?;
     loop {
-        t.write_str(&format!("\ndm {}> ", partner.screen_name))
+        t.write_str(&format!("\ndm {}> ", single_line(&partner.screen_name)))
             .await?;
         let Some(line) = t.read_line(Echo::On).await? else {
             return Ok(None); // peer went away
@@ -2349,7 +2355,7 @@ where
     if messages.is_empty() {
         t.write_str(&format!(
             "\nNo messages with {} yet — `r` writes one.\n",
-            partner.screen_name
+            single_line(&partner.screen_name)
         ))
         .await?;
         return Ok(());
@@ -2360,7 +2366,7 @@ where
         rows.push(format!(
             "[{}] {}{auto}: {}",
             fmt_datetime(m.at_ms),
-            m.from_persona,
+            single_line(&m.from_persona),
             m.text
         ));
     }

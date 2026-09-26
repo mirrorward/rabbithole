@@ -58,6 +58,10 @@ disables that class.
   list instead. Door games and ZMODEM receive no asynchronous notice bytes;
   queued mail appears at the next text prompt. If the bounded event queue
   overflows, a generic hint directs the member to check durable mail with `D`.
+  Persona labels in greetings, online samples and direct-mail screens omit
+  terminal controls and embedded line breaks. Numbered mail selection retains
+  the original identity for lookup and replies, in UTF-8 and CP437 alike.
+  Operator ANSI artwork and message-body rendering keep their own policies.
 - **Doors**: `doors_enabled`, `doors_dir` (default `doors/`, relative to
   `data_dir`), `doors_max_nodes` (default 4; 0 refuses every launch),
   `doors_session_max_secs` (default 3600; 0 = unlimited; a door's own
