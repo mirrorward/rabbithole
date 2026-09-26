@@ -60,20 +60,67 @@ async fn resolve_account(shared: &Shared, screen_name: &str) -> anyhow::Result<O
         .map(|p| p.account_id))
 }
 
-/// Sessions a viewer below moderator is not shown in a room's roster: the
-/// invisible ones (Cheshire mode), except their own — the rule the who-list
-/// keeps.
-fn hidden_sessions(shared: &Shared, ctx: &SessionCtx) -> std::collections::HashSet<u64> {
-    if ctx.role >= rabbithole_server_core::Role::Moderator {
-        return std::collections::HashSet::new();
-    }
+/// Live sessions this viewer may see. An allow-set also excludes captured
+/// memberships whose presence disappeared during teardown.
+fn visible_sessions(shared: &Shared, ctx: &SessionCtx) -> std::collections::HashSet<u64> {
     shared
         .presence
         .snapshot()
         .into_iter()
-        .filter(|e| e.is_invisible() && e.session_id != ctx.session_id)
+        .filter(|e| {
+            !e.is_invisible()
+                || e.session_id == ctx.session_id
+                || ctx.role >= rabbithole_server_core::Role::Moderator
+        })
         .map(|e| e.session_id)
         .collect()
+}
+
+fn visible_room_info(shared: &Shared, ctx: &SessionCtx, summary: &RoomSummary) -> pchat::RoomInfo {
+    let visible = visible_sessions(shared, ctx);
+    let mut info = room_info(summary);
+    info.member_count = shared
+        .chat
+        .member_sessions(&summary.name)
+        .iter()
+        .filter(|(session, _)| visible.contains(session))
+        .count() as u32;
+    info
+}
+
+fn visible_members(shared: &Shared, ctx: &SessionCtx, members: Vec<(u64, String)>) -> Vec<String> {
+    let presence: std::collections::HashMap<_, _> = shared
+        .presence
+        .snapshot()
+        .into_iter()
+        .map(|entry| (entry.session_id, entry))
+        .collect();
+    member_names(&presence, ctx.role, ctx.session_id, members)
+}
+
+fn member_names(
+    presence: &std::collections::HashMap<u64, rabbithole_server_core::PresenceEntry>,
+    role: rabbithole_server_core::Role,
+    viewer_session: u64,
+    members: Vec<(u64, String)>,
+) -> Vec<String> {
+    let mut names: Vec<_> = members
+        .into_iter()
+        .filter_map(|(session, _)| {
+            let entry = presence.get(&session)?;
+            if entry.is_invisible()
+                && session != viewer_session
+                && role < rabbithole_server_core::Role::Moderator
+            {
+                None
+            } else {
+                Some(entry.screen_name.clone())
+            }
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 pub async fn handle(
@@ -95,7 +142,11 @@ pub async fn handle(
     }
 
     if frame.decode::<pchat::RoomListRequest>().is_some() {
-        let rooms = shared.chat.list(ctx.session_id, ctx.account_id);
+        let rooms = shared.chat.list_visible(
+            ctx.session_id,
+            ctx.account_id,
+            &visible_sessions(shared, ctx),
+        );
         reply!(&pchat::RoomList::new(rooms.iter().map(room_info).collect()));
         return Ok(true);
     }
@@ -113,7 +164,9 @@ pub async fn handle(
             &ctx.screen_name,
             ctx.session_id,
         ) {
-            Ok(summary) => reply!(&pchat::RoomInfoReply::new(room_info(&summary))),
+            Ok(summary) => reply!(&pchat::RoomInfoReply::new(visible_room_info(
+                shared, ctx, &summary
+            ))),
             Err(e) => fail!(map_err(e)),
         }
         return Ok(true);
@@ -124,7 +177,9 @@ pub async fn handle(
             .chat
             .join(&req.room, ctx.session_id, ctx.account_id, &ctx.screen_name)
         {
-            Ok(summary) => reply!(&pchat::RoomInfoReply::new(room_info(&summary))),
+            Ok(summary) => reply!(&pchat::RoomInfoReply::new(visible_room_info(
+                shared, ctx, &summary
+            ))),
             Err(e) => fail!(map_err(e)),
         }
         return Ok(true);
@@ -215,16 +270,7 @@ pub async fn handle(
         // say; who of its members they are shown follows the who-list.
         match shared.chat.members(&req.room, ctx.session_id) {
             Ok(_) => {
-                let hidden = hidden_sessions(shared, ctx);
-                let mut members: Vec<String> = shared
-                    .chat
-                    .member_sessions(&req.room)
-                    .into_iter()
-                    .filter(|(session, _)| !hidden.contains(session))
-                    .map(|(_, name)| name)
-                    .collect();
-                members.sort();
-                members.dedup();
+                let members = visible_members(shared, ctx, shared.chat.member_sessions(&req.room));
                 reply!(&pchat::RoomMemberList::new(members))
             }
             Err(e) => fail!(map_err(e)),
@@ -244,16 +290,7 @@ pub async fn handle(
             now_ms(),
         ) {
             Ok(kept) => {
-                let hidden = hidden_sessions(shared, ctx);
-                let mut members: Vec<String> = kept
-                    .members
-                    .into_iter()
-                    .filter(|(session, _)| !hidden.contains(session))
-                    .map(|(_, name)| name)
-                    .collect();
-                // One person on two devices is one row.
-                members.sort();
-                members.dedup();
+                let members = visible_members(shared, ctx, kept.members);
                 // Each mute by the name it was given here; the asker's own
                 // by the name they are asking under, which is the one they
                 // know themselves by.
@@ -377,4 +414,42 @@ pub async fn handle(
     }
 
     Ok(false)
+}
+
+#[cfg(test)]
+mod room_update_tests {
+    use super::*;
+    use rabbithole_server_core::{PresenceEntry, Role};
+
+    #[test]
+    fn captured_members_cannot_reveal_departed_or_invisible_names() {
+        let captured = vec![(2, "cached invisible name".into())];
+        let mut current = std::collections::HashMap::new();
+        // A close after membership capture but before presence capture.
+        assert!(member_names(&current, Role::User, 1, captured.clone()).is_empty());
+        assert!(member_names(&current, Role::Moderator, 1, captured.clone()).is_empty());
+        current.insert(
+            2,
+            PresenceEntry {
+                session_id: 2,
+                account_id: 20,
+                screen_name: "current name".into(),
+                role: Role::User,
+                transport: "test".into(),
+                connected_at: std::time::Instant::now(),
+                state: 3,
+                status: None,
+                pubkey: None,
+            },
+        );
+        assert!(member_names(&current, Role::User, 1, captured.clone()).is_empty());
+        assert_eq!(
+            member_names(&current, Role::User, 2, captured.clone()),
+            ["current name"]
+        );
+        assert_eq!(
+            member_names(&current, Role::Moderator, 1, captured),
+            ["current name"]
+        );
+    }
 }

@@ -137,6 +137,9 @@ pub enum Event {
         role: u8,
         caps: u64,
     },
+    /// Refresh this session's visible room list and open keeping view.
+    /// Contains no room names or member identities.
+    RoomsChanged,
 }
 
 #[cfg(test)]

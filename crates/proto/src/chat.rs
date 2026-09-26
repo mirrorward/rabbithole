@@ -608,3 +608,16 @@ impl Message for RoomModeration {
     const FAMILY: Family = Family::CHAT;
     const MESSAGE_TYPE: u16 = 29;
 }
+
+/// Ephemeral push: visible rooms or their membership changed. Fetch a fresh
+/// [`RoomList`] and any open [`RoomModeration`] view. No room names or roster
+/// are included; each read uses the viewer's current permissions. Older
+/// clients continue ordinary reads. Sent only when both peers offer the
+/// `room-updates` capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomsChanged;
+
+impl Message for RoomsChanged {
+    const FAMILY: Family = Family::CHAT;
+    const MESSAGE_TYPE: u16 = 30;
+}

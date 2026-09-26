@@ -131,6 +131,7 @@ pub async fn run_session(
     // ---- AwaitHello / AwaitAuth ----------------------------------------
     let mut negotiated: Option<ProtocolVersion> = None;
     let mut theme_updates = false;
+    let mut room_updates = false;
     // The client's *claimed* portable identity key from the handshake, the
     // random challenge nonce we issued for it, and the key once it has PROVED
     // possession (a valid KeyProof signature over the nonce). Only the *verified*
@@ -162,6 +163,9 @@ pub async fn run_session(
                     theme_updates = hello
                         .capabilities
                         .contains(rabbithole_proto::hello::caps::SERVER_THEME_UPDATES);
+                    room_updates = hello
+                        .capabilities
+                        .contains(rabbithole_proto::hello::caps::ROOM_UPDATES);
                     client_pubkey = hello.client_pubkey;
                     // If the client offered an identity key, challenge it to prove
                     // possession: a random nonce it must sign (see the KeyProof
@@ -185,6 +189,9 @@ pub async fn run_session(
                             ),
                             rabbithole_proto::Capability::new(
                                 rabbithole_proto::hello::caps::SERVER_THEME_UPDATES,
+                            ),
+                            rabbithole_proto::Capability::new(
+                                rabbithole_proto::hello::caps::ROOM_UPDATES,
                             ),
                         ]),
                         cfg.name,
@@ -469,6 +476,14 @@ pub async fn run_session(
                             break;
                         }
                         Ok(ev) => {
+                            // Presence visibility and persona labels change room
+                            // counts/rosters without changing chat membership.
+                            if let ServerEvent::PresenceChanged { session_id, .. }
+                                | ServerEvent::SessionChanged { session_id, .. } = &ev {
+                                if room_updates && shared.chat.audience_for_session(*session_id).allows(ctx.session_id, ctx.account_id) {
+                                    conn.send(Frame::push(&pchat::RoomsChanged)?).await?;
+                                }
+                            }
                             if let ServerEvent::RadioRequestsChanged { station } = &ev {
                                 if ctx.radio_requests_watch.as_deref() == Some(station) {
                                     if let Some(push) = radio_requests_push(&shared, &mut ctx) {
@@ -492,12 +507,15 @@ pub async fn run_session(
                             if matches!(&ev, ServerEvent::ThemeChanged { .. }) && !theme_updates {
                                 continue;
                             }
+                            if matches!(&ev, ServerEvent::RoomsChanged { .. }) && !room_updates {
+                                continue;
+                            }
                             if let Some(push) = push_for_event(&ev, &shared, ctx.role, ctx.account_id, ctx.session_id) {
                                 // Progress and theme invalidations are for
                                 // whoever is watching now. A reconnect fetches
                                 // its current theme, so do not fill the replay
                                 // log with obsolete invalidations.
-                                let passing = matches!(&ev, ServerEvent::ThemeChanged { .. }) || matches!(
+                                let passing = matches!(&ev, ServerEvent::ThemeChanged { .. } | ServerEvent::RoomsChanged { .. }) || matches!(
                                     &ev,
                                     ServerEvent::PullStatus { status, .. }
                                         if status.state == rabbithole_proto::filelib::pull_state::RUNNING
@@ -515,6 +533,11 @@ pub async fn run_session(
                         }
                         Err(RecvError::Lagged(n)) => {
                             tracing::warn!(session_id, missed = n, "session lagged behind the bus");
+                            // No room payload is replayed: every viewer reads
+                            // its own current visible list and keeper view.
+                            if room_updates {
+                                conn.send(Frame::push(&pchat::RoomsChanged)?).await?;
+                            }
                             // A bounded snapshot recovers missed queue mutations.
                             if let Some(push) = radio_requests_push(&shared, &mut ctx) {
                                 conn.send(push).await?;
@@ -791,6 +814,12 @@ pub(crate) fn push_for_event(
 ) -> Option<Frame> {
     let viewer_is_mod = viewer_role >= Role::Moderator;
     match event {
+        ServerEvent::RoomsChanged { audience } => {
+            if !audience.allows(viewer_session, viewer_account) {
+                return None;
+            }
+            Frame::push(&pchat::RoomsChanged).ok()
+        }
         ServerEvent::ThemeChanged { account } => {
             // Only live authenticated sessions receive this invalidation;
             // the offline replay recorder uses session 0. Preference changes

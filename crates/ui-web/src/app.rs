@@ -1155,6 +1155,13 @@ impl AppState {
                             crate::native::connect_native(&ep, token);
                         }
                     }
+                    Event::RoomsChanged => {
+                        if let Some(session) = so_app.session_at(&ep) {
+                            if session.state == state {
+                                so_app.rooms_changed_at(session);
+                            }
+                        }
+                    }
                     Event::ChatMessage {
                         room,
                         from,
@@ -1278,17 +1285,7 @@ impl AppState {
                 session_seen.update(|seen| *seen = seen.saturating_add(added).min(total));
             }));
             ws.on_rooms(std::rc::Rc::new(move |rooms| {
-                state.update(|s| {
-                    s.rooms = rooms;
-                    // A room that is no longer there (emptied and gone while
-                    // the connection was down) is not somewhere to be.
-                    let here = s.room().to_string();
-                    if here != crate::client::LOBBY
-                        && !s.rooms.iter().any(|r| r.name.eq_ignore_ascii_case(&here))
-                    {
-                        s.room = String::new();
-                    }
-                })
+                state.update(|s| s.set_rooms(rooms))
             }));
             let keeping_endpoint = endpoint.clone();
             ws.on_room_keeping(std::rc::Rc::new(move |answer| {
@@ -2824,6 +2821,35 @@ impl AppState {
         if let Some(answer) = answer {
             self.requests_answered(session, answer);
         }
+    }
+
+    /// Ask the burrow what rooms it has.
+    #[cfg(target_arch = "wasm32")]
+    fn rooms_changed_at(&self, session: Session) {
+        if !session.authenticated.get_untracked()
+            || session.state.try_update(|s| s.queue_room_refresh()) != Some(true)
+        {
+            return;
+        }
+        let ready = session.ready.get_untracked();
+        defer(move || {
+            // A queued refresh cannot migrate to a newly authenticated owner.
+            if session.authenticated.try_get_untracked() != Some(true)
+                || session.ready.try_get_untracked() != Some(ready)
+            {
+                return;
+            }
+            let room = session.state.try_update(|s| {
+                s.room_refresh_queued = false;
+                s.room().to_string()
+            });
+            if let Some(room) = room {
+                session.ws.with_value(|c| {
+                    c.dispatch_room(&crate::wire::RoomCommand::List);
+                    c.dispatch_room(&crate::wire::RoomCommand::Keeping { room });
+                });
+            }
+        });
     }
 
     /// Ask the burrow what rooms it has.

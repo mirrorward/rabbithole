@@ -12,12 +12,32 @@
 
 use tokio::sync::broadcast;
 
+/// Who could see an affected room before or after a mutation. Captured while
+/// the room is locked so departure/reaping cannot erase its former audience.
+/// Only a payload-free invalidation crosses the wire; snapshots authorize anew.
+#[derive(Debug, Clone, Default)]
+pub struct RoomAudience {
+    pub public: bool,
+    pub sessions: std::collections::HashSet<u64>,
+    pub accounts: std::collections::HashSet<i64>,
+}
+
+impl RoomAudience {
+    pub fn allows(&self, session: u64, account: i64) -> bool {
+        session != 0
+            && (self.public || self.sessions.contains(&session) || self.accounts.contains(&account))
+    }
+}
+
 /// Events published on the bus.
 ///
 /// `#[non_exhaustive]` — waves add variants; subscribers ignore unknowns.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
+    /// Visible room metadata/membership changed. Contains no room payload;
+    /// receivers fetch lists and authorized keeper views from current state.
+    RoomsChanged { audience: RoomAudience },
     /// A station's queue changed. Only live watchers receive a fresh view,
     /// built for their own login; never broadcast somebody else's `mine` flags.
     RadioRequestsChanged { station: String },

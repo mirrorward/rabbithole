@@ -159,8 +159,14 @@ impl Client {
             client_version: client_version.to_string(),
             session_token: None,
         };
-        let hello =
-            Hello::new(client_name, client_version, CapabilitySet::default()).with_pubkey(pubkey);
+        let hello = Hello::new(
+            client_name,
+            client_version,
+            CapabilitySet(vec![rabbithole_proto::Capability::new(
+                rabbithole_proto::hello::caps::ROOM_UPDATES,
+            )]),
+        )
+        .with_pubkey(pubkey);
         let ack: HelloAck = client.request(&hello).await?;
         // Prove possession of the identity key if the server challenged it. Sign
         // the channel-bound message: over QUIC the binder is the cert fingerprint

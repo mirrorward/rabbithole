@@ -52,6 +52,7 @@ real service workers and gives each fixture its own writable copy of the app. No
 | `npx playwright test tests/auth.spec.ts` | Correlated authentication failures, delayed handshakes, early pane requests, corrected password retry, and explicit saved-sign-in resume. |
 | `npx playwright test tests/bookmarks.spec.ts` | Opt-in account bookmarks, two users on one burrow, legacy migration, independent expiry/removal, and storage failures. |
 | `npm run test:chat` | Recent chat history for a second client, room isolation, and reconnection. |
+| `npx playwright test tests/room-updates.spec.ts` | Two live clients update room lists and an open keeper roster after creation, join, leave, invitation, last-member deletion and disconnect, without refreshing the observing page. |
 | `npm run test:keynav` | Focus recovery in Members after filtering, no focus stealing, route disposal/remount, and Boards Tab order with arrow, Enter, pointer and modified-click navigation. |
 | `npx playwright test tests/send.spec.ts` | Per-send source choices, real two-burrow upload/pull/progress, desktop/mobile layout, and safe fallback with an older destination. |
 | `npx playwright test tests/feed-mappings.spec.ts` | Configured but unpolled feeds, redacted URL collisions with distinct real poll counts, TOML restart/reconnect updates, older-server fallback, and stale burrow/account replies. |

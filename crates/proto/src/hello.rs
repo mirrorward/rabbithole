@@ -54,6 +54,8 @@ pub mod caps {
     pub const GUEST: &str = "guest";
     /// Peer can refresh a session's signed theme after a `ThemeChanged` push.
     pub const SERVER_THEME_UPDATES: &str = "server-theme-updates";
+    /// Peer can refresh visible rooms and keeper views after `RoomsChanged`.
+    pub const ROOM_UPDATES: &str = "room-updates";
 }
 
 /// First frame from the connecting peer.

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use parking_lot::RwLock;
 
-use crate::bus::{EventBus, ServerEvent};
+use crate::bus::{EventBus, RoomAudience, ServerEvent};
 
 /// The room every burrow has.
 pub const LOBBY: &str = "lobby";
@@ -81,6 +81,12 @@ struct Room {
 }
 
 impl Room {
+    fn include_audience(&self, audience: &mut RoomAudience) {
+        audience.public |= !self.private;
+        audience.sessions.extend(self.members.keys().copied());
+        audience.accounts.extend(self.invited.iter().copied());
+    }
+
     /// Is `account` muted right now? An expired timed mute is dropped the
     /// first time it is consulted (lazy expiry).
     fn muted_now(&mut self, account: i64, now_ms: u64) -> bool {
@@ -210,7 +216,12 @@ impl ChatService {
             guests.insert(session_id, account_id);
         }
         if let Some(room) = self.rooms.write().get_mut(&key(LOBBY)) {
-            room.members.insert(session_id, screen_name.to_string());
+            if room.members.get(&session_id).map(String::as_str) != Some(screen_name) {
+                room.members.insert(session_id, screen_name.to_string());
+                let mut audience = RoomAudience::default();
+                room.include_audience(&mut audience);
+                self.bus.publish(ServerEvent::RoomsChanged { audience });
+            }
         }
     }
 
@@ -226,8 +237,14 @@ impl ChatService {
         let final_guest = account_id < 0 && !guests.values().any(|id| *id == account_id);
         let mut rooms = self.rooms.write();
         let mut lifted = Vec::new();
+        let mut audience = RoomAudience::default();
+        let mut changed = false;
         rooms.retain(|_, room| {
-            room.members.remove(&session_id);
+            if room.members.contains_key(&session_id) {
+                room.include_audience(&mut audience);
+                room.members.remove(&session_id);
+                changed = true;
+            }
             let survives = room.persistent || !room.members.is_empty();
             if final_guest {
                 let was_muted = room.muted.remove(&account_id).is_some();
@@ -238,6 +255,9 @@ impl ChatService {
             }
             survives
         });
+        if changed {
+            self.bus.publish(ServerEvent::RoomsChanged { audience });
+        }
         // Reuse the scoped moderation update so an open keeper view refreshes.
         // Publish after cleanup while rooms is still locked: later moderation
         // must not overtake this notice. Never announce a room just reaped.
@@ -291,6 +311,26 @@ impl ChatService {
     /// Rooms visible to a viewer: public + private ones they belong to or
     /// are invited to.
     pub fn list(&self, viewer_session: u64, viewer_account: i64) -> Vec<RoomSummary> {
+        self.list_counted(viewer_session, viewer_account, |_| true)
+    }
+
+    /// Listing with the same live, visible sessions as the caller's roster.
+    /// Count under the room lock, rather than patching it after another read.
+    pub fn list_visible(
+        &self,
+        viewer_session: u64,
+        viewer_account: i64,
+        visible: &HashSet<u64>,
+    ) -> Vec<RoomSummary> {
+        self.list_counted(viewer_session, viewer_account, |id| visible.contains(&id))
+    }
+
+    fn list_counted(
+        &self,
+        viewer_session: u64,
+        viewer_account: i64,
+        visible: impl Fn(u64) -> bool,
+    ) -> Vec<RoomSummary> {
         let rooms = self.rooms.read();
         let mut out: Vec<RoomSummary> = rooms
             .values()
@@ -299,7 +339,12 @@ impl ChatService {
                     || r.members.contains_key(&viewer_session)
                     || r.invited.contains(&viewer_account)
             })
-            .map(Self::summary)
+            .map(|room| {
+                let mut summary = Self::summary(room);
+                summary.member_count =
+                    room.members.keys().filter(|id| visible(**id)).count() as u32;
+                summary
+            })
             .collect();
         out.sort_by(|a, b| {
             (a.name != LOBBY)
@@ -351,7 +396,10 @@ impl ChatService {
             history: VecDeque::new(),
         };
         let summary = Self::summary(&room);
+        let mut audience = RoomAudience::default();
+        room.include_audience(&mut audience);
         rooms.insert(k, room);
+        self.bus.publish(ServerEvent::RoomsChanged { audience });
         Ok(summary)
     }
 
@@ -375,7 +423,12 @@ impl ChatService {
         {
             return Err(ChatError::Forbidden);
         }
-        room.members.insert(session_id, screen_name.to_string());
+        if room.members.get(&session_id).map(String::as_str) != Some(screen_name) {
+            room.members.insert(session_id, screen_name.to_string());
+            let mut audience = RoomAudience::default();
+            room.include_audience(&mut audience);
+            self.bus.publish(ServerEvent::RoomsChanged { audience });
+        }
         Ok(Self::summary(room))
     }
 
@@ -388,10 +441,16 @@ impl ChatService {
         let Some(room) = rooms.get_mut(&k) else {
             return Err(ChatError::NoSuchRoom(name.into()));
         };
+        if !room.members.contains_key(&session_id) {
+            return Ok(());
+        }
+        let mut audience = RoomAudience::default();
+        room.include_audience(&mut audience);
         room.members.remove(&session_id);
         if !room.persistent && room.members.is_empty() {
             rooms.remove(&k);
         }
+        self.bus.publish(ServerEvent::RoomsChanged { audience });
         Ok(())
     }
 
@@ -409,8 +468,13 @@ impl ChatService {
         if !room.members.contains_key(&inviter_session) {
             return Err(ChatError::NotMember);
         }
-        room.invited.insert(target_account);
+        let changed = room.invited.insert(target_account);
         room.banned.remove(&target_account); // an invite forgives a ban
+        if changed {
+            let mut audience = RoomAudience::default();
+            room.include_audience(&mut audience);
+            self.bus.publish(ServerEvent::RoomsChanged { audience });
+        }
         Ok(())
     }
 
@@ -433,7 +497,13 @@ impl ChatService {
         if !Self::can_moderate(room, account_id, is_moderator) {
             return Err(ChatError::Forbidden);
         }
-        room.topic = topic.trim().chars().take(200).collect();
+        let topic = topic.trim().chars().take(200).collect::<String>();
+        if room.topic != topic {
+            room.topic = topic;
+            let mut audience = RoomAudience::default();
+            room.include_audience(&mut audience);
+            self.bus.publish(ServerEvent::RoomsChanged { audience });
+        }
         Ok(())
     }
 
@@ -458,15 +528,24 @@ impl ChatService {
         if room.created_by_account == target_account {
             return Err(ChatError::Forbidden); // can't kick the creator
         }
+        let mut audience = RoomAudience::default();
+        room.include_audience(&mut audience);
         let mut kicked = Vec::new();
         for s in target_sessions {
             if room.members.remove(s).is_some() {
                 kicked.push(*s);
             }
         }
+        let mut removed_invite = false;
         if ban {
             room.banned.insert(target_account);
-            room.invited.remove(&target_account);
+            removed_invite = room.invited.remove(&target_account);
+        }
+        if !kicked.is_empty() || removed_invite {
+            if !room.persistent && room.members.is_empty() {
+                rooms.remove(&key(name));
+            }
+            self.bus.publish(ServerEvent::RoomsChanged { audience });
         }
         Ok(kicked)
     }
@@ -613,6 +692,21 @@ impl ChatService {
             room.members.iter().map(|(s, n)| (*s, n.clone())).collect();
         out.sort_by_key(|(s, _)| *s);
         out
+    }
+
+    /// Visibility changes affect counts even when membership itself stays put.
+    /// Also useful for presence-name changes, whose live labels are projected
+    /// from the presence registry by the protocol surface.
+    pub fn audience_for_session(&self, session_id: u64) -> RoomAudience {
+        let rooms = self.rooms.read();
+        let mut audience = RoomAudience::default();
+        for room in rooms
+            .values()
+            .filter(|room| room.members.contains_key(&session_id))
+        {
+            room.include_audience(&mut audience);
+        }
+        audience
     }
 
     /// How `name` is being kept, as the viewer may see it. A private room
@@ -780,6 +874,102 @@ fn next_chat_timestamp(previous: Option<i64>, wall_clock_ms: i64) -> i64 {
 }
 
 #[cfg(test)]
+mod room_update_tests {
+    use super::*;
+
+    fn changed(rx: &mut tokio::sync::broadcast::Receiver<ServerEvent>) -> RoomAudience {
+        let ServerEvent::RoomsChanged { audience } = rx.try_recv().unwrap() else {
+            panic!("expected room invalidation");
+        };
+        assert!(rx.try_recv().is_err(), "one invalidation per mutation");
+        audience
+    }
+
+    #[test]
+    fn real_changes_publish_once_and_noop_membership_is_silent() {
+        let bus = EventBus::default();
+        let chat = ChatService::new(bus.clone(), 64);
+        let mut rx = bus.subscribe();
+        chat.join_lobby(1, 10, "alice");
+        assert!(changed(&mut rx).allows(2, 20));
+        chat.join_lobby(1, 10, "alice");
+        chat.join(LOBBY, 1, 10, "alice").unwrap();
+        assert!(rx.try_recv().is_err());
+        chat.create("den", "", "", false, 10, "alice", 1).unwrap();
+        assert!(changed(&mut rx).allows(2, 20));
+        chat.join("den", 2, 20, "bob").unwrap();
+        changed(&mut rx);
+        chat.join("DEN", 2, 20, "bob").unwrap();
+        chat.leave("den", 99).unwrap();
+        assert!(rx.try_recv().is_err());
+        chat.leave("den", 2).unwrap();
+        changed(&mut rx);
+        chat.leave("den", 2).unwrap();
+        assert!(rx.try_recv().is_err());
+        chat.session_closed(1, 10);
+        assert!(changed(&mut rx).allows(2, 20));
+        assert!(chat.list(2, 20).iter().all(|room| room.name != "den"));
+        chat.session_closed(1, 10);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn private_audience_survives_departure_ban_and_reaping_without_names() {
+        let bus = EventBus::default();
+        let chat = ChatService::new(bus.clone(), 64);
+        let mut rx = bus.subscribe();
+        chat.create("secret", "", "", true, 10, "alice", 1).unwrap();
+        let audience = changed(&mut rx);
+        assert!(audience.allows(1, 10));
+        assert!(!audience.allows(2, 20));
+        assert!(!audience.allows(0, 10), "ephemeral, never replayed");
+        chat.invite("secret", 1, 20).unwrap();
+        assert!(
+            changed(&mut rx).allows(22, 20),
+            "all invited account sessions"
+        );
+        chat.invite("secret", 1, 20).unwrap();
+        assert!(rx.try_recv().is_err());
+        chat.join("secret", 2, 20, "bob").unwrap();
+        changed(&mut rx);
+        chat.kick("secret", 10, false, 20, &[2], true).unwrap();
+        let audience = changed(&mut rx);
+        assert!(
+            audience.allows(2, 20),
+            "removed viewer must drop its old list"
+        );
+        assert!(!audience.allows(3, 30));
+        assert!(chat.list(2, 20).iter().all(|room| room.name != "secret"));
+        chat.leave("secret", 1).unwrap();
+        let audience = changed(&mut rx);
+        assert!(audience.allows(1, 10));
+        assert!(!audience.allows(2, 20));
+        assert!(chat.list(1, 10).iter().all(|room| room.name != "secret"));
+    }
+
+    #[test]
+    fn listing_counts_use_the_same_hidden_sessions_as_rosters() {
+        let chat = ChatService::new(EventBus::default(), 64);
+        chat.join_lobby(1, 10, "alice");
+        chat.join_lobby(2, 20, "invisible");
+        chat.create("secret", "", "", true, 20, "invisible", 2)
+            .unwrap();
+        let list = chat.list_visible(1, 10, &HashSet::from([1]));
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].member_count, 1);
+        let own = chat.list_visible(2, 20, &HashSet::from([1, 2]));
+        assert_eq!(own.len(), 2);
+        assert_eq!(own[0].member_count, 2);
+        assert_eq!(own[1].member_count, 1);
+        chat.session_closed(2, 20);
+        assert_eq!(
+            chat.list_visible(1, 10, &HashSet::from([1]))[0].member_count,
+            1
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -845,6 +1035,9 @@ mod tests {
     ) -> Vec<(i64, String, bool, Option<u32>)> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
+            if matches!(event, ServerEvent::RoomsChanged { .. }) {
+                continue;
+            }
             let ServerEvent::RoomMuted {
                 account,
                 screen_name,
@@ -1207,6 +1400,9 @@ mod tests {
         );
         let mut rooms = Vec::new();
         while let Ok(event) = updates.try_recv() {
+            if matches!(event, ServerEvent::RoomsChanged { .. }) {
+                continue;
+            }
             let ServerEvent::RoomMuted {
                 account,
                 screen_name,
@@ -1264,7 +1460,7 @@ mod tests {
                 )]
             );
             assert!(
-                updates.try_recv().is_err(),
+                notices(&mut updates).is_empty(),
                 "registered mutes were not lifted"
             );
         }
@@ -1279,21 +1475,17 @@ mod tests {
         let mut updates = chat.bus.subscribe();
         chat.session_closed(3, -1);
         assert!(chat.is_muted(LOBBY, -1, 0));
-        assert!(updates.try_recv().is_err());
+        assert!(notices(&mut updates).is_empty());
         assert!(matches!(
             chat.send(LOBBY, sender(4, -1, "visitor elsewhere"), "muted", 0),
             Err(ChatError::Muted)
         ));
         chat.session_closed(4, -1);
         assert!(!chat.is_muted(LOBBY, -1, 0));
-        assert!(matches!(
-            updates.try_recv(),
-            Ok(ServerEvent::RoomMuted {
-                account: -1,
-                muted: false,
-                ..
-            })
-        ));
+        assert_eq!(
+            notices(&mut updates),
+            vec![(-1, "visitor".into(), false, None)]
+        );
         assert!(chat.guest_sessions.read().is_empty());
         // A moderator may have resolved this ID from presence before the
         // disconnect, but must not resurrect it after final cleanup wins.

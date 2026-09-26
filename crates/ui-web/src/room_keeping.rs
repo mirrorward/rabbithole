@@ -57,6 +57,13 @@ fn key(room: &str) -> String {
 }
 
 impl KeepingState {
+    pub fn retain_rooms(&mut self, rooms: &[rabbithole_proto::chat::RoomInfo]) {
+        let visible = |name: &String| rooms.iter().any(|room| key(&room.name) == *name);
+        self.rooms.retain(|name, _| visible(name));
+        self.heard_at.retain(|name, _| visible(name));
+        self.looks_due.retain(|name, _| visible(name));
+    }
+
     /// How `room` is kept, as last heard.
     pub fn of(&self, room: &str) -> Option<&RoomModeration> {
         self.rooms.get(&key(room))

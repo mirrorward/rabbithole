@@ -247,9 +247,12 @@ pub(crate) fn is_auth_reply(frame: &Frame) -> bool {
 
 /// Build the [`Hello`] request frame that opens every RHP session.
 pub fn hello_request(id: RequestId, pubkey: Option<[u8; 32]>) -> Result<Frame, ProtoError> {
-    let capabilities = CapabilitySet(vec![rabbithole_proto::hello::Capability::new(
-        rabbithole_proto::hello::caps::SERVER_THEME_UPDATES,
-    )]);
+    let capabilities = CapabilitySet(vec![
+        rabbithole_proto::hello::Capability::new(
+            rabbithole_proto::hello::caps::SERVER_THEME_UPDATES,
+        ),
+        rabbithole_proto::hello::Capability::new(rabbithole_proto::hello::caps::ROOM_UPDATES),
+    ]);
     let hello = Hello::new(CLIENT_NAME, CLIENT_VERSION, capabilities).with_pubkey(pubkey);
     Frame::request(id, &hello)
 }
@@ -992,6 +995,15 @@ pub fn frame_to_events(frame: &Frame) -> Vec<Event> {
         }];
     }
 
+    if frame.kind == rabbithole_proto::FrameKind::Push
+        && matches!(
+            frame.decode::<rabbithole_proto::chat::RoomsChanged>(),
+            Some(Ok(_))
+        )
+    {
+        return vec![Event::RoomsChanged];
+    }
+
     // Chat: a line arrived (a push, or an echo of our own send).
     if let Some(Ok(msg)) = frame.decode::<ChatMessage>() {
         return vec![Event::ChatMessage {
@@ -1712,6 +1724,27 @@ pub fn frame_to_rooms(frame: &Frame) -> Option<Vec<rabbithole_proto::chat::RoomI
             .ok()?
             .rooms,
     )
+}
+
+#[cfg(test)]
+mod room_update_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_typed_payload_free_push_invalidates_rooms() {
+        let push = Frame::push(&rabbithole_proto::chat::RoomsChanged).unwrap();
+        assert!(push.payload.0.is_empty());
+        assert_eq!(frame_to_events(&push), vec![Event::RoomsChanged]);
+        let request = Frame::request(RequestId(1), &rabbithole_proto::chat::RoomsChanged).unwrap();
+        assert!(frame_to_events(&request).is_empty());
+        let reply = Frame::reply_to(&request, &rabbithole_proto::chat::RoomsChanged).unwrap();
+        assert!(frame_to_events(&reply).is_empty());
+        let refused = Frame::error_reply(&request, rabbithole_proto::ErrorCode::Unsupported);
+        assert!(!frame_to_events(&refused).contains(&Event::RoomsChanged));
+        let mut unknown = push;
+        unknown.message_type = 65_000;
+        assert!(frame_to_events(&unknown).is_empty());
+    }
 }
 
 /// One room, as it now stands: made, joined, or its topic changed.
@@ -3073,6 +3106,9 @@ mod tests {
         assert!(hello
             .capabilities
             .contains(rabbithole_proto::hello::caps::SERVER_THEME_UPDATES));
+        assert!(hello
+            .capabilities
+            .contains(rabbithole_proto::hello::caps::ROOM_UPDATES));
         // No-key handshake is still valid (guest / no local identity).
         assert_eq!(
             hello_request(RequestId(1), None)

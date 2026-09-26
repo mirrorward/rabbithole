@@ -394,6 +394,8 @@ pub struct UiState {
     pub keeping: crate::room_keeping::KeepingState,
     /// The rooms this burrow has, as it last listed them.
     pub rooms: Vec<rabbithole_proto::chat::RoomInfo>,
+    /// Coalesces payload-free room invalidations until the next UI tick.
+    pub room_refresh_queued: bool,
     /// Which room is being read. The lobby until somebody goes elsewhere.
     pub room: String,
     /// The board tree.
@@ -442,6 +444,27 @@ pub struct Loading {
 }
 
 impl UiState {
+    /// Discard authorization-sensitive cached rosters before asking again.
+    /// State belongs to one burrow/session; no global focused-room shortcut.
+    pub fn queue_room_refresh(&mut self) -> bool {
+        self.keeping = Default::default();
+        !std::mem::replace(&mut self.room_refresh_queued, true)
+    }
+
+    pub fn set_rooms(&mut self, rooms: Vec<rabbithole_proto::chat::RoomInfo>) {
+        self.rooms = rooms;
+        let here = self.room().to_string();
+        if here != crate::client::LOBBY
+            && !self
+                .rooms
+                .iter()
+                .any(|room| room.name.eq_ignore_ascii_case(&here))
+        {
+            self.room = String::new();
+        }
+        self.keeping.retain_rooms(&self.rooms);
+    }
+
     /// Fold a single [`Event`] into the state. Unknown (`#[non_exhaustive]`)
     /// events are ignored, matching the core's "tolerate unknown events"
     /// contract.
@@ -550,6 +573,10 @@ impl UiState {
     /// `Connected`/`Disconnected` events the reducer already folds).
     pub fn set_conn(&mut self, conn: ConnState) {
         self.conn = conn;
+        if conn != ConnState::Online {
+            self.room_refresh_queued = false;
+            self.keeping = Default::default();
+        }
         if conn.is_pending() {
             self.status = conn.label().to_string();
         }
@@ -1404,6 +1431,80 @@ mod dm_preview_tests {
             }],
         );
         assert_eq!(t.preview(), Some(("newest", 9)), "history wins");
+    }
+}
+
+#[cfg(test)]
+mod room_update_tests {
+    use super::*;
+    use rabbithole_proto::chat::{RoomInfo, RoomModeration};
+
+    fn room(name: &str, count: u32) -> RoomInfo {
+        let mut room = RoomInfo::new(name);
+        room.member_count = count;
+        room
+    }
+
+    #[test]
+    fn invalidations_coalesce_per_session_and_clear_cached_private_rosters() {
+        let mut alpha = UiState::default();
+        let mut beta = UiState::default();
+        for state in [&mut alpha, &mut beta] {
+            state.keeping.rooms.insert(
+                "secret".into(),
+                RoomModeration::new(
+                    "secret",
+                    0,
+                    true,
+                    vec!["alice".into(), "bob".into()],
+                    Vec::new(),
+                ),
+            );
+        }
+        assert!(alpha.queue_room_refresh());
+        assert!(!alpha.queue_room_refresh());
+        assert!(alpha.keeping.rooms.is_empty());
+        assert!(!beta.room_refresh_queued);
+        assert_eq!(beta.keeping.of("secret").unwrap().members, ["alice", "bob"]);
+        alpha.room_refresh_queued = false;
+        assert!(alpha.queue_room_refresh());
+        alpha.set_conn(ConnState::Reconnecting);
+        assert!(!alpha.room_refresh_queued);
+        assert!(alpha.keeping.rooms.is_empty());
+    }
+
+    #[test]
+    fn current_snapshots_update_counts_and_retire_reaped_rooms_without_navigation() {
+        let mut state = UiState {
+            room: "Den".into(),
+            ..Default::default()
+        };
+        state.set_rooms(vec![room("lobby", 2), room("Den", 1)]);
+        state.keeping.rooms.insert(
+            "den".into(),
+            RoomModeration::new("Den", 0, true, vec!["alice".into()], Vec::new()),
+        );
+        state.set_rooms(vec![room("lobby", 3), room("Den", 2)]);
+        assert_eq!(state.room(), "Den");
+        assert_eq!(state.rooms[1].member_count, 2);
+        state.set_rooms(vec![room("lobby", 1)]);
+        assert_eq!(state.room(), crate::client::LOBBY);
+        assert!(state.keeping.of("Den").is_none());
+    }
+
+    #[test]
+    fn visible_unicode_room_keeps_its_normalized_keeper_view() {
+        let mut state = UiState {
+            room: "Étage".into(),
+            ..Default::default()
+        };
+        state.keeping.rooms.insert(
+            "étage".into(),
+            RoomModeration::new("Étage", 0, true, vec!["alice".into()], Vec::new()),
+        );
+        state.set_rooms(vec![room("lobby", 1), room("Étage", 1)]);
+        assert_eq!(state.room(), "Étage");
+        assert_eq!(state.keeping.of("Étage").unwrap().members, ["alice"]);
     }
 }
 
