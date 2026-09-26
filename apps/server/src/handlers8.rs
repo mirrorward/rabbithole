@@ -14,12 +14,14 @@ use rabbithole_proto::filelib as pf;
 use rabbithole_proto::{ErrorCode, Frame};
 use rabbithole_server_core::files::KIND_FILE;
 use rabbithole_server_core::{Caps, FileError, FileService, ServerEvent};
-use rabbithole_store_server::repo6::FileNodeRow;
+use rabbithole_store_server::repo6::{FileAreaRow, FileNodeRow};
 
 use crate::handlers15::audit;
 use crate::session::SessionCtx;
 use crate::Shared;
 
+#[cfg(test)]
+mod metadata_tests;
 #[cfg(test)]
 mod search_tests;
 
@@ -67,6 +69,110 @@ fn map_err(e: FileError) -> ErrorCode {
     }
 }
 
+/// Metadata describes what can be seen, independently of download rights.
+/// Check each returned resource so a parent's listing never overrides a
+/// child's nearer ACL. The evaluator supplies normal nearest-rule inheritance.
+fn visible_areas(
+    areas: &[FileAreaRow],
+    allows: impl Fn(&str, Caps) -> bool,
+) -> Vec<pf::FileAreaView> {
+    areas
+        .iter()
+        .filter(|a| allows(&resource(&a.slug, None), Caps::SEE | Caps::FILE_LIST))
+        .map(|a| pf::FileAreaView::new(&a.slug, &a.title, &a.description))
+        .collect()
+}
+
+async fn metadata_visible(
+    files: &FileService,
+    node: &FileNodeRow,
+    allows: &impl Fn(&str, Caps) -> bool,
+    quarantined: &impl Fn(Option<&[u8; 32]>) -> bool,
+) -> Result<bool, FileError> {
+    let res = resource(&node.area, Some(&node.path));
+    if !allows(&res, Caps::SEE | Caps::FILE_LIST)
+        || (quarantined(node.blob_id.as_ref()) && !allows("moderation", Caps::MODERATE))
+    {
+        return Ok(false);
+    }
+    Ok(allows(&res, Caps::DROPBOX_VIEW)
+        || allows(&resource(&node.area, None), Caps::FILE_MANAGE)
+        || !files.has_dropbox_ancestor(node.id).await?)
+}
+
+async fn node_metadata(
+    files: &FileService,
+    id: i64,
+    allows: impl Fn(&str, Caps) -> bool,
+    quarantined: impl Fn(Option<&[u8; 32]>) -> bool,
+) -> Result<pf::FileNodeView, ErrorCode> {
+    let node = files
+        .node(id)
+        .await
+        .map_err(map_err)?
+        .ok_or(ErrorCode::NotFound)?;
+    if !metadata_visible(files, &node, &allows, &quarantined)
+        .await
+        .map_err(map_err)?
+    {
+        // A known ID must not distinguish hidden metadata from absent data.
+        return Err(ErrorCode::NotFound);
+    }
+    Ok(view(&node))
+}
+
+async fn folder_metadata(
+    files: &FileService,
+    area: &str,
+    path: Option<&str>,
+    allows: impl Fn(&str, Caps) -> bool,
+    quarantined: impl Fn(Option<&[u8; 32]>) -> bool,
+) -> Result<Vec<pf::FileNodeView>, ErrorCode> {
+    // Area lookup is case-insensitive, ACL resources are not. Authorize the
+    // stored spelling so a caller cannot select a different rule with casing.
+    let canonical_area = files.area(area).await.map_err(map_err)?.slug;
+    let area = canonical_area.as_str();
+    let res = resource(area, path);
+    if !allows(&res, Caps::SEE) {
+        return Err(ErrorCode::NotFound);
+    }
+    if !allows(&res, Caps::FILE_LIST) {
+        return Err(ErrorCode::Forbidden);
+    }
+    if let Some(path) = path.filter(|path| !path.is_empty()) {
+        let node = files
+            .node_by_path(area, path)
+            .await
+            .map_err(map_err)?
+            .ok_or(ErrorCode::NotFound)?;
+        if !metadata_visible(files, &node, &allows, &quarantined)
+            .await
+            .map_err(map_err)?
+        {
+            return Err(ErrorCode::NotFound);
+        }
+        // The drop box itself remains visible as an upload destination.
+        // Its contents are empty to people without inspection rights;
+        // descendants of a hidden box are absent even by a known path/ID.
+        if node.is_dropbox
+            && !allows(&res, Caps::DROPBOX_VIEW)
+            && !allows(&resource(area, None), Caps::FILE_MANAGE)
+        {
+            return Ok(Vec::new());
+        }
+    }
+    let mut visible = Vec::new();
+    for node in files.list(area, path).await.map_err(map_err)? {
+        if metadata_visible(files, &node, &allows, &quarantined)
+            .await
+            .map_err(map_err)?
+        {
+            visible.push(view(&node));
+        }
+    }
+    Ok(visible)
+}
+
 /// Keep authorization ahead of the result limit. Permissions are supplied by
 /// the live session; the service supplies only bounded pages of candidates.
 async fn visible_search(
@@ -87,16 +193,7 @@ async fn visible_search(
         };
         before = Some((last.created_at, last.id));
         for node in page {
-            let res = resource(&node.area, Some(&node.path));
-            if !allows(&res, Caps::SEE | Caps::FILE_LIST)
-                || (quarantined(node.blob_id.as_ref()) && !allows("moderation", Caps::MODERATE))
-            {
-                continue;
-            }
-            if !allows(&res, Caps::DROPBOX_VIEW)
-                && !allows(&resource(&node.area, None), Caps::FILE_MANAGE)
-                && files.has_dropbox_ancestor(node.id).await?
-            {
+            if !metadata_visible(files, &node, &allows, &quarantined).await? {
                 continue;
             }
             found.push(view(&node));
@@ -135,72 +232,48 @@ pub async fn handle(
 
     // ---- List areas ------------------------------------------------------
     if frame.decode::<pf::AreaListRequest>().is_some() {
-        if !ctx.allows(shared, "files", Caps::FILE_LIST) {
+        if !ctx.allows(shared, "files", Caps::SEE | Caps::FILE_LIST) {
             fail!(ErrorCode::Forbidden);
         }
-        let areas = try_file!(shared.files.areas().await)
-            .iter()
-            .map(|a| pf::FileAreaView::new(&a.slug, &a.title, &a.description))
-            .collect();
+        let areas = visible_areas(&try_file!(shared.files.areas().await), |res, caps| {
+            ctx.allows(shared, res, caps)
+        });
         reply!(&pf::AreaList::new(areas));
         return Ok(true);
     }
 
     // ---- List a folder ---------------------------------------------------
     if let Some(Ok(req)) = frame.decode::<pf::FolderListRequest>() {
-        if !ctx.allows(
-            shared,
-            &resource(&req.area, req.path.as_deref()),
-            Caps::FILE_LIST,
-        ) {
-            fail!(ErrorCode::Forbidden);
-        }
-        // A drop box hides its contents unless you can view drop boxes.
-        if let Some(path) = req.path.as_deref() {
-            if let Some(node) = try_file!(shared.files.node_by_path(&req.area, path).await) {
-                if node.is_dropbox
-                    && !ctx.allows(
-                        shared,
-                        &resource(&req.area, req.path.as_deref()),
-                        Caps::DROPBOX_VIEW,
-                    )
-                    && !ctx.allows(shared, &resource(&req.area, None), Caps::FILE_MANAGE)
-                {
-                    reply!(&pf::NodeList::new(vec![]));
-                    return Ok(true);
-                }
-            }
-        }
-        // Quarantined file content is hidden from non-moderators.
-        let sees_quarantined = ctx.allows(shared, "moderation", Caps::MODERATE);
-        let nodes = try_file!(shared.files.list(&req.area, req.path.as_deref()).await)
-            .iter()
-            .filter(|n| sees_quarantined || !shared.moderation.file_quarantined(n.blob_id.as_ref()))
-            .map(view)
-            .collect();
+        let nodes = match folder_metadata(
+            &shared.files,
+            &req.area,
+            req.path.as_deref(),
+            |res, caps| ctx.allows(shared, res, caps),
+            |blob| shared.moderation.file_quarantined(blob),
+        )
+        .await
+        {
+            Ok(nodes) => nodes,
+            Err(code) => fail!(code),
+        };
         reply!(&pf::NodeList::new(nodes));
         return Ok(true);
     }
 
     // ---- Node metadata ---------------------------------------------------
     if let Some(Ok(req)) = frame.decode::<pf::NodeGet>() {
-        let Some(node) = try_file!(shared.files.node(req.id).await) else {
-            fail!(ErrorCode::NotFound)
-        };
-        if !ctx.allows(
-            shared,
-            &resource(&node.area, Some(&node.path)),
-            Caps::FILE_LIST,
-        ) {
-            fail!(ErrorCode::Forbidden);
-        }
-        // Quarantined = hidden (indistinguishable from absent) for non-mods.
-        if shared.moderation.file_quarantined(node.blob_id.as_ref())
-            && !ctx.allows(shared, "moderation", Caps::MODERATE)
+        let node = match node_metadata(
+            &shared.files,
+            req.id,
+            |res, caps| ctx.allows(shared, res, caps),
+            |blob| shared.moderation.file_quarantined(blob),
+        )
+        .await
         {
-            fail!(ErrorCode::NotFound);
-        }
-        reply!(&pf::NodeReply::new(view(&node)));
+            Ok(node) => node,
+            Err(code) => fail!(code),
+        };
+        reply!(&pf::NodeReply::new(node));
         return Ok(true);
     }
 
