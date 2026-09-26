@@ -12,8 +12,9 @@ use rabbithole_core::{Client, ClientError};
 use rabbithole_legacy_hotline::constants::{field, transaction};
 use rabbithole_legacy_hotline::{Field, Handshake, HandshakeReply, Transaction, TransactionHeader};
 use rabbithole_proto::chat::{
-    ChatMessage, RoomCreate, RoomInfoReply, RoomInvite, RoomJoin, RoomKick, RoomModeration,
-    RoomModerationRequest, RoomMute, RoomMuted, RoomSlowMode, RoomSlowModeChanged, RoomUnmute,
+    ChatMessage, RoomCreate, RoomInfoReply, RoomInvite, RoomJoin, RoomKick, RoomLeave,
+    RoomModeration, RoomModerationRequest, RoomMute, RoomMuted, RoomSlowMode, RoomSlowModeChanged,
+    RoomUnmute,
 };
 use rabbithole_proto::presence::PresenceState;
 use rabbithole_proto::ErrorCode;
@@ -242,6 +243,216 @@ async fn a_room_says_how_it_is_kept_and_to_whom() {
     burrow.shutdown().await;
 }
 
+#[tokio::test]
+async fn guest_disconnect_clears_permanent_and_timed_mutes_and_refreshes_keeper() {
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(test_config(dir.path())).await;
+    let mut mo = login(&burrow, "mo").await;
+    let mut guests = Vec::new();
+    for name in ["visitor", "other visitor"] {
+        let mut guest = Client::connect(
+            &format!("ws://{}", burrow.ws_addr),
+            None,
+            None,
+            "guest-cleanup",
+            "0",
+        )
+        .await
+        .unwrap();
+        let ok = guest.auth_guest(Some(name.into())).await.unwrap();
+        assert!(ok.token.is_empty(), "an ephemeral account cannot resume");
+        guest.expect_welcome().await.unwrap();
+        let account = burrow
+            .shared
+            .presence
+            .is_screen_name_online(&ok.screen_name)
+            .unwrap()
+            .account_id;
+        assert!(account < 0);
+        guests.push((guest, ok.screen_name, account));
+    }
+    let (mut other, other_name, other_account) = guests.pop().unwrap();
+    let (mut guest, name, account) = guests.pop().unwrap();
+    assert_ne!(
+        account, other_account,
+        "each guest authentication has its own final session"
+    );
+    let _: RoomInfoReply = mo
+        .request(&RoomCreate::new("guest-den", true))
+        .await
+        .unwrap();
+    mo.request_ack(&RoomInvite::new("guest-den", &name))
+        .await
+        .unwrap();
+    let _: RoomInfoReply = guest.request(&RoomJoin::new("guest-den")).await.unwrap();
+    for (room, duration) in [(LOBBY, None), ("guest-den", Some(3600))] {
+        mo.request_ack(&RoomMute::new(room, &name, duration))
+            .await
+            .unwrap();
+    }
+    mo.request_ack(&RoomMute::new(LOBBY, &other_name, None))
+        .await
+        .unwrap();
+    guest
+        .request_ack(&RoomLeave::new("guest-den"))
+        .await
+        .unwrap();
+    let kept: RoomModeration = mo
+        .request(&RoomModerationRequest::new("guest-den"))
+        .await
+        .unwrap();
+    assert_eq!(kept.muted.len(), 1, "leaving alone retains the timed mute");
+    assert_eq!(kept.muted[0].screen_name, name);
+
+    guest.close().await;
+    let mut refreshed = Vec::new();
+    for _ in 0..2 {
+        let frame = wait_push_named("guest-mute-cleanup", &mut mo, |frame| {
+            matches!(frame.decode::<RoomMuted>(), Some(Ok(ref update)) if !update.muted && update.screen_name == name)
+        }).await;
+        refreshed.push(frame.decode::<RoomMuted>().unwrap().unwrap().room);
+    }
+    refreshed.sort();
+    assert_eq!(refreshed, ["guest-den", LOBBY]);
+    // The notification used by open keeper views arrives after both maps have
+    // been cleaned, even for the private room the guest had already left.
+    for room in [LOBBY, "guest-den"] {
+        let kept: RoomModeration = mo.request(&RoomModerationRequest::new(room)).await.unwrap();
+        assert!(!kept.muted.iter().any(|muted| muted.screen_name == name));
+    }
+    assert!(burrow.shared.chat.is_muted(LOBBY, other_account, 0));
+    other.close().await;
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn registered_disconnect_and_reconnect_keeps_a_permanent_lobby_mute() {
+    use rabbithole_proto::presence::UserLeft;
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(test_config(dir.path())).await;
+    let mut mo = login(&burrow, "mo").await;
+    let mut pest = login(&burrow, "pest").await;
+    mo.request_ack(&RoomMute::new(LOBBY, "pest", None))
+        .await
+        .unwrap();
+    pest.close().await;
+    wait_push_named("registered-session-ended", &mut mo, |frame| {
+        matches!(frame.decode::<UserLeft>(), Some(Ok(ref left)) if left.screen_name == "pest")
+    }).await;
+    let mut pest = login(&burrow, "pest").await;
+    assert!(matches!(
+        pest.chat_send(LOBBY, "reconnected").await,
+        Err(ClientError::Refused(ErrorCode::Muted))
+    ));
+    let kept: RoomModeration = mo
+        .request(&RoomModerationRequest::new(LOBBY))
+        .await
+        .unwrap();
+    assert!(kept
+        .muted
+        .iter()
+        .any(|muted| muted.screen_name == "pest" && muted.remaining_secs.is_none()));
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_guest_welcome_still_cleans_presence_membership_and_mutes() {
+    use rabbithole_net::{Connection, NetError, PeerInfo, TransportKind};
+    use rabbithole_proto::hello::Hello;
+    use rabbithole_proto::session::{AuthGuest, Welcome};
+    use rabbithole_proto::{CapabilitySet, Frame, RequestId};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    use std::sync::Arc;
+
+    struct FailedWelcome {
+        input: VecDeque<Frame>,
+        peer: PeerInfo,
+        shared: Arc<burrow::Shared>,
+        session: u64,
+        account: Arc<AtomicI64>,
+        closed: Arc<AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl Connection for FailedWelcome {
+        async fn send(&mut self, frame: Frame) -> Result<(), NetError> {
+            if frame.decode::<Welcome>().is_some() {
+                // Deterministically reproduce a moderator acting after the
+                // guest joins but before its first Welcome can be delivered.
+                let guest = self.shared.presence.get(self.session).unwrap();
+                assert!(guest.account_id < 0);
+                self.account.store(guest.account_id, Ordering::Relaxed);
+                self.shared
+                    .chat
+                    .mute(
+                        LOBBY,
+                        1,
+                        true,
+                        guest.account_id,
+                        &guest.screen_name,
+                        None,
+                        0,
+                    )
+                    .unwrap();
+                return Err(NetError::Closed);
+            }
+            Ok(())
+        }
+        async fn recv(&mut self) -> Result<Option<Frame>, NetError> {
+            Ok(self.input.pop_front())
+        }
+        fn peer(&self) -> &PeerInfo {
+            &self.peer
+        }
+        async fn close(&mut self) {
+            self.closed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let burrow = start(test_config(dir.path())).await;
+    let mut mo = login(&burrow, "mo").await;
+    let session = burrow.shared.next_session_id();
+    let account = Arc::new(AtomicI64::new(0));
+    let closed = Arc::new(AtomicBool::new(false));
+    let conn = FailedWelcome {
+        input: VecDeque::from([
+            Frame::request(
+                RequestId(1),
+                &Hello::new("failed-welcome", "0", CapabilitySet::default()),
+            )
+            .unwrap(),
+            Frame::request(RequestId(2), &AuthGuest::new(Some("visitor".into()))).unwrap(),
+        ]),
+        peer: PeerInfo {
+            remote_addr: "127.0.0.1:12345".parse().unwrap(),
+            transport: TransportKind::WebSocket,
+        },
+        shared: burrow.shared.clone(),
+        session,
+        account: account.clone(),
+        closed: closed.clone(),
+    };
+    assert!(
+        burrow::session::run_session(Box::new(conn), session, burrow.shared.clone())
+            .await
+            .is_err()
+    );
+    assert!(closed.load(Ordering::Relaxed));
+    assert!(burrow.shared.presence.get(session).is_none());
+    assert!(!burrow.shared.chat.is_member(LOBBY, session));
+    assert!(!burrow
+        .shared
+        .chat
+        .is_muted(LOBBY, account.load(Ordering::Relaxed), 0));
+    let kept: RoomModeration = mo
+        .request(&RoomModerationRequest::new(LOBBY))
+        .await
+        .unwrap();
+    assert!(kept.muted.is_empty());
+    burrow.shutdown().await;
+}
+
 /// A 1-second timed mute expires on its own (lazy expiry): the refusal
 /// clears within a bounded poll, no unmute needed.
 #[tokio::test]
@@ -441,6 +652,53 @@ fn txn_int(txn: &Transaction, id: u16) -> Option<u32> {
         .iter()
         .find(|f| f.id == id)
         .and_then(|f| rabbithole_legacy_hotline::read_int(&f.data).ok())
+}
+
+#[tokio::test]
+async fn hotline_guest_disconnect_removes_a_permanent_lobby_mute() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = ServerConfig {
+        hotline_enabled: true,
+        hotline_addr: "127.0.0.1:0".parse().unwrap(),
+        ..test_config(dir.path())
+    };
+    let burrow = start(cfg).await;
+    let mut mo = login(&burrow, "mo").await;
+    let mut guest = Hotline::connect(burrow.hotline_addr.unwrap()).await;
+    assert_eq!(guest.login("", "", "retro visitor").await.header.error, 0);
+    // The login reply precedes presence registration. A handled request proves
+    // the session has entered its main loop before the moderator targets it.
+    guest.send(transaction::GET_USER_NAME_LIST, vec![]).await;
+    guest.read_until(transaction::GET_USER_NAME_LIST).await;
+    let account = burrow
+        .shared
+        .presence
+        .is_screen_name_online("retro visitor")
+        .unwrap()
+        .account_id;
+    assert!(account < 0);
+    mo.request_ack(&RoomMute::new(LOBBY, "retro visitor", None))
+        .await
+        .unwrap();
+    guest
+        .notice(None, "retro visitor was muted in lobby until unmuted.")
+        .await;
+    guest.close().await;
+    wait_push_named("hotline-guest-mute-cleanup", &mut mo, |frame| {
+        matches!(frame.decode::<RoomMuted>(), Some(Ok(ref update))
+            if !update.muted && update.room == LOBBY && update.screen_name == "retro visitor")
+    })
+    .await;
+    assert!(!burrow.shared.chat.is_muted(LOBBY, account, 0));
+    let kept: RoomModeration = mo
+        .request(&RoomModerationRequest::new(LOBBY))
+        .await
+        .unwrap();
+    assert!(!kept
+        .muted
+        .iter()
+        .any(|muted| muted.screen_name == "retro visitor"));
+    burrow.shutdown().await;
 }
 
 /// The Hotline surface observes a mute set natively: the classic CHAT_SEND

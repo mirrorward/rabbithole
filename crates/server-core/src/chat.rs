@@ -132,6 +132,9 @@ pub struct Sender<'a> {
 
 pub struct ChatService {
     bus: EventBus,
+    /// Only live ephemeral sessions; no departed-account tombstones. Whenever
+    /// both locks are needed, take this lock before `rooms`.
+    guest_sessions: RwLock<HashMap<u64, i64>>,
     rooms: RwLock<HashMap<String, Room>>, // keyed lowercase
     max_len: usize,
 }
@@ -166,6 +169,7 @@ impl ChatService {
     pub fn new(bus: EventBus, max_len: usize) -> Self {
         let service = Self {
             bus,
+            guest_sessions: RwLock::default(),
             rooms: RwLock::default(),
             max_len,
         };
@@ -193,20 +197,53 @@ impl ChatService {
     }
 
     /// Called at session start: everyone is in the lobby.
-    pub fn join_lobby(&self, session_id: u64, screen_name: &str) {
+    pub fn join_lobby(&self, session_id: u64, account_id: i64, screen_name: &str) {
+        let mut guests = self.guest_sessions.write();
+        if account_id < 0 {
+            guests.insert(session_id, account_id);
+        }
         if let Some(room) = self.rooms.write().get_mut(&key(LOBBY)) {
             room.members.insert(session_id, screen_name.to_string());
         }
     }
 
-    /// Called at session end: drop membership everywhere, reaping empty
-    /// ad-hoc rooms.
-    pub fn session_closed(&self, session_id: u64) {
+    /// Called at final session teardown: drop membership everywhere, reaping
+    /// empty ad-hoc rooms. A negative guest account's mutes end when its last
+    /// session does (guest authentications currently have unique IDs and cannot
+    /// resume). Register and mute use the same lock order, so a stale moderator
+    /// lookup cannot recreate a mute after cleanup.
+    /// Registered accounts (and compatibility account 0) retain their mutes.
+    pub fn session_closed(&self, session_id: u64, account_id: i64) {
+        let mut guests = self.guest_sessions.write();
+        guests.remove(&session_id);
+        let final_guest = account_id < 0 && !guests.values().any(|id| *id == account_id);
         let mut rooms = self.rooms.write();
+        let mut lifted = Vec::new();
         rooms.retain(|_, room| {
             room.members.remove(&session_id);
-            room.persistent || !room.members.is_empty()
+            let survives = room.persistent || !room.members.is_empty();
+            if final_guest {
+                let was_muted = room.muted.remove(&account_id).is_some();
+                let name = room.muted_as.remove(&account_id);
+                if survives && was_muted {
+                    lifted.push((room.name.clone(), name.unwrap_or_default()));
+                }
+            }
+            survives
         });
+        drop(rooms);
+        drop(guests);
+        // Reuse the scoped moderation update so an open keeper view refreshes.
+        // Publish only after cleanup, and never announce a room just reaped.
+        for (room, screen_name) in lifted {
+            self.bus.publish(ServerEvent::RoomMuted {
+                account: account_id,
+                screen_name,
+                room,
+                muted: false,
+                duration_secs: None,
+            });
+        }
     }
 
     /// Is this session a member of the room?
@@ -428,6 +465,10 @@ impl ChatService {
         duration: Option<Duration>,
         now_ms: u64,
     ) -> Result<(), ChatError> {
+        let guests = self.guest_sessions.read();
+        if target_account < 0 && !guests.values().any(|id| *id == target_account) {
+            return Err(ChatError::Forbidden);
+        }
         let mut rooms = self.rooms.write();
         let room = rooms
             .get_mut(&key(name))
@@ -700,8 +741,8 @@ mod tests {
 
     fn service() -> ChatService {
         let s = ChatService::new(EventBus::default(), 64);
-        s.join_lobby(1, "alice");
-        s.join_lobby(2, "bob");
+        s.join_lobby(1, 10, "alice");
+        s.join_lobby(2, 20, "bob");
         s
     }
 
@@ -883,13 +924,179 @@ mod tests {
     fn session_close_reaps_memberships() {
         let chat = service();
         chat.create("temp", "", "", true, 10, "alice", 1).unwrap();
-        chat.session_closed(1);
+        chat.session_closed(1, 10);
         assert!(matches!(
             chat.members("temp", 1),
             Err(ChatError::NoSuchRoom(_))
         ));
         assert!(!chat.is_member(LOBBY, 1));
         assert!(chat.is_member(LOBBY, 2));
+    }
+
+    #[test]
+    fn guest_session_end_clears_mutes_in_every_surviving_room_and_notifies_keepers() {
+        let chat = service();
+        chat.join_lobby(3, -1, "visitor");
+        chat.join_lobby(4, -2, "other visitor");
+        chat.create("den", "", "", true, 10, "alice", 1).unwrap();
+        chat.invite("den", 1, -1).unwrap();
+        chat.join("den", 3, -1, "visitor in den").unwrap();
+        chat.mute(LOBBY, 10, true, -1, "visitor", None, 0).unwrap();
+        chat.mute(
+            "den",
+            10,
+            false,
+            -1,
+            "visitor in den",
+            Some(Duration::from_secs(60)),
+            0,
+        )
+        .unwrap();
+        chat.mute(LOBBY, 10, true, -2, "other visitor", None, 0)
+            .unwrap();
+        // Compatibility account 0 is not an ephemeral guest ID.
+        chat.mute("den", 10, false, 0, "compatibility", None, 0)
+            .unwrap();
+        chat.session_closed(99, 0);
+        assert!(chat.is_muted("den", 0, 0));
+
+        // Leaving a room alone must not let a guest bypass its mute. Cleanup
+        // later also covers rooms the ended session no longer belongs to.
+        chat.leave("den", 3).unwrap();
+        assert!(chat.is_muted("den", -1, 0));
+        chat.join("den", 3, -1, "visitor in den").unwrap();
+        assert!(matches!(
+            chat.send("den", sender(3, -1, "visitor in den"), "still muted", 0),
+            Err(ChatError::Muted)
+        ));
+        chat.leave("den", 3).unwrap();
+        chat.create("temporary", "", "", false, 10, "alice", 1)
+            .unwrap();
+        chat.join("temporary", 3, -1, "visitor").unwrap();
+        chat.mute("temporary", 10, false, -1, "visitor", None, 0)
+            .unwrap();
+        chat.leave("temporary", 1).unwrap();
+
+        let mut updates = chat.bus.subscribe();
+        chat.session_closed(3, -1);
+        assert!(!chat.is_member(LOBBY, 3));
+        assert!(chat.is_muted(LOBBY, -2, 0));
+        assert!(chat.is_muted("den", 0, 0));
+        assert!(!chat.rooms.read().contains_key("temporary"));
+        for room in chat.rooms.read().values() {
+            assert!(!room.muted.contains_key(&-1));
+            assert!(!room.muted_as.contains_key(&-1));
+        }
+        assert_eq!(
+            chat.keeping(LOBBY, 1, 10, true, 0).unwrap().muted,
+            vec![(-2, "other visitor".into(), None)]
+        );
+        assert_eq!(
+            chat.keeping("den", 1, 10, false, 0).unwrap().muted,
+            vec![(0, "compatibility".into(), None)]
+        );
+        let mut rooms = Vec::new();
+        while let Ok(event) = updates.try_recv() {
+            let ServerEvent::RoomMuted {
+                account,
+                screen_name,
+                room,
+                muted,
+                duration_secs,
+            } = event
+            else {
+                panic!("unexpected cleanup event");
+            };
+            assert_eq!(account, -1);
+            assert!(!muted);
+            assert_eq!(duration_secs, None);
+            assert_eq!(
+                screen_name,
+                if room == LOBBY {
+                    "visitor"
+                } else {
+                    "visitor in den"
+                }
+            );
+            rooms.push(room);
+        }
+        rooms.sort();
+        assert_eq!(rooms, ["den", LOBBY]);
+        chat.session_closed(3, -1);
+        assert!(updates.try_recv().is_err(), "repeated cleanup is silent");
+    }
+
+    #[test]
+    fn registered_mutes_survive_disconnect_and_reconnect() {
+        for duration in [None, Some(Duration::from_secs(60))] {
+            let chat = service();
+            chat.mute(LOBBY, 10, true, 20, "bob", duration, 0).unwrap();
+            let mut updates = chat.bus.subscribe();
+            chat.session_closed(2, 20);
+            assert_eq!(
+                chat.rooms.read()[LOBBY]
+                    .muted_as
+                    .get(&20)
+                    .map(String::as_str),
+                Some("bob")
+            );
+            chat.join_lobby(5, 20, "bob back");
+            assert!(matches!(
+                chat.send(LOBBY, sender(5, 20, "bob back"), "still muted", 1),
+                Err(ChatError::Muted)
+            ));
+            assert_eq!(
+                chat.keeping(LOBBY, 5, 20, false, 1).unwrap().muted,
+                vec![(
+                    20,
+                    "bob".into(),
+                    duration.map(|duration| duration.as_millis() as u64 - 1)
+                )]
+            );
+            assert!(
+                updates.try_recv().is_err(),
+                "registered mutes were not lifted"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_last_guest_session_lifts_mutes_and_stale_targets_cannot_recreate_them() {
+        let chat = service();
+        chat.join_lobby(3, -1, "visitor");
+        chat.join_lobby(4, -1, "visitor elsewhere");
+        chat.mute(LOBBY, 10, true, -1, "visitor", None, 0).unwrap();
+        let mut updates = chat.bus.subscribe();
+        chat.session_closed(3, -1);
+        assert!(chat.is_muted(LOBBY, -1, 0));
+        assert!(updates.try_recv().is_err());
+        assert!(matches!(
+            chat.send(LOBBY, sender(4, -1, "visitor elsewhere"), "muted", 0),
+            Err(ChatError::Muted)
+        ));
+        chat.session_closed(4, -1);
+        assert!(!chat.is_muted(LOBBY, -1, 0));
+        assert!(matches!(
+            updates.try_recv(),
+            Ok(ServerEvent::RoomMuted {
+                account: -1,
+                muted: false,
+                ..
+            })
+        ));
+        assert!(chat.guest_sessions.read().is_empty());
+        // A moderator may have resolved this ID from presence before the
+        // disconnect, but must not resurrect it after final cleanup wins.
+        assert_eq!(
+            chat.mute(LOBBY, 10, true, -1, "visitor", None, 0),
+            Err(ChatError::Forbidden)
+        );
+        assert!(chat
+            .keeping(LOBBY, 1, 10, true, 0)
+            .unwrap()
+            .muted
+            .is_empty());
+        assert!(chat.rooms.read()[LOBBY].muted_as.is_empty());
     }
 
     #[test]
@@ -1012,7 +1219,7 @@ mod tests {
     #[test]
     fn slow_mode_spaces_sends_and_exempts_moderators() {
         let chat = service();
-        chat.join_lobby(3, "mo");
+        chat.join_lobby(3, 999, "mo");
         assert!(matches!(
             chat.set_slow_mode(LOBBY, 10, 20, false),
             Err(ChatError::Forbidden)

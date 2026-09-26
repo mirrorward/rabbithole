@@ -396,55 +396,58 @@ pub async fn run_session(
         status: None,
         pubkey: ctx.pubkey,
     });
-    shared.chat.join_lobby(session_id, &ctx.screen_name);
+    shared
+        .chat
+        .join_lobby(session_id, ctx.account_id, &ctx.screen_name);
     // Subscribe BEFORE welcome/replay so no event falls in a gap.
     let mut bus_rx = shared.bus.subscribe();
 
-    // Replay pushes missed while disconnected (token resume) BEFORE the
-    // fresh Welcome — the new Welcome gets a higher sequence and must not
-    // appear in its own replay.
-    if resumed && replay_cursor > 0 {
-        for missed in shared.pushlog.since(ctx.account_id, replay_cursor) {
-            conn.send(missed).await?;
-        }
-    }
-
-    let welcome = Frame::push(&psess::Welcome::new(motd, agreement))?;
-    conn.send(shared.pushlog.stamp(ctx.account_id, welcome))
-        .await?;
-
-    // Offline mail call: deliver unread DMs (capped; the rest via DmThreads).
-    if !ctx.is_guest {
-        use rabbithole_store_server::repo3::DmsRepo;
-        let unread = DmsRepo(&shared.pool).unread_for(ctx.account_id).await?;
-        for row in unread.iter().take(100) {
-            let push = Frame::push(&rabbithole_proto::dm::DmReceived::new(
-                crate::handlers3::dm_row_to_message(row),
-            ))?;
-            conn.send(shared.pushlog.stamp(ctx.account_id, push))
-                .await?;
-        }
-    }
-
-    // Bulk-transfer accept loop (QUIC only): dedicated streams carry file
-    // bytes off the control channel. Each accepted stream is served
-    // concurrently; the task ends when the connection closes.
-    let bulk_task = conn.bulk().map(|bulk| {
-        let shared = shared.clone();
-        let account_id = ctx.account_id;
-        tokio::spawn(async move {
-            while let Ok((send, recv)) = bulk.accept().await {
-                tokio::spawn(crate::handlers9::serve_bulk_stream(
-                    shared.clone(),
-                    account_id,
-                    send,
-                    recv,
-                ));
-            }
-        })
-    });
-
+    let mut bulk_task = None;
     let result: anyhow::Result<()> = async {
+        // Replay pushes missed while disconnected (token resume) BEFORE the
+        // fresh Welcome — the new Welcome gets a higher sequence and must not
+        // appear in its own replay.
+        if resumed && replay_cursor > 0 {
+            for missed in shared.pushlog.since(ctx.account_id, replay_cursor) {
+                conn.send(missed).await?;
+            }
+        }
+
+        let welcome = Frame::push(&psess::Welcome::new(motd, agreement))?;
+        conn.send(shared.pushlog.stamp(ctx.account_id, welcome))
+            .await?;
+
+        // Offline mail call: deliver unread DMs (capped; the rest via DmThreads).
+        if !ctx.is_guest {
+            use rabbithole_store_server::repo3::DmsRepo;
+            let unread = DmsRepo(&shared.pool).unread_for(ctx.account_id).await?;
+            for row in unread.iter().take(100) {
+                let push = Frame::push(&rabbithole_proto::dm::DmReceived::new(
+                    crate::handlers3::dm_row_to_message(row),
+                ))?;
+                conn.send(shared.pushlog.stamp(ctx.account_id, push))
+                    .await?;
+            }
+        }
+
+        // Bulk-transfer accept loop (QUIC only): dedicated streams carry file
+        // bytes off the control channel. Each accepted stream is served
+        // concurrently; the task ends when the connection closes.
+        bulk_task = conn.bulk().map(|bulk| {
+            let shared = shared.clone();
+            let account_id = ctx.account_id;
+            tokio::spawn(async move {
+                while let Ok((send, recv)) = bulk.accept().await {
+                    tokio::spawn(crate::handlers9::serve_bulk_stream(
+                        shared.clone(),
+                        account_id,
+                        send,
+                        recv,
+                    ));
+                }
+            })
+        });
+
         loop {
             tokio::select! {
                 incoming = conn.recv() => {
@@ -536,7 +539,7 @@ pub async fn run_session(
     }
     // A disconnected peer can't serve swarm bytes: drop its advertisements.
     shared.swarm.session_closed(session_id);
-    shared.chat.session_closed(session_id);
+    shared.chat.session_closed(session_id, ctx.account_id);
     shared.presence.leave(session_id);
     conn.close().await;
     tracing::info!(session_id, "session ended");

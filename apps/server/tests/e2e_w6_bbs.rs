@@ -295,7 +295,7 @@ async fn chat_bridges_telnet_clients_and_native_sessions() {
     // A native (non-telnet) session speaks in the same lobby: both telnet
     // clients get the line.
     let native_session = burrow.shared.next_session_id();
-    burrow.shared.chat.join_lobby(native_session, "carol");
+    burrow.shared.chat.join_lobby(native_session, 999, "carol");
     burrow
         .shared
         .chat

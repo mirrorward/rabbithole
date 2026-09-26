@@ -1024,7 +1024,9 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
         // Legacy Hotline clients carry no portable identity key.
         pubkey: None,
     });
-    shared.chat.join_lobby(session_id, &screen_name);
+    shared
+        .chat
+        .join_lobby(session_id, authed.account.id, &screen_name);
     tracing::info!(user_id, name = %screen_name, "hotline client logged in");
 
     let mut active = Active {
@@ -1091,7 +1093,9 @@ async fn serve(sock: tokio::net::TcpStream, shared: Arc<Shared>) -> Result<()> {
     //    write half down gracefully (FIN) so buffered bytes — e.g. a final
     //    DisconnectMsg — drain instead of being discarded by an RST.
     shared.hotline.unregister(user_id);
-    shared.chat.session_closed(session_id);
+    shared
+        .chat
+        .session_closed(session_id, active.subject.account_id);
     shared.presence.leave(session_id);
     wr.shutdown().await.ok();
     tracing::info!(user_id, "hotline client disconnected");

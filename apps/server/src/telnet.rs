@@ -134,7 +134,7 @@ where
     });
     shared
         .chat
-        .join_lobby(session_id, &authed.persona.screen_name);
+        .join_lobby(session_id, authed.account.id, &authed.persona.screen_name);
     let result = tokio::select! {
         result = async {
             show_welcome(&mut t, shared, &authed, session_id).await?;
@@ -160,7 +160,7 @@ where
             }
         }
     };
-    shared.chat.session_closed(session_id);
+    shared.chat.session_closed(session_id, authed.account.id);
     shared.presence.leave(session_id);
     result
 }
