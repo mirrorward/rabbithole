@@ -43,14 +43,14 @@
 //! - **Crash-recovery resume / `M_GET`**: whole-file offset-0 transfers only.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use rabbithole_legacy_binkp::{
-    decode_block, Action, Address as BinkpAddress, Command, Event, FileInfo, FrameError, RawBlock,
-    Session, SessionConfig, BLOCK_MAX,
+    decode_block, Action, Address as BinkpAddress, Command, Event, FileInfo, FrameError, Phase,
+    RawBlock, Role as BinkpRole, Session, SessionConfig, BLOCK_MAX,
 };
 use rabbithole_legacy_ftn::{
     bso_file_name, scan, BsoKind, Flavor, FtnAddress, Message as FtnMessage, PackedMessage,
@@ -115,7 +115,7 @@ pub async fn spawn_ftn(
             }
             let gateway = gateway.clone();
             tokio::spawn(async move {
-                if let Err(e) = serve_inbound(gateway, sock).await {
+                if let Err(e) = serve_inbound(gateway, sock, peer.ip()).await {
                     tracing::debug!("ftn inbound session error: {e}");
                 }
             });
@@ -491,7 +491,7 @@ fn block_to_event(block: RawBlock) -> Result<Event> {
 
 /// Handle one inbound (answering) binkp connection: receive files into the
 /// spool, then toss any PKTs among them.
-async fn serve_inbound(gateway: Arc<FtnGateway>, stream: TcpStream) -> Result<()> {
+async fn serve_inbound(gateway: Arc<FtnGateway>, stream: TcpStream, peer_ip: IpAddr) -> Result<()> {
     let name = non_empty(&gateway.shared.config.read().name, "RabbitHole");
     let mut addresses = Vec::new();
     if let Some(node) = gateway.node {
@@ -511,7 +511,14 @@ async fn serve_inbound(gateway: Arc<FtnGateway>, stream: TcpStream) -> Result<()
         outgoing: Vec::new(), // answering-side send is deferred (see module docs)
     });
 
-    let received = drive_session(stream, session, HashMap::new(), &gateway.inbound_dir).await?;
+    let received = drive_session(
+        stream,
+        session,
+        HashMap::new(),
+        &gateway.inbound_dir,
+        Some((gateway.shared.as_ref(), peer_ip)),
+    )
+    .await?;
     for path in received {
         match tokio::fs::read(&path).await {
             Ok(bytes) => match gateway.ingest_pkt_bytes(&bytes).await {
@@ -590,7 +597,7 @@ pub async fn run_originating(
         challenge: None,
         outgoing: files.into_iter().map(|(i, _)| i).collect(),
     });
-    drive_session(stream, session, outgoing, inbound_dir).await
+    drive_session(stream, session, outgoing, inbound_dir, None).await
 }
 
 /// Read the outbound BSO directory into `(FileInfo, bytes)` pairs.
@@ -628,6 +635,7 @@ async fn drive_session(
     mut session: Session,
     outgoing: HashMap<String, Vec<u8>>,
     inbound_dir: &Path,
+    inbound_auth: Option<(&Shared, IpAddr)>,
 ) -> Result<Vec<PathBuf>> {
     let (rd, mut wr) = stream.into_split();
     let mut rd = BufReader::new(rd);
@@ -651,9 +659,35 @@ async fn drive_session(
             Ok((block, used)) => {
                 pos += used;
                 let event = block_to_event(block)?;
+                // Only an answering M_PWD in Greeting verifies credentials.
+                // Scope it to the accepted TCP peer, never the untrusted M_ADR.
+                // As on the other login surfaces, probe first and spend only
+                // on failure; malformed input and peer M_ERR are not failures.
+                let auth_attempt = inbound_auth.filter(|_| {
+                    session.role() == BinkpRole::Answering
+                        && session.phase() == Phase::Greeting
+                        && matches!(&event, Event::Command(Command::Pwd(_)))
+                });
+                if let Some((shared, ip)) = auth_attempt {
+                    if !shared.rate_probe(Scope::Ip(ip), rl::AUTH) {
+                        let reply = Command::Bsy("too many failed logins; try again later".into())
+                            .to_block()
+                            .encode()?;
+                        wr.write_all(&reply).await?;
+                        wr.flush().await?;
+                        return Err(anyhow!("binkp authentication rate limited"));
+                    }
+                }
                 let actions = session
                     .advance(event)
                     .map_err(|e| anyhow!("binkp session: {e}"))?;
+                if let Some((shared, ip)) = auth_attempt {
+                    if session.phase() == Phase::Failed {
+                        // Record the failed verification before any socket
+                        // write can fail or yield. Success never spends AUTH.
+                        let _ = shared.rate_allow(Scope::Ip(ip), rl::AUTH);
+                    }
+                }
                 finished = perform_actions(
                     actions,
                     &mut wr,
