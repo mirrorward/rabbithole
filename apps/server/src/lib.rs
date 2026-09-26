@@ -334,7 +334,7 @@ impl Burrow {
             peers: PeerRegistry::new(),
             // Reload the last signed local catalog so the generation chain
             // survives restarts (peers must never see a stale "fresh" gen 1).
-            catalogs: fed_catalog::CatalogState::load(&data_dir, &identity.signing.public().0),
+            catalogs: fed_catalog::CatalogState::load(&data_dir, &identity.signing.seed()),
             // Reload pinned origin keys so key-continuity survives a restart
             // (a reboot must not reopen the origin to a spoofer's re-pin).
             fed_flood: fed_flood::FloodState::load(&data_dir),
@@ -361,6 +361,9 @@ impl Burrow {
                     .seed_approved(key, peer.name.clone(), Some(peer.origin.clone()));
             }
         }
+        // Restore verified peer payloads only after the current approved
+        // origin/key pins are established. Revoked sources remain hidden.
+        shared.catalogs.load_peers(&shared.peers);
 
         tracing::info!(
             quic = %quic_addr,

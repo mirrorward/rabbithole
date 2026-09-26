@@ -160,6 +160,28 @@ retries). Cross-server search runs locally over the verified stored
 catalogs (`ctl fed-search`); a client-facing RHP search over federated
 catalogs is a follow-up.
 
+### Peer cache and restart behavior
+
+Verified peer catalogs are saved in
+`<data_dir>/federation/peer_catalogs.bin`. The versioned snapshot is signed by
+this burrow's identity and replaced atomically after a newer catalog verifies.
+A failed cache write leaves the previous accepted generation in place.
+
+On startup, the burrow loads approved peers first, authenticates the cache,
+reverifies each retained catalog, and exposes only payloads whose origin/key
+pair still matches a current approval. Revocation hides a peer immediately;
+reapproval must receive a strictly newer generation, including after restart.
+Eviction removes payloads while retaining their generation watermarks.
+
+The cache retains at most 64 payloads totaling 32 MiB, with a 4 MiB limit per
+catalog. Older accepted payloads are evicted first. At most 4,096 peer keys
+can hold watermarks or pending fetch slots; catalog fetches for additional keys
+are refused instead of discarding replay protection. Peering connections can
+remain active when catalog sync is refused. A corrupt, oversized, unsupported,
+or differently signed cache is ignored and logged, so its payloads are never
+served. Its watermarks cannot be recovered from that invalid snapshot;
+subsequent approved-peer pulls rebuild the cache.
+
 ### SignedCatalog semantics
 
 From `crates/federation::catalog`, signature domain `rhp-fed-catalog-v1`:

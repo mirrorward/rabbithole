@@ -35,9 +35,11 @@
 //! `<data_dir>/federation/catalog.bin` and reloaded on boot (discarded if it
 //! doesn't verify under the current server identity), so the generation
 //! chain survives restarts — a peer holding generation N is never shown a
-//! "fresh" generation 1. Verified **peer** catalogs are in-memory only; a
-//! restarted server re-pulls them on the next dial (persisting the peer cache
-//! is a documented follow-up, not needed for correctness).
+//! "fresh" generation 1. Verified peer catalogs and replay watermarks are
+//! atomically persisted in a bounded, locally signed `peer_catalogs.bin`.
+//! After approved pins are seeded on boot, payloads are reverified against
+//! the current origin/key tuples. Revoked and evicted watermarks survive,
+//! while their payloads stay absent from search.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -51,6 +53,10 @@ use rabbithole_identity::{IdentityKey, PublicKey};
 use rabbithole_server_core::{Caps, PeerRegistry, Role, Subject};
 
 use crate::Shared;
+
+mod cache;
+#[cfg(test)]
+mod persistence_tests;
 
 /// The "anyone" subject used to decide what is publicly listable: a bare
 /// guest with no class mask and no per-account grants. Only what this subject
@@ -80,13 +86,31 @@ pub struct CatalogState {
     /// A revoked entry retains only its revision and generation watermark, so
     /// reapproval cannot accept a replay of an older signed catalog.
     peers: parking_lot::RwLock<HashMap<[u8; 32], PeerCatalog>>,
+    /// Serializes mutations and persistence. Readers never take this lock;
+    /// disk I/O never holds the catalog or registry locks.
+    mutation: parking_lot::Mutex<()>,
+    /// Covers each complete operator approval-file/cache transaction. It is
+    /// acquired before mutation; catalog ingest never needs this guard.
+    operator_change: parking_lot::Mutex<()>,
+    cache: Option<cache::PeerCache>,
+    #[cfg(test)]
+    after_approval_flush: parking_lot::Mutex<Option<ApprovalPause>>,
 }
 
-#[derive(Default)]
+#[cfg(test)]
+struct ApprovalPause {
+    reached: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[derive(Clone, Default)]
 struct PeerCatalog {
     revision: Arc<()>,
+    origin: Option<String>,
     generation: Option<u64>,
-    signed: Option<SignedCatalog>,
+    signed: Option<Arc<SignedCatalog>>,
+    bytes: usize,
+    order: u64,
 }
 
 /// An approval boundary captured before a fetch or signature verification.
@@ -95,6 +119,7 @@ struct PeerCatalog {
 pub(crate) struct CatalogFetch {
     key: [u8; 32],
     revision: Arc<()>,
+    origin: String,
 }
 
 impl CatalogState {
@@ -105,12 +130,16 @@ impl CatalogState {
     /// Boot-time load: seed the local catalog from `<data_dir>` if a persisted
     /// copy exists and still verifies under this server's identity key
     /// (otherwise it is discarded and the chain restarts at generation 1).
-    pub fn load(data_dir: &Path, server_key: &[u8; 32]) -> Self {
-        let state = Self::default();
+    pub fn load(data_dir: &Path, signing_seed: &[u8; 32]) -> Self {
+        let server_key = IdentityKey::from_seed(signing_seed).public();
+        let state = Self {
+            cache: Some(cache::PeerCache::new(data_dir, signing_seed)),
+            ..Self::default()
+        };
         let path = catalog_path(data_dir);
         if let Ok(bytes) = std::fs::read(&path) {
             match SignedCatalog::from_bytes(&bytes) {
-                Some(signed) if signed.verify(&PublicKey(*server_key)).is_ok() => {
+                Some(signed) if signed.verify(&server_key).is_ok() => {
                     // Freshly-constructed mutex: try_lock cannot fail here.
                     if let Ok(mut guard) = state.local.try_lock() {
                         *guard = Some(signed);
@@ -127,12 +156,68 @@ impl CatalogState {
         state
     }
 
+    /// Boot-only cache load, after persisted and configured approved pins have
+    /// been seeded and before tasks start. Invalid caches are safely ignored.
+    pub fn load_peers(&self, registry: &PeerRegistry) {
+        let _mutation = self.mutation.lock();
+        if !self.peers.read().is_empty() {
+            tracing::warn!("refusing to reload peer catalogs over live state");
+            return;
+        }
+        let Some(cache) = &self.cache else { return };
+        let mut peers = match cache.read() {
+            Ok(peers) => peers,
+            Err(error) => {
+                tracing::warn!(%error, "ignoring invalid persisted peer catalogs");
+                return;
+            }
+        };
+        for (key, peer) in &mut peers {
+            if !peer
+                .origin
+                .as_deref()
+                .is_some_and(|origin| registry.is_approved_origin(key, origin))
+            {
+                peer.signed = None;
+                peer.bytes = 0;
+            }
+        }
+        *self.peers.write() = peers;
+    }
+
+    /// Flush hidden watermarks before reapproval. In particular, a previous
+    /// failed revocation write must not resurrect its old payload on restart.
+    pub(crate) fn persist_current(&self) -> Result<()> {
+        {
+            let _mutation = self.mutation.lock();
+            let peers = self.peers.read().clone();
+            self.persist(&peers)?;
+        }
+        #[cfg(test)]
+        if let Some(pause) = self.after_approval_flush.lock().take() {
+            pause.reached.wait();
+            pause.release.wait();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn operator_change(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.operator_change.lock()
+    }
+
+    fn persist(&self, peers: &HashMap<[u8; 32], PeerCatalog>) -> Result<()> {
+        if let Some(cache) = &self.cache {
+            cache.write(peers)?;
+        }
+        Ok(())
+    }
+
     /// The latest verified catalog from `peer`, if any.
     pub fn peer_catalog(&self, key: &[u8; 32]) -> Option<SignedCatalog> {
         self.peers
             .read()
             .get(key)
-            .and_then(|peer| peer.signed.clone())
+            .and_then(|peer| peer.signed.as_deref().cloned())
     }
 
     /// All stored peer catalogs, sorted by server key for stable output.
@@ -141,7 +226,7 @@ impl CatalogState {
             .peers
             .read()
             .values()
-            .filter_map(|peer| peer.signed.clone())
+            .filter_map(|peer| peer.signed.as_deref().cloned())
             .collect();
         v.sort_by_key(|c| c.catalog.server_key);
         v
@@ -153,25 +238,35 @@ impl CatalogState {
         let peers = self.peers.read();
         let mut catalogs: Vec<_> = peers
             .iter()
-            .filter(|(key, _)| registry.is_approved(key))
-            .filter_map(|(_, peer)| peer.signed.clone())
+            .filter(|(key, peer)| {
+                peer.origin
+                    .as_deref()
+                    .is_some_and(|origin| registry.is_approved_origin(key, origin))
+            })
+            .filter_map(|(_, peer)| peer.signed.as_deref().cloned())
             .collect();
         catalogs.sort_by_key(|catalog| catalog.catalog.server_key);
         catalogs
     }
 
-    /// Catalog state is always locked before the peer registry. This shares
-    /// a critical section with final insertion: an ingest either commits before
-    /// revocation and is evicted, or observes the revoked approval/revision.
-    /// No I/O or await occurs while these locks are held.
-    pub(crate) fn revoke_peer(&self, registry: &PeerRegistry, key: &[u8; 32]) -> bool {
-        let mut peers = self.peers.write();
-        let existed = registry.revoke(key);
-        if let Some(peer) = peers.get_mut(key) {
+    /// Lock order: operator-change (when present), mutation, catalog, registry.
+    /// Revoke hides the payload and invalidates fetches before persistence. A
+    /// write failure is reported; callers must still persist withdrawn approval.
+    pub(crate) fn revoke_peer(&self, registry: &PeerRegistry, key: &[u8; 32]) -> Result<bool> {
+        let _mutation = self.mutation.lock();
+        let (existed, next) = {
+            let mut peers = self.peers.write();
+            let existed = registry.revoke(key);
+            let Some(peer) = peers.get_mut(key) else {
+                return Ok(existed);
+            };
             peer.signed = None;
+            peer.bytes = 0;
             peer.revision = Arc::new(());
-        }
-        existed
+            (existed, peers.clone())
+        };
+        self.persist(&next)?;
+        Ok(existed)
     }
 
     pub(crate) fn begin_fetch(
@@ -179,14 +274,30 @@ impl CatalogState {
         registry: &PeerRegistry,
         key: [u8; 32],
     ) -> Result<CatalogFetch> {
+        let _mutation = self.mutation.lock();
         let mut peers = self.peers.write();
-        if !registry.is_approved(&key) {
-            bail!("refusing catalog from non-approved peer");
+        let origin = registry
+            .get(&key)
+            .filter(|peer| peer.approved)
+            .and_then(|peer| peer.origin)
+            .ok_or_else(|| anyhow!("refusing catalog from non-approved peer or unpinned origin"))?;
+        if !rabbithole_federation::is_valid_server_name(&origin) {
+            bail!("refusing catalog with invalid pinned origin");
+        }
+        if !peers.contains_key(&key) && peers.len() >= cache::MAX_TRACKED_PEERS {
+            bail!("peer catalog watermark limit reached");
         }
         let peer = peers.entry(key).or_default();
+        if peer.origin.as_deref() != Some(&origin) {
+            peer.origin = Some(origin.clone());
+            peer.signed = None;
+            peer.bytes = 0;
+            peer.revision = Arc::new(());
+        }
         Ok(CatalogFetch {
             key,
             revision: peer.revision.clone(),
+            origin,
         })
     }
 
@@ -196,25 +307,48 @@ impl CatalogState {
         fetch: CatalogFetch,
         signed: SignedCatalog,
     ) -> Result<SignedCatalog> {
-        let mut peers = self.peers.write();
-        if !registry.is_approved(&fetch.key) {
-            bail!("refusing catalog from non-approved peer");
+        let bytes = signed.to_bytes().len();
+        if bytes > cache::MAX_CATALOG_BYTES {
+            bail!("peer catalog exceeds size limit");
         }
-        let peer = peers
-            .get_mut(&fetch.key)
-            .filter(|peer| Arc::ptr_eq(&peer.revision, &fetch.revision))
-            .ok_or_else(|| anyhow!("peer approval revoked during catalog fetch"))?;
-        if let Some(generation) = peer.generation {
-            if signed.catalog.generation <= generation {
-                bail!(
-                    "stale catalog: generation {} <= stored {}",
-                    signed.catalog.generation,
-                    generation
-                );
+        let _mutation = self.mutation.lock();
+        let mut next = {
+            let peers = self.peers.read();
+            if !registry.is_approved_origin(&fetch.key, &fetch.origin) {
+                bail!("refusing catalog from non-approved peer");
             }
-        }
+            let peer = peers
+                .get(&fetch.key)
+                .filter(|peer| Arc::ptr_eq(&peer.revision, &fetch.revision))
+                .ok_or_else(|| anyhow!("peer approval revoked during catalog fetch"))?;
+            if let Some(generation) = peer.generation {
+                if signed.catalog.generation <= generation {
+                    bail!(
+                        "stale catalog: generation {} <= stored {}",
+                        signed.catalog.generation,
+                        generation
+                    );
+                }
+            }
+            peers.clone()
+        };
+        let order = next
+            .values()
+            .map(|peer| peer.order)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("peer catalog retention counter exhausted"))?;
+        let peer = next.get_mut(&fetch.key).expect("fetch was checked");
         peer.generation = Some(signed.catalog.generation);
-        peer.signed = Some(signed.clone());
+        peer.signed = Some(Arc::new(signed.clone()));
+        peer.bytes = bytes;
+        peer.order = order;
+        cache::trim(&mut next);
+        // No catalog/registry lock is held during encoding or disk writes.
+        // The mutation guard prevents revoke and other ingests from passing us.
+        self.persist(&next)?;
+        *self.peers.write() = next;
         Ok(signed)
     }
 
@@ -373,7 +507,7 @@ async fn public_entries(shared: &Shared) -> Result<Vec<CatalogEntry>> {
 ///   a `KeyMismatch`);
 /// - approval withdrawn during verification, even if the peer was reapproved;
 /// - stale generations (must be strictly newer than the last accepted one,
-///   including after revocation and reapproval during this process lifetime).
+///   including after revocation, reapproval and cache reload).
 pub fn ingest_peer_catalog(
     shared: &Shared,
     peer_key: [u8; 32],
@@ -389,6 +523,9 @@ pub(crate) fn ingest_fetched_catalog(
     fetch: CatalogFetch,
     bytes: &[u8],
 ) -> Result<SignedCatalog> {
+    if bytes.len() > cache::MAX_CATALOG_BYTES {
+        bail!("peer catalog exceeds size limit");
+    }
     let signed = SignedCatalog::from_bytes(bytes).ok_or_else(|| anyhow!("malformed catalog"))?;
     signed
         .verify(&PublicKey(fetch.key))
@@ -456,7 +593,7 @@ mod tests {
                 state.store_verified(&registry, delayed, second)
             })
         };
-        assert!(state.revoke_peer(&registry, &key));
+        assert!(state.revoke_peer(&registry, &key).unwrap());
         assert!(state.peer_catalog(&key).is_none());
         assert!(state.begin_fetch(&registry, key).is_err());
         registry.approve_origin(&key, "peer.example".into());
@@ -490,7 +627,7 @@ mod tests {
         let state = CatalogState::new();
         let registry = PeerRegistry::new();
         for byte in 0..=255 {
-            assert!(!state.revoke_peer(&registry, &[byte; 32]));
+            assert!(!state.revoke_peer(&registry, &[byte; 32]).unwrap());
             assert!(state.begin_fetch(&registry, [byte; 32]).is_err());
         }
         assert!(state.peers.read().is_empty());

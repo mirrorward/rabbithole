@@ -321,15 +321,15 @@ async fn revoked_catalog_is_evicted_without_losing_an_approved_mirror() {
         assert_eq!(source["generation"], newer.catalog.generation);
     }
 
-    // Only the local catalog is persisted today. Restart must neither restore
-    // revoked approval nor invent a cached peer source; the approved mirror
-    // remains eligible for a fresh catalog pull.
+    // Restart retains the approved mirror cache, while revoked approval and
+    // payloads stay absent. No dial is needed to recover search results.
     burrow::federation::revoke_peer(&b.shared, a_key).unwrap();
     b.shutdown().await;
     let restarted = Burrow::start(b_config).await.unwrap();
     assert!(!restarted.shared.peers.is_approved(&a_key));
     assert!(restarted.shared.peers.is_approved(&c_key));
-    assert!(restarted.shared.catalogs.peer_catalogs().is_empty());
+    assert_eq!(restarted.shared.catalogs.peer_catalogs().len(), 1);
+    assert!(restarted.shared.catalogs.peer_catalog(&c_key).is_some());
     assert!(
         burrow::fed_catalog::ingest_peer_catalog(&restarted.shared, a_key, &newer.to_bytes())
             .is_err()

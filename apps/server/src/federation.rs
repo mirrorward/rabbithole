@@ -1735,6 +1735,7 @@ pub fn approve_peer(
     key: [u8; 32],
     origin: Option<String>,
 ) -> std::result::Result<(String, bool), PeerRefusal> {
+    let _operator = shared.catalogs.operator_change();
     let origin = origin
         .map(|o| o.trim().to_string())
         .filter(|o| !o.is_empty())
@@ -1748,11 +1749,19 @@ pub fn approve_peer(
             return Err(PeerRefusal::OriginAlias(existing));
         }
     }
+    // A failed earlier cache eviction must be made durable before this key
+    // can be approved again, or a reboot could resurrect its old payload.
+    shared
+        .catalogs
+        .persist_current()
+        .map_err(PeerRefusal::Persist)?;
     let was_approved = shared.peers.is_approved_origin(&key, &origin);
     let existed = shared.peers.approve_origin(&key, origin.clone());
     if let Err(error) = persist_approved(shared) {
         if !was_approved {
-            shared.catalogs.revoke_peer(&shared.peers, &key);
+            if let Err(cache_error) = shared.catalogs.revoke_peer(&shared.peers, &key) {
+                tracing::warn!(%cache_error, "could not persist rolled-back peer catalog approval");
+            }
         }
         return Err(PeerRefusal::Persist(error));
     }
@@ -1762,13 +1771,15 @@ pub fn approve_peer(
 /// Withdraw approval of `key`; a live session with it is closed and it drops
 /// back to pending. Returns whether the peer was known.
 pub fn revoke_peer(shared: &Shared, key: [u8; 32]) -> std::result::Result<bool, PeerRefusal> {
+    let _operator = shared.catalogs.operator_change();
     let known_origin = shared.peers.get(&key).and_then(|peer| peer.origin);
     if is_configured_peer(shared, &key, known_origin.as_deref()) {
         return Err(PeerRefusal::Configured);
     }
-    let existed = shared.catalogs.revoke_peer(&shared.peers, &key);
+    let revoked = shared.catalogs.revoke_peer(&shared.peers, &key);
+    // Approval withdrawal must still be saved if the cache write failed.
     persist_approved(shared).map_err(PeerRefusal::Persist)?;
-    Ok(existed)
+    revoked.map_err(PeerRefusal::Persist)
 }
 
 /// Persist the registry's current approved origin-key tuples to disk.
