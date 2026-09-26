@@ -41,6 +41,11 @@ disables that class.
 
 - **Telnet**: `telnet_enabled`, `telnet_addr`, `telnet_min_role`,
   `files_http_base` (empty default = no transfer handoff; live).
+  Accounts with confirmed TOTP enrollment receive a hidden authenticator or
+  recovery-code prompt after their password is accepted. Empty input cancels
+  login. Cancellation or disconnect at that prompt spends one failed AUTH
+  attempt; successful authentication spends none. The complete credentials,
+  shared per-IP AUTH budget and live minimum role are rechecked before entry.
 - **Doors**: `doors_enabled`, `doors_dir` (default `doors/`, relative to
   `data_dir`), `doors_max_nodes` (default 4; 0 refuses every launch),
   `doors_session_max_secs` (default 3600; 0 = unlimited; a door's own

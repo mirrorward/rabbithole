@@ -73,7 +73,9 @@ use rabbithole_legacy_telnet::{Echo, Encoding, TelnetStream};
 use rabbithole_proto::welcome as pw;
 use rabbithole_server_core::chat::Sender;
 use rabbithole_server_core::ratelimit::{class as rl, now_ms, Scope};
-use rabbithole_server_core::{AuthedUser, Caps, PresenceEntry, Role, ServerEvent, LOBBY};
+use rabbithole_server_core::{
+    AuthError, AuthedUser, Caps, PresenceEntry, Role, ServerEvent, LOBBY,
+};
 use rabbithole_store_server::repo2::PersonasRepo;
 use rabbithole_store_server::repo3::{dm_receipts_enabled, BlocksRepo, DmsRepo};
 use rabbithole_store_server::repo4::PostRow;
@@ -191,12 +193,10 @@ fn ansi_terminal(term: Option<&str>) -> bool {
 }
 
 /// Prompt for credentials until success, disconnect, or [`MAX_ATTEMPTS`].
-/// TOTP-gated accounts can't complete the minimal prompt yet (no
-/// second-factor step), so they fail here like a bad password. Failed
-/// attempts also drain the per-IP `auth` rate bucket; an empty bucket ends
-/// the session before (or right after) an attempt. A correct password for
-/// an account below `telnet_min_role` is refused explicitly (it does not
-/// count as a failed attempt — the credentials were right).
+/// A confirmed second factor adds a hidden code prompt to the same attempt.
+/// Failed attempts (including an abandoned code prompt) drain the per-IP
+/// `auth` bucket; successful authentication does not. The shared service
+/// verifies both password and code before the live `telnet_min_role` gate.
 async fn login<S>(
     t: &mut TelnetStream<S>,
     shared: &Arc<Shared>,
@@ -223,7 +223,48 @@ where
             return Ok(None);
         };
         if !user.is_empty() {
-            if let Ok(authed) = shared.auth.login_password(&user, &pass, None).await {
+            let mut result = shared.auth.login_password(&user, &pass, None).await;
+            if matches!(result, Err(AuthError::TotpRequired)) {
+                if let Err(error) = t
+                    .write_str("Authenticator or recovery code (empty to cancel): ")
+                    .await
+                {
+                    if let Some(ip) = peer_ip {
+                        shared.rate_allow(Scope::Ip(ip), rl::AUTH);
+                    }
+                    return Err(error);
+                }
+                let code = match t.read_line(Echo::Hidden).await {
+                    Ok(Some(code)) if !code.trim().is_empty() => code,
+                    abandoned => {
+                        // A completed password check followed by cancellation
+                        // is still an unsuccessful login, even on disconnect.
+                        if let Some(ip) = peer_ip {
+                            shared.rate_allow(Scope::Ip(ip), rl::AUTH);
+                        }
+                        match abandoned {
+                            Ok(Some(_)) => t.write_str("Login cancelled.\n").await?,
+                            Ok(None) => {}
+                            Err(error) => return Err(error),
+                        }
+                        return Ok(None);
+                    }
+                };
+                // Another connection may exhaust the shared budget while
+                // this terminal waits at the code prompt.
+                if let Some(ip) = peer_ip {
+                    if !shared.rate_probe(Scope::Ip(ip), rl::AUTH) {
+                        t.write_str("Too many failed logins. Try again later.\n")
+                            .await?;
+                        return Ok(None);
+                    }
+                }
+                result = shared
+                    .auth
+                    .login_password(&user, &pass, Some(code.trim()))
+                    .await;
+            }
+            if let Ok(authed) = result {
                 let min = Role::parse_min_role(&shared.config.read().telnet_min_role)
                     .unwrap_or(Role::Guest);
                 if authed.subject.role < min {
