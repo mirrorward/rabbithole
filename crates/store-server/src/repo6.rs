@@ -577,9 +577,10 @@ impl FilesRepo<'_> {
         Ok(rows.iter().map(row_to_node).collect())
     }
 
-    /// Search may reach nested descendants without opening their folders.
+    /// Reads may reach nested descendants without opening their folders.
     /// Walk every ancestor, not just the immediate parent. UNION makes even
-    /// a malformed cyclic tree finite.
+    /// a malformed cyclic tree finite. A missing node or a chain which never
+    /// reaches a root produces RowNotFound, rather than a public result.
     pub async fn has_dropbox_ancestor(&self, node_id: i64) -> Result<bool, StoreError> {
         let row = sqlx::query(
             "WITH RECURSIVE parents(id, parent_id, is_dropbox) AS (
@@ -588,7 +589,10 @@ impl FilesRepo<'_> {
                  UNION
                  SELECT p.id, p.parent_id, p.is_dropbox FROM file_nodes p
                  JOIN parents c ON p.id = c.parent_id
-             ) SELECT EXISTS(SELECT 1 FROM parents WHERE is_dropbox != 0) AS hidden",
+             ) SELECT EXISTS(SELECT 1 FROM parents WHERE is_dropbox != 0) AS hidden
+               FROM file_nodes n WHERE n.id = ?1
+               AND (n.parent_id IS NULL OR
+                    EXISTS(SELECT 1 FROM parents WHERE parent_id IS NULL))",
         )
         .bind(node_id)
         .fetch_one(self.0)
@@ -601,6 +605,30 @@ impl FilesRepo<'_> {
 mod tests {
     use super::*;
     use crate::open_in_memory;
+
+    #[tokio::test]
+    async fn ancestry_rejects_missing_nodes_and_cycles() {
+        let pool = open_in_memory().await.unwrap();
+        let repo = FilesRepo(&pool);
+        let area = repo.create_area("a", "A", "").await.unwrap();
+        let a = repo
+            .create_folder(area.id, None, "a", "a", false)
+            .await
+            .unwrap();
+        let b = repo
+            .create_folder(area.id, Some(a.id), "b", "a/b", false)
+            .await
+            .unwrap();
+        assert!(!repo.has_dropbox_ancestor(b.id).await.unwrap());
+        assert!(repo.has_dropbox_ancestor(i64::MAX).await.is_err());
+        sqlx::query("UPDATE file_nodes SET parent_id = ? WHERE id = ?")
+            .bind(b.id)
+            .bind(a.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(repo.has_dropbox_ancestor(b.id).await.is_err());
+    }
 
     #[tokio::test]
     async fn one_content_is_found_wherever_it_is_filed() {

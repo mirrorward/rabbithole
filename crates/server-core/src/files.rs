@@ -123,7 +123,8 @@ impl FileService {
         Ok(self.repo().areas().await?)
     }
 
-    async fn area(&self, slug: &str) -> Result<FileAreaRow, FileError> {
+    /// Resolve an area, including its canonical stored slug for ACL checks.
+    pub async fn area(&self, slug: &str) -> Result<FileAreaRow, FileError> {
         self.repo()
             .area_by_slug(slug)
             .await?
@@ -288,18 +289,11 @@ impl FileService {
         Ok(self.repo().node_by_path(area.id, path).await?)
     }
 
-    /// Whether a node's immediate parent folder is a drop box (its contents
-    /// are hidden without DROPBOX_VIEW).
+    /// Whether any current ancestor is a drop box (its contents are hidden
+    /// without DROPBOX_VIEW). Resolve by ID so a previously read row cannot
+    /// retain public ancestry after a move. Missing nodes fail closed.
     pub async fn in_dropbox(&self, node: &FileNodeRow) -> Result<bool, FileError> {
-        let Some(parent_id) = node.parent_id else {
-            return Ok(false);
-        };
-        Ok(self
-            .repo()
-            .node_by_id(parent_id)
-            .await?
-            .map(|p| p.is_dropbox)
-            .unwrap_or(false))
+        self.has_dropbox_ancestor(node.id).await
     }
 
     /// Resolve a node, following one alias hop to its target.
@@ -552,7 +546,7 @@ impl FileService {
             .await?)
     }
 
-    /// Search traverses all matching paths, including nested drop boxes.
+    /// Read paths and search share the same complete ancestry check.
     pub async fn has_dropbox_ancestor(&self, node_id: i64) -> Result<bool, FileError> {
         Ok(self.repo().has_dropbox_ancestor(node_id).await?)
     }
@@ -578,6 +572,52 @@ mod tests {
 
     async fn service() -> FileService {
         FileService::new(open_in_memory().await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn dropbox_ancestry_follows_moves_even_for_previously_read_nodes() {
+        let svc = service().await;
+        svc.create_area("files", "Files", "").await.unwrap();
+        let drop = svc.mkdir("files", None, "drop", true).await.unwrap();
+        let folder = svc.mkdir("files", None, "nested", false).await.unwrap();
+        svc.mkdir("files", Some("nested"), "deeper", false)
+            .await
+            .unwrap();
+        let file = svc
+            .add_file(
+                "files",
+                Some("nested/deeper"),
+                "secret",
+                &[1; 32],
+                1,
+                "",
+                "",
+                "",
+                "a",
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !svc.in_dropbox(&drop).await.unwrap(),
+            "a box is not its own ancestor"
+        );
+        assert!(!svc.in_dropbox(&file).await.unwrap());
+        svc.move_to(folder.id, Some("drop")).await.unwrap();
+        assert!(svc.in_dropbox(&folder).await.unwrap());
+        assert!(
+            svc.in_dropbox(&file).await.unwrap(),
+            "the cached public path is not authority"
+        );
+        assert!(svc.has_dropbox_ancestor(file.id).await.unwrap());
+        svc.move_to(folder.id, None).await.unwrap();
+        assert!(!svc.in_dropbox(&file).await.unwrap());
+        svc.delete(file.id).await.unwrap();
+        assert!(
+            svc.in_dropbox(&file).await.is_err(),
+            "disappeared nodes are not public"
+        );
+        assert!(svc.has_dropbox_ancestor(i64::MAX).await.is_err());
     }
 
     #[tokio::test]

@@ -1141,20 +1141,27 @@ where
     }
     // Drop-boxed content is not downloadable without view/manage rights
     // (the same rule Hotline's DownloadFile applies).
-    let in_dropbox = shared.files.in_dropbox(&target).await.unwrap_or(false);
-    if in_dropbox
-        && !shared
-            .perms
-            .allows(&authed.subject, &resource, Caps::DROPBOX_VIEW)
-        && !shared.perms.allows(
-            &authed.subject,
-            &file_resource(&target.area, ""),
-            Caps::FILE_MANAGE,
-        )
-    {
-        t.write_str("\nYou do not have permission to download that file.\n")
-            .await?;
-        return Ok(None);
+    for entry in [&node, &target] {
+        let allowed = match shared.files.in_dropbox(entry).await {
+            Ok(false) => true,
+            Ok(true) => {
+                shared.perms.allows(
+                    &authed.subject,
+                    &file_resource(&entry.area, &entry.path),
+                    Caps::DROPBOX_VIEW,
+                ) || shared.perms.allows(
+                    &authed.subject,
+                    &file_resource(&entry.area, ""),
+                    Caps::FILE_MANAGE,
+                )
+            }
+            Err(_) => false,
+        };
+        if !allowed {
+            t.write_str("\nYou do not have permission to download that file.\n")
+                .await?;
+            return Ok(None);
+        }
     }
     // Moderation: quarantined and hash-denied content reads as absent, the
     // same non-teasing 404 the HTTP serve path gives.
@@ -2539,6 +2546,84 @@ mod tests {
             listeners,
             live,
         }
+    }
+
+    #[tokio::test]
+    async fn nested_dropbox_downloads_authorize_both_alias_placements() {
+        use super::{authorize_download, BbsTerminal};
+        use rabbithole_legacy_telnet::TelnetStream;
+        use rabbithole_server_core::{Caps, Role, ServerConfig};
+
+        let dir = tempfile::tempdir().unwrap();
+        let b = crate::Burrow::start(ServerConfig {
+            data_dir: dir.path().to_owned(),
+            quic_addr: "127.0.0.1:0".parse().unwrap(),
+            ws_addr: "127.0.0.1:0".parse().unwrap(),
+            ..ServerConfig::default()
+        })
+        .await
+        .unwrap();
+        b.shared
+            .auth
+            .create_account("alice", "dropbox-password", Role::User)
+            .await
+            .unwrap();
+        let mut user = b
+            .shared
+            .auth
+            .login_password("alice", "dropbox-password", None)
+            .await
+            .unwrap();
+        let files = &b.shared.files;
+        files.create_area("pub", "Public", "").await.unwrap();
+        files.mkdir("pub", None, "drop", true).await.unwrap();
+        files
+            .mkdir("pub", Some("drop"), "nested", false)
+            .await
+            .unwrap();
+        for (parent, name) in [(None, "public"), (Some("drop/nested"), "secret")] {
+            files
+                .add_file(
+                    "pub",
+                    parent,
+                    name,
+                    &[1; 32],
+                    1,
+                    "",
+                    "",
+                    "",
+                    "alice",
+                    user.account.id,
+                )
+                .await
+                .unwrap();
+        }
+        files
+            .add_alias("pub", None, "into", "drop/nested/secret")
+            .await
+            .unwrap();
+        files
+            .add_alias("pub", Some("drop/nested"), "out", "public")
+            .await
+            .unwrap();
+        let (server, _client) = tokio::io::duplex(64 * 1024);
+        let mut terminal = BbsTerminal::new(TelnetStream::new(server), &b.shared, &user);
+        for grant in [0, Caps::DROPBOX_VIEW.0, Caps::FILE_MANAGE.0] {
+            user.subject.grant_mask = grant;
+            for path in ["drop/nested/secret", "into", "drop/nested/out"] {
+                let result = authorize_download(&mut terminal, &b.shared, &user, "pub", "", path)
+                    .await
+                    .unwrap();
+                assert_eq!(result.is_some(), grant != 0, "{path}, grant {grant}");
+            }
+            assert!(
+                authorize_download(&mut terminal, &b.shared, &user, "pub", "", "public")
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        b.shutdown().await;
     }
 
     #[test]

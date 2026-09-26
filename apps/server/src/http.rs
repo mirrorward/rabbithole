@@ -633,7 +633,9 @@ async fn serve_file_download(req: &Request, shared: &Arc<Shared>) -> Response {
         return not_found();
     }
     // Drop-box contents are never served anonymously.
-    if shared.files.in_dropbox(&target).await.unwrap_or(true) {
+    if shared.files.in_dropbox(&node).await.unwrap_or(true)
+        || shared.files.in_dropbox(&target).await.unwrap_or(true)
+    {
         return not_found();
     }
     let Some(blob_id) = target.blob_id else {

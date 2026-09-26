@@ -2534,18 +2534,25 @@ async fn download_file(shared: &Arc<Shared>, active: &Active, txn: &Transaction)
         return err_reply(ty, id, "not permitted");
     }
     // Drop-boxed content is not downloadable without view/manage rights.
-    let in_dropbox = shared.files.in_dropbox(&target).await.unwrap_or(false);
-    if in_dropbox
-        && !shared
-            .perms
-            .allows(&active.subject, &resource, Caps::DROPBOX_VIEW)
-        && !shared.perms.allows(
-            &active.subject,
-            &file_resource(&target.area, None),
-            Caps::FILE_MANAGE,
-        )
-    {
-        return err_reply(ty, id, "not permitted");
+    for entry in [&node, &target] {
+        let allowed = match shared.files.in_dropbox(entry).await {
+            Ok(false) => true,
+            Ok(true) => {
+                shared.perms.allows(
+                    &active.subject,
+                    &file_resource(&entry.area, Some(&entry.path)),
+                    Caps::DROPBOX_VIEW,
+                ) || shared.perms.allows(
+                    &active.subject,
+                    &file_resource(&entry.area, None),
+                    Caps::FILE_MANAGE,
+                )
+            }
+            Err(_) => false,
+        };
+        if !allowed {
+            return err_reply(ty, id, "not permitted");
+        }
     }
     let Some(blob_id) = target.blob_id else {
         return err_reply(ty, id, "no content");

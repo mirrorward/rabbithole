@@ -402,7 +402,11 @@ async fn take(
     if !ctx.allows(shared, &res, Caps::FILE_DOWNLOAD) {
         return Take::Skip;
     }
-    if shared.files.in_dropbox(file).await.unwrap_or(true)
+    let hidden = match shared.files.in_dropbox(file).await {
+        Ok(hidden) => hidden,
+        Err(_) => return Take::Skip,
+    };
+    if hidden
         && !ctx.allows(shared, &res, Caps::DROPBOX_VIEW)
         && !ctx.allows(shared, &resource(&file.area, None), Caps::FILE_MANAGE)
     {
@@ -479,7 +483,12 @@ async fn grant(
             }
             // A drop box's contents are hidden from those who may not view
             // it, and a pull must not be a way around that.
-            let hidden = node.is_dropbox || shared.files.in_dropbox(&node).await.unwrap_or(true);
+            let nested = shared
+                .files
+                .in_dropbox(&node)
+                .await
+                .map_err(|_| ErrorCode::NotFound)?;
+            let hidden = node.is_dropbox || nested;
             if hidden
                 && !ctx.allows(shared, &res, Caps::DROPBOX_VIEW)
                 && !ctx.allows(shared, &resource(&node.area, None), Caps::FILE_MANAGE)
@@ -500,7 +509,25 @@ async fn grant(
                 Ok(file) => file,
                 Err(_) => return Err(ErrorCode::NotFound),
             };
-            let taken = take(shared, ctx, &file, top).await;
+            let mut taken = take(shared, ctx, &file, top).await;
+            if node.id != file.id && matches!(taken, Take::Item(_)) {
+                // An alias cannot expose an otherwise readable file through
+                // a location whose drop-box contents the caller may not view.
+                let allowed = match shared.files.in_dropbox(&node).await {
+                    Ok(false) => true,
+                    Ok(true) => {
+                        ctx.allows(
+                            shared,
+                            &resource(&node.area, Some(&node.path)),
+                            Caps::DROPBOX_VIEW,
+                        ) || ctx.allows(shared, &resource(&node.area, None), Caps::FILE_MANAGE)
+                    }
+                    Err(_) => false,
+                };
+                if !allowed {
+                    taken = Take::Skip;
+                }
+            }
             if req.nodes.len() == 1 && matches!(taken, Take::Hidden) {
                 return Err(ErrorCode::NotFound);
             }

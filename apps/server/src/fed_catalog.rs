@@ -310,6 +310,11 @@ async fn public_entries(shared: &Shared) -> Result<Vec<CatalogEntry>> {
             .await
             .map_err(|e| anyhow!("manifest {}: {e}", area.slug))?;
         for (node, _rel) in files {
+            // Enumeration and publication are separate reads; a moved row
+            // must not advertise content now inside a drop box.
+            if shared.files.in_dropbox(&node).await.unwrap_or(true) {
+                continue;
+            }
             let Some(hash) = node.blob_id else {
                 continue; // no content blob: nothing to hash or fetch
             };

@@ -364,16 +364,21 @@ pub async fn handle(
         ) {
             fail!(ErrorCode::Forbidden);
         }
-        // Drop-boxed content is not downloadable without view rights.
-        if try_file!(shared.files.in_dropbox(&target).await)
-            && !ctx.allows(
-                shared,
-                &resource(&target.area, Some(&target.path)),
-                Caps::DROPBOX_VIEW,
-            )
-            && !ctx.allows(shared, &resource(&target.area, None), Caps::FILE_MANAGE)
-        {
-            fail!(ErrorCode::Forbidden);
+        // Both the requested placement and an alias's resolved target must
+        // permit access; a public alias cannot expose a hidden target, nor can
+        // a hidden alias be opened by knowing its ID. RH-169 shares the same
+        // recursive ancestor rule across byte-serving surfaces.
+        for placement in [&node, &target] {
+            if try_file!(shared.files.in_dropbox(placement).await)
+                && !ctx.allows(
+                    shared,
+                    &resource(&placement.area, Some(&placement.path)),
+                    Caps::DROPBOX_VIEW,
+                )
+                && !ctx.allows(shared, &resource(&placement.area, None), Caps::FILE_MANAGE)
+            {
+                fail!(ErrorCode::Forbidden);
+            }
         }
         let Some(blob_id) = target.blob_id else {
             fail!(ErrorCode::NotFound)

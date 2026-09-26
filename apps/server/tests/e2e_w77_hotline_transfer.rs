@@ -767,3 +767,104 @@ async fn held_back_content_is_absent_over_hotline() {
 
     burrow.shutdown().await;
 }
+
+#[tokio::test]
+async fn hotline_nested_dropboxes_check_both_alias_placements_and_allow_viewers() {
+    let work = tempfile::tempdir().unwrap();
+    let (b, mut alice, addr) = setup(work.path()).await;
+    let files = &b.shared.files;
+    files.mkdir("warez", None, "drop", true).await.unwrap();
+    let nested = files
+        .mkdir("warez", Some("drop"), "nested", false)
+        .await
+        .unwrap();
+    let body = b"nested hotline bytes";
+    let blob = b.shared.blobs.put(body).unwrap();
+    for (parent, name) in [(None, "public.txt"), (Some("drop/nested"), "secret.txt")] {
+        files
+            .add_file(
+                "warez",
+                parent,
+                name,
+                &blob.0,
+                body.len() as i64,
+                "text/plain",
+                "",
+                "",
+                "alice",
+                1,
+            )
+            .await
+            .unwrap();
+    }
+    files
+        .add_alias("warez", None, "into.txt", "drop/nested/secret.txt")
+        .await
+        .unwrap();
+    files
+        .add_alias("warez", Some("drop/nested"), "out.txt", "public.txt")
+        .await
+        .unwrap();
+    for (name, path) in [
+        ("secret.txt", vec!["warez", "drop", "nested"]),
+        ("into.txt", vec!["warez"]),
+        ("out.txt", vec!["warez", "drop", "nested"]),
+    ] {
+        let reply = negotiate_download(&mut alice, name, &path, None).await;
+        assert_eq!(reply.header.error, 1, "member must not download {name}");
+        assert!(field_int(&reply, field::REF_NUM).is_none());
+    }
+    let public = negotiate_download(&mut alice, "public.txt", &["warez"], None).await;
+    assert_eq!(public.header.error, 0);
+    let bytes = htxf_recv(
+        addr,
+        field_int(&public, field::REF_NUM).unwrap(),
+        field_int(&public, field::TRANSFER_SIZE).unwrap() as usize,
+    )
+    .await;
+    assert_eq!(
+        ffo_data_fork(&bytes),
+        body,
+        "ordinary HTXF content still downloads"
+    );
+    b.shared
+        .auth
+        .create_account("viewer", "dropbox-viewer-password", Role::Moderator)
+        .await
+        .unwrap();
+    let mut viewer = Client::connect(addr).await;
+    assert_eq!(
+        viewer
+            .login("viewer", "dropbox-viewer-password", "Viewer")
+            .await
+            .header
+            .error,
+        0
+    );
+    for (name, path) in [
+        ("secret.txt", vec!["warez", "drop", "nested"]),
+        ("into.txt", vec!["warez"]),
+        ("out.txt", vec!["warez", "drop", "nested"]),
+    ] {
+        let reply = negotiate_download(&mut viewer, name, &path, None).await;
+        assert_eq!(reply.header.error, 0, "viewer can download {name}");
+        let bytes = htxf_recv(
+            addr,
+            field_int(&reply, field::REF_NUM).unwrap(),
+            field_int(&reply, field::TRANSFER_SIZE).unwrap() as usize,
+        )
+        .await;
+        assert_eq!(ffo_data_fork(&bytes), body);
+    }
+    files.move_to(nested.id, None).await.unwrap();
+    let moved = negotiate_download(&mut alice, "secret.txt", &["warez", "nested"], None).await;
+    assert_eq!(
+        moved.header.error, 0,
+        "a new authorization follows a move out"
+    );
+    files.move_to(nested.id, Some("drop")).await.unwrap();
+    let hidden =
+        negotiate_download(&mut alice, "secret.txt", &["warez", "drop", "nested"], None).await;
+    assert_eq!(hidden.header.error, 1);
+    b.shutdown().await;
+}
