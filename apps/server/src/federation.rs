@@ -100,10 +100,11 @@ use rabbithole_federation::{
 use rabbithole_identity::{IdentityKey, PublicKey, Signature};
 use rabbithole_net::quic::{QuicListener, QuicTransport};
 use rabbithole_net::tls::{CertFingerprint, ServerAuth, TlsIdentity};
-use rabbithole_net::{Connection, Listener, Transport};
+use rabbithole_net::{Connection, Listener, NetError, Transport};
 use rabbithole_proto::{Family, Frame, FrameKind, Payload, RequestId, PROTOCOL_VERSION};
 use rabbithole_server_core::boards::IngestOutcome;
 use rabbithole_server_core::events::{EventBody, SignedEvent};
+use rabbithole_server_core::ratelimit::{class as rl, Scope};
 use rabbithole_server_core::{BoardError, SeenKey, ServerEvent};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -457,66 +458,31 @@ pub async fn spawn_federation(
 /// Handle one inbound peer connection: run the mutual-auth handshake, apply
 /// admin approval, and hold the session for its lifetime.
 async fn serve_peer(mut conn: Box<dyn Connection>, shared: Arc<Shared>) -> Result<()> {
-    let key = IdentityKey::from_seed(&shared.server_signing_seed);
-    let my_key = shared.server_key;
+    let hello = match authenticate_peer(conn.as_mut(), &shared).await {
+        Ok(hello) => hello,
+        Err(error) => {
+            let error = match error {
+                PeerAuthError::Invalid(error) => {
+                    // One failed attempt, independent of how many checks it
+                    // failed. Successful proofs (including pending peers),
+                    // transport failures and local errors spend nothing.
+                    let _ = shared.rate_allow(Scope::Ip(conn.peer().remote_addr.ip()), rl::AUTH);
+                    error
+                }
+                PeerAuthError::Transport(error) => error,
+                PeerAuthError::Limited => anyhow!("peer authentication rate limited"),
+            };
+            conn.close().await;
+            return Err(error);
+        }
+    };
+    let dialer_key = hello.server_key;
+    let dialer_name = hello.server_name;
+    let dialer_origin = hello.origin;
     let remote = conn.peer().remote_addr.to_string();
 
-    // 1. Receive the dialer's Hello.
-    let hello: HelloMsg = recv_fed(conn.as_mut(), MT_HELLO).await?;
-    let dialer_key = hello.hello.server_key;
-    let dialer_name = hello.hello.server_name.clone();
-    let dialer_origin = hello.hello.origin.clone();
-    if hello.hello.protocol_version != FED_PROTOCOL {
-        bail!("peer federation protocol version is not supported");
-    }
-    if !is_valid_server_name(&dialer_origin) {
-        bail!("peer announced an invalid federation origin");
-    }
-    if dialer_origin == shared.origin_name() && dialer_key != my_key {
-        bail!("peer attempted to claim our local federation origin");
-    }
-
-    // 2. Reply with our announcement + proof. `accepted` reflects the current
-    //    approval of the claimed key (advisory; the session only goes live
-    //    after we verify the dialer's proof below).
-    let listener_nonce = random_nonce();
-    let listener_origin = shared.origin_name();
-    let transcript = auth_transcript(
-        &dialer_key,
-        &my_key,
-        &dialer_origin,
-        &listener_origin,
-        &hello.nonce,
-        &listener_nonce,
-    );
-    let approved_at_ack = shared.peers.is_approved_origin(&dialer_key, &dialer_origin);
-    let ack = PeerHelloAck {
-        server_key: my_key,
-        server_name: shared.config.read().name,
-        origin: listener_origin,
-        protocol_version: FED_PROTOCOL,
-        software: SOFTWARE.to_string(),
-        accepted: approved_at_ack,
-    };
-    conn.send(fed_frame(
-        FrameKind::Reply,
-        MT_HELLO_ACK,
-        &HelloAckMsg {
-            ack,
-            nonce: listener_nonce,
-            proof: key.sign(&transcript),
-        },
-    ))
-    .await?;
-
-    // 3. Verify the dialer proved possession of its announced key.
-    let proof: ProofMsg = recv_fed(conn.as_mut(), MT_PROOF).await?;
-    if !PublicKey(dialer_key).verify(&transcript, &proof.proof) {
-        bail!("dialer failed to authenticate its server key");
-    }
-
-    // 4. Apply approval, update the registry, then send Welcome as a
-    //    deterministic readiness signal.
+    // Authentication is complete. Approval/provenance failures and the live
+    // session below are deliberately outside failure accounting.
     let connected = if authorize_authenticated_peer(
         &shared.peers,
         &shared.fed_flood,
@@ -554,11 +520,124 @@ async fn serve_peer(mut conn: Box<dyn Connection>, shared: Arc<Shared>) -> Resul
         return Ok(());
     }
 
-    // Serve catalog traffic + board-event flood-fill until the peer drops the
-    // session. This listener side also answers catalog announce/get (the
-    // dialer pulls; see `sync_catalogs`).
     run_peer_session(conn, dialer_key, dialer_origin, shared, true).await;
     Ok(())
+}
+
+/// Explicitly distinguish peer-supplied invalid authentication from local
+/// send failures, transport cancellation and an already exhausted budget.
+enum PeerAuthError {
+    Invalid(anyhow::Error),
+    Transport(anyhow::Error),
+    Limited,
+}
+
+fn probe_peer_auth(shared: &Shared, conn: &dyn Connection) -> Result<(), PeerAuthError> {
+    if shared.rate_probe(Scope::Ip(conn.peer().remote_addr.ip()), rl::AUTH) {
+        Ok(())
+    } else {
+        Err(PeerAuthError::Limited)
+    }
+}
+
+async fn recv_peer_auth<T: DeserializeOwned>(
+    conn: &mut dyn Connection,
+    message_type: u16,
+) -> Result<T, PeerAuthError> {
+    let frame = match conn.recv().await {
+        Ok(Some(frame)) => frame,
+        Ok(None) => {
+            return Err(PeerAuthError::Transport(anyhow!(
+                "peer closed before message {message_type}"
+            )));
+        }
+        Err(error @ NetError::Proto(_)) => return Err(PeerAuthError::Invalid(error.into())),
+        Err(error) => return Err(PeerAuthError::Transport(error.into())),
+    };
+    if frame.kind != FrameKind::Request || frame.error.is_some() {
+        return Err(PeerAuthError::Invalid(anyhow!(
+            "invalid federation authentication request"
+        )));
+    }
+    decode_fed(&frame, message_type).map_err(PeerAuthError::Invalid)
+}
+
+async fn authenticate_peer(
+    conn: &mut dyn Connection,
+    shared: &Shared,
+) -> Result<PeerHello, PeerAuthError> {
+    probe_peer_auth(shared, conn)?;
+    let key = IdentityKey::from_seed(&shared.server_signing_seed);
+    let my_key = shared.server_key;
+
+    // 1. Receive the dialer's Hello.
+    let hello: HelloMsg = recv_peer_auth(conn, MT_HELLO).await?;
+    // A connection may have waited while another from this IP spent the
+    // remaining budget. Check again before signing our challenge.
+    probe_peer_auth(shared, conn)?;
+    let dialer_key = hello.hello.server_key;
+    let dialer_origin = &hello.hello.origin;
+    if hello.hello.protocol_version != FED_PROTOCOL {
+        return Err(PeerAuthError::Invalid(anyhow!(
+            "peer federation protocol version is not supported"
+        )));
+    }
+    if !is_valid_server_name(dialer_origin) {
+        return Err(PeerAuthError::Invalid(anyhow!(
+            "peer announced an invalid federation origin"
+        )));
+    }
+    if *dialer_origin == shared.origin_name() && dialer_key != my_key {
+        return Err(PeerAuthError::Invalid(anyhow!(
+            "peer attempted to claim our local federation origin"
+        )));
+    }
+
+    // 2. Reply with our announcement + proof. `accepted` reflects the current
+    //    approval of the claimed key (advisory; the session only goes live
+    //    after we verify the dialer's proof below).
+    let listener_nonce = random_nonce();
+    let listener_origin = shared.origin_name();
+    let transcript = auth_transcript(
+        &dialer_key,
+        &my_key,
+        dialer_origin,
+        &listener_origin,
+        &hello.nonce,
+        &listener_nonce,
+    );
+    let approved_at_ack = shared.peers.is_approved_origin(&dialer_key, dialer_origin);
+    let ack = PeerHelloAck {
+        server_key: my_key,
+        server_name: shared.config.read().name,
+        origin: listener_origin,
+        protocol_version: FED_PROTOCOL,
+        software: SOFTWARE.to_string(),
+        accepted: approved_at_ack,
+    };
+    conn.send(fed_frame(
+        FrameKind::Reply,
+        MT_HELLO_ACK,
+        &HelloAckMsg {
+            ack,
+            nonce: listener_nonce,
+            proof: key.sign(&transcript),
+        },
+    ))
+    .await
+    .map_err(|error| PeerAuthError::Transport(error.into()))?;
+
+    // 3. Verify the dialer proved possession of its announced key.
+    let proof: ProofMsg = recv_peer_auth(conn, MT_PROOF).await?;
+    // In particular, pre-opening many challenges must not bypass a budget
+    // exhausted by an intervening failure on another connection.
+    probe_peer_auth(shared, conn)?;
+    if !PublicKey(dialer_key).verify(&transcript, &proof.proof) {
+        return Err(PeerAuthError::Invalid(anyhow!(
+            "dialer failed to authenticate its server key"
+        )));
+    }
+    Ok(hello.hello)
 }
 
 /// Commit the inbound post-proof transition only while the exact tuple is
@@ -1696,6 +1775,455 @@ pub fn persist_approved(shared: &Shared) -> Result<()> {
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::net::IpAddr;
+
+    use parking_lot::Mutex;
+    use rabbithole_net::{PeerInfo, TransportKind};
+    use rabbithole_proto::{ErrorCode, ProtoError};
+    use rabbithole_server_core::ratelimit::{self, Decision, LimitKey, Policy};
+    use rabbithole_server_core::ServerConfig;
+
+    enum Input {
+        Hello,
+        Proof(bool),
+        Frame(Frame),
+        Error(NetError),
+        Eof,
+    }
+
+    #[derive(Default)]
+    struct Trace {
+        reads: usize,
+        sent: Vec<Frame>,
+        closed: bool,
+    }
+
+    type ReadHook = (usize, Box<dyn FnOnce() + Send>);
+
+    /// A protocol peer whose proof uses the listener's actual fresh nonce.
+    /// It can fail either side of an I/O boundary without timing or sockets.
+    struct Peer {
+        info: PeerInfo,
+        key: IdentityKey,
+        hello: HelloMsg,
+        input: VecDeque<Input>,
+        fail_send: Option<u16>,
+        before_read: Option<ReadHook>,
+        trace: Arc<Mutex<Trace>>,
+    }
+
+    impl Peer {
+        fn new(ip: u8, valid: bool) -> Self {
+            let key = IdentityKey::from_seed(&[ip; 32]);
+            Self {
+                info: PeerInfo {
+                    remote_addr: SocketAddr::new(IpAddr::from([192, 0, 2, ip]), 12345),
+                    transport: TransportKind::Quic,
+                },
+                hello: HelloMsg {
+                    hello: PeerHello {
+                        server_key: key.public().0,
+                        server_name: format!("Peer {ip}"),
+                        origin: format!("peer-{ip}"),
+                        protocol_version: FED_PROTOCOL,
+                        software: "test".into(),
+                    },
+                    nonce: [ip; 32],
+                },
+                key,
+                input: VecDeque::from([Input::Hello, Input::Proof(valid), Input::Eof]),
+                fail_send: None,
+                before_read: None,
+                trace: Arc::new(Mutex::new(Trace::default())),
+            }
+        }
+
+        fn scope(&self) -> Scope {
+            Scope::Ip(self.info.remote_addr.ip())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Connection for Peer {
+        async fn send(&mut self, frame: Frame) -> std::result::Result<(), NetError> {
+            if self.fail_send == Some(frame.message_type) {
+                // Even a local encoding failure is not the remote's failure.
+                return Err(NetError::Proto(ProtoError::FrameTooLarge {
+                    size: 2,
+                    max: 1,
+                }));
+            }
+            self.trace.lock().sent.push(frame);
+            Ok(())
+        }
+
+        async fn recv(&mut self) -> std::result::Result<Option<Frame>, NetError> {
+            let read = {
+                let mut trace = self.trace.lock();
+                trace.reads += 1;
+                trace.reads
+            };
+            if self.before_read.as_ref().is_some_and(|(at, _)| *at == read) {
+                self.before_read.take().unwrap().1();
+            }
+            match self.input.pop_front().unwrap_or(Input::Eof) {
+                Input::Hello => Ok(Some(fed_frame(FrameKind::Request, MT_HELLO, &self.hello))),
+                Input::Proof(valid) => {
+                    let trace = self.trace.lock();
+                    let ack: HelloAckMsg = decode_fed(
+                        trace
+                            .sent
+                            .iter()
+                            .find(|f| f.message_type == MT_HELLO_ACK)
+                            .unwrap(),
+                        MT_HELLO_ACK,
+                    )
+                    .unwrap();
+                    let transcript = auth_transcript(
+                        &self.hello.hello.server_key,
+                        &ack.ack.server_key,
+                        &self.hello.hello.origin,
+                        &ack.ack.origin,
+                        &self.hello.nonce,
+                        &ack.nonce,
+                    );
+                    let proof = if valid {
+                        self.key.sign(&transcript)
+                    } else {
+                        IdentityKey::from_seed(&[255; 32]).sign(&transcript)
+                    };
+                    Ok(Some(fed_frame(
+                        FrameKind::Request,
+                        MT_PROOF,
+                        &ProofMsg { proof },
+                    )))
+                }
+                Input::Frame(frame) => Ok(Some(frame)),
+                Input::Error(error) => Err(error),
+                Input::Eof => Ok(None),
+            }
+        }
+
+        fn peer(&self) -> &PeerInfo {
+            &self.info
+        }
+
+        async fn close(&mut self) {
+            self.trace.lock().closed = true;
+        }
+    }
+
+    async fn server(path: &Path, burst: u32) -> crate::Burrow {
+        crate::Burrow::start(ServerConfig {
+            name: "Auth tests".into(),
+            quic_addr: "127.0.0.1:0".parse().unwrap(),
+            ws_addr: "127.0.0.1:0".parse().unwrap(),
+            data_dir: path.to_owned(),
+            ratelimit_auth_per_min: 1,
+            ratelimit_auth_burst: burst,
+            ..ServerConfig::default()
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn invalid_messages_and_claims_charge_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = server(dir.path(), 2).await;
+        for case in 1..=11 {
+            let mut peer = Peer::new(case, false);
+            let scope = peer.scope();
+            match case {
+                1 => {} // wrong signature
+                2 => peer.hello.hello.protocol_version += 1,
+                3 => peer.hello.hello.origin = "bad origin".into(),
+                4 => peer.hello.hello.origin = b.shared.origin_name(),
+                5 => {
+                    peer.input =
+                        VecDeque::from([Input::Error(NetError::Proto(ProtoError::FrameTooLarge {
+                            size: 2,
+                            max: 1,
+                        }))])
+                }
+                6..=9 => {
+                    let mut frame = fed_frame(FrameKind::Request, MT_HELLO, &peer.hello);
+                    match case {
+                        6 => frame.family = Family::SESSION,
+                        7 => frame.kind = FrameKind::Reply,
+                        8 => frame.payload = Payload(vec![]),
+                        9 => frame.error = Some(ErrorCode::Unauthenticated),
+                        _ => unreachable!(),
+                    }
+                    peer.input = VecDeque::from([Input::Frame(frame)]);
+                }
+                10 => {
+                    peer.input = VecDeque::from([
+                        Input::Hello,
+                        Input::Frame(fed_frame(FrameKind::Request, MT_HELLO, &peer.hello)),
+                    ])
+                }
+                11 => {
+                    let mut frame = fed_frame(FrameKind::Request, MT_PROOF, &());
+                    frame.payload = Payload(vec![]);
+                    peer.input = VecDeque::from([Input::Hello, Input::Frame(frame)]);
+                }
+                _ => unreachable!(),
+            }
+            let trace = peer.trace.clone();
+            assert!(
+                serve_peer(Box::new(peer), b.shared.clone()).await.is_err(),
+                "case {case}"
+            );
+            assert!(trace.lock().closed);
+            assert!(!trace
+                .lock()
+                .sent
+                .iter()
+                .any(|f| f.message_type == MT_WELCOME));
+            assert!(
+                b.shared.rate_allow(scope, rl::AUTH),
+                "case {case} charged more than once"
+            );
+            assert!(
+                !b.shared.rate_allow(scope, rl::AUTH),
+                "case {case} did not charge"
+            );
+        }
+        assert!(b.shared.peers.pending().is_empty());
+        b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn transport_and_post_proof_failures_do_not_spend_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = server(dir.path(), 1).await;
+        for case in 1..=6 {
+            let mut peer = Peer::new(case, true);
+            let scope = peer.scope();
+            match case {
+                1 => peer.input = VecDeque::from([Input::Eof]),
+                2 => peer.input = VecDeque::from([Input::Hello, Input::Eof]),
+                3 => {
+                    peer.input = VecDeque::from([Input::Error(NetError::Io(std::io::Error::from(
+                        std::io::ErrorKind::ConnectionReset,
+                    )))])
+                }
+                4 => peer.fail_send = Some(MT_HELLO_ACK),
+                5 => peer.fail_send = Some(MT_WELCOME),
+                6 => {
+                    // Proof succeeds, but the approved origin conflicts with
+                    // provenance. This is authorization, not authentication.
+                    b.shared.peers.seed_approved(
+                        peer.key.public().0,
+                        "peer",
+                        Some(peer.hello.hello.origin.clone()),
+                    );
+                    b.shared
+                        .fed_flood
+                        .trust_direct(&peer.hello.hello.origin, [99; 32])
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                serve_peer(Box::new(peer), b.shared.clone()).await.is_err(),
+                "case {case}"
+            );
+            assert!(
+                b.shared.rate_allow(scope, rl::AUTH),
+                "case {case} charged a non-auth failure"
+            );
+        }
+        b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn exhausted_ip_isolated_and_recovers_on_injected_bucket_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = server(dir.path(), 1).await;
+        let peer = Peer::new(1, false);
+        let scope = peer.scope();
+        assert!(serve_peer(Box::new(peer), b.shared.clone()).await.is_err());
+        let peer = Peer::new(1, true);
+        let trace = peer.trace.clone();
+        assert!(serve_peer(Box::new(peer), b.shared.clone()).await.is_err());
+        assert_eq!(trace.lock().reads, 0, "limited before any Hello work");
+        assert!(trace.lock().closed);
+
+        // An approved peer on another IP still connects despite the first's
+        // exhausted bucket.
+        let peer = Peer::new(2, true);
+        b.shared.peers.seed_approved(
+            peer.key.public().0,
+            "unrelated",
+            Some(peer.hello.hello.origin.clone()),
+        );
+        let trace = peer.trace.clone();
+        assert!(serve_peer(Box::new(peer), b.shared.clone()).await.is_ok());
+        let welcome: WelcomeMsg = decode_fed(
+            trace
+                .lock()
+                .sent
+                .iter()
+                .find(|f| f.message_type == MT_WELCOME)
+                .unwrap(),
+            MT_WELCOME,
+        )
+        .unwrap();
+        assert!(welcome.connected);
+
+        // Advance the actual bucket with its public injected-clock API. This
+        // checks recovery without sleeping or changing
+        // production clock/config, then exercises the real gate again.
+        let key = LimitKey {
+            scope,
+            class: rl::AUTH,
+        };
+        let policy = Policy::for_class(&b.shared.config.read(), rl::AUTH).unwrap();
+        let now = ratelimit::now_ms();
+        let Decision::Limited { retry_after_ms, .. } =
+            b.shared.ratelimit.peek_with(key, policy, now)
+        else {
+            panic!("failed proof exhausted the bucket");
+        };
+        assert!(retry_after_ms > 1);
+        assert!(b
+            .shared
+            .ratelimit
+            .peek_with(key, policy, now + retry_after_ms - 1)
+            .is_limited());
+        assert!(!b
+            .shared
+            .ratelimit
+            // One millisecond past the advertised delay avoids asserting
+            // floating-point equality after the preceding partial refill.
+            .peek_with(key, policy, now + retry_after_ms + 1)
+            .is_limited());
+        let peer = Peer::new(1, true);
+        let trace = peer.trace.clone();
+        assert!(serve_peer(Box::new(peer), b.shared.clone()).await.is_ok());
+        assert!(trace
+            .lock()
+            .sent
+            .iter()
+            .any(|f| f.message_type == MT_WELCOME));
+        b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn preopened_handshakes_reprobe_before_challenge_and_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = server(dir.path(), 1).await;
+        for read in [1, 2] {
+            let mut peer = Peer::new(read as u8, true);
+            let scope = peer.scope();
+            let shared = b.shared.clone();
+            peer.before_read = Some((
+                read,
+                Box::new(move || {
+                    assert!(shared.rate_allow(scope, rl::AUTH));
+                }),
+            ));
+            let trace = peer.trace.clone();
+            assert!(serve_peer(Box::new(peer), b.shared.clone()).await.is_err());
+            let trace = trace.lock();
+            assert!(trace.closed);
+            assert_eq!(trace.reads, read);
+            assert_eq!(
+                trace.sent.len(),
+                read - 1,
+                "no work after the competing failure"
+            );
+        }
+        assert!(b.shared.peers.pending().is_empty());
+        b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn approved_and_pending_proofs_do_not_charge_and_live_disable_bypasses_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = server(dir.path(), 1).await;
+        for approved in [false, true] {
+            for _ in 0..3 {
+                let peer = Peer::new(1, true);
+                if approved {
+                    b.shared.peers.seed_approved(
+                        peer.key.public().0,
+                        "peer",
+                        Some(peer.hello.hello.origin.clone()),
+                    );
+                }
+                let trace = peer.trace.clone();
+                assert!(serve_peer(Box::new(peer), b.shared.clone()).await.is_ok());
+                let trace = trace.lock();
+                let welcome: WelcomeMsg = decode_fed(
+                    trace
+                        .sent
+                        .iter()
+                        .find(|f| f.message_type == MT_WELCOME)
+                        .unwrap(),
+                    MT_WELCOME,
+                )
+                .unwrap();
+                assert_eq!(welcome.connected, approved);
+            }
+        }
+        let scope = Peer::new(1, true).scope();
+        assert!(
+            b.shared.rate_allow(scope, rl::AUTH),
+            "all successful proofs were free"
+        );
+        assert!(!b.shared.rate_probe(scope, rl::AUTH));
+        for key in ["ratelimit_enabled", "ratelimit_auth_per_min"] {
+            b.shared
+                .config
+                .set_key(
+                    key,
+                    if key == "ratelimit_enabled" {
+                        "false"
+                    } else {
+                        "0"
+                    },
+                )
+                .unwrap();
+            for _ in 0..3 {
+                assert!(serve_peer(Box::new(Peer::new(1, false)), b.shared.clone())
+                    .await
+                    .is_err());
+                assert!(serve_peer(Box::new(Peer::new(1, true)), b.shared.clone())
+                    .await
+                    .is_ok());
+            }
+            b.shared
+                .config
+                .set_key(
+                    key,
+                    if key == "ratelimit_enabled" {
+                        "true"
+                    } else {
+                        "1"
+                    },
+                )
+                .unwrap();
+        }
+        // A nonzero rate with zero capacity denies even an approved peer.
+        b.shared
+            .config
+            .set_key("ratelimit_auth_burst", "0")
+            .unwrap();
+        let peer = Peer::new(1, true);
+        let trace = peer.trace.clone();
+        assert!(serve_peer(Box::new(peer), b.shared.clone()).await.is_err());
+        assert_eq!(trace.lock().reads, 0);
+        b.shutdown().await;
+    }
 }
 
 #[cfg(test)]

@@ -77,6 +77,26 @@ Each proof demonstrates **live possession** of the announced identity key and
 binds the immutable origin to it. The nonces bind the proof to *this*
 connection, so a captured proof cannot be replayed on another session.
 
+Inbound peering uses the shared **AUTH** failure budget for the remote IP
+(`ratelimit_auth_per_min` and `ratelimit_auth_burst`). A non-consuming probe
+runs before the exchange and again after each received handshake message,
+before challenge signing or proof verification. An exhausted bucket closes
+that connection without a Welcome; the initial gate sends no HelloAck.
+Malformed authentication frames, unsupported federation versions, invalid
+origin claims and invalid signatures each charge one failed attempt.
+Transport disconnects and local I/O failures do not. Successful proofs spend
+nothing, including valid peers waiting for approval; later authorization or
+session failures also spend nothing. Approval never bypasses the gate because
+the announced key is unproved until the signature is checked.
+
+The policy is read live. `ratelimit_enabled = false` or
+`ratelimit_auth_per_min = 0` disables this gate; a zero burst with a nonzero
+rate refuses all attempts. Tokens refill normally, and other remote IPs retain
+their own budgets. Peers sharing an IP share its AUTH budget with the other
+login surfaces. This gate does not replace QUIC transport bounds or limit
+post-authentication traffic, and does not change the separate native
+grant-pull handshake.
+
 `federation_origin` is TOML-only, restart-only, and required whenever
 federation is enabled. The hot-reloadable display `name` does not change the
 origin used in newly signed events.
