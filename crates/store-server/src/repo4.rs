@@ -292,6 +292,15 @@ impl PostsRepo<'_> {
     /// duplicate (same event flooded twice) is a no-op returning false.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert(&self, post: &PostRow) -> Result<bool, StoreError> {
+        let mut conn = self.0.acquire().await?;
+        Self::insert_on(&mut conn, post).await
+    }
+
+    /// The same projection insert inside a caller-owned transaction.
+    pub(crate) async fn insert_on(
+        conn: &mut sqlx::SqliteConnection,
+        post: &PostRow,
+    ) -> Result<bool, StoreError> {
         let affected = sqlx::query(
             "INSERT INTO posts (event_id, board_slug, root_id, parent_id, author, author_key,
                                 origin, subject, body, mime, created_at, event_blob)
@@ -310,7 +319,7 @@ impl PostsRepo<'_> {
         .bind(&post.mime)
         .bind(post.created_at)
         .bind(&post.event_blob)
-        .execute(self.0)
+        .execute(conn)
         .await?
         .rows_affected();
         Ok(affected > 0)

@@ -8,6 +8,7 @@
 //! retention) live here.
 
 use rabbithole_identity::keys::IdentityKey;
+use rabbithole_store_server::qwk::QwkRepliesRepo;
 use rabbithole_store_server::repo4::{
     BoardRow, BoardsRepo, FollowupRow, FollowupsRepo, PostRow, PostsRepo, ReadMarksRepo,
 };
@@ -225,6 +226,71 @@ impl BoardService {
         mime: &str,
         now_ms: i64,
     ) -> Result<PostRow, BoardError> {
+        let (event, max_threads) = self
+            .prepare_post(
+                board,
+                parent,
+                author_display,
+                author_seed,
+                subject,
+                body,
+                mime,
+                now_ms,
+            )
+            .await?;
+        self.ingest(&event, max_threads).await
+    }
+
+    /// Post a QWK reply with a durable successful-import receipt. `None`
+    /// means this account has already imported the same semantic reply on
+    /// this board. The signed event, projection, receipt and retention
+    /// changes commit together; callers publish only for `Some`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn post_qwk_reply(
+        &self,
+        account_id: i64,
+        digest: &[u8; 32],
+        board: &str,
+        parent: Option<[u8; 32]>,
+        author_display: &str,
+        author_seed: &[u8; 32],
+        subject: &str,
+        body: &str,
+        now_ms: i64,
+    ) -> Result<Option<PostRow>, BoardError> {
+        let (event, max_threads) = self
+            .prepare_post(
+                board,
+                parent,
+                author_display,
+                author_seed,
+                subject,
+                body,
+                "text/plain",
+                now_ms,
+            )
+            .await?;
+        let row = self.project_post(&event).await?;
+        Ok(QwkRepliesRepo(&self.pool)
+            .post_once(account_id, digest, &row, max_threads)
+            .await?
+            .then_some(row))
+    }
+
+    /// Validate and mint through the same author, board and thread rules for
+    /// ordinary posts and atomic QWK imports. No writes happen here.
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_post(
+        &self,
+        board: &str,
+        parent: Option<[u8; 32]>,
+        author_display: &str,
+        author_seed: &[u8; 32],
+        subject: &str,
+        body: &str,
+        mime: &str,
+        now_ms: i64,
+    ) -> Result<(SignedEvent, i64), BoardError> {
         let Some(board_row) = BoardsRepo(&self.pool).by_slug(board).await? else {
             return Err(BoardError::NoSuchBoard);
         };
@@ -270,8 +336,7 @@ impl BoardService {
             },
         );
 
-        let row = self.ingest(&event, board_row.max_threads).await?;
-        Ok(row)
+        Ok((event, board_row.max_threads))
     }
 
     /// Store a signed event's projection (used by `post` and, later, by the
@@ -282,6 +347,26 @@ impl BoardService {
         event: &SignedEvent,
         max_threads: i64,
     ) -> Result<PostRow, BoardError> {
+        let row = self.project_post(event).await?;
+        PostsRepo(&self.pool).insert(&row).await?;
+
+        // Retention: drop oldest overflow threads in this board, and their
+        // follow-ups with them.
+        if row.parent_id.is_none() && max_threads > 0 {
+            for old in PostsRepo(&self.pool)
+                .overflow_threads(&row.board_slug, max_threads)
+                .await?
+            {
+                PostsRepo(&self.pool).delete_thread(&old).await?;
+                FollowupsRepo(&self.pool).delete_for_root(&old).await?;
+            }
+        }
+        Ok(row)
+    }
+
+    /// Prepare the projection without storing it, preserving the signed blob
+    /// unchanged and using the local board's canonical spelling.
+    async fn project_post(&self, event: &SignedEvent) -> Result<PostRow, BoardError> {
         let EventBody::Post {
             board,
             root,
@@ -307,7 +392,7 @@ impl BoardService {
         } else {
             None
         });
-        let row = PostRow {
+        Ok(PostRow {
             event_id: event.id,
             board_slug,
             root_id,
@@ -320,21 +405,7 @@ impl BoardService {
             edited: false,
             tombstoned: false,
             event_blob: blob,
-        };
-        PostsRepo(&self.pool).insert(&row).await?;
-
-        // Retention: drop oldest overflow threads in this board, and their
-        // follow-ups with them.
-        if parent.is_none() && max_threads > 0 {
-            for old in PostsRepo(&self.pool)
-                .overflow_threads(&row.board_slug, max_threads)
-                .await?
-            {
-                PostsRepo(&self.pool).delete_thread(&old).await?;
-                FollowupsRepo(&self.pool).delete_for_root(&old).await?;
-            }
-        }
-        Ok(row)
+        })
     }
 
     pub async fn threads(

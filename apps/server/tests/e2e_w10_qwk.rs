@@ -425,6 +425,198 @@ async fn rep_ingest_posts_threads_dedupes_and_rejects() {
 }
 
 #[tokio::test]
+async fn rep_replay_survives_restart_and_scopes_accounts_and_resolved_boards() {
+    use rabbithole_identity::keys::IdentityKey;
+    use rabbithole_server_core::events::SignedEvent;
+    use rabbithole_store_server::repo::AccountsRepo;
+
+    let work = tempfile::tempdir().unwrap();
+    let mut cfg = test_config(&work.path().join("srv"));
+    let burrow = Burrow::start(cfg.clone()).await.unwrap();
+    let alice = burrow
+        .shared
+        .auth
+        .create_account("alice", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    burrow
+        .shared
+        .auth
+        .create_account("bob", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    seed_boards(&burrow).await;
+    let mut reply = ReplyMessage::new(1, "ALL", "OFFLINE", "Persistent", "same semantic content");
+    let report = burrow::qwk::ingest_rep_for(
+        &burrow.shared,
+        &alice,
+        &ReplyPacket::new(vec![reply.clone(), reply.clone()]).encode(),
+    )
+    .await
+    .unwrap();
+    assert_eq!((report.accepted, report.duplicates), (1, 1));
+    assert!(report.rejected.is_empty());
+    let first = burrow
+        .shared
+        .boards
+        .threads("alpha", 10)
+        .await
+        .unwrap()
+        .remove(0)
+        .0;
+    let signed: SignedEvent = postcard::from_bytes(&first.event_blob).unwrap();
+    let origin_key = IdentityKey::from_seed(&burrow.shared.server_signing_seed)
+        .public()
+        .0;
+    signed.verify(&origin_key).unwrap();
+    assert_eq!(signed.id, first.event_id);
+    assert!(
+        signed.author.starts_with("alice@"),
+        "uploader, not REP From"
+    );
+    burrow.shutdown().await;
+
+    // A name change must not change this server database's dedupe scope.
+    cfg.name = "Renamed QWK Warren".into();
+    let burrow = Burrow::start(cfg).await.unwrap();
+    let alice = AccountsRepo(&burrow.shared.pool)
+        .by_login("alice")
+        .await
+        .unwrap()
+        .unwrap();
+    let bob = AccountsRepo(&burrow.shared.pool)
+        .by_login("bob")
+        .await
+        .unwrap()
+        .unwrap();
+    burrow
+        .shared
+        .boards
+        .create_board("aardvark", "New first board", "", 2, None, 0)
+        .await
+        .unwrap();
+    // alpha is now conference 2. Fresh reader bookkeeping must not make the
+    // same content fresh, nor may the old conference number alias another board.
+    reply.conference = 2;
+    reply.number = 999;
+    reply.date = "09-26-26".into();
+    reply.time = "23:59".into();
+    reply.status = b'-';
+    let rep = ReplyPacket::new(vec![reply.clone()]).encode();
+    let replay = burrow::qwk::ingest_rep_for(&burrow.shared, &alice, &rep)
+        .await
+        .unwrap();
+    assert_eq!((replay.accepted, replay.duplicates), (0, 1));
+    assert_eq!(
+        burrow
+            .shared
+            .boards
+            .threads("alpha", 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let other_account = burrow::qwk::ingest_rep_for(&burrow.shared, &bob, &rep)
+        .await
+        .unwrap();
+    assert_eq!((other_account.accepted, other_account.duplicates), (1, 0));
+    for (conference, board) in [(1, "aardvark"), (3, "beta")] {
+        reply.conference = conference;
+        let report = burrow::qwk::ingest_rep_for(
+            &burrow.shared,
+            &alice,
+            &ReplyPacket::new(vec![reply.clone()]).encode(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((report.accepted, report.duplicates), (1, 0));
+        assert_eq!(
+            burrow.shared.boards.threads(board, 10).await.unwrap().len(),
+            1
+        );
+    }
+    assert_eq!(
+        burrow
+            .shared
+            .boards
+            .threads("alpha", 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn rep_refusal_is_retryable_and_concurrent_uploads_publish_once() {
+    use rabbithole_server_core::{Caps, ServerEvent};
+
+    let work = tempfile::tempdir().unwrap();
+    let burrow = Burrow::start(test_config(&work.path().join("srv")))
+        .await
+        .unwrap();
+    let alice = burrow
+        .shared
+        .auth
+        .create_account("alice", "pw-pw-pw", Role::User)
+        .await
+        .unwrap();
+    seed_boards(&burrow).await;
+    let rep = ReplyPacket::new(vec![ReplyMessage::new(
+        1,
+        "ALL",
+        "ALICE",
+        "Retry",
+        "after refusal",
+    )])
+    .encode();
+    let mut denied = alice.clone();
+    denied.revoke_mask |= Caps::BOARD_POST.0;
+    let mut events = burrow.shared.bus.subscribe();
+    assert!(matches!(
+        burrow::qwk::ingest_rep_for(&burrow.shared, &denied, &rep).await,
+        Err(burrow::qwk::QwkGateError::Forbidden)
+    ));
+    assert!(burrow
+        .shared
+        .boards
+        .threads("alpha", 10)
+        .await
+        .unwrap()
+        .is_empty());
+    let (a, b) = tokio::join!(
+        burrow::qwk::ingest_rep_for(&burrow.shared, &alice, &rep),
+        burrow::qwk::ingest_rep_for(&burrow.shared, &alice, &rep),
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!(a.accepted + b.accepted, 1);
+    assert_eq!(a.duplicates + b.duplicates, 1);
+    assert!(a.rejected.is_empty() && b.rejected.is_empty());
+    let rows = burrow.shared.boards.threads("alpha", 10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    // Both import futures finished, so all their synchronous publications
+    // are queued already. No negative timing assertion is needed.
+    let mut published = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let ServerEvent::BoardPost { id, .. } = event {
+            published.push(id);
+        }
+    }
+    assert_eq!(published, [rows[0].0.event_id]);
+    let stats = burrow.shared.stats.snapshot(0, &[("qwk", true)]);
+    let qwk = stats
+        .gateways
+        .iter()
+        .find(|gateway| gateway.name == "qwk")
+        .unwrap();
+    assert_eq!(qwk.counters, [("replies_ingested".into(), 1)]);
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
 async fn qwk_disabled_by_default_refuses_both_ctl_surfaces() {
     let work = tempfile::tempdir().unwrap();
     let cfg = ServerConfig {

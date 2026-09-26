@@ -57,19 +57,20 @@
 //! gateway seeds) and `BOARD_POST` checked per target board
 //! (`board/<slug>`). A reply's `reference` field is resolved against the
 //! board's article numbering to thread under its parent when possible.
-//! Dedupe uses the reply's blake3 [`content_hash`] in the shared
-//! [`DedupStore`](rabbithole_server_core::DedupStore) under the new
-//! [`SeenKey::QwkReply`] namespace — content-addressed, so the QWK
-//! `{conference, number}` identity key (which readers fill unreliably) is not
-//! trusted. Like the other gateways the seen set is in-memory and
-//! time-windowed; durable cross-restart dedupe is a follow-up.
+//! Dedupe durably records the reply's semantic blake3 [`content_hash`], scoped
+//! to the uploading account and resolved board in this server's QWK receipt
+//! table. Conference numbers are normalized before hashing so renumbering a
+//! board doesn't change its reply identity. Receipts commit atomically with
+//! the signed post/projection and retention changes, survive server restarts
+//! and post pruning, and expire after 30 days (cleaned on the next import).
+//! Refused or failed posts leave no receipt, so a later retry remains valid.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use rabbithole_legacy_qwk::reply::{check, content_hash, ReplyProblem};
 use rabbithole_legacy_qwk::{build_packet, ControlDat, QwkMessage, ReplyPacket};
-use rabbithole_server_core::{Caps, Role, SeenKey, ServerEvent, Subject};
+use rabbithole_server_core::{Caps, Role, ServerEvent, Subject};
 use rabbithole_store_server::repo::Account;
 use rabbithole_store_server::repo4::{BoardRow, ReadMarksRepo};
 
@@ -394,12 +395,6 @@ pub async fn ingest_rep_for(
                 .push((reply.subject.clone(), problems_text(&problems)));
             continue;
         }
-        let digest = content_hash(&reply);
-        let key = SeenKey::QwkReply(digest);
-        if shared.dedup.seen(&key) {
-            report.duplicates += 1;
-            continue;
-        }
         let board = by_num[&reply.conference];
         if !shared
             .perms
@@ -410,6 +405,12 @@ pub async fn ingest_rep_for(
                 .push((reply.subject.clone(), "not permitted on that board".into()));
             continue;
         }
+        // The durable key includes the resolved board, not this packet's
+        // mutable conference number. Preserve the codec's semantic fields
+        // and its existing treatment of volatile headers/reference.
+        let mut semantic_reply = reply.clone();
+        semantic_reply.conference = 0;
+        let digest = content_hash(&semantic_reply);
         // `reference` is the parent's article number in this board's stable
         // numbering; unresolvable references post as top-level threads.
         let parent = if reply.reference > 0 {
@@ -423,23 +424,20 @@ pub async fn ingest_rep_for(
         let now = chrono::Utc::now().timestamp_millis();
         match shared
             .boards
-            .post(
+            .post_qwk_reply(
+                account.id,
+                &digest,
                 &board.slug,
                 parent,
                 &author,
                 &seed,
                 &reply.subject,
                 &reply.body,
-                "text/plain",
                 now,
             )
             .await
         {
-            Ok(row) => {
-                // Record only what actually posted, so an RBAC/board refusal
-                // today doesn't shadow a legitimate retry tomorrow. This also
-                // catches an in-batch repeat: the second copy sees the key.
-                shared.dedup.check_and_record(key, now);
+            Ok(Some(row)) => {
                 shared.bus.publish(ServerEvent::BoardPost {
                     board: row.board_slug.clone(),
                     id: row.event_id,
@@ -448,6 +446,7 @@ pub async fn ingest_rep_for(
                 report.accepted += 1;
                 shared.stats.incr("qwk", "replies_ingested");
             }
+            Ok(None) => report.duplicates += 1,
             Err(e) => report.rejected.push((reply.subject.clone(), e.to_string())),
         }
     }
