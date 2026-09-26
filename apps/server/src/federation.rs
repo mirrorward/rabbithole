@@ -1390,6 +1390,7 @@ async fn sync_catalogs(
     shared: &Arc<Shared>,
     peer_key: [u8; 32],
 ) -> Result<()> {
+    let fetch = shared.catalogs.begin_fetch(&shared.peers, peer_key)?;
     let mine = crate::fed_catalog::local_catalog(shared).await?;
     conn.send(fed_frame(
         FrameKind::Request,
@@ -1411,7 +1412,7 @@ async fn sync_catalogs(
     ))
     .await?;
     let msg: CatalogMsg = recv_fed_bounded(conn, MT_CATALOG, MAX_CATALOG).await?;
-    let stored = crate::fed_catalog::ingest_peer_catalog(shared, peer_key, &msg.bytes)?;
+    let stored = crate::fed_catalog::ingest_fetched_catalog(shared, fetch, &msg.bytes)?;
     tracing::info!(
         peer = %PublicKey(peer_key).fingerprint(),
         generation = stored.catalog.generation,
@@ -1655,7 +1656,7 @@ pub fn approve_peer(
     let existed = shared.peers.approve_origin(&key, origin.clone());
     if let Err(error) = persist_approved(shared) {
         if !was_approved {
-            shared.peers.revoke(&key);
+            shared.catalogs.revoke_peer(&shared.peers, &key);
         }
         return Err(PeerRefusal::Persist(error));
     }
@@ -1669,7 +1670,7 @@ pub fn revoke_peer(shared: &Shared, key: [u8; 32]) -> std::result::Result<bool, 
     if is_configured_peer(shared, &key, known_origin.as_deref()) {
         return Err(PeerRefusal::Configured);
     }
-    let existed = shared.peers.revoke(&key);
+    let existed = shared.catalogs.revoke_peer(&shared.peers, &key);
     persist_approved(shared).map_err(PeerRefusal::Persist)?;
     Ok(existed)
 }

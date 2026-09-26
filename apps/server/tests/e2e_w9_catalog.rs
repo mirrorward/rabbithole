@@ -201,6 +201,174 @@ async fn catalog_sync_and_federated_search_with_provenance() {
 }
 
 #[tokio::test]
+async fn revoked_catalog_is_evicted_without_losing_an_approved_mirror() {
+    let work = tempfile::tempdir().unwrap();
+    let a = Burrow::start(fed_config(&work.path().join("a")))
+        .await
+        .unwrap();
+    let b_config = fed_config(&work.path().join("b"));
+    let b = Burrow::start(b_config.clone()).await.unwrap();
+    let c = Burrow::start(fed_config(&work.path().join("c")))
+        .await
+        .unwrap();
+    let a_key = a.shared.server_key;
+    let b_key = b.shared.server_key;
+    let c_key = c.shared.server_key;
+    for peer in [&a, &c] {
+        peer.shared
+            .files
+            .create_area("public", "Public", "")
+            .await
+            .unwrap();
+        let response = burrow::ctl::handle(
+            &peer.shared,
+            &json!({"cmd": "peer-approve", "key": hex::encode(b_key), "origin": b.shared.origin_name()}),
+        ).await;
+        assert_eq!(response["ok"], true, "{response}");
+    }
+    add_file(&a, "public", None, "revoked-demo.zip", 7, 1234).await;
+    add_file(&a, "public", None, "revoked-only-demo.zip", 8, 1234).await;
+    add_file(&c, "public", None, "approved-demo.zip", 7, 1234).await;
+    for peer in [&a, &c] {
+        assert_eq!(
+            dial_peer(b.shared.clone(), target_for(peer)).await.unwrap(),
+            DialOutcome::Connected(peer.shared.server_key)
+        );
+    }
+    assert_eq!(b.shared.peers.state(&a_key), Some(PeerState::Connected));
+    let first = b.shared.catalogs.peer_catalog(&a_key).unwrap();
+    let mirror = b.shared.catalogs.peer_catalog(&c_key).unwrap();
+    let before =
+        burrow::ctl::handle(&b.shared, &json!({"cmd": "fed-search", "terms": "demo"})).await;
+    assert_eq!(before["data"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        before["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["hash"] == hex::encode([7; 32]))
+            .unwrap()["sources"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let revoked = burrow::ctl::handle(
+        &b.shared,
+        &json!({"cmd": "peer-revoke", "key": hex::encode(a_key)}),
+    )
+    .await;
+    assert_eq!(revoked["ok"], true, "{revoked}");
+    // No wait for the session's approval tick: withdrawal removes the search
+    // source immediately while leaving an approved mirror of the same hash.
+    assert!(b.shared.catalogs.peer_catalog(&a_key).is_none());
+    assert_eq!(b.shared.catalogs.peer_catalog(&c_key), Some(mirror));
+    let after =
+        burrow::ctl::handle(&b.shared, &json!({"cmd": "fed-search", "terms": "demo"})).await;
+    let rows = after["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "revoked-only content disappeared: {after}");
+    assert_eq!(rows[0]["hash"], hex::encode([7; 32]));
+    let sources = rows[0]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0]["server_key"], hex::encode(c_key));
+    let listed = burrow::ctl::handle(&b.shared, &json!({"cmd": "fed-catalogs"})).await;
+    assert!(!listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["key"] == hex::encode(a_key)));
+    assert!(
+        burrow::fed_catalog::ingest_peer_catalog(&b.shared, a_key, &first.to_bytes())
+            .unwrap_err()
+            .to_string()
+            .contains("non-approved")
+    );
+
+    let approved = burrow::ctl::handle(
+        &b.shared,
+        &json!({"cmd": "peer-approve", "key": hex::encode(a_key)}),
+    )
+    .await;
+    assert_eq!(approved["ok"], true, "{approved}");
+    assert!(
+        b.shared.catalogs.peer_catalog(&a_key).is_none(),
+        "approval alone does not restore revoked bytes"
+    );
+    assert!(
+        burrow::fed_catalog::ingest_peer_catalog(&b.shared, a_key, &first.to_bytes())
+            .unwrap_err()
+            .to_string()
+            .contains("stale catalog")
+    );
+    add_file(&a, "public", None, "new-demo.zip", 9, 99).await;
+    assert_eq!(
+        dial_peer(b.shared.clone(), target_for(&a)).await.unwrap(),
+        DialOutcome::Connected(a_key)
+    );
+    let newer = b.shared.catalogs.peer_catalog(&a_key).unwrap();
+    assert!(newer.supersedes(&first));
+    let restored =
+        burrow::ctl::handle(&b.shared, &json!({"cmd": "fed-search", "terms": "demo"})).await;
+    assert_eq!(restored["data"].as_array().unwrap().len(), 3);
+    for source in restored["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|row| row["sources"].as_array().unwrap())
+        .filter(|source| source["server_key"] == hex::encode(a_key))
+    {
+        assert_eq!(source["generation"], newer.catalog.generation);
+    }
+
+    // Only the local catalog is persisted today. Restart must neither restore
+    // revoked approval nor invent a cached peer source; the approved mirror
+    // remains eligible for a fresh catalog pull.
+    burrow::federation::revoke_peer(&b.shared, a_key).unwrap();
+    b.shutdown().await;
+    let restarted = Burrow::start(b_config).await.unwrap();
+    assert!(!restarted.shared.peers.is_approved(&a_key));
+    assert!(restarted.shared.peers.is_approved(&c_key));
+    assert!(restarted.shared.catalogs.peer_catalogs().is_empty());
+    assert!(
+        burrow::fed_catalog::ingest_peer_catalog(&restarted.shared, a_key, &newer.to_bytes())
+            .is_err()
+    );
+    assert_eq!(
+        dial_peer(restarted.shared.clone(), target_for(&c))
+            .await
+            .unwrap(),
+        DialOutcome::Connected(c_key)
+    );
+    let reloaded = burrow::ctl::handle(
+        &restarted.shared,
+        &json!({"cmd": "fed-search", "terms": "demo"}),
+    )
+    .await;
+    assert_eq!(reloaded["data"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        reloaded["data"][0]["sources"][0]["server_key"],
+        hex::encode(c_key)
+    );
+    // Defense at both read boundaries also excludes a stale cache entry whose
+    // registry approval changed without going through the eviction helper.
+    restarted.shared.peers.revoke(&c_key);
+    assert!(restarted.shared.catalogs.peer_catalog(&c_key).is_some());
+    let filtered = burrow::ctl::handle(
+        &restarted.shared,
+        &json!({"cmd": "fed-search", "terms": "demo"}),
+    )
+    .await;
+    assert!(filtered["data"].as_array().unwrap().is_empty());
+    let filtered = burrow::ctl::handle(&restarted.shared, &json!({"cmd": "fed-catalogs"})).await;
+    assert_eq!(filtered["data"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["data"][0]["local"], true);
+    restarted.shutdown().await;
+    c.shutdown().await;
+    a.shutdown().await;
+}
+
+#[tokio::test]
 async fn tampered_impersonated_and_stale_catalogs_are_rejected() {
     let work = tempfile::tempdir().unwrap();
     let b = Burrow::start(fed_config(&work.path().join("b")))

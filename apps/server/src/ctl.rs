@@ -610,8 +610,8 @@ async fn dispatch(shared: &Arc<Shared>, req: &Value) -> Result<Value, String> {
         }
         // ---- Federated catalogs + cross-server search (Wave 9.x) -------
         "fed-catalogs" => {
-            // The local catalog (rebuilt on demand) plus every stored,
-            // verified peer catalog.
+            // The local catalog (rebuilt on demand) plus every currently
+            // approved, verified peer catalog.
             let local = crate::fed_catalog::local_catalog(shared)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -622,7 +622,7 @@ async fn dispatch(shared: &Arc<Shared>, req: &Value) -> Result<Value, String> {
                 "generation": local.catalog.generation,
                 "entries": local.catalog.entries.len(),
             })];
-            for cat in shared.catalogs.peer_catalogs() {
+            for cat in shared.catalogs.approved_peer_catalogs(&shared.peers) {
                 let key = cat.catalog.server_key;
                 rows.push(json!({
                     "server": crate::fed_catalog::server_display_name(shared, &key),

@@ -41,13 +41,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use rabbithole_federation::{
     dedupe_by_hash, Catalog, CatalogEntry, DedupedMatch, SearchQuery, SearchResult, SignedCatalog,
 };
 use rabbithole_identity::{IdentityKey, PublicKey};
-use rabbithole_server_core::{Caps, Role, Subject};
+use rabbithole_server_core::{Caps, PeerRegistry, Role, Subject};
 
 use crate::Shared;
 
@@ -74,8 +75,26 @@ pub struct CatalogState {
     /// the (awaiting) rebuild so concurrent callers serialize and can't
     /// double-bump the generation.
     local: tokio::sync::Mutex<Option<SignedCatalog>>,
-    /// Latest verified catalog per approved peer.
-    peers: parking_lot::RwLock<HashMap<[u8; 32], SignedCatalog>>,
+    /// Catalog and revocation boundary per previously approved peer. Entries
+    /// are created only by an approved fetch, never by unknown revoke requests.
+    /// A revoked entry retains only its revision and generation watermark, so
+    /// reapproval cannot accept a replay of an older signed catalog.
+    peers: parking_lot::RwLock<HashMap<[u8; 32], PeerCatalog>>,
+}
+
+#[derive(Default)]
+struct PeerCatalog {
+    revision: Arc<()>,
+    generation: Option<u64>,
+    signed: Option<SignedCatalog>,
+}
+
+/// An approval boundary captured before a fetch or signature verification.
+/// Pointer identity avoids wrapping counters: revocation replaces the marker,
+/// and outstanding fetches keep the old allocation alive until they finish.
+pub(crate) struct CatalogFetch {
+    key: [u8; 32],
+    revision: Arc<()>,
 }
 
 impl CatalogState {
@@ -110,23 +129,103 @@ impl CatalogState {
 
     /// The latest verified catalog from `peer`, if any.
     pub fn peer_catalog(&self, key: &[u8; 32]) -> Option<SignedCatalog> {
-        self.peers.read().get(key).cloned()
+        self.peers
+            .read()
+            .get(key)
+            .and_then(|peer| peer.signed.clone())
     }
 
     /// All stored peer catalogs, sorted by server key for stable output.
     pub fn peer_catalogs(&self) -> Vec<SignedCatalog> {
-        let mut v: Vec<SignedCatalog> = self.peers.read().values().cloned().collect();
+        let mut v: Vec<SignedCatalog> = self
+            .peers
+            .read()
+            .values()
+            .filter_map(|peer| peer.signed.clone())
+            .collect();
         v.sort_by_key(|c| c.catalog.server_key);
         v
     }
 
-    /// Whether an announced `generation` from `peer` is fresher than what we
-    /// hold — i.e. worth a full fetch.
-    pub fn wants(&self, key: &[u8; 32], generation: u64) -> bool {
-        match self.peers.read().get(key) {
-            Some(cur) => generation > cur.catalog.generation,
-            None => true,
+    /// Search/list boundary: even a retained or future reloaded cache entry is
+    /// never authority to advertise an unapproved source.
+    pub fn approved_peer_catalogs(&self, registry: &PeerRegistry) -> Vec<SignedCatalog> {
+        let peers = self.peers.read();
+        let mut catalogs: Vec<_> = peers
+            .iter()
+            .filter(|(key, _)| registry.is_approved(key))
+            .filter_map(|(_, peer)| peer.signed.clone())
+            .collect();
+        catalogs.sort_by_key(|catalog| catalog.catalog.server_key);
+        catalogs
+    }
+
+    /// Catalog state is always locked before the peer registry. This shares
+    /// a critical section with final insertion: an ingest either commits before
+    /// revocation and is evicted, or observes the revoked approval/revision.
+    /// No I/O or await occurs while these locks are held.
+    pub(crate) fn revoke_peer(&self, registry: &PeerRegistry, key: &[u8; 32]) -> bool {
+        let mut peers = self.peers.write();
+        let existed = registry.revoke(key);
+        if let Some(peer) = peers.get_mut(key) {
+            peer.signed = None;
+            peer.revision = Arc::new(());
         }
+        existed
+    }
+
+    pub(crate) fn begin_fetch(
+        &self,
+        registry: &PeerRegistry,
+        key: [u8; 32],
+    ) -> Result<CatalogFetch> {
+        let mut peers = self.peers.write();
+        if !registry.is_approved(&key) {
+            bail!("refusing catalog from non-approved peer");
+        }
+        let peer = peers.entry(key).or_default();
+        Ok(CatalogFetch {
+            key,
+            revision: peer.revision.clone(),
+        })
+    }
+
+    fn store_verified(
+        &self,
+        registry: &PeerRegistry,
+        fetch: CatalogFetch,
+        signed: SignedCatalog,
+    ) -> Result<SignedCatalog> {
+        let mut peers = self.peers.write();
+        if !registry.is_approved(&fetch.key) {
+            bail!("refusing catalog from non-approved peer");
+        }
+        let peer = peers
+            .get_mut(&fetch.key)
+            .filter(|peer| Arc::ptr_eq(&peer.revision, &fetch.revision))
+            .ok_or_else(|| anyhow!("peer approval revoked during catalog fetch"))?;
+        if let Some(generation) = peer.generation {
+            if signed.catalog.generation <= generation {
+                bail!(
+                    "stale catalog: generation {} <= stored {}",
+                    signed.catalog.generation,
+                    generation
+                );
+            }
+        }
+        peer.generation = Some(signed.catalog.generation);
+        peer.signed = Some(signed.clone());
+        Ok(signed)
+    }
+
+    /// Whether an announced `generation` from `peer` is fresher than the last
+    /// accepted generation, including a watermark retained after revocation.
+    pub fn wants(&self, key: &[u8; 32], generation: u64) -> bool {
+        self.peers
+            .read()
+            .get(key)
+            .and_then(|peer| peer.generation)
+            .is_none_or(|current| generation > current)
     }
 }
 
@@ -267,42 +366,40 @@ async fn public_entries(shared: &Shared) -> Result<Vec<CatalogEntry>> {
 /// - signatures that don't verify under the pinned peer key (covers both
 ///   tampering and impersonation — a catalog naming a different server key is
 ///   a `KeyMismatch`);
-/// - stale generations (must be strictly newer than what we hold).
+/// - approval withdrawn during verification, even if the peer was reapproved;
+/// - stale generations (must be strictly newer than the last accepted one,
+///   including after revocation and reapproval during this process lifetime).
 pub fn ingest_peer_catalog(
     shared: &Shared,
     peer_key: [u8; 32],
     bytes: &[u8],
 ) -> Result<SignedCatalog> {
-    if !shared.peers.is_approved(&peer_key) {
-        bail!("refusing catalog from non-approved peer");
-    }
-    let signed = SignedCatalog::from_bytes(bytes).ok_or_else(|| anyhow!("malformed catalog"))?;
-    signed
-        .verify(&PublicKey(peer_key))
-        .map_err(|e| anyhow!("catalog rejected: {e}"))?;
-
-    let mut peers = shared.catalogs.peers.write();
-    if let Some(cur) = peers.get(&peer_key) {
-        if signed.catalog.generation <= cur.catalog.generation {
-            bail!(
-                "stale catalog: generation {} <= stored {}",
-                signed.catalog.generation,
-                cur.catalog.generation
-            );
-        }
-    }
-    peers.insert(peer_key, signed.clone());
-    Ok(signed)
+    let fetch = shared.catalogs.begin_fetch(&shared.peers, peer_key)?;
+    ingest_fetched_catalog(shared, fetch, bytes)
 }
 
-/// Run `query` across the local catalog plus every stored (verified) peer
-/// catalog, collapsing identical files with [`dedupe_by_hash`]. Every source
+/// Finish a fetch using the approval boundary from before its first await.
+pub(crate) fn ingest_fetched_catalog(
+    shared: &Shared,
+    fetch: CatalogFetch,
+    bytes: &[u8],
+) -> Result<SignedCatalog> {
+    let signed = SignedCatalog::from_bytes(bytes).ok_or_else(|| anyhow!("malformed catalog"))?;
+    signed
+        .verify(&PublicKey(fetch.key))
+        .map_err(|e| anyhow!("catalog rejected: {e}"))?;
+
+    shared.catalogs.store_verified(&shared.peers, fetch, signed)
+}
+
+/// Run `query` across the local catalog plus every currently approved,
+/// verified peer catalog, collapsing identical files with [`dedupe_by_hash`]. Every source
 /// in the result carries provenance: the advertising server's key and the
 /// catalog generation it came from.
 pub async fn federated_search(shared: &Shared, query: &SearchQuery) -> Result<Vec<DedupedMatch>> {
     let local = local_catalog(shared).await?;
     let mut results = vec![SearchResult::from_catalog(&local.catalog, query)];
-    for cat in shared.catalogs.peer_catalogs() {
+    for cat in shared.catalogs.approved_peer_catalogs(&shared.peers) {
         results.push(SearchResult::from_catalog(&cat.catalog, query));
     }
     Ok(dedupe_by_hash(&results))
@@ -317,5 +414,93 @@ pub fn server_display_name(shared: &Shared, key: &[u8; 32]) -> String {
     match shared.peers.get(key) {
         Some(rec) if !rec.name.is_empty() => rec.name,
         _ => hex::encode(key),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revoke_during_fetch_cannot_repopulate_after_reapproval() {
+        let state = Arc::new(CatalogState::new());
+        let registry = Arc::new(PeerRegistry::new());
+        let identity = IdentityKey::from_seed(&[42; 32]);
+        let key = identity.public().0;
+        registry.seed_approved(key, "peer", Some("peer.example".into()));
+        let first = Catalog::new(key, 1, None).sign(&identity).unwrap();
+        let fetch = state.begin_fetch(&registry, key).unwrap();
+        state
+            .store_verified(&registry, fetch, first.clone())
+            .unwrap();
+
+        let second = Catalog::new(key, 2, Some(first.catalog_id().unwrap()))
+            .sign(&identity)
+            .unwrap();
+        // Pause a verified reply at the final insertion boundary. The fetch
+        // was authorized, but withdrawal and reapproval happen before commit.
+        let delayed = state.begin_fetch(&registry, key).unwrap();
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let ingest = {
+            let state = state.clone();
+            let registry = registry.clone();
+            let release = release.clone();
+            let second = second.clone();
+            std::thread::spawn(move || {
+                release.wait();
+                state.store_verified(&registry, delayed, second)
+            })
+        };
+        assert!(state.revoke_peer(&registry, &key));
+        assert!(state.peer_catalog(&key).is_none());
+        assert!(state.begin_fetch(&registry, key).is_err());
+        registry.approve_origin(&key, "peer.example".into());
+        release.wait();
+        assert!(ingest
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("revoked during catalog fetch"));
+        assert!(state.peer_catalog(&key).is_none());
+
+        // Eviction does not reset the anti-replay watermark. A fresh approved
+        // fetch accepts generation 2, while generation 1 remains stale.
+        assert!(!state.wants(&key, 1));
+        let replay = state.begin_fetch(&registry, key).unwrap();
+        assert!(state
+            .store_verified(&registry, replay, first)
+            .unwrap_err()
+            .to_string()
+            .contains("stale catalog"));
+        let fresh = state.begin_fetch(&registry, key).unwrap();
+        state
+            .store_verified(&registry, fresh, second.clone())
+            .unwrap();
+        assert_eq!(state.peer_catalog(&key), Some(second));
+    }
+
+    #[test]
+    fn unapproved_cache_entries_are_filtered_and_unknown_revokes_allocate_nothing() {
+        let state = CatalogState::new();
+        let registry = PeerRegistry::new();
+        for byte in 0..=255 {
+            assert!(!state.revoke_peer(&registry, &[byte; 32]));
+            assert!(state.begin_fetch(&registry, [byte; 32]).is_err());
+        }
+        assert!(state.peers.read().is_empty());
+
+        let identity = IdentityKey::from_seed(&[42; 32]);
+        let key = identity.public().0;
+        registry.seed_approved(key, "peer", Some("peer.example".into()));
+        let signed = Catalog::new(key, 1, None).sign(&identity).unwrap();
+        let fetch = state.begin_fetch(&registry, key).unwrap();
+        state.store_verified(&registry, fetch, signed).unwrap();
+        // Model an old cache or future persisted-cache loader whose entries
+        // survived a registry-only approval change. The read boundary gates it.
+        registry.revoke(&key);
+        assert_eq!(state.peer_catalogs().len(), 1);
+        assert!(state.approved_peer_catalogs(&registry).is_empty());
+        assert_eq!(state.peers.read().len(), 1);
     }
 }
