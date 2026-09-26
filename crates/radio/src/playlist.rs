@@ -94,6 +94,39 @@ impl Playlist {
         self.cursor = None;
     }
 
+    /// Replaces the tracks — the folder behind a station changed — keeping
+    /// the station's place in them.
+    ///
+    /// The track under the cursor stays under it if it is still here. If it
+    /// went, the next [`Playlist::advance`] plays the first of the tracks
+    /// that were to follow it that is still here, so a station does not go
+    /// back to the top of its list because one song was taken out. A
+    /// playlist that had not started stays unstarted.
+    pub fn replace(&mut self, tracks: Vec<Track>) {
+        let was: Vec<_> = self.order.iter().map(|&i| self.tracks[i].id).collect();
+        let cursor = self.cursor;
+        self.tracks = tracks;
+        self.order = compute_order(&self.tracks, self.mode);
+        let len = self.order.len();
+        let position_of = |id| self.order.iter().position(|&i| self.tracks[i].id == id);
+        self.cursor = match cursor {
+            None => None,
+            Some(_) if len == 0 => None,
+            Some(c) => match was.get(c).copied().and_then(position_of) {
+                Some(here) => Some(here),
+                // Gone: stand just before whatever was coming next, in the
+                // order it was coming.
+                None => (1..was.len())
+                    .map(|step| was[(c + step) % was.len()])
+                    .find_map(position_of)
+                    .map(|next| match self.mode {
+                        RotationMode::RepeatOne => next,
+                        _ => (next + len - 1) % len,
+                    }),
+            },
+        };
+    }
+
     /// The track under the cursor, or `None` if the playlist is empty or has
     /// not been started with [`Playlist::advance`] yet.
     pub fn current(&self) -> Option<&Track> {
@@ -163,6 +196,77 @@ mod tests {
 
     fn ids(tracks: &[Track]) -> Vec<u64> {
         tracks.iter().map(|t| t.id.0).collect()
+    }
+
+    #[test]
+    fn a_new_track_joins_without_losing_the_place() {
+        let mut pl = Playlist::new(vec![track(1), track(2), track(3)], RotationMode::Sequential);
+        pl.advance();
+        pl.advance(); // on 2
+        pl.replace(vec![track(1), track(2), track(3), track(4)]);
+        assert_eq!(pl.current().unwrap().id.0, 2, "still on the same song");
+        let next: Vec<u64> = (0..4).map(|_| pl.advance().unwrap().id.0).collect();
+        assert_eq!(next, vec![3, 4, 1, 2], "and the new one takes its turn");
+    }
+
+    #[test]
+    fn a_removed_track_hands_on_to_what_was_coming_next() {
+        let mut pl = Playlist::new(
+            vec![track(1), track(2), track(3), track(4)],
+            RotationMode::Sequential,
+        );
+        pl.advance();
+        pl.advance(); // on 2
+                      // 2 is taken out, and so is 3, which was next.
+        pl.replace(vec![track(1), track(4)]);
+        assert_eq!(
+            pl.advance().unwrap().id.0,
+            4,
+            "the first still here of what was coming, not the top of the list"
+        );
+    }
+
+    #[test]
+    fn replacing_an_unstarted_or_emptied_playlist() {
+        let mut pl = Playlist::new(vec![track(1)], RotationMode::Sequential);
+        pl.replace(vec![track(1), track(2)]);
+        assert!(pl.current().is_none(), "not started is not started");
+        assert_eq!(pl.advance().unwrap().id.0, 1);
+        pl.replace(Vec::new());
+        assert!(pl.current().is_none());
+        assert!(pl.advance().is_none());
+        pl.replace(vec![track(5)]);
+        assert_eq!(
+            pl.advance().unwrap().id.0,
+            5,
+            "and it starts again when there is music"
+        );
+    }
+
+    #[test]
+    fn replacement_preserves_shuffle_successors_and_repeat_one() {
+        let original = vec![track(1), track(2), track(3), track(4)];
+        let mut shuffled = Playlist::new(original.clone(), RotationMode::Shuffle { seed: 17 });
+        let removed = shuffled.advance().unwrap().id;
+        let mut next = shuffled.clone();
+        let successor = next.advance().unwrap().id;
+        shuffled.replace(original.into_iter().filter(|t| t.id != removed).collect());
+        assert_eq!(shuffled.advance().unwrap().id, successor);
+
+        let mut repeat = Playlist::new(vec![track(1), track(2), track(3)], RotationMode::RepeatOne);
+        repeat.advance();
+        repeat.replace(vec![track(2), track(3)]);
+        assert_eq!(
+            repeat.advance().unwrap().id.0,
+            2,
+            "repeat the surviving successor"
+        );
+        repeat.replace(vec![track(4), track(2), track(3)]);
+        assert_eq!(
+            repeat.advance().unwrap().id.0,
+            2,
+            "keep repeating the same track"
+        );
     }
 
     #[test]

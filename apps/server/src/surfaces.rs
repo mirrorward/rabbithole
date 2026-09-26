@@ -175,6 +175,20 @@ impl Surfaces {
         }
     }
 
+    /// Start a newly populated station under the same lock as surface
+    /// stop/restart. Checking and spawning before taking this lock can leave
+    /// two pumps after a restart, or create an orphan mount after shutdown.
+    pub async fn ensure_radio_pump(&self, shared: &Arc<Shared>, slug: &str) {
+        if let Some(run) = self.running.lock().await.get_mut(&Surface::Radio) {
+            if shared.radio.track_count(slug) > 0 && !shared.radio.is_pumped(slug) {
+                run.handles.push(crate::radio::spawn_program_pump(
+                    shared.clone(),
+                    slug.into(),
+                ));
+            }
+        }
+    }
+
     /// Every surface and what it is doing, in [`Surface::ALL`] order.
     pub fn report(&self) -> Vec<(Surface, SurfaceState)> {
         Surface::ALL.iter().map(|s| (*s, self.state(*s))).collect()
@@ -378,4 +392,75 @@ pub async fn reconcile(shared: &Arc<Shared>) -> Vec<Surface> {
         surfaces.states.lock().insert(surface, state);
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn library_pumps_are_started_once_and_stop_with_the_radio() {
+        let dir = tempfile::tempdir().unwrap();
+        let burrow = crate::Burrow::start(ServerConfig {
+            quic_addr: "127.0.0.1:0".parse().unwrap(),
+            ws_addr: "127.0.0.1:0".parse().unwrap(),
+            radio_addr: "127.0.0.1:0".parse().unwrap(),
+            data_dir: dir.path().into(),
+            ..ServerConfig::default()
+        })
+        .await
+        .unwrap();
+        let shared = &burrow.shared;
+        shared.radio.install_program(
+            "later",
+            "Later",
+            "music",
+            vec![rabbithole_radio::Track::new(
+                rabbithole_radio::TrackId(1),
+                "one.mp3",
+                "",
+                1_000,
+                rabbithole_radio::BlobId::ZERO,
+            )],
+            Some(crate::radio::Sound::Mpeg),
+        );
+        for _ in 0..4 {
+            shared.config.set_key("radio_enabled", "true").unwrap();
+            // The refresh and the operator can both start this station. Their
+            // order must not leave duplicate pumps or mount entries.
+            tokio::join!(
+                reconcile(shared),
+                shared.surfaces.ensure_radio_pump(shared, "later"),
+                shared.surfaces.ensure_radio_pump(shared, "later"),
+            );
+            assert_eq!(
+                shared.surfaces.running.lock().await[&Surface::Radio]
+                    .handles
+                    .len(),
+                2,
+                "one listener and one pump"
+            );
+            assert!(shared.radio.is_pumped("later"));
+            assert!(shared.radio.is_streaming("later"));
+
+            shared.config.set_key("radio_enabled", "false").unwrap();
+            tokio::join!(
+                shared.surfaces.ensure_radio_pump(shared, "later"),
+                reconcile(shared),
+                shared.surfaces.ensure_radio_pump(shared, "later"),
+            );
+            assert!(!shared.radio.is_pumped("later"));
+            assert!(
+                !shared.radio.is_streaming("later"),
+                "no orphan mount after stop"
+            );
+            assert!(!shared
+                .surfaces
+                .running
+                .lock()
+                .await
+                .contains_key(&Surface::Radio));
+        }
+        burrow.shutdown().await;
+    }
 }

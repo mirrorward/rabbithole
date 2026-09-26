@@ -112,6 +112,16 @@ impl StationController {
         self.playlist.tracks()
     }
 
+    /// Replaces the rotation, as the folder behind the station changed. The
+    /// track on the air plays on — it is held here, not in the rotation —
+    /// and the rotation carries on from where it was. Returns how many
+    /// waiting requests were dropped for asking after files that are gone.
+    pub fn replace_rotation(&mut self, tracks: Vec<Track>) -> usize {
+        let dropped = self.queue.keep_only(&tracks);
+        self.playlist.replace(tracks);
+        dropped
+    }
+
     /// The track currently playing, if any.
     pub fn current(&self) -> Option<&Track> {
         self.current.as_ref()

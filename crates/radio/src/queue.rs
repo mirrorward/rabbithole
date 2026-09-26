@@ -162,6 +162,24 @@ impl RequestQueue {
             .map(|(i, _)| i)
     }
 
+    /// Keeps only the requests for tracks still in `tracks`, and brings the
+    /// ones that stay up to date with them (a renamed file is asked for
+    /// under its new name). Returns how many were dropped: a request for a
+    /// file that has gone cannot be played, and left in place it would sit
+    /// at the head of the queue for good.
+    pub fn keep_only(&mut self, tracks: &[Track]) -> usize {
+        let before = self.requests.len();
+        self.requests
+            .retain_mut(|r| match tracks.iter().find(|t| t.id == r.track.id) {
+                Some(t) => {
+                    r.track = t.clone();
+                    true
+                }
+                None => false,
+            });
+        before - self.requests.len()
+    }
+
     /// Returns the highest-voted request without removing it.
     pub fn peek(&self) -> Option<&QueuedRequest> {
         self.winner_index().map(|i| &self.requests[i])
@@ -181,6 +199,19 @@ mod tests {
 
     fn track(id: u64) -> Track {
         Track::new(TrackId(id), format!("t{id}"), "artist", 1_000, BlobId::ZERO)
+    }
+
+    #[test]
+    fn requests_follow_the_rotation() {
+        let mut q = RequestQueue::new();
+        q.enqueue(track(1), "alice").unwrap();
+        q.enqueue(track(2), "bob").unwrap();
+        let mut renamed = track(1);
+        renamed.title = "One (live)".into();
+        // 2 went; 1 was renamed.
+        assert_eq!(q.keep_only(&[renamed, track(3)]), 1);
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.peek().unwrap().track().title, "One (live)");
     }
 
     #[test]

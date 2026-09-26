@@ -384,6 +384,13 @@ lines), and the mobile builds (iOS simulator / Android NDK).
 - [~] Syndication admin UI: per-board network mappings, feed monitor, dupe stats — `ui-web::syndication_admin` (pure panel model, 858 lines): gateway matrix (NNTP reader/feed/TLS, FTN, QWK, syndication — enabled state, port, live-vs-restart badges mirroring documented server semantics and overridden by real `ConfigApplied.applied_live` answers), read-only feeds table (`syndication_feeds` is TOML-only — `ConfigGet` NotFound folds to an honest "edit burrow.toml + restart" hint; total defensive TOML-fragment parser for dev/mock), bounded poll-interval editor; `SyndicationPanel` in the Admin view. 22 new tests (186 crate) + wasm green. **Live-stats server slice landed** (the documented seam): `apps/server/src/stats.rs` `GatewayStats` (in-memory counters, per-feed `last_poll`/status/items_seen/posted/dupes + per-gateway named counters bumped at existing success points — `nntp.sessions`/`.posts`, `nntp_feed.accepted`, `ftn.echomail_posts`, `qwk.packets_built`/`.replies_ingested`, `hotline.logins`, `radio.sources_connected`, `telnet.logins`), exposed over ADMIN 45/46 `GatewayStatsRequest`→`GatewayStatsReply` (CONFIG_ADMIN-gated, string-keyed counters so the set grows without proto bumps) + `ctl gateway-stats` (JSON); 2 unit + 2 e2e + proto roundtrip. Deferred: wiring the SPA panel to render the new reply; server-side read-only feeds exposure
 
 ## Wave 11 — Radio
+
+**Live library refresh (RH-161):** stations follow added, renamed and removed
+library tracks without restarting or cutting off the current song. Existing
+mounts retain their format; removed tracks leave waiting requests and retired
+format rotations. New format mounts join live, and DJ takeovers keep their audio
+and metadata until automation resumes. Refresh and listener restarts share the
+same lifecycle lock, and change detection uses the exact library snapshot applied.
 *Depends on: W1, W4 (W8 for UI polish)*
 
 - [x] Station/mount model (multiple stations, per-server toggle) — `rabbithole-audio` (PCM frames, mixer, `Station` fan-out, jitter buffer, VU meter; 21 tests) + `rabbithole-radio::StationRegistry` (create/remove/list, per-station enable toggle, listener accounting; 23 tests)

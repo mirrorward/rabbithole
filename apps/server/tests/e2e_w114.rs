@@ -1348,7 +1348,10 @@ async fn library_of(work: &tempfile::TempDir, dir: &std::path::Path, files: &[(&
     for (name, bytes) in files {
         let src = work.path().join(name);
         std::fs::write(&src, bytes).unwrap();
-        dj.transfer_upload("music", None, name, &src, "audio/flac", "")
+        let mime = burrow::radio::sound_of_name(name, "")
+            .expect("fixture has a supported audio suffix")
+            .content_type();
+        dj.transfer_upload("music", None, name, &src, mime, "")
             .await
             .unwrap();
     }
@@ -1728,4 +1731,363 @@ async fn a_station_offers_only_what_it_can_play_a_page_at_a_time() {
     ));
 
     burrow.shutdown().await;
+}
+
+/// A station follows its folder while the burrow runs. Its rotation used to
+/// be read once, at startup, so a song uploaded to the station's folder
+/// could not be played or asked for until a restart, and a folder that was
+/// empty at startup stayed a silent station for good.
+#[tokio::test]
+async fn a_song_added_to_a_stations_folder_takes_its_turn_without_a_restart() {
+    use rabbithole_core::Client;
+    use rabbithole_proto::radio::{RadioOffer, RadioOfferRequest, RadioRequest, RadioRequests};
+
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path().join("srv");
+    // One song in "music"; "later" exists and is empty.
+    library_of(&work, &dir, &[]).await;
+    {
+        let burrow = Burrow::start(test_config(&dir)).await.unwrap();
+        let mut dj = Client::connect(
+            &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
+            None,
+            None,
+            "e2e",
+            "0",
+        )
+        .await
+        .unwrap();
+        dj.auth_password("dj", "spin-spin-spin").await.unwrap();
+        dj.expect_welcome().await.unwrap();
+        dj.area_create("later", "Later", "").await.unwrap();
+        let src = work.path().join("one.mp3");
+        // Thirty seconds of audio; the entire later startup/upload/request
+        // phase has a shorter deadline, so a legitimate track boundary cannot
+        // race the assertion that refreshing preserves the song on the air.
+        std::fs::write(&src, mp3_of(1_150, 0x11)).unwrap();
+        dj.transfer_upload("music", None, "one.mp3", &src, "audio/mpeg", "")
+            .await
+            .unwrap();
+        burrow.shutdown().await;
+    }
+
+    let mut config = test_config(&dir);
+    config
+        .radio_library_areas
+        .insert("jukebox".into(), "music".into());
+    config
+        .radio_library_areas
+        .insert("nightshift".into(), "later".into());
+    let action_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let burrow = Burrow::start(config).await.unwrap();
+    tokio::time::timeout_at(action_deadline, async {
+        let radio = burrow.radio_addr.expect("radio enabled");
+        assert_eq!(burrow.shared.radio.track_count("jukebox"), 1);
+        assert_eq!(burrow.shared.radio.track_count("nightshift"), 0);
+        assert!(
+            !burrow.shared.radio.is_pumped("nightshift"),
+            "nothing to play"
+        );
+
+        burrow
+            .shared
+            .auth
+            .create_account("alice", "pw-pw-pw-pw", Role::User)
+            .await
+            .unwrap();
+        let url = format!("ws://127.0.0.1:{}", burrow.ws_addr.port());
+        let mut dj = Client::connect(&url, None, None, "e2e", "0").await.unwrap();
+        dj.auth_password("dj", "spin-spin-spin").await.unwrap();
+        dj.expect_welcome().await.unwrap();
+        let mut alice = Client::connect(&url, None, None, "e2e", "0").await.unwrap();
+        alice.auth_password("alice", "pw-pw-pw-pw").await.unwrap();
+        alice.expect_welcome().await.unwrap();
+
+        // Only the song on the air, so nothing to ask for yet.
+        let offer: RadioOffer = alice
+            .request(&RadioOfferRequest::new("jukebox", ""))
+            .await
+            .unwrap();
+        assert!(offer.tracks.is_empty(), "{offer:?}");
+
+        // A second song lands in the folder, and a first one in the empty folder.
+        for (area, name, tag) in [("music", "two.mp3", 0x22), ("later", "first.mp3", 0x33)] {
+            let src = work.path().join(name);
+            std::fs::write(&src, mp3_of(115, tag)).unwrap();
+            dj.transfer_upload(area, None, name, &src, "audio/mpeg", "")
+                .await
+                .unwrap();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while (burrow.shared.radio.track_count("jukebox") < 2
+            || !burrow.shared.radio.is_pumped("nightshift"))
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            burrow.shared.radio.track_count("jukebox"),
+            2,
+            "the new song is in the rotation"
+        );
+
+        // It can be asked for, by its name, and it is what plays next.
+        let offer: RadioOffer = alice
+            .request(&RadioOfferRequest::new("jukebox", ""))
+            .await
+            .unwrap();
+        let two = offer
+            .tracks
+            .iter()
+            .find(|t| t.title.contains("two"))
+            .expect("the new song is offered");
+        let asked: RadioRequests = alice
+            .request(&RadioRequest::new("jukebox", two.id))
+            .await
+            .unwrap();
+        assert_eq!(asked.queue.len(), 1);
+        // The song that was on the air is still the one on the air.
+        assert!(burrow
+            .shared
+            .radio
+            .now_playing("jukebox")
+            .unwrap()
+            .title
+            .contains("one"));
+
+        // And the station that had nothing is on the air now, streaming.
+        assert!(burrow.shared.radio.is_pumped("nightshift"));
+        let mut listener = TcpStream::connect(radio).await.unwrap();
+        listener
+            .write_all(b"GET /nightshift HTTP/1.0\r\n\r\n")
+            .await
+            .unwrap();
+        listener.flush().await.unwrap();
+        let (head, _) = read_head(&mut listener).await;
+        assert!(
+            head.starts_with("ICY 200 OK"),
+            "the folder that was empty plays now: {head:?}"
+        );
+    })
+    .await
+    .expect("startup, uploads and requests complete within 15s, before the first 30s song ends");
+
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn adding_a_new_format_keeps_the_existing_stream_and_uses_a_companion_mount() {
+    use rabbithole_core::Client;
+
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path().join("srv");
+    let opus = opus_of(3, 0x77);
+    library_of(&work, &dir, &[("one.opus", &opus)]).await;
+    let mut config = test_config(&dir);
+    config
+        .radio_library_areas
+        .insert("mixed".into(), "music".into());
+    let burrow = Burrow::start(config).await.unwrap();
+    let radio = burrow.radio_addr.unwrap();
+    let mut listener = TcpStream::connect(radio).await.unwrap();
+    listener
+        .write_all(b"GET /mixed HTTP/1.0\r\n\r\n")
+        .await
+        .unwrap();
+    let (head, _) = read_head(&mut listener).await;
+    assert!(
+        head.starts_with("ICY 200 OK") && head.contains("audio/ogg"),
+        "{head}"
+    );
+
+    let mut dj = Client::connect(
+        &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
+        None,
+        None,
+        "e2e",
+        "0",
+    )
+    .await
+    .unwrap();
+    dj.auth_password("dj", "spin-spin-spin").await.unwrap();
+    dj.expect_welcome().await.unwrap();
+    let src = work.path().join("two.mp3");
+    std::fs::write(&src, mp3_of(115, 0x22)).unwrap();
+    dj.transfer_upload("music", None, "two.mp3", &src, "audio/mpeg", "")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !burrow.shared.radio.is_pumped("mixed.mp3") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("new MP3 format should get its own pump without restarting");
+    assert_eq!(
+        burrow.shared.radio.expected_sound("mixed"),
+        Some(burrow::radio::Sound::Ogg(0))
+    );
+    assert_eq!(burrow.shared.radio.track_count("mixed"), 1);
+    assert_eq!(burrow.shared.radio.track_count("mixed.mp3"), 1);
+    assert!(!burrow
+        .shared
+        .radio
+        .program_slugs()
+        .contains(&"mixed.ogg".into()));
+
+    // The already-connected listener keeps receiving the original codec;
+    // read beyond an entire old track so buffered startup bytes cannot pass.
+    let heard = tokio::time::timeout(
+        Duration::from_secs(10),
+        read_at_least(&mut listener, opus.len() * 3),
+    )
+    .await
+    .expect("original Ogg stream continues across rotation");
+    assert!(
+        heard.len() >= opus.len() * 3,
+        "existing stream was disconnected"
+    );
+    assert!(heard.windows(120).any(|bytes| bytes == [0x77; 120]));
+    assert!(!heard.windows(120).any(|bytes| bytes == [0x22; 120]));
+
+    let mut mp3 = TcpStream::connect(radio).await.unwrap();
+    mp3.write_all(b"GET /mixed.mp3 HTTP/1.0\r\n\r\n")
+        .await
+        .unwrap();
+    let (head, mut heard) = read_head(&mut mp3).await;
+    assert!(
+        head.starts_with("ICY 200 OK") && head.contains("audio/mpeg"),
+        "{head}"
+    );
+    heard.extend(read_at_least(&mut mp3, 417).await);
+    assert!(
+        heard.windows(413).any(|bytes| bytes == [0x22; 413]),
+        "new mount streams the uploaded MP3"
+    );
+    burrow.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_new_library_companion_waits_for_its_existing_dj_on_both_source_surfaces() {
+    use rabbithole_core::Client;
+
+    for dedicated in [false, true] {
+        let work = tempfile::tempdir().unwrap();
+        let dir = work.path().join("srv");
+        library_of(&work, &dir, &[("one.opus", &opus_of(3, 0x77))]).await;
+        let mut config = test_config(&dir);
+        config
+            .radio_library_areas
+            .insert("mixed".into(), "music".into());
+        config.radio_source_enabled = dedicated;
+        config.radio_source_addr = "127.0.0.1:0".parse().unwrap();
+        config.radio_source_user = "source".into();
+        config.radio_source_password = "source-password".into();
+        let burrow = Burrow::start(config).await.unwrap();
+        let radio = burrow.radio_addr.unwrap();
+        let (source_addr, auth) = if dedicated {
+            (
+                burrow.radio_source_addr.unwrap(),
+                basic_auth("source", "source-password"),
+            )
+        } else {
+            (radio, basic_auth("dj", "spin-spin-spin"))
+        };
+        // A DJ already owns the future MP3 companion, and is sending Ogg.
+        let mut source = TcpStream::connect(source_addr).await.unwrap();
+        source.write_all(format!(
+            "PUT /mixed.mp3 HTTP/1.0\r\nAuthorization: Basic {auth}\r\nice-name: Live set\r\ncontent-type: audio/ogg\r\n\r\n"
+        ).as_bytes()).await.unwrap();
+        assert!(read_head(&mut source).await.0.contains("200"));
+        let mut listener = TcpStream::connect(radio).await.unwrap();
+        listener
+            .write_all(b"GET /mixed.mp3 HTTP/1.0\r\n\r\n")
+            .await
+            .unwrap();
+        assert!(read_head(&mut listener).await.0.contains("audio/ogg"));
+
+        let mut dj = Client::connect(
+            &format!("ws://127.0.0.1:{}", burrow.ws_addr.port()),
+            None,
+            None,
+            "e2e",
+            "0",
+        )
+        .await
+        .unwrap();
+        dj.auth_password("dj", "spin-spin-spin").await.unwrap();
+        dj.expect_welcome().await.unwrap();
+        let src = work.path().join("two.mp3");
+        std::fs::write(&src, mp3_of(115, 0x22)).unwrap();
+        dj.transfer_upload("music", None, "two.mp3", &src, "audio/mpeg", "")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !burrow.shared.radio.is_pumped("mixed.mp3") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("library companion should be installed while its DJ holds the mount");
+        let current = burrow::radio::station_listing(&burrow.shared)
+            .into_iter()
+            .find(|s| s.station == "mixed.mp3")
+            .expect("live station remains listed");
+        assert!(
+            current.live,
+            "installing automation must not announce that the DJ left"
+        );
+        assert_eq!(current.title, "Live set");
+        assert!(burrow.shared.radio.is_live("mixed.mp3"));
+        assert_eq!(
+            burrow.shared.radio.now_playing("mixed.mp3").unwrap().title,
+            "Live set"
+        );
+        assert_eq!(burrow.shared.radio.program_content_type("mixed.mp3"), None);
+        let marker = opus_of(1, 0x55);
+        source.write_all(&marker).await.unwrap();
+        assert_eq!(
+            read_at_least(&mut listener, marker.len()).await,
+            marker,
+            "DJ keeps the existing stream"
+        );
+
+        drop(source);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while burrow.shared.radio.is_live("mixed.mp3")
+                || burrow
+                    .shared
+                    .radio
+                    .program_content_type("mixed.mp3")
+                    .as_deref()
+                    != Some("audio/mpeg")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("new automation starts after DJ departure");
+        assert!(
+            burrow
+                .shared
+                .radio
+                .registry
+                .get("mixed.mp3")
+                .unwrap()
+                .enabled
+        );
+        let mut automation = TcpStream::connect(radio).await.unwrap();
+        automation
+            .write_all(b"GET /mixed.mp3 HTTP/1.0\r\n\r\n")
+            .await
+            .unwrap();
+        let (head, mut heard) = read_head(&mut automation).await;
+        assert!(
+            head.contains("audio/mpeg"),
+            "automation declares its own codec after DJ departure: {head}"
+        );
+        heard.extend(read_at_least(&mut automation, 417).await);
+        assert!(heard.windows(413).any(|bytes| bytes == [0x22; 413]));
+        burrow.shutdown().await;
+    }
 }

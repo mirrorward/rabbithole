@@ -225,6 +225,19 @@ impl StationHistory {
 /// live-DJ takeover state. The playlist rotates on its own until a DJ goes
 /// live; while live, the DJ's now-playing overrides the rotation and rotation
 /// is paused (resuming when the DJ disconnects).
+/// What bringing a station up to date with its folder did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refreshed {
+    /// Nothing in the folder had changed.
+    Unchanged,
+    /// The rotation changed. `dropped` waiting requests asked after files
+    /// that are gone; `started` says a station that had nothing to play
+    /// has begun.
+    Changed { dropped: usize, started: bool },
+    /// The folder asked for a station that was not on the air, and now is.
+    Installed,
+}
+
 struct Program {
     controller: StationController,
     /// `Some` while a DJ is live: their now-playing overrides the playlist's.
@@ -435,11 +448,20 @@ impl Stations {
             enabled: true,
         });
         let _ = self.registry.set_enabled(slug, true);
+        // A format added to a live library can install its companion while
+        // a DJ already owns that URL. Keep their metadata until departure.
+        // Lock in source-then-program order so departure cannot clear the
+        // live state before this newly installed program has received it.
+        let mounts = self.mounts.lock();
+        let live = mounts
+            .get(slug)
+            .filter(|m| !m.program_owned)
+            .and_then(|m| m.now_playing.lock().clone());
         self.programs.lock().insert(
             slug.to_string(),
             Program {
                 controller,
-                live: None,
+                live,
                 source_bytes: 0,
                 pumped: false,
                 expected,
@@ -661,7 +683,7 @@ impl Stations {
     pub fn end_live(&self, slug: &str, held: impl Fn(&Track) -> bool) {
         if let Some(p) = self.programs.lock().get_mut(slug) {
             p.live = None;
-            if std::mem::take(&mut p.owed) {
+            if std::mem::take(&mut p.owed) || (p.controller.current().is_none() && p.tracks > 0) {
                 p.move_on(unix_ms(), &held);
             }
         }
@@ -773,6 +795,65 @@ impl Stations {
             }
             _ => false,
         }
+    }
+
+    /// Whether a pump is streaming `slug`'s rotation.
+    pub fn is_pumped(&self, slug: &str) -> bool {
+        self.programs.lock().get(slug).is_some_and(|p| p.pumped)
+    }
+
+    /// Bring `slug` up to date with the folder behind it, or put it on the
+    /// air if the folder now asks for a station that is not there yet (the
+    /// first FLAC file in a library that was all MP3).
+    ///
+    /// The track on the air plays on and the rotation carries on from where
+    /// it was: a song added to a station's folder takes its turn, and one
+    /// taken out is not played again, without anybody listening being cut
+    /// off. Waiting requests for files that have gone are dropped.
+    pub fn refresh_program(
+        &self,
+        slug: &str,
+        display_name: &str,
+        description: &str,
+        tracks: Vec<Track>,
+        expected: Option<Sound>,
+        unsendable: impl IntoIterator<Item = TrackId>,
+    ) -> Refreshed {
+        let unsendable: HashSet<TrackId> = unsendable.into_iter().collect();
+        {
+            let mounts = self.mounts.lock();
+            let mut programs = self.programs.lock();
+            if let Some(p) = programs.get_mut(slug) {
+                p.live = mounts
+                    .get(slug)
+                    .filter(|m| !m.program_owned)
+                    .and_then(|m| m.now_playing.lock().clone());
+                if p.controller.rotation() == tracks.as_slice() && p.unsendable == unsendable {
+                    return Refreshed::Unchanged;
+                }
+                let here: HashSet<TrackId> = tracks.iter().map(|t| t.id).collect();
+                p.unplayable.retain(|id| here.contains(id));
+                p.tracks = tracks.len();
+                p.unsendable = unsendable;
+                // A mount that is not up yet goes up as what its tracks say.
+                // One that is up stays what its listeners were told.
+                if !p.pumped {
+                    p.expected = expected;
+                }
+                let dropped = p.controller.replace_rotation(tracks);
+                // A station that had nothing to play starts now it has.
+                let started = if p.controller.current().is_none() && p.tracks > 0 && !p.is_live() {
+                    p.controller.on_track_finished(unix_ms());
+                    true
+                } else {
+                    false
+                };
+                return Refreshed::Changed { dropped, started };
+            }
+        }
+        self.install_program(slug, display_name, description, tracks, expected);
+        self.set_unsendable(slug, unsendable);
+        Refreshed::Installed
     }
 
     /// Hand a rotation to a pump: from now on it advances when told to.
@@ -1253,6 +1334,7 @@ where
     // And say so: a rotation behind the mount takes the air back, otherwise
     // the station is off it. What it announces is what it plays next, not
     // the song the DJ talked over.
+    shared.radio.end_live(&slug, |t| is_held(shared, t));
     shared.radio.take_air_back(&slug, |t| is_held(shared, t));
     if shared.radio.now_playing(&slug).is_some() {
         publish_now_playing(shared, &slug, false);
@@ -1572,7 +1654,7 @@ fn now_playing_from_ice(meta: &StationMeta, dj: &str) -> NowPlaying {
 
 /// Publishes a station's current now-playing (with the live listener count)
 /// into presence, so status lines pick it up like away/idle status.
-fn publish_now_playing(shared: &Arc<Shared>, slug: &str, live: bool) {
+pub(crate) fn publish_now_playing(shared: &Arc<Shared>, slug: &str, live: bool) {
     let Some(np) = shared.radio.now_playing(slug) else {
         return;
     };
@@ -2553,7 +2635,7 @@ where
         enabled: true,
     });
     let _ = shared.radio.registry.set_enabled(&slug, true);
-    let had_program = shared.radio.go_live(&slug, np);
+    shared.radio.go_live(&slug, np);
     publish_now_playing(shared, &slug, true);
     shared.stats.incr("radio", "sources_connected");
 
@@ -2581,7 +2663,8 @@ where
     shared.radio.mounts.lock().remove(&slug);
     shared.radio.end_live(&slug, |t| is_held(shared, t));
     shared.radio.take_air_back(&slug, |t| is_held(shared, t));
-    if had_program && shared.radio.now_playing(&slug).is_some() {
+    // A library format may have arrived while this source was connected.
+    if shared.radio.now_playing(&slug).is_some() {
         publish_now_playing(shared, &slug, false);
     } else {
         shared.radio.note_off_air(&slug);
@@ -3076,6 +3159,128 @@ mod tests {
             !radio.take_air_back("ambient", |_| false),
             "moved on once, not twice"
         );
+    }
+
+    #[test]
+    fn a_station_follows_its_folder_without_cutting_the_song() {
+        let radio = Stations::new();
+        let track = |n: u64| {
+            Track::new(
+                TrackId(n),
+                format!("t{n}.mp3"),
+                "",
+                1_000,
+                BlobId([n as u8; 32]),
+            )
+        };
+        radio.install_program(
+            "ambient",
+            "Ambient",
+            "",
+            vec![track(1), track(2), track(3)],
+            Some(Sound::Mpeg),
+        );
+        radio.request("ambient", 3, "alice", |_| false).unwrap();
+        assert_eq!(
+            radio.refresh_program(
+                "ambient",
+                "Ambient",
+                "",
+                vec![track(1), track(2), track(3)],
+                Some(Sound::Mpeg),
+                []
+            ),
+            Refreshed::Unchanged,
+            "the same folder is no change"
+        );
+        // t3 is taken out of the folder and t4 is added.
+        assert_eq!(
+            radio.refresh_program(
+                "ambient",
+                "Ambient",
+                "",
+                vec![track(1), track(2), track(4)],
+                Some(Sound::Mpeg),
+                []
+            ),
+            Refreshed::Changed {
+                dropped: 1,
+                started: false
+            },
+            "the request for the file that went is dropped"
+        );
+        assert_eq!(radio.track_count("ambient"), 3);
+        assert_eq!(
+            radio.now_playing("ambient").unwrap().title,
+            "t1.mp3",
+            "t1 plays on"
+        );
+        let waiting = radio.requests("ambient", "alice", |_| false).unwrap();
+        assert!(waiting.queue.is_empty());
+        radio.request("ambient", 4, "alice", |_| false).unwrap();
+
+        // A station that had nothing to play starts when it has.
+        radio.install_program("later", "Later", "", Vec::new(), None);
+        assert!(radio.now_playing("later").is_none());
+        assert_eq!(
+            radio.refresh_program("later", "Later", "", vec![track(9)], Some(Sound::Mpeg), []),
+            Refreshed::Changed {
+                dropped: 0,
+                started: true
+            }
+        );
+        assert_eq!(radio.now_playing("later").unwrap().title, "t9.mp3");
+        // And a mount the folder now asks for, which was not there, is put up.
+        assert_eq!(
+            radio.refresh_program("later.ogg", "Later (OGG)", "", vec![track(8)], None, []),
+            Refreshed::Installed
+        );
+        assert_eq!(radio.track_count("later.ogg"), 1);
+    }
+
+    #[test]
+    fn a_live_dj_keeps_new_or_previously_empty_automation_until_departure() {
+        for existing in [false, true] {
+            let radio = Stations::new();
+            if existing {
+                radio.install_program("later", "Later", "music", Vec::new(), None);
+            }
+            let live = NowPlaying {
+                title: "Live set".into(),
+                artist: "DJ's choice".into(),
+                dj: "alice".into(),
+            };
+            let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+            radio.mounts.lock().insert(
+                "later".into(),
+                MountEntry {
+                    tx: tx.clone(),
+                    meta: StationMeta::default(),
+                    content_type: "audio/ogg".into(),
+                    now_playing: Arc::new(Mutex::new(Some(live.clone()))),
+                    program_owned: false,
+                    lead: Arc::from(&[][..]),
+                },
+            );
+            radio.refresh_program(
+                "later",
+                "Later",
+                "music",
+                vec![Track::new(TrackId(1), "one.mp3", "", 1_000, BlobId::ZERO)],
+                Some(Sound::Mpeg),
+                [],
+            );
+            assert!(radio.is_live("later"));
+            assert_eq!(radio.now_playing("later"), Some(live));
+            let mount = radio.mounts.lock();
+            assert!(mount["later"].tx.same_channel(&tx));
+            assert_eq!(mount["later"].content_type, "audio/ogg");
+            drop(mount);
+            radio.mounts.lock().remove("later");
+            radio.end_live("later", |_| false);
+            assert!(!radio.is_live("later"));
+            assert_eq!(radio.now_playing("later").unwrap().title, "one.mp3");
+        }
     }
 
     #[test]

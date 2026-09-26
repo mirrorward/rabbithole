@@ -390,6 +390,13 @@ impl Burrow {
         if !shared.radio.program_slugs().is_empty() {
             tasks.push(radio::spawn_playlist_driver(shared.clone()));
         }
+        if !radio_library_areas.is_empty() {
+            tasks.push(tokio::spawn(radio_library_watcher(
+                shared.clone(),
+                radio_library_areas.clone(),
+                std::time::Duration::from_secs(60),
+            )));
+        }
         // Every optional surface (telnet, finger, HTTP, NNTP and its TLS and
         // feed variants, radio and its source ingest, Hotline, FidoNet, the
         // feed poller): started here to match the config, and again whenever
@@ -620,70 +627,105 @@ async fn replay_recorder(shared: Arc<Shared>) {
     }
 }
 
-/// Build a library-backed radio program per configured `mount -> file-area`
-/// entry: recurse the area, map its audio files into a playlist, and install
-/// it. A missing/empty area logs and is skipped (the station just has no
-/// automation until a DJ goes live).
+/// One station a library folder puts on the air: its mount, what to call
+/// it, the folder it plays, its rotation, what it sends, what of the folder
+/// it cannot send, and the cover art the folder holds.
+struct LibraryProgram {
+    slug: String,
+    name: String,
+    area: String,
+    tracks: Vec<rabbithole_radio::Track>,
+    sound: Option<radio::Sound>,
+    unsendable: Vec<rabbithole_radio::TrackId>,
+    covers: std::collections::HashMap<String, [u8; 32]>,
+}
+
+/// Put a library-backed radio program on the air per configured
+/// `mount -> file-area` entry: recurse the area, map its audio files into a
+/// playlist, and install it. A missing/empty area retains an empty station
+/// that can receive its first tracks without restarting the burrow.
 async fn install_radio_library(
     shared: &Arc<Shared>,
     areas: &std::collections::HashMap<String, String>,
 ) {
-    // A mount is a name listeners tune to, so which library takes which name
-    // is settled the same way at every start: by name, not by however the
-    // config happened to come out of a map.
-    let mut ordered: Vec<(&String, &String)> = areas.iter().collect();
-    ordered.sort();
+    let folders = read_radio_library(shared, areas).await;
+    for plan in plan_radio_library(shared, areas, &folders).await {
+        let count = plan.tracks.len();
+        shared.radio.set_covers(&plan.slug, plan.covers);
+        shared
+            .radio
+            .install_program(&plan.slug, &plan.name, &plan.area, plan.tracks, plan.sound);
+        shared
+            .radio
+            .set_unsendable(&plan.slug, plan.unsendable.iter().copied());
+        tracing::info!(mount = %plan.slug, area = %plan.area, tracks = count, "radio library program installed");
+    }
+}
+
+/// What every configured library folder puts on the air, read afresh.
+///
+/// The same folders give the same stations at every reading: mounts are
+/// settled in name order, a library cannot take a name another already has,
+/// and a FLAC mount that is already sending keeps the form its listeners
+/// were told about rather than being re-voted by what was added to it.
+async fn plan_radio_library(
+    shared: &Arc<Shared>,
+    areas: &std::collections::HashMap<String, String>,
+    folders: &[LibraryFolder],
+) -> Vec<LibraryProgram> {
+    let mut plans = Vec::new();
     // Names already on the air this pass, so a second library cannot take a
     // mount out from under the first one without saying so.
     let mut installed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (mount, area) in ordered {
-        let nodes = match shared.files.manifest(area, None).await {
-            Ok(files) => files
-                .into_iter()
-                .map(|(node, _rel)| node)
-                .collect::<Vec<_>>(),
-            Err(e) => {
-                tracing::warn!(mount = %mount, area = %area, "radio library area unavailable: {e}");
-                Vec::new()
-            }
-        };
+    for folder in folders {
+        let mount = &folder.mount;
+        let area = &folder.area;
+        let nodes = &folder.nodes;
         // A station sends one kind of sound, so a library holding more than
         // one kind gets a mount for each: the MP3 files where they have
         // always been, the Ogg files at `<mount>.ogg`, the FLAC files at
         // `<mount>.flac`. Nothing is left out for being the wrong kind, and
         // a listener picks which to tune in to. A library of one kind is
         // one mount, exactly as before.
-        let split = radio::split_by_sound(&nodes);
-        let covers = radio::covers_from_nodes(&nodes);
-        // Which kind keeps the bare mount is settled by what it is, not by
-        // how many of each there happen to be: MP3 if there is any, else
-        // Ogg, else FLAC. Counting would move a station's listeners onto a
-        // different kind of sound the day somebody adds files, which is not
-        // a thing a mount should do.
+        let split = radio::split_by_sound(nodes);
+        let covers = radio::covers_from_nodes(nodes);
+        // An existing mount keeps its codec even if the folder gains or
+        // loses a format. Otherwise adding MP3 to an Ogg-only library would
+        // replace the Ogg rotation under a pump that can only send Ogg.
+        // At first installation, prefer an explicit suffix, then MP3, Ogg,
+        // FLAC. Empty format rotations remain reserved for later uploads.
         // Which form of FLAC that mount will send is settled here too, by
         // what most of the library is, rather than by whichever track the
         // rotation happens to read first: one voice memo at the top of a
         // folder of albums would otherwise leave every album out.
-        let (form, other_forms) = flac_form(shared, &split.flac).await;
+        let (form, other_forms) = flac_form(shared, &split.flac, sending_form(shared, mount)).await;
         let mut kinds: Vec<(&str, radio::Sound, Vec<rabbithole_radio::Track>)> = vec![
             ("mp3", radio::Sound::Mpeg, split.mpeg),
             ("ogg", radio::Sound::Ogg(0), split.ogg),
             ("flac", radio::Sound::Flac(form), split.flac),
         ];
-        kinds.retain(|(_, _, tracks)| !tracks.is_empty());
         // A mount the operator named for a kind — `jukebox.flac` — is that
         // kind's mount. It keeps the name they chose and the other kinds
         // hang off the base of it, so a listener who tunes to a name that
         // says FLAC is not answered MP3, with the FLAC away at a name
         // nobody would guess: `jukebox.flac.flac`.
-        let lower = mount.to_ascii_lowercase();
-        let named = kinds.iter().position(|(ext, _, _)| {
-            lower.len() > ext.len() + 1 && lower.ends_with(&format!(".{ext}"))
+        let (base, named) = library_mount_parts(mount);
+        let primary = shared
+            .radio
+            .expected_sound(mount)
+            .map(sound_extension)
+            .or(named)
+            .or_else(|| kinds.iter().find(|(_, _, t)| !t.is_empty()).map(|k| k.0));
+        kinds.retain(|(ext, _, tracks)| {
+            !tracks.is_empty()
+                || Some(*ext) == primary
+                || shared
+                    .radio
+                    .expected_sound(&format!("{base}.{ext}"))
+                    .is_some()
         });
-        let mut base = mount.to_string();
-        if let Some(i) = named {
+        if let Some(i) = kinds.iter().position(|k| Some(k.0) == primary) {
             let kind = kinds.remove(i);
-            base.truncate(base.len() - kind.0.len() - 1);
             kinds.insert(0, kind);
         }
         // Each mount, what to call it, what goes on it, and what it sends
@@ -747,16 +789,214 @@ async fn install_radio_library(
             ));
         }
         for (slug, name, tracks, sound) in programs {
-            let count = tracks.len();
-            shared.radio.set_covers(&slug, covers.clone());
-            shared
-                .radio
-                .install_program(&slug, &name, area, tracks, sound);
-            shared
-                .radio
-                .set_unsendable(&slug, unsendable.iter().copied());
-            tracing::info!(mount = %slug, area = %area, tracks = count, "radio library program installed");
-            installed.insert(slug);
+            installed.insert(slug.clone());
+            plans.push(LibraryProgram {
+                slug,
+                name,
+                area: area.clone(),
+                tracks,
+                sound,
+                unsendable: unsendable.clone(),
+                covers: covers.clone(),
+            });
+        }
+    }
+    plans
+}
+
+/// The FLAC form a library's station is already sending, if one is: a
+/// mount that is up has told its listeners what it is, and a file added to
+/// the folder does not get to change that under them. It only decides which
+/// of the new files the station can send.
+fn sending_form(shared: &Arc<Shared>, mount: &str) -> Option<radio::Form> {
+    let (base, _) = library_mount_parts(mount);
+    [mount.to_string(), format!("{base}.flac")]
+        .iter()
+        .filter(|slug| shared.radio.is_pumped(slug))
+        .find_map(|slug| match shared.radio.expected_sound(slug) {
+            Some(radio::Sound::Flac(form)) if form != radio::Form::default() => Some(form),
+            _ => None,
+        })
+}
+
+fn library_mount_parts(mount: &str) -> (&str, Option<&'static str>) {
+    if let Some((base, suffix)) = mount.rsplit_once('.') {
+        if !base.is_empty() {
+            for ext in ["mp3", "ogg", "flac"] {
+                if suffix.eq_ignore_ascii_case(ext) {
+                    return (base, Some(ext));
+                }
+            }
+        }
+    }
+    (mount, None)
+}
+
+fn sound_extension(sound: radio::Sound) -> &'static str {
+    match sound {
+        radio::Sound::Mpeg => "mp3",
+        radio::Sound::Ogg(_) => "ogg",
+        radio::Sound::Flac(_) => "flac",
+    }
+}
+
+/// Bring every library station up to date with its folder: a song added
+/// takes its turn, one taken out is not played again, and a folder that
+/// now holds a kind of sound it did not gets a station for it. Nobody
+/// listening is cut off. A station that has music for the first time gets
+/// a pump when the radio is up, and the pump stops with the radio.
+async fn refresh_radio_library(
+    shared: &Arc<Shared>,
+    areas: &std::collections::HashMap<String, String>,
+    folders: &[LibraryFolder],
+) {
+    for plan in plan_radio_library(shared, areas, folders).await {
+        let count = plan.tracks.len();
+        shared.radio.set_covers(&plan.slug, plan.covers);
+        let outcome = shared.radio.refresh_program(
+            &plan.slug,
+            &plan.name,
+            &plan.area,
+            plan.tracks,
+            plan.sound,
+            plan.unsendable,
+        );
+        match outcome {
+            radio::Refreshed::Unchanged => {}
+            radio::Refreshed::Changed { dropped, started } => {
+                tracing::info!(
+                    mount = %plan.slug,
+                    area = %plan.area,
+                    tracks = count,
+                    dropped_requests = dropped,
+                    "radio library station follows its folder"
+                );
+                if started {
+                    radio::publish_now_playing(
+                        shared,
+                        &plan.slug,
+                        shared.radio.is_live(&plan.slug),
+                    );
+                }
+            }
+            radio::Refreshed::Installed => {
+                tracing::info!(mount = %plan.slug, area = %plan.area, tracks = count, "radio library station put on the air");
+                radio::publish_now_playing(shared, &plan.slug, shared.radio.is_live(&plan.slug));
+            }
+        }
+        shared.surfaces.ensure_radio_pump(shared, &plan.slug).await;
+    }
+}
+
+/// Only the file metadata that affects rotation, format or cover selection.
+/// Download counts and ratings must not force audio headers to be re-read.
+#[derive(PartialEq, Eq)]
+struct LibraryFile {
+    id: i64,
+    parent_id: Option<i64>,
+    kind: u8,
+    name: String,
+    mime: String,
+    comment: String,
+    blob: Option<[u8; 32]>,
+}
+
+/// A single manifest read feeds both change detection and the applied plan.
+/// Reading it twice could apply transient contents B but record fingerprint A,
+/// leaving B's removed tracks in the rotation after the folder returns to A.
+struct LibraryFolder {
+    mount: String,
+    area: String,
+    nodes: Vec<rabbithole_store_server::repo6::FileNodeRow>,
+}
+
+impl LibraryFolder {
+    fn fingerprint(&self) -> (String, Vec<LibraryFile>) {
+        let mut files: Vec<_> = self
+            .nodes
+            .iter()
+            .map(|node| LibraryFile {
+                id: node.id,
+                parent_id: node.parent_id,
+                kind: node.kind,
+                name: node.name.clone(),
+                mime: node.mime.clone(),
+                comment: node.comment.clone(),
+                blob: node.blob_id,
+            })
+            .collect();
+        files.sort_by_key(|f| f.id);
+        (self.mount.clone(), files)
+    }
+}
+
+/// Cheap change detection: no file bytes are read. Include images and MIME
+/// metadata, so replacing cover art or correcting a file's type is noticed.
+async fn read_radio_library(
+    shared: &Arc<Shared>,
+    areas: &std::collections::HashMap<String, String>,
+) -> Vec<LibraryFolder> {
+    // Stable name order also decides ownership of colliding derived mounts.
+    let mut ordered: Vec<(&String, &String)> = areas.iter().collect();
+    ordered.sort();
+    let mut out = Vec::new();
+    for (mount, area) in ordered {
+        let nodes = match shared.files.manifest(area, None).await {
+            Ok(files) => files.into_iter().map(|(node, _)| node).collect(),
+            Err(e) => {
+                tracing::warn!(mount = %mount, area = %area, "radio library area unavailable: {e}");
+                Vec::new()
+            }
+        };
+        out.push(LibraryFolder {
+            mount: mount.clone(),
+            area: area.clone(),
+            nodes,
+        });
+    }
+    out
+}
+
+/// Keep every library station following its folder while the burrow runs.
+///
+/// A station's rotation used to be read once, at startup, so a song
+/// uploaded to its folder could not be played or asked for until a
+/// restart. A file landing in a library folder is announced on the bus and
+/// looked at straight away; removals, renames and moves are not announced,
+/// so the folders are also compared once a minute, cheaply. Audio headers
+/// are re-read only after relevant file metadata changes.
+async fn radio_library_watcher(
+    shared: Arc<Shared>,
+    areas: std::collections::HashMap<String, String>,
+    interval: std::time::Duration,
+) {
+    let mut rx = shared.bus.subscribe();
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Always reconcile the first snapshot. A file may have arrived between
+    // startup's installation scan and this task subscribing to the bus.
+    let mut seen = None;
+    let library = |area: &str| areas.values().any(|a| a.eq_ignore_ascii_case(area));
+    loop {
+        let look = tokio::select! {
+            _ = tick.tick() => true,
+            ev = rx.recv() => match ev {
+                Ok(ServerEvent::FileAdded { area, .. }) => library(&area),
+                // Missed some: look, since a file may have landed in them.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                Ok(ServerEvent::Shutdown)
+                | Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Ok(_) => false,
+            },
+        };
+        if !look {
+            continue;
+        }
+        let folders = read_radio_library(&shared, &areas).await;
+        let now: Vec<_> = folders.iter().map(LibraryFolder::fingerprint).collect();
+        if seen.as_ref() != Some(&now) {
+            refresh_radio_library(&shared, &areas, &folders).await;
+            seen = Some(now);
         }
     }
 }
@@ -780,6 +1020,7 @@ async fn install_radio_library(
 async fn flac_form(
     shared: &Arc<Shared>,
     tracks: &[rabbithole_radio::Track],
+    sending: Option<radio::Form>,
 ) -> (radio::Form, Vec<rabbithole_radio::TrackId>) {
     if tracks.is_empty() {
         return (radio::Form::default(), Vec::new());
@@ -840,10 +1081,14 @@ async fn flac_form(
             None => tally.push((form, 1, at)),
         }
     }
-    let chosen = tally
-        .into_iter()
-        .max_by_key(|(_, count, first)| (*count, std::cmp::Reverse(*first)))
-        .map(|(form, _, _)| form);
+    // A mount already sending has settled it for its listeners.
+    let chosen = match sending {
+        Some(f) => Some((f.rate, f.channels, f.bits)),
+        None => tally
+            .into_iter()
+            .max_by_key(|(_, count, first)| (*count, std::cmp::Reverse(*first)))
+            .map(|(form, _, _)| form),
+    };
     let Some((rate, channels, bits)) = chosen else {
         return (radio::Form::default(), Vec::new());
     };
@@ -902,6 +1147,179 @@ async fn accept_loop(mut listener: Box<dyn Listener>, shared: Arc<Shared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rabbithole_server_core::Role;
+
+    #[test]
+    fn library_mount_suffixes_are_case_insensitive_and_utf8_safe() {
+        assert_eq!(library_mount_parts("éxxx"), ("éxxx", None));
+        assert_eq!(library_mount_parts("夜.FLaC"), ("夜", Some("flac")));
+        assert_eq!(library_mount_parts("mix.ogg"), ("mix", Some("ogg")));
+        assert_eq!(library_mount_parts(".mp3"), (".mp3", None));
+        assert_eq!(library_mount_parts("mix.other"), ("mix.other", None));
+    }
+
+    async fn await_rotation(shared: &Arc<Shared>, slug: &str, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while shared.radio.track_count(slug) != count {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{slug} should have {count} tracks, observed {}",
+                shared.radio.track_count(slug)
+            )
+        });
+    }
+
+    #[tokio::test]
+    async fn library_watcher_preserves_codecs_clears_removed_formats_and_reloads_covers() {
+        let dir = tempfile::tempdir().unwrap();
+        // No configured watcher or radio surface: this test controls the
+        // startup scan boundary and polls the real file store at a short interval.
+        let burrow = Burrow::start(ServerConfig {
+            quic_addr: "127.0.0.1:0".parse().unwrap(),
+            ws_addr: "127.0.0.1:0".parse().unwrap(),
+            data_dir: dir.path().into(),
+            ..ServerConfig::default()
+        })
+        .await
+        .unwrap();
+        let shared = &burrow.shared;
+        let owner = shared
+            .auth
+            .create_account("dj", "password", Role::Admin)
+            .await
+            .unwrap();
+        shared
+            .files
+            .create_area("music", "Music", "")
+            .await
+            .unwrap();
+        let add = |name: &'static str, mime: &'static str, blob: [u8; 32]| async move {
+            shared
+                .files
+                .add_file("music", None, name, &blob, 1, mime, "", "", "dj", owner.id)
+                .await
+                .unwrap()
+        };
+        let ogg = add("one.opus", "audio/ogg", [1; 32]).await;
+        let areas = std::collections::HashMap::from([("mix".into(), "music".into())]);
+        install_radio_library(shared, &areas).await;
+        assert_eq!(
+            shared.radio.expected_sound("mix"),
+            Some(radio::Sound::Ogg(0))
+        );
+
+        // These files arrive after installation but before the watcher starts.
+        // They must not be absorbed into its first snapshot without a refresh.
+        let mp3 = add("two.mp3", "audio/mpeg", [2; 32]).await;
+        let requested = add("three.mp3", "audio/mpeg", [3; 32]).await;
+        let watcher = tokio::spawn(radio_library_watcher(
+            shared.clone(),
+            areas.clone(),
+            std::time::Duration::from_millis(20),
+        ));
+        await_rotation(shared, "mix.mp3", 2).await;
+        assert_eq!(shared.radio.track_count("mix"), 1);
+        assert_eq!(
+            shared.radio.expected_sound("mix"),
+            Some(radio::Sound::Ogg(0))
+        );
+        assert!(!shared.radio.program_slugs().contains(&"mix.ogg".into()));
+        let waiting = if shared.radio.current_track("mix.mp3").unwrap().id.0 == mp3.id as u64 {
+            requested.id
+        } else {
+            mp3.id
+        };
+        shared
+            .radio
+            .request("mix.mp3", waiting as u64, "listener", |_| false)
+            .unwrap();
+
+        // No audio changed: a newly supplied cover still refreshes the station.
+        let cover = add("cover.png", "image/png", [4; 32]).await;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while shared.radio.cover_for("mix", "one.opus") != cover.blob_id {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("cover-only changes should be noticed");
+
+        // Delete a whole secondary format. The last song may finish, but the
+        // old rotation and queued request must not survive in a stale program.
+        shared.files.delete(mp3.id).await.unwrap();
+        shared.files.delete(requested.id).await.unwrap();
+        await_rotation(shared, "mix.mp3", 0).await;
+        assert!(shared
+            .radio
+            .requests("mix.mp3", "listener", |_| false)
+            .unwrap()
+            .queue
+            .is_empty());
+        shared.radio.advance("mix.mp3", 0);
+        assert!(shared.radio.current_track("mix.mp3").is_none());
+        assert_eq!(
+            shared.radio.expected_sound("mix.mp3"),
+            Some(radio::Sound::Mpeg)
+        );
+
+        // Removing the primary format cannot move the secondary onto its URL.
+        shared.files.delete(ogg.id).await.unwrap();
+        await_rotation(shared, "mix", 0).await;
+        shared.radio.advance("mix", 0);
+        let again = add("again.mp3", "audio/mpeg", [5; 32]).await;
+        await_rotation(shared, "mix.mp3", 1).await;
+        assert_eq!(shared.radio.track_count("mix"), 0);
+        assert_eq!(
+            shared.radio.current_track("mix.mp3").unwrap().id.0,
+            again.id as u64
+        );
+        let ogg_again = add("again.opus", "audio/ogg", [6; 32]).await;
+        await_rotation(shared, "mix", 1).await;
+        assert_eq!(
+            shared.radio.current_track("mix").unwrap().id.0,
+            ogg_again.id as u64
+        );
+        assert_eq!(
+            shared.radio.expected_sound("mix"),
+            Some(radio::Sound::Ogg(0))
+        );
+        assert!(!shared.radio.is_pumped("mix"), "disabled surface stays off");
+        watcher.abort();
+        let _ = watcher.await;
+
+        // A -> B -> A while a refresh is in flight: a file uploaded after
+        // the scan must not sneak into that scan's plan, then survive its
+        // deletion because the recorded fingerprint still describes A.
+        let in_flight = read_radio_library(shared, &areas).await;
+        let transient = add("transient.mp3", "audio/mpeg", [7; 32]).await;
+        refresh_radio_library(shared, &areas, &in_flight).await;
+        assert_eq!(
+            shared.radio.track_count("mix.mp3"),
+            1,
+            "apply exactly the captured folder state"
+        );
+        shared.files.delete(transient.id).await.unwrap();
+        let after = read_radio_library(shared, &areas).await;
+        assert!(
+            in_flight
+                .iter()
+                .map(LibraryFolder::fingerprint)
+                .collect::<Vec<_>>()
+                == after
+                    .iter()
+                    .map(LibraryFolder::fingerprint)
+                    .collect::<Vec<_>>()
+        );
+        assert!(shared
+            .radio
+            .request("mix.mp3", transient.id as u64, "listener", |_| false)
+            .is_err());
+        burrow.shutdown().await;
+    }
 
     #[test]
     fn websocket_defaults_to_loopback_only() {
