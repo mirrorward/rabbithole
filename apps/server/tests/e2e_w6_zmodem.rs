@@ -21,6 +21,9 @@ use rabbithole_server_core::{Role, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+#[path = "e2e_w6_zmodem/recovery.rs"]
+mod recovery;
+
 fn test_config(dir: &Path) -> ServerConfig {
     ServerConfig {
         name: "Zmodem Warren".into(),
@@ -833,8 +836,12 @@ async fn zput_refuses_name_collisions_before_any_data() {
             other => panic!("unexpected action {other:?}"),
         }
     }
-    c.expect(b"Upload refused: taken.bin already exists here.")
-        .await;
+    assert_eq!(c.next_header().await.header.frame_type, FrameType::Zskip);
+    let fin = rabbithole_legacy_zmodem::Header::new(FrameType::Zfin).encode(HeaderFormat::Hex);
+    c.send_raw(&fin).await;
+    assert_eq!(c.next_header().await.header.frame_type, FrameType::Zfin);
+    c.send_raw(b"OO").await;
+    c.expect(b"Skipped: taken.bin already exists here").await;
     c.expect(b"files /warez> ").await;
 
     // The original is untouched and the shell still answers.

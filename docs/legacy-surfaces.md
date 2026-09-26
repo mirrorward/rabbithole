@@ -22,9 +22,9 @@ disables that class.
 
 | Surface | Default port | Enable key | Min-role gate | Rate classes | Deferred |
 |---|---|---|---|---|---|
-| Telnet BBS | 2323 (`telnet_addr`) | `telnet_enabled` | `telnet_min_role` (default guest) | conn, auth, legacy | inline byte transfers (ZMODEM codec exists, unwired — `files get` mints an HTTP handoff link instead) |
+| Telnet BBS | 2323 (`telnet_addr`) | `telnet_enabled` | `telnet_min_role` (default guest) | conn, auth, legacy | real-terminal ZMODEM interoperability validation; restart-persistent upload staging |
 | — doors (on telnet) | — | `doors_enabled` (+ `telnet_enabled`) | cap `DOOR_RUN` on `doors/<id>` (member+ default) | (telnet's) | socket-handle inheritance (`%H` is always `0`; both io modes bridge stdio) |
-| — files browser (on telnet) | — | (with telnet) | caps `FILE_LIST` / `FILE_DOWNLOAD` / `DROPBOX_VIEW`, same ACLs as native/Hotline | (telnet's) | byte transfers — `get` prints `<files_http_base>/files/<area>/<path>`; empty `files_http_base` (default) turns the handoff off. Serving the links is the web slice's job |
+| — files browser (on telnet) | — | (with telnet) | caps `FILE_LIST` / `FILE_DOWNLOAD` / `DROPBOX_VIEW`, same ACLs as native/Hotline | legacy, transfer (starts) | `get` offers an HTTP handoff when `files_http_base` is set; `zget`/`zput` transfer bytes directly over telnet. Persistent ZMODEM staging remains deferred |
 | Finger (RFC 1288) | 7979 (`finger_addr`) | `finger_enabled` | `finger_min_role` — finger is anonymous, so **any value above guest refuses every query** with a polite notice | conn | — (one capped query per connection by design) |
 | NNTP reader (RFC 3977; STARTTLS per RFC 4642) | 1119 (`nntp_addr`) | `nntp_enabled` | `nntp_min_role` — anonymous reading counts as guest; above that, unauthenticated commands get 480 and a below-minimum `AUTHINFO` gets 481. `AUTHINFO` on plaintext answers 483 while `nntp_auth_require_tls` (default **on**) holds | conn, legacy, auth (failed AUTHINFO), post (`POST`, per account) | article numbering shifts when retention drops posts (accepted for a read gateway) |
 | NNTPS reader (implicit TLS, RFC 8143) | 563 (`nntp_tls_addr`; privileged) | `nntp_tls_enabled` | same as the reader — the TLS transport satisfies the `AUTHINFO` gate | conn, legacy, auth, post | self-signed identity only (clients pin the burrow fingerprint; ACME certs land with the web slice) |
@@ -62,6 +62,19 @@ disables that class.
   terminal controls and embedded line breaks. Numbered mail selection retains
   the original identity for lookup and replies, in UTF-8 and CP437 alike.
   Operator ANSI artwork and message-body rendering keep their own policies.
+  In the files menu, `zget <name>` and `zput` transfer bytes over telnet;
+  `get` remains the optional HTTP handoff. A receiver's `ZSKIP` completes a
+  skipped download without incrementing its download count. Upload offers
+  declined for an existing/invalid name or size/quota policy receive `ZSKIP`,
+  leaving the batch ready for another file; existing content is never replaced.
+  Eight declined offers are allowed per batch before it is cancelled.
+  `ZNAK` and malformed headers share a budget of eight recovery exchanges per
+  session, independent of good intervening headers. Header scanning and waits
+  are bounded; exhaustion cancels the exchange and drains transfer residue
+  before restoring the prompt. Data-subpacket corruption still aborts, with
+  valid partial upload bytes retained under the existing reconnect policy.
+  Staging does not survive a server restart; real-terminal interoperability
+  validation remains separate from the automated TCP fixtures.
 - **Doors**: `doors_enabled`, `doors_dir` (default `doors/`, relative to
   `data_dir`), `doors_max_nodes` (default 4; 0 refuses every launch),
   `doors_session_max_secs` (default 3600; 0 = unlimited), `[[doors]]` array

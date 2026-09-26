@@ -1,7 +1,7 @@
-//! Sans-IO session sketch: happy-path ZMODEM send/receive state machines.
+//! Sans-IO ZMODEM send/receive state machines with bounded header recovery.
 //!
-//! This module is deliberately a *sketch* — just enough structure for the
-//! telnet integration slice to drive a straightforward transfer. The state
+//! This module handles single-file sends, batch receives, offset resume and
+//! per-file declines for the telnet integration slice. The state
 //! machines own no sockets and do no encoding: the caller decodes wire
 //! bytes into [`RecvEvent`]/[`SendEvent`]s (via [`crate::header`] and
 //! [`crate::subpacket`]) and performs the returned actions.
@@ -39,11 +39,21 @@
 //!   feeding the file-info subpacket and the receiver asks for the tail
 //!   instead (`ZRPOS(offset)`), then expects data from that offset.
 //!
+//! ## Bounded recovery and decline
+//!
+//! `ZSKIP` declines one offered file; receivers remain ready for another and
+//! the single-file sender finishes normally without claiming delivery. `ZNAK`
+//! replays the last control exchange. Drivers report malformed headers through
+//! `corrupt_header`, which requests retransmission without advancing offsets.
+//! At most [`MAX_RECOVERY_ATTEMPTS`] recoveries are allowed per session.
+//! Semantics follow Forsberg's protocol, sections 8.2 and 11.6–11.9:
+//! <https://techheap.packetizer.com/communications/modems/zmodem8.html>.
+//!
 //! ## Deliberately deferred (future slices)
 //!
-//! - Full error recovery: `ZNAK`/garbled-header retries, retry limits and
-//!   timeouts, `ZRPOS` storm damping, `Attn` sequences from `ZSINIT`.
-//! - `ZSKIP`/`ZCRC` file-exists negotiation, `ZFREECNT`, `ZCHALLENGE`,
+//! - Data-subpacket retransmission, `ZRPOS` storm damping and `Attn`
+//!   sequences from `ZSINIT`. The driver owns transport timeouts.
+//! - `ZCRC` file-exists comparison, `ZFREECNT`, `ZCHALLENGE`,
 //!   `ZCOMMAND`.
 //! - Multi-file batches on the send side (the receiver already loops back
 //!   to `AwaitingFile` after each `ZEOF`).
@@ -52,7 +62,7 @@
 //! Out-of-order but well-formed events yield
 //! [`SessionError::UnexpectedEvent`] rather than silent misbehaviour, and
 //! a stale `ZDATA`/`ZEOF` position is answered with a corrective `ZRPOS`
-//! (the seed of real recovery).
+//! without advancing the accepted file offset.
 
 use thiserror::Error;
 
@@ -60,9 +70,24 @@ use crate::header::{FrameType, Header, HeaderFormat, CANFC32, CANFDX, CANOVIO};
 use crate::zdle::FrameEnd;
 use crate::zfile::{FileInfo, FileInfoError};
 
+/// Total recovery exchanges allowed in one session, across protocol phases.
+/// Good headers do not replenish this budget and permit a retry storm.
+pub const MAX_RECOVERY_ATTEMPTS: u8 = 8;
+
+fn recovery(attempts: &mut u8) -> Result<(), SessionError> {
+    if *attempts >= MAX_RECOVERY_ATTEMPTS {
+        return Err(SessionError::RetriesExhausted);
+    }
+    *attempts += 1;
+    Ok(())
+}
+
 /// Errors from the session state machines.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SessionError {
+    /// Too many retransmission requests or corrupt headers in this session.
+    #[error("header recovery retry limit reached")]
+    RetriesExhausted,
     /// An event arrived that this state cannot handle (see module docs on
     /// deferred recovery).
     #[error("unexpected {event} in state {state}")]
@@ -170,14 +195,15 @@ pub enum RecvAction {
     Finished,
 }
 
-/// Happy-path ZMODEM receiver (see module docs for the flow and what is
-/// deferred).
+/// Batch ZMODEM receiver with per-file decline and bounded header recovery.
 #[derive(Debug)]
 pub struct Receiver {
     state: RecvState,
     /// Where the *next* accepted file starts: 0 normally, a staged partial's
     /// length when the driver armed a resume (consumed per file).
     resume_offset: u32,
+    recoveries: u8,
+    last_reply: Option<RecvAction>,
 }
 
 impl Default for Receiver {
@@ -192,6 +218,8 @@ impl Receiver {
         Receiver {
             state: RecvState::AwaitingInit,
             resume_offset: 0,
+            recoveries: 0,
+            last_reply: None,
         }
     }
 
@@ -210,6 +238,33 @@ impl Receiver {
         self.resume_offset = offset;
     }
 
+    /// Refuse this offer without opening a file or ending the batch.
+    pub fn decline_file(&mut self) -> Result<Vec<RecvAction>, SessionError> {
+        if self.state != RecvState::AwaitingFileInfo {
+            return Err(SessionError::UnexpectedEvent {
+                state: self.state.name(),
+                event: "file decline",
+            });
+        }
+        self.resume_offset = 0;
+        self.state = RecvState::AwaitingFile;
+        let reply = RecvAction::SendHeader {
+            header: Header::new(FrameType::Zskip),
+            format: HeaderFormat::Hex,
+        };
+        self.last_reply = Some(reply.clone());
+        Ok(vec![reply])
+    }
+
+    /// Ask the peer to repeat its corrupt header. No file offset changes.
+    pub fn corrupt_header(&mut self) -> Result<Vec<RecvAction>, SessionError> {
+        recovery(&mut self.recoveries)?;
+        Ok(vec![RecvAction::SendHeader {
+            header: Header::new(FrameType::Znak),
+            format: HeaderFormat::Hex,
+        }])
+    }
+
     /// The `ZRINIT` this receiver advertises: full-duplex, overlapped I/O,
     /// 32-bit CRC, no buffer-size limit (streaming).
     fn zrinit() -> RecvAction {
@@ -221,6 +276,28 @@ impl Receiver {
 
     /// Feed one event; get the actions the driver must perform, in order.
     pub fn advance(&mut self, event: RecvEvent) -> Result<Vec<RecvAction>, SessionError> {
+        if matches!(&event, RecvEvent::Header(h) if h.frame_type == FrameType::Znak || (self.state == RecvState::Done && h.frame_type == FrameType::Zfin))
+        {
+            recovery(&mut self.recoveries)?;
+            return self.last_reply.clone().map(|reply| vec![reply]).ok_or(
+                SessionError::UnexpectedEvent {
+                    state: self.state.name(),
+                    event: "ZNAK before any reply",
+                },
+            );
+        }
+        let actions = self.advance_inner(event)?;
+        if let Some(reply) = actions
+            .iter()
+            .rev()
+            .find(|action| matches!(action, RecvAction::SendHeader { .. }))
+        {
+            self.last_reply = Some(reply.clone());
+        }
+        Ok(actions)
+    }
+
+    fn advance_inner(&mut self, event: RecvEvent) -> Result<Vec<RecvAction>, SessionError> {
         let unexpected = SessionError::UnexpectedEvent {
             state: self.state.name(),
             event: event.name(),
@@ -339,7 +416,7 @@ pub enum SendState {
     Start,
     /// Sent `ZRQINIT`; waiting for the receiver's `ZRINIT`.
     AwaitingRinit,
-    /// Sent `ZFILE` + info; waiting for `ZRPOS` (or `ZSKIP`, deferred).
+    /// Sent `ZFILE` + info; waiting for `ZRPOS` or `ZSKIP`.
     AwaitingFileAck,
     /// The caller is streaming `ZDATA` subpackets from `offset`.
     Streaming {
@@ -414,13 +491,16 @@ pub enum SendAction {
     Finished,
 }
 
-/// Happy-path single-file ZMODEM sender sketch.
+/// Single-file ZMODEM sender with resume, decline and bounded header recovery.
 #[derive(Debug)]
 pub struct Sender {
     state: SendState,
     info: FileInfo,
     /// Whether the receiver advertised CANFC32 (drives header/CRC width).
     peer_can_fc32: bool,
+    recoveries: u8,
+    last_exchange: Vec<SendAction>,
+    skipped: bool,
 }
 
 impl Sender {
@@ -430,6 +510,9 @@ impl Sender {
             state: SendState::Start,
             info,
             peer_can_fc32: false,
+            recoveries: 0,
+            last_exchange: Vec::new(),
+            skipped: false,
         }
     }
 
@@ -441,6 +524,32 @@ impl Sender {
     /// Whether the receiver can check 32-bit CRCs (valid after `ZRINIT`).
     pub fn peer_can_fc32(&self) -> bool {
         self.peer_can_fc32
+    }
+
+    /// A completed session may have declined the file rather than delivered it.
+    pub fn skipped(&self) -> bool {
+        self.skipped
+    }
+
+    /// Ask for a corrupt peer header again, retaining the last real exchange
+    /// so a subsequent ZNAK never causes a negative-acknowledgement loop.
+    pub fn corrupt_header(&mut self) -> Result<Vec<SendAction>, SessionError> {
+        recovery(&mut self.recoveries)?;
+        Ok(vec![SendAction::SendHeader {
+            header: Header::new(FrameType::Znak),
+            format: HeaderFormat::Hex,
+        }])
+    }
+
+    fn retry_exchange(&mut self) -> Result<Vec<SendAction>, SessionError> {
+        if self.last_exchange.is_empty() || self.state == SendState::Done {
+            return Err(SessionError::UnexpectedEvent {
+                state: self.state.name(),
+                event: "ZNAK without a pending exchange",
+            });
+        }
+        recovery(&mut self.recoveries)?;
+        Ok(self.last_exchange.clone())
     }
 
     fn binary_format(&self) -> HeaderFormat {
@@ -460,14 +569,46 @@ impl Sender {
             });
         }
         self.state = SendState::AwaitingRinit;
-        Ok(vec![SendAction::SendHeader {
+        self.last_exchange = vec![SendAction::SendHeader {
             header: Header::new(FrameType::Zrqinit),
             format: HeaderFormat::Hex,
-        }])
+        }];
+        Ok(self.last_exchange.clone())
     }
 
     /// Feed one event; get the actions the driver must perform, in order.
     pub fn advance(&mut self, event: SendEvent) -> Result<Vec<SendAction>, SessionError> {
+        if matches!(&event, SendEvent::Header(h) if h.frame_type == FrameType::Znak) {
+            return self.retry_exchange();
+        }
+        if matches!(&event, SendEvent::Header(h) if h.frame_type == FrameType::Zskip) {
+            match self.state {
+                SendState::AwaitingFileAck
+                | SendState::Streaming { .. }
+                | SendState::AwaitingEofAck => {
+                    self.skipped = true;
+                    self.state = SendState::AwaitingFinAck;
+                    self.last_exchange = vec![SendAction::SendHeader {
+                        header: Header::new(FrameType::Zfin),
+                        format: HeaderFormat::Hex,
+                    }];
+                    return Ok(self.last_exchange.clone());
+                }
+                SendState::AwaitingFinAck if self.skipped => return self.retry_exchange(),
+                _ => {}
+            }
+        }
+        let actions = self.advance_inner(event)?;
+        if actions
+            .iter()
+            .any(|action| matches!(action, SendAction::SendHeader { .. }))
+        {
+            self.last_exchange = actions.clone();
+        }
+        Ok(actions)
+    }
+
+    fn advance_inner(&mut self, event: SendEvent) -> Result<Vec<SendAction>, SessionError> {
         let unexpected = SessionError::UnexpectedEvent {
             state: self.state.name(),
             event: event.name(),
@@ -564,6 +705,10 @@ impl Sender {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "session/recovery_tests.rs"]
+mod recovery_tests;
 
 #[cfg(test)]
 mod tests {

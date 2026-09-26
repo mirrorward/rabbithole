@@ -3,9 +3,9 @@
 //! A pure, dependency-light codec for the classic **ZMODEM** file-transfer
 //! protocol (Chuck Forsberg, 1988), so real retro terminals — SyncTERM,
 //! NetRunner, qodem — can transfer files against RabbitHole's telnet surface.
-//! This crate is *only* the wire format plus a sans-IO session sketch — no
+//! This crate is *only* the wire format plus sans-IO session state machines — no
 //! sockets, no telnet integration, no async. Those layers wire this codec
-//! into the telnet surface in a later Wave 6 slice.
+//! into the server's telnet surface.
 //!
 //! ## Wire layers (outermost to innermost)
 //!
@@ -34,8 +34,8 @@
 //!   codecs.
 //! - [`subpacket`] — data subpackets: payload + frame-end + CRC.
 //! - [`zfile`] — the ZFILE file-information block (name, length, mtime, …).
-//! - [`session`] — sans-IO `SendState` / `RecvState` sketch of the happy-path
-//!   transfer flow for the telnet integration slice to drive.
+//! - [`session`] — sans-IO `SendState` / `RecvState` transfer flow, resume,
+//!   per-file decline and bounded header recovery for the telnet driver.
 //!
 //! ## Safety & robustness
 //!

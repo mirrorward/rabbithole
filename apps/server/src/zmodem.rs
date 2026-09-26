@@ -88,6 +88,13 @@ const PARTIAL_TTL: Duration = Duration::from_secs(30 * 60);
 /// Consecutive CANs from the peer that abort the session (the spec's five).
 const CANCEL_CANS: u32 = 5;
 
+/// A header cannot grow indefinitely or keep an operation alive with noise.
+const MAX_HEADER_SCAN: usize = 16 * 1024;
+const MAX_HEADER_BUFFER: usize = 1024;
+/// Total pre-data policy refusals in a batch, independently of corruption.
+/// Successful files do not replenish this cap or permit unbounded skip text.
+const MAX_DECLINED_OFFERS: usize = 8;
+
 /// The classic abort sequence: CANs to stop the peer's engine, backspaces
 /// to tidy its terminal.
 const ABORT_SEQ: [u8; 16] = [
@@ -169,9 +176,11 @@ enum Zx {
     Io(io::Error),
     /// The peer went quiet past [`IDLE_TIMEOUT`].
     Timeout,
-    /// The peer struck CANs (or declined the file with ZSKIP/ZABORT/ZFERR).
+    /// The peer struck CANs (or sent ZABORT/ZFERR).
     Cancelled,
-    /// The byte stream or event order was wrong; recovery is out of scope.
+    /// One malformed header was discarded; the state machine may request it again.
+    BadHeader,
+    /// An unrecoverable error or exhausted recovery budget.
     Protocol(String),
     /// Policy said no (bad name, collision, size, quota).
     Refused(String),
@@ -250,12 +259,27 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> Wire<'a, S> {
         Ok(())
     }
 
-    /// The next well-formed header, skipping line noise (the dangling LF of
-    /// the command line that started the transfer, hex-header trailers,
-    /// garbled bytes) and honoring cancels.
+    /// The next header, skipping bounded line noise/trailers and honoring
+    /// cancels. A malformed candidate is reported for bounded retransmission.
     async fn next_header(&mut self) -> Result<DecodedHeader, Zx> {
+        self.next_header_with_budget(IDLE_TIMEOUT).await
+    }
+
+    async fn next_header_with_budget(&mut self, budget: Duration) -> Result<DecodedHeader, Zx> {
+        tokio::time::timeout(budget, self.read_header())
+            .await
+            .map_err(|_| Zx::Timeout)?
+    }
+
+    async fn read_header(&mut self) -> Result<DecodedHeader, Zx> {
+        let mut scanned = 0;
         loop {
+            let before = self.buf.len();
             self.skip_to_zpad()?;
+            scanned += before - self.buf.len();
+            if scanned > MAX_HEADER_SCAN {
+                return Err(Zx::Protocol("header scan limit reached".into()));
+            }
             if self.buf.is_empty() {
                 self.refill().await?;
                 continue;
@@ -265,11 +289,17 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> Wire<'a, S> {
                     self.buf.drain(..decoded.consumed);
                     return Ok(decoded);
                 }
-                Err(HeaderError::Incomplete) => self.refill().await?,
+                Err(HeaderError::Incomplete) if self.buf.len() < MAX_HEADER_BUFFER => {
+                    self.refill().await?
+                }
                 Err(HeaderError::Cancelled) => return Err(Zx::Cancelled),
-                // Garbled: shed the leading pad and rescan (resync).
+                // Shed the entire pad prefix, once, then let the next call
+                // resynchronize. Retain following bytes: a valid next header
+                // may already be in this same read. Each fault spends a retry.
                 Err(_) => {
-                    self.buf.remove(0);
+                    let pads = self.buf.iter().take_while(|&&b| b == ZPAD).count();
+                    self.buf.drain(..pads.max(1));
+                    return Err(Zx::BadHeader);
                 }
             }
         }
@@ -320,6 +350,61 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> Wire<'a, S> {
                 _ => break, // quiet, EOF, or transport error
             }
         }
+    }
+
+    /// A receiver must still answer a retransmission request for its final
+    /// ZFIN. Keep this within the existing quiet/total cleanup bounds; OO,
+    /// disconnect or quiet ends cleanup without delaying the shell forever.
+    async fn finish_receive(&mut self, rx: &mut Receiver) -> Result<(), Zx> {
+        tokio::time::timeout(DRAIN_MAX, async {
+            loop {
+                if self.buf.windows(2).any(|bytes| bytes == b"OO") {
+                    self.buf.clear();
+                    return Ok(());
+                }
+                self.skip_to_zpad()?;
+                if !self.buf.is_empty() {
+                    let actions = match decode_header(&self.buf) {
+                        Ok(decoded) => {
+                            self.buf.drain(..decoded.consumed);
+                            if matches!(
+                                decoded.header.frame_type,
+                                FrameType::Znak | FrameType::Zfin
+                            ) {
+                                rx.advance(RecvEvent::Header(decoded.header))?
+                            } else {
+                                vec![]
+                            }
+                        }
+                        Err(HeaderError::Cancelled) => return Err(Zx::Cancelled),
+                        Err(HeaderError::Incomplete) if self.buf.len() < MAX_HEADER_BUFFER => {
+                            vec![]
+                        }
+                        Err(_) => {
+                            let pads = self.buf.iter().take_while(|&&b| b == ZPAD).count();
+                            self.buf.drain(..pads.max(1));
+                            rx.corrupt_header()?
+                        }
+                    };
+                    for action in actions {
+                        if let RecvAction::SendHeader { header, format } = action {
+                            self.send(&header.encode(format)).await?;
+                        }
+                    }
+                    if !self.buf.is_empty()
+                        && !matches!(decode_header(&self.buf), Err(HeaderError::Incomplete))
+                    {
+                        continue;
+                    }
+                }
+                match tokio::time::timeout(DRAIN_QUIET, self.t.read_binary()).await {
+                    Ok(Ok(Some(bytes))) => self.buf.extend_from_slice(&bytes),
+                    _ => return Ok(()),
+                }
+            }
+        })
+        .await
+        .unwrap_or(Ok(()))
     }
 }
 
@@ -375,27 +460,37 @@ where
     let outcome = drive_send(&mut wire, Sender::new(info), &bytes).await;
     let detail = format!("{}/{} bytes={}", target.area, target.path, bytes.len());
     match outcome {
-        Ok(()) => {
+        Ok(skipped) => {
             // The receiver's own trailing "OO" (this codec's receiver sends
             // one) must not replay into line mode as a command.
             wire.drain_residue().await;
-            if let Err(e) = shared.files.record_download(target.id).await {
-                tracing::warn!("zmodem download counter failed: {e}");
+            if !skipped {
+                if let Err(e) = shared.files.record_download(target.id).await {
+                    tracing::warn!("zmodem download counter failed: {e}");
+                }
             }
             audit(
                 shared,
                 &authed.account.login,
                 "zmodem-send",
-                format!("{detail} outcome=complete"),
+                format!(
+                    "{detail} outcome={}",
+                    if skipped { "skipped" } else { "complete" }
+                ),
             );
-            t.write_str("\nZMODEM send complete.\n").await
+            t.write_str(if skipped {
+                "\nZMODEM file skipped by receiver.\n"
+            } else {
+                "\nZMODEM send complete.\n"
+            })
+            .await
         }
         Err(zx) => finish_failed(t, shared, authed, "zmodem-send", &detail, zx, None).await,
     }
 }
 
 /// Drive the codec [`Sender`] to completion over the wire.
-async fn drive_send<S>(wire: &mut Wire<'_, S>, mut tx: Sender, bytes: &[u8]) -> Result<(), Zx>
+async fn drive_send<S>(wire: &mut Wire<'_, S>, mut tx: Sender, bytes: &[u8]) -> Result<bool, Zx>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -424,13 +519,20 @@ where
                     pending.extend(tx.advance(exhausted)?);
                 }
                 SendAction::SendOverAndOut => wire.send(b"OO").await?,
-                SendAction::Finished => return Ok(()),
+                SendAction::Finished => return Ok(tx.skipped()),
             }
         }
-        let decoded = wire.next_header().await?;
+        let decoded = match wire.next_header().await {
+            Ok(decoded) => decoded,
+            Err(Zx::BadHeader) => {
+                pending.extend(tx.corrupt_header()?);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if matches!(
             decoded.header.frame_type,
-            FrameType::Zskip | FrameType::Zabort | FrameType::Zferr | FrameType::Zcan
+            FrameType::Zabort | FrameType::Zferr | FrameType::Zcan
         ) {
             return Err(Zx::Cancelled);
         }
@@ -514,6 +616,7 @@ where
     let mut wide = false;
     let mut current: Option<InFlight> = None;
     let mut results: Vec<String> = Vec::new();
+    let mut declined = 0;
 
     let outcome = loop {
         // Route by receiver state: file-info and data arrive as subpackets,
@@ -544,6 +647,24 @@ where
                     }
                     RecvEvent::Header(decoded.header)
                 }
+                Err(Zx::BadHeader) => match rx.corrupt_header() {
+                    Ok(actions) => {
+                        let mut failed = None;
+                        for action in actions {
+                            if let RecvAction::SendHeader { header, format } = action {
+                                if let Err(error) = wire.send(&header.encode(format)).await {
+                                    failed = Some(error);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(error) = failed {
+                            break Err(error);
+                        }
+                        continue;
+                    }
+                    Err(error) => break Err(error.into()),
+                },
                 Err(zx) => break Err(zx),
             },
         };
@@ -559,7 +680,31 @@ where
                         rx.set_resume_offset(inflight.data.len() as u32);
                         current = Some(inflight);
                     }
-                    Err(reason) => break Err(Zx::Refused(reason)),
+                    Err(OfferError::Declined(reason)) => {
+                        declined += 1;
+                        if declined > MAX_DECLINED_OFFERS {
+                            break Err(Zx::Refused("too many declined file offers".into()));
+                        }
+                        results.push(format!("Skipped: {reason}"));
+                        let actions = match rx.decline_file() {
+                            Ok(actions) => actions,
+                            Err(error) => break Err(error.into()),
+                        };
+                        let mut failed = None;
+                        for action in actions {
+                            if let RecvAction::SendHeader { header, format } = action {
+                                if let Err(error) = wire.send(&header.encode(format)).await {
+                                    failed = Some(error);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(error) = failed {
+                            break Err(error);
+                        }
+                        continue;
+                    }
+                    Err(OfferError::Fatal(reason)) => break Err(Zx::Refused(reason)),
                 }
             }
         }
@@ -624,7 +769,7 @@ where
             break Err(zx);
         }
         if finished {
-            break Ok(());
+            break wire.finish_receive(&mut rx).await;
         }
     };
 
@@ -632,7 +777,6 @@ where
         Ok(()) => {
             // A compliant sender answers our ZFIN with its own "OO"; eat it
             // so it never replays into line mode as a command.
-            wire.drain_residue().await;
             let mut out = String::from("\nZMODEM receive complete.\n");
             for line in &results {
                 out.push_str(&format!("  {line}\n"));
@@ -666,13 +810,18 @@ where
 /// Vet one ZFILE offer against the native upload gates. `Ok` carries the
 /// in-flight state (staging seeded when a resumable partial exists);
 /// `Err` is the refusal reason.
+enum OfferError {
+    Declined(String),
+    Fatal(String),
+}
+
 async fn vet_offer(
     shared: &Arc<Shared>,
     authed: &AuthedUser,
     area: &str,
     folder: Option<&str>,
     info: &FileInfo,
-) -> Result<InFlight, String> {
+) -> Result<InFlight, OfferError> {
     // Strip any path the sender attached; the basename is the offer.
     let name = info
         .name
@@ -687,7 +836,9 @@ async fn vet_offer(
         || name == ".."
         || name.chars().any(char::is_control)
     {
-        return Err("that file name is not acceptable".into());
+        return Err(OfferError::Declined(
+            "that file name is not acceptable".into(),
+        ));
     }
     // No clobbering — the FileService convention every upload path follows.
     let full = match folder {
@@ -696,19 +847,26 @@ async fn vet_offer(
     };
     match shared.files.node_by_path(area, &full).await {
         Ok(None) => {}
-        Ok(Some(_)) => return Err(format!("{name} already exists here")),
-        Err(e) => return Err(format!("the file library is unavailable: {e}")),
+        Ok(Some(_)) => return Err(OfferError::Declined(format!("{name} already exists here"))),
+        Err(e) => {
+            return Err(OfferError::Fatal(format!(
+                "the file library is unavailable: {e}"
+            )))
+        }
     }
     // Declared-size cap and the storage quota, checked fast on the declared
     // size (finalize re-checks the actual bytes).
     let declared = info.length;
     if declared.is_some_and(|d| d > MAX_ZPUT_BYTES) {
-        return Err("file too large".into());
+        return Err(OfferError::Declined("file too large".into()));
     }
     if let Err(refused) =
         crate::upload_gate::check(shared, authed.account.id, declared.unwrap_or(0)).await
     {
-        return Err(refused.line());
+        return Err(match refused {
+            crate::upload_gate::Refusal::Unavailable => OfferError::Fatal(refused.line()),
+            _ => OfferError::Declined(refused.line()),
+        });
     }
     // Resume: seed staging when a live partial fits under the declared size.
     let key = partial_key(authed.account.id, area, folder, &name);
@@ -857,6 +1015,13 @@ where
                 Some(format!("Transfer failed: {e}.")),
             )
         }
+        Zx::BadHeader => {
+            wire.abort().await;
+            (
+                "bad-header".to_string(),
+                Some("Transfer failed: invalid header.".to_string()),
+            )
+        }
         Zx::Refused(reason) => {
             wire.abort().await;
             (
@@ -894,3 +1059,7 @@ fn audit(shared: &Arc<Shared>, actor: &str, action: &str, detail: String) {
         let _ = AuditRepo(&pool).record(&actor, &action, &detail).await;
     });
 }
+
+#[cfg(test)]
+#[path = "zmodem/recovery_tests.rs"]
+mod recovery_tests;
