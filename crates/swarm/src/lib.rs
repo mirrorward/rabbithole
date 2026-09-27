@@ -32,8 +32,8 @@ pub use link::{
     DestinationHash, DestinationHashError, LinkAuthority, LinkError, LinkTarget, RabbitLink,
 };
 pub use manifest::{
-    Manifest, ManifestCborError, ManifestError, ManifestFile, CHUNK_SIZE,
-    MANIFEST_CBOR_VERSION, MAX_MANIFEST_CBOR_BYTES, MAX_MANIFEST_CBOR_FILES,
+    Manifest, ManifestCborError, ManifestError, ManifestFile, CHUNK_SIZE, MANIFEST_CBOR_VERSION,
+    MAX_MANIFEST_CBOR_BYTES, MAX_MANIFEST_CBOR_FILES,
 };
 pub use peer::{
     decode_proved, encode_proved, fetch_file, fetch_have, fetch_proved, fetch_range,
