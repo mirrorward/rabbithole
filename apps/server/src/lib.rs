@@ -113,6 +113,7 @@ pub struct Shared {
     pub catalogs: fed_catalog::CatalogState,
     /// Shared per-peer cadence and cursors for bounded history recovery.
     pub(crate) fed_history: federation::HistoryState,
+    pub(crate) fed_ingest: federation::IngestState,
     /// Board-event flood-fill shared state: the pinned origin-key registry
     /// (Wave 9). Per-edge subscription/seen state lives in the session tasks.
     pub fed_flood: fed_flood::FloodState,
@@ -340,6 +341,7 @@ impl Burrow {
             // survives restarts (peers must never see a stale "fresh" gen 1).
             catalogs: fed_catalog::CatalogState::load(&data_dir, &identity.signing.seed()),
             fed_history: federation::HistoryState::default(),
+            fed_ingest: federation::IngestState::default(),
             // Reload pinned origin keys so key-continuity survives a restart
             // (a reboot must not reopen the origin to a spoofer's re-pin).
             fed_flood: fed_flood::FloodState::load(&data_dir),
@@ -531,6 +533,9 @@ fn effective_origin(config: &ServerConfig) -> String {
 }
 
 fn validate_federation_policy(config: &ServerConfig) -> Result<()> {
+    rabbithole_server_core::config::validate_federation_denied_keys(
+        &config.federation_denied_keys,
+    )?;
     if !config.federation_enabled {
         return Ok(());
     }

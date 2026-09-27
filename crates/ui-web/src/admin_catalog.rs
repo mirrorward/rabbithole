@@ -957,6 +957,65 @@ pub const SECTIONS: &[Section] = &[
                     .unit(Unit::Seconds)
                     .zero("Periodic offers off"),
                     item(
+                        "federation_ingest_frames_per_sec",
+                        "Incoming frames per second",
+                        "Control frames each peer's allowance regains per second. All links from \
+                         the same peer share an allowance. Set 0 to stop refill; the remaining \
+                         burst can still be used.",
+                    )
+                    .zero("No refill"),
+                    item(
+                        "federation_ingest_frames_burst",
+                        "Incoming frame burst",
+                        "Maximum control frames a peer can send in a burst. Exceeding its \
+                         allowance closes that session. Set 0 to refuse every incoming frame.",
+                    )
+                    .zero("No frames allowed"),
+                    item(
+                        "federation_ingest_bytes_per_sec",
+                        "Incoming bytes per second",
+                        "Control payload bytes each peer's allowance regains per second. \
+                         This covers catalogs and board traffic. Set 0 to stop refill; \
+                         file transfers have separate limits.",
+                    )
+                    .unit(Unit::BytesPerSec)
+                    .zero("No refill"),
+                    item(
+                        "federation_ingest_bytes_burst",
+                        "Incoming byte burst",
+                        "Maximum control payload bytes a peer can send in a burst. Set 0 \
+                         to refuse every nonempty payload. Reconnecting does not reset \
+                         the allowance.",
+                    )
+                    .unit(Unit::Bytes)
+                    .zero("No payload bytes allowed"),
+                    item(
+                        "federation_ingest_events_per_sec",
+                        "Incoming event work per second",
+                        "Event items each peer's allowance regains per second. Offers and \
+                         requests count each event ID; deliveries count each event, including \
+                         duplicates or invalid items. Set 0 to stop refill.",
+                    )
+                    .zero("No refill"),
+                    item(
+                        "federation_ingest_events_burst",
+                        "Incoming event work burst",
+                        "Maximum event items a peer can ask this burrow to process in a burst. \
+                         A batch over its allowance is refused whole. Set 0 to refuse all \
+                         nonempty event offers, requests and deliveries.",
+                    )
+                    .zero("No event work allowed"),
+                    item(
+                        "federation_denied_keys",
+                        "Denied peer keys",
+                        "A TOML array of complete 64-digit hexadecimal public keys: put each \
+                         key in double quotes inside square brackets. These peers are refused \
+                         even when approved or configured. \
+                         Use [] to clear this list; existing approvals and origin pins stay \
+                         unchanged. At most 4096 keys.",
+                    )
+                    .long(),
+                    item(
                         "federation_origin",
                         "This burrow\u{2019}s origin",
                         "The permanent name this burrow signs federated posts with. Set once \

@@ -363,6 +363,18 @@ pub struct ServerConfig {
     /// 5–3600). Zero disables periodic passes; subscription-triggered catch-up
     /// remains bounded by a 60-second per-peer cooldown.
     pub federation_history_reoffer_secs: u64,
+    /// Live federation control-frame budgets per authenticated peer key.
+    /// Rates are per second; zero rate is a non-refilling burst, not a bypass.
+    pub federation_ingest_frames_per_sec: u32,
+    pub federation_ingest_frames_burst: u32,
+    pub federation_ingest_bytes_per_sec: u32,
+    pub federation_ingest_bytes_burst: u32,
+    /// Event work includes delivered events and offered/requested event ids.
+    pub federation_ingest_events_per_sec: u32,
+    pub federation_ingest_events_burst: u32,
+    /// Live explicit deny override, independent of approval and origin pins.
+    /// A TOML array of up to 4096 complete Ed25519 public keys in hex.
+    pub federation_denied_keys: Vec<String>,
     /// Best-effort UPnP-IGD / NAT-PMP / PCP port mapping: on startup ask the
     /// LAN router to open the QUIC and WS ports so a self-hosted burrow behind
     /// a consumer NAT is reachable without a manual port-forward. Off by
@@ -586,6 +598,13 @@ impl Default for ServerConfig {
             federation_peers: Vec::new(),
             federation_board_subscribe: Vec::new(),
             federation_history_reoffer_secs: 60,
+            federation_ingest_frames_per_sec: 32,
+            federation_ingest_frames_burst: 128,
+            federation_ingest_bytes_per_sec: 4194304,
+            federation_ingest_bytes_burst: 16777216,
+            federation_ingest_events_per_sec: 1024,
+            federation_ingest_events_burst: 4096,
+            federation_denied_keys: Vec::new(),
             portmap_enabled: false,
             portmap_gateway: String::new(),
             portmap_lifetime_secs: 7200,
@@ -883,6 +902,20 @@ impl ServerConfig {
             "federation_origin" => self.federation_origin.clone(),
             "federation_addr" => self.federation_addr.to_string(),
             "federation_history_reoffer_secs" => self.federation_history_reoffer_secs.to_string(),
+            "federation_ingest_frames_per_sec" => self.federation_ingest_frames_per_sec.to_string(),
+            "federation_ingest_frames_burst" => self.federation_ingest_frames_burst.to_string(),
+            "federation_ingest_bytes_per_sec" => self.federation_ingest_bytes_per_sec.to_string(),
+            "federation_ingest_bytes_burst" => self.federation_ingest_bytes_burst.to_string(),
+            "federation_ingest_events_per_sec" => self.federation_ingest_events_per_sec.to_string(),
+            "federation_ingest_events_burst" => self.federation_ingest_events_burst.to_string(),
+            "federation_denied_keys" => toml::Value::Array(
+                self.federation_denied_keys
+                    .iter()
+                    .cloned()
+                    .map(toml::Value::String)
+                    .collect(),
+            )
+            .to_string(),
             "s2s_grants_enabled" => self.s2s_grants_enabled.to_string(),
             "s2s_pull_enabled" => self.s2s_pull_enabled.to_string(),
             "s2s_max_concurrent" => self.s2s_max_concurrent.to_string(),
@@ -1360,6 +1393,52 @@ impl ServerConfig {
                 self.federation_addr = parse_addr(key, value)?;
                 Ok(false)
             }
+            "federation_ingest_frames_per_sec" => {
+                self.federation_ingest_frames_per_sec = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "federation_ingest_frames_burst" => {
+                self.federation_ingest_frames_burst = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "federation_ingest_bytes_per_sec" => {
+                self.federation_ingest_bytes_per_sec = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "federation_ingest_bytes_burst" => {
+                self.federation_ingest_bytes_burst = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "federation_ingest_events_per_sec" => {
+                self.federation_ingest_events_per_sec = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "federation_ingest_events_burst" => {
+                self.federation_ingest_events_burst = parse_u32(key, value)?;
+                Ok(true)
+            }
+            "federation_denied_keys" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Keys {
+                    keys: Vec<String>,
+                }
+                let parsed: Keys = toml::from_str(&format!("keys = {value}")).map_err(|_| {
+                    ConfigError::BadValue {
+                        key: key.into(),
+                        detail: "expected a TOML array of public keys".into(),
+                    }
+                })?;
+                let parsed = parsed.keys;
+                validate_federation_denied_keys(&parsed)?;
+                self.federation_denied_keys = parsed
+                    .into_iter()
+                    .map(|key| key.to_ascii_lowercase())
+                    .collect();
+                self.federation_denied_keys.sort();
+                self.federation_denied_keys.dedup();
+                Ok(true)
+            }
             "federation_history_reoffer_secs" => {
                 let seconds: u64 = value.parse().map_err(|_| ConfigError::BadValue {
                     key: key.into(),
@@ -1653,6 +1732,13 @@ pub const CONFIG_KEYS: &[&str] = &[
     "federation_origin",
     "federation_addr",
     "federation_history_reoffer_secs",
+    "federation_ingest_frames_per_sec",
+    "federation_ingest_frames_burst",
+    "federation_ingest_bytes_per_sec",
+    "federation_ingest_bytes_burst",
+    "federation_ingest_events_per_sec",
+    "federation_ingest_events_burst",
+    "federation_denied_keys",
     "s2s_grants_enabled",
     "s2s_pull_enabled",
     "s2s_max_concurrent",
@@ -1857,6 +1943,21 @@ impl ServerConfig {
     }
 }
 
+/// Validate file/programmatic config as well as the live setter.
+pub fn validate_federation_denied_keys(keys: &[String]) -> Result<(), ConfigError> {
+    if keys.len() > 4096
+        || keys
+            .iter()
+            .any(|key| key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err(ConfigError::BadValue {
+            key: "federation_denied_keys".into(),
+            detail: "expected at most 4096 complete 64-digit hexadecimal public keys".into(),
+        });
+    }
+    Ok(())
+}
+
 fn parse_bool(key: &str, v: &str) -> Result<bool, ConfigError> {
     match v.to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
@@ -1908,6 +2009,12 @@ impl LiveConfig {
         self.0.read().clone()
     }
 
+    /// Inspect current policy without cloning its collections. Keep the
+    /// closure short: it holds the config read lock and must not do I/O.
+    pub fn read_with<R>(&self, read: impl FnOnce(&ServerConfig) -> R) -> R {
+        read(&self.0.read())
+    }
+
     pub fn get_key(&self, key: &str) -> Result<String, ConfigError> {
         self.0.read().get_key(key)
     }
@@ -1954,6 +2061,52 @@ impl LiveConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn federation_ingest_live_config_is_validated_and_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("burrow.toml");
+        std::fs::write(&path, "# keep operator comments\n").unwrap();
+        let live = LiveConfig::new(ServerConfig::load(Some(&path)).unwrap());
+        for key in CONFIG_KEYS
+            .iter()
+            .filter(|key| key.starts_with("federation_ingest_"))
+        {
+            assert!(live.set_key(key, "0").unwrap());
+            assert_eq!(live.get_key(key).unwrap(), "0");
+            assert!(live.set_key(key, "-1").is_err());
+            assert!(live.set_key(key, "4294967296").is_err());
+        }
+        let public = "AB".repeat(32);
+        assert!(live
+            .set_key(
+                "federation_denied_keys",
+                &format!("[\"{public}\", \"{public}\"]")
+            )
+            .unwrap());
+        assert_eq!(
+            live.read().federation_denied_keys,
+            vec![public.to_ascii_lowercase()]
+        );
+        for value in ["[\"nope\"]", "123", "[42]"] {
+            assert!(live.set_key("federation_denied_keys", value).is_err());
+        }
+        let loaded = ServerConfig::load(Some(&path)).unwrap();
+        assert_eq!(loaded.federation_ingest_frames_burst, 0);
+        assert_eq!(
+            loaded.federation_denied_keys,
+            vec![public.to_ascii_lowercase()]
+        );
+        assert!(std::fs::read_to_string(path)
+            .unwrap()
+            .contains("# keep operator comments"));
+        assert!(live
+            .describe()
+            .iter()
+            .filter(|key| key.key.starts_with("federation_ingest_")
+                || key.key == "federation_denied_keys")
+            .all(|key| key.applies_live && !key.read_only));
+    }
 
     #[test]
     fn history_reoffer_cadence_is_live_bounded_and_roundtrips() {

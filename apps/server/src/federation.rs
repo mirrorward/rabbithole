@@ -117,7 +117,9 @@ use crate::Shared;
 
 mod catalog_sync;
 mod history;
+mod ingest;
 pub(crate) use history::HistoryState;
+pub(crate) use ingest::IngestState;
 
 /// Domain separator for the S2S handshake proof signatures.
 const AUTH_CONTEXT: &[u8] = b"rhp-fed-s2s-auth-v2";
@@ -510,6 +512,10 @@ async fn serve_peer(mut conn: Box<dyn Connection>, shared: Arc<Shared>) -> Resul
 
     // Authentication is complete. Approval/provenance failures and the live
     // session below are deliberately outside failure accounting.
+    if let Err(error) = ingest::permit(&shared, &dialer_key) {
+        conn.close().await;
+        return Err(error);
+    }
     let connected = if authorize_authenticated_peer(
         &shared.peers,
         &shared.fed_flood,
@@ -633,7 +639,8 @@ async fn authenticate_peer(
         &hello.nonce,
         &listener_nonce,
     );
-    let approved_at_ack = shared.peers.is_approved_origin(&dialer_key, dialer_origin);
+    let approved_at_ack = shared.peers.is_approved_origin(&dialer_key, dialer_origin)
+        && ingest::permit(shared, &dialer_key).is_ok();
     let ack = PeerHelloAck {
         server_key: my_key,
         server_name: shared.config.read().name,
@@ -709,6 +716,15 @@ async fn run_peer_session(
     serve_catalog: bool,
 ) {
     let mut edge = FloodEdge::new(peer_key, peer_origin);
+    if !shared
+        .peers
+        .is_approved_origin(&peer_key, &edge.peer_origin)
+        || ingest::permit(&shared, &peer_key).is_err()
+    {
+        shared.peers.set_disconnected(&peer_key);
+        conn.close().await;
+        return;
+    }
     edge.history = shared
         .fed_history
         .register(peer_key, tokio::time::Instant::now());
@@ -766,6 +782,7 @@ async fn run_peer_session(
                 if !shared
                     .peers
                     .is_approved_origin(&edge.peer_key, &edge.peer_origin)
+                    || ingest::permit(&shared, &edge.peer_key).is_err()
                 {
                     tracing::info!(
                         peer = %PublicKey(peer_key).fingerprint(),
@@ -786,6 +803,7 @@ async fn run_peer_session(
                 match incoming {
                     Ok(Some(frame)) => {
                         let result = async {
+                            ingest::frame(&shared, &edge.peer_key, &edge.peer_origin, &frame)?;
                             if catalog_sync::handles(frame.message_type) {
                                 catalogs.handle(conn.as_mut(), &shared, &edge.peer_key, &edge.peer_origin, &frame, tokio::time::Instant::now()).await
                             } else {
@@ -811,6 +829,7 @@ async fn run_peer_session(
                         if !shared
                             .peers
                             .is_approved_origin(&edge.peer_key, &edge.peer_origin)
+                            || ingest::permit(&shared, &edge.peer_key).is_err()
                         {
                             break;
                         }
@@ -1041,6 +1060,7 @@ async fn handle_ihave(
     if offer.event_ids.len() > MAX_IHAVE_IDS {
         bail!("ihave list too large");
     }
+    ingest::events(shared, &edge.peer_key, offer.event_ids.len())?;
     let mut want: Vec<[u8; 32]> = Vec::new();
     for id in offer.event_ids {
         if want.len() >= MAX_PULL_IDS {
@@ -1108,6 +1128,7 @@ async fn handle_pull(
     if req.event_ids.len() > MAX_PULL_IDS {
         bail!("pull list too large");
     }
+    ingest::events(shared, &edge.peer_key, req.event_ids.len())?;
     let mut events: Vec<FedEvent> = Vec::new();
     let mut origin_keys: Vec<[u8; 32]> = Vec::new();
     for id in req.event_ids.iter().take(MAX_EVENTS_PER_MSG) {
@@ -1176,6 +1197,7 @@ async fn handle_events(shared: &Arc<Shared>, edge: &mut FloodEdge, frame: &Frame
     if msg.origin_keys.len() != msg.push.events.len() {
         bail!("origin-key / event length mismatch");
     }
+    ingest::events(shared, &edge.peer_key, msg.push.events.len())?;
     let board = msg.push.board.clone();
     let Some(brow) = shared
         .boards
@@ -1189,6 +1211,13 @@ async fn handle_events(shared: &Arc<Shared>, edge: &mut FloodEdge, frame: &Frame
         return Ok(()); // not a postable board
     }
     for (fe, origin_key) in msg.push.events.iter().zip(msg.origin_keys.iter()) {
+        ingest::permit(shared, &edge.peer_key)?;
+        if !shared
+            .peers
+            .is_approved_origin(&edge.peer_key, &edge.peer_origin)
+        {
+            bail!("peer approval revoked during event delivery");
+        }
         if let Err(e) =
             ingest_fed_event(shared, edge, &board, fe, origin_key, brow.max_threads).await
         {
@@ -1372,6 +1401,9 @@ fn origin_key_for(shared: &Arc<Shared>, signed: &SignedEvent) -> Option<[u8; 32]
 /// task holds the session open; the peer is implicitly approved on our side
 /// (we chose to dial it). Returns once both registries reflect the outcome.
 pub async fn dial_peer(shared: Arc<Shared>, target: DialTarget) -> Result<DialOutcome> {
+    if let Some(key) = target.expected_key {
+        ingest::permit(&shared, &key)?;
+    }
     let transport = QuicTransport::new(
         target.server_name.clone(),
         ServerAuth::Pinned(target.fingerprint),
@@ -1425,6 +1457,8 @@ pub async fn dial_peer(shared: Arc<Shared>, target: DialTarget) -> Result<DialOu
         bail!("peer failed to authenticate its server key");
     }
 
+    ingest::permit(&shared, &listener_key)?;
+
     // 3. Send our proof.
     conn.send(fed_frame(
         FrameKind::Request,
@@ -1437,6 +1471,8 @@ pub async fn dial_peer(shared: Arc<Shared>, target: DialTarget) -> Result<DialOu
 
     // 4. Await the readiness signal (registry-updated by the peer).
     let welcome: WelcomeMsg = recv_fed(conn.as_mut(), MT_WELCOME).await?;
+
+    ingest::permit(&shared, &listener_key)?;
 
     // We chose to dial this peer, so it is approved on our side.
     shared.peers.seed_approved(
@@ -1466,8 +1502,15 @@ pub async fn dial_peer(shared: Arc<Shared>, target: DialTarget) -> Result<DialOu
         // Catalog sync (dialer-pull) rides the live session before it goes to
         // the background hold, so callers have a deterministic "sync
         // attempted" point. Failure is non-fatal: the peering session is
-        // useful without a catalog, and the next dial retries.
-        if let Err(e) = sync_catalogs(conn.as_mut(), &shared, listener_key).await {
+        // useful without a catalog, and the next dial retries. Policy refusals
+        // are fatal and must not be downgraded to a catalog-only failure.
+        if let Err(e) = sync_catalogs(conn.as_mut(), &shared, listener_key, &listener_origin).await
+        {
+            if e.is::<ingest::Refusal>() {
+                shared.peers.set_disconnected(&listener_key);
+                conn.close().await;
+                return Err(e);
+            }
             tracing::warn!(
                 peer = %PublicKey(listener_key).fingerprint(),
                 "federation catalog sync failed: {e}"
@@ -1497,6 +1540,7 @@ async fn sync_catalogs(
     conn: &mut dyn Connection,
     shared: &Arc<Shared>,
     peer_key: [u8; 32],
+    peer_origin: &str,
 ) -> Result<()> {
     let fetch = shared.catalogs.begin_fetch(&shared.peers, peer_key)?;
     let mine = crate::fed_catalog::local_catalog(shared).await?;
@@ -1509,7 +1553,12 @@ async fn sync_catalogs(
         },
     ))
     .await?;
-    let theirs: CatalogAnnounceMsg = recv_fed(conn, MT_CATALOG_ANNOUNCE).await?;
+    let frame = conn
+        .recv()
+        .await?
+        .ok_or_else(|| anyhow!("peer closed during catalog announcement"))?;
+    ingest::frame(shared, &peer_key, peer_origin, &frame)?;
+    let theirs: CatalogAnnounceMsg = decode_fed(&frame, MT_CATALOG_ANNOUNCE)?;
     if !shared.catalogs.wants(&peer_key, theirs.generation) {
         return Ok(()); // we already hold this generation (or newer)
     }
@@ -1519,7 +1568,12 @@ async fn sync_catalogs(
         &CatalogGetMsg {},
     ))
     .await?;
-    let msg: CatalogMsg = recv_fed_bounded(conn, MT_CATALOG, MAX_CATALOG).await?;
+    let frame = conn
+        .recv()
+        .await?
+        .ok_or_else(|| anyhow!("peer closed during catalog fetch"))?;
+    ingest::frame(shared, &peer_key, peer_origin, &frame)?;
+    let msg: CatalogMsg = decode_fed_bounded(&frame, MT_CATALOG, MAX_CATALOG)?;
     let stored = crate::fed_catalog::ingest_fetched_catalog(shared, fetch, &msg.bytes)?;
     tracing::info!(
         peer = %PublicKey(peer_key).fingerprint(),

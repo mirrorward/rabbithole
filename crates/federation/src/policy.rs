@@ -25,6 +25,7 @@ pub struct RateLimiter {
     refill_per_ms: f64,
     /// Per-peer bucket state.
     buckets: HashMap<[u8; 32], Bucket>,
+    max_peers: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,8 +43,9 @@ impl RateLimiter {
     pub fn new(capacity: u32, refill_per_sec: f64) -> Self {
         RateLimiter {
             capacity: capacity.max(1) as f64,
-            refill_per_ms: refill_per_sec.max(0.0) / 1000.0,
+            refill_per_ms: finite_rate(refill_per_sec) / 1000.0,
             buckets: HashMap::new(),
+            max_peers: usize::MAX,
         }
     }
 
@@ -51,20 +53,57 @@ impl RateLimiter {
     /// if admitted (a token was available), `false` if the peer is currently
     /// rate-limited. New peers start with a full bucket.
     pub fn try_acquire(&mut self, peer: &[u8; 32], now_ms: i64) -> bool {
-        let capacity = self.capacity;
-        let refill_per_ms = self.refill_per_ms;
+        self.try_acquire_many(peer, 1, now_ms)
+    }
+
+    /// Bound state without evicting a peer that still carries debt. A full
+    /// table refuses new identities until an existing bucket refills.
+    pub fn bounded(capacity: u32, refill_per_sec: f64, max_peers: usize) -> Self {
+        let mut limiter = Self::new(capacity, refill_per_sec);
+        limiter.capacity = f64::from(capacity);
+        limiter.max_peers = max_peers;
+        limiter
+    }
+
+    /// Apply a live policy at `now_ms`. Elapsed time uses the OLD rate;
+    /// increasing a capacity never grants a fresh burst. Zero capacity denies.
+    pub fn update_policy(&mut self, capacity: u32, refill_per_sec: f64, now_ms: i64) {
+        for bucket in self.buckets.values_mut() {
+            refill(bucket, self.capacity, self.refill_per_ms, now_ms);
+            bucket.tokens = bucket.tokens.min(f64::from(capacity));
+        }
+        self.capacity = f64::from(capacity);
+        self.refill_per_ms = finite_rate(refill_per_sec) / 1000.0;
+    }
+
+    /// Spend a bounded weighted cost (bytes/events). Insufficient funds do
+    /// not partially spend the bucket. Caller must authenticate/admit peer
+    /// identities before calling this method.
+    pub fn try_acquire_many(&mut self, peer: &[u8; 32], cost: u32, now_ms: i64) -> bool {
+        if cost == 0 {
+            return true;
+        }
+        if f64::from(cost) > self.capacity {
+            return false;
+        }
+        if !self.buckets.contains_key(peer) && self.buckets.len() >= self.max_peers {
+            let capacity = self.capacity;
+            let refill_per_ms = self.refill_per_ms;
+            self.buckets.retain(|_, bucket| {
+                refill(bucket, capacity, refill_per_ms, now_ms);
+                bucket.tokens < capacity
+            });
+            if self.buckets.len() >= self.max_peers {
+                return false;
+            }
+        }
         let bucket = self.buckets.entry(*peer).or_insert(Bucket {
-            tokens: capacity,
+            tokens: self.capacity,
             last_ms: now_ms,
         });
-
-        // Refill for elapsed time (never negative if the clock jumps back).
-        let elapsed = (now_ms - bucket.last_ms).max(0) as f64;
-        bucket.tokens = (bucket.tokens + elapsed * refill_per_ms).min(capacity);
-        bucket.last_ms = now_ms;
-
-        if bucket.tokens >= 1.0 {
-            bucket.tokens -= 1.0;
+        refill(bucket, self.capacity, self.refill_per_ms, now_ms);
+        if bucket.tokens >= f64::from(cost) {
+            bucket.tokens -= f64::from(cost);
             true
         } else {
             false
@@ -80,6 +119,21 @@ impl RateLimiter {
     pub fn tracked_peers(&self) -> usize {
         self.buckets.len()
     }
+}
+
+fn finite_rate(rate: f64) -> f64 {
+    if rate.is_finite() {
+        rate.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn refill(bucket: &mut Bucket, capacity: f64, rate: f64, now_ms: i64) {
+    let elapsed = now_ms.saturating_sub(bucket.last_ms).max(0) as f64;
+    bucket.tokens = (bucket.tokens + elapsed * rate).min(capacity);
+    // A backward clock must not count the same interval twice later.
+    bucket.last_ms = bucket.last_ms.max(now_ms);
 }
 
 /// How a [`PeerPolicy`]'s entry set is interpreted.
