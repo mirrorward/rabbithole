@@ -7,6 +7,7 @@
 
 use crate::repo4::{PostRow, PostsRepo};
 use crate::{SqlitePool, StoreError};
+pub mod exports;
 
 /// Match the shared in-memory seen store's existing 30-day window. A replay
 /// exactly on the boundary is still a duplicate; older receipts expire.
@@ -29,7 +30,39 @@ impl QwkRepliesRepo<'_> {
         post: &PostRow,
         max_threads: i64,
     ) -> Result<bool, StoreError> {
+        Ok(self
+            .post_once_inner(account_id, digest, post, max_threads, None)
+            .await?
+            .unwrap_or(false))
+    }
+
+    /// An invalid/expired export returns `None`, distinct from a duplicate.
+    pub async fn post_once_for_export(
+        &self,
+        account_id: i64,
+        digest: &[u8; 32],
+        post: &PostRow,
+        max_threads: i64,
+        guard: &exports::ExportGuard,
+    ) -> Result<Option<bool>, StoreError> {
+        self.post_once_inner(account_id, digest, post, max_threads, Some(guard))
+            .await
+    }
+
+    async fn post_once_inner(
+        &self,
+        account_id: i64,
+        digest: &[u8; 32],
+        post: &PostRow,
+        max_threads: i64,
+        guard: Option<&exports::ExportGuard>,
+    ) -> Result<Option<bool>, StoreError> {
         let mut tx = self.0.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(guard) = guard {
+            if !exports::validate_on(&mut tx, account_id, guard, post).await? {
+                return Ok(None);
+            }
+        }
         sqlx::query("DELETE FROM qwk_reply_receipts WHERE accepted_at < ?")
             .bind(post.created_at.saturating_sub(REPLY_RETENTION_MS))
             .execute(&mut *tx)
@@ -50,7 +83,7 @@ impl QwkRepliesRepo<'_> {
         .rows_affected();
         if claimed == 0 {
             tx.commit().await?;
-            return Ok(false);
+            return Ok(Some(false));
         }
         // If this exact signed event already exists, keep the receipt as a
         // successful association but report a duplicate, not another post.
@@ -79,9 +112,12 @@ impl QwkRepliesRepo<'_> {
             }
         }
         tx.commit().await?;
-        Ok(inserted)
+        Ok(Some(inserted))
     }
 }
+
+#[cfg(test)]
+mod exports_tests;
 
 #[cfg(test)]
 mod tests {

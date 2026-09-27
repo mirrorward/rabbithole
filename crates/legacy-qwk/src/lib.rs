@@ -4,7 +4,8 @@
 //! format and its **QWKE** extensions, so vintage offline readers can exchange
 //! mail with a RabbitHole server. This crate is *only* the byte-level codec:
 //! there is **no networking or board wiring** here. A deterministic STORE ZIP
-//! writer bundles the encoded members; delivery remains the server's job.
+//! writer bundles the encoded members, and a bounded STORE/DEFLATE reader
+//! accepts REP reply archives; delivery remains the server's job.
 //!
 //! QWK is a **legacy** format with hand-rolled, fixed-width binary records and
 //! its own oddities (128-byte blocks, a `0xE3` end-of-line marker, and
@@ -25,6 +26,8 @@
 //! - [`model`] — the shared [`QwkMessage`] with `\n`-normalized body text.
 //! - [`reply`] — `.REP` reply-packet ingest (the `<BBSID>.MSG` member), with
 //!   per-record validation and blake3 dedupe of uploaded replies.
+//! - [`rep_archive`] — bounded REP ZIP validation and STORE/DEFLATE decoding
+//!   of the expected `<BBSID>.MSG` member.
 //! - [`packet`] — a pure high-level builder assembling the outbound QWK packet
 //!   members (`MESSAGES.DAT` / `CONTROL.DAT` / `*.NDX` / `DOOR.ID`) from messages
 //!   and conference metadata, for CLI/web export.
@@ -48,8 +51,8 @@
 //! ## Safety & robustness
 //!
 //! `#![forbid(unsafe_code)]`. Every decoder is total: malformed, truncated, or
-//! hostile input yields an [`error::QwkError`], never a panic. Text is
-//! round-tripped losslessly through Latin-1 at the byte edge.
+//! hostile input yields an [`error::QwkError`] or [`rep_archive::ArchiveError`],
+//! never a panic. Text is round-tripped losslessly through Latin-1 at the byte edge.
 
 #![forbid(unsafe_code)]
 
@@ -62,6 +65,7 @@ pub mod model;
 pub mod ndx;
 pub mod packet;
 pub mod qwke;
+pub mod rep_archive;
 pub mod reply;
 pub mod zip;
 

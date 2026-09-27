@@ -1412,19 +1412,21 @@ where
     };
     let mut out = format!(
         "\n--- QWK packet for {}: {} new message(s) in {} conference(s) ---\n\
-         Fetch each member over HTTP (raw QWK members; ZIP bundling is a \
-         follow-up):\n",
+         Export id: {}\n\
+         Fetch these raw QWK members using the operator's HTTP handoff:\n",
         authed.account.login,
         build.total_messages,
-        build.conferences.len()
+        build.conferences.len(),
+        build.export_id
     );
     for m in &build.members {
         out.push_str(&format!(
-            "  {:<12} {:>8}  {}/qwk/{}/{}\n",
+            "  {:<12} {:>8}  {}/qwk/{}/{}/{}\n",
             m.name,
             fmt_size(m.size as i64),
             base,
-            url_encode_path(&authed.account.login),
+            url_encode_path(&crate::qwk::spool_component(&authed.account.login)),
+            url_encode_path(&build.export_id),
             url_encode_path(&m.name)
         ));
     }

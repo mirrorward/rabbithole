@@ -2942,6 +2942,7 @@ name = "rabbithole-legacy-qwk"
 version = "0.268.0"
 dependencies = [
  "blake3",
+ "flate2",
  "thiserror 2.0.18",
 ]
 

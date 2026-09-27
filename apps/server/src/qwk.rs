@@ -14,10 +14,10 @@
 //! slug, numbered `1..=N` (capped at [`MAX_CONFERENCES`] because the `.NDX`
 //! conference byte is a `u8`). The full `number → slug` mapping is written
 //! into `CONTROL.DAT`'s conference list (the name *is* the slug), so a reader
-//! — and the `.REP` ingest below — can always translate back. Creating or
-//! deleting boards renumbers later conferences; the packet and the reply are
-//! interpreted against the *current* board set, which is the classic QWK-door
-//! behavior.
+//! can translate back. Creating or deleting boards renumbers later exports.
+//! Archive import requires the exact account-owned `export_id` and resolves
+//! frozen board/post identities. The low-level raw-member API retains its
+//! historical current-map behavior; see `docs/qwk-reply-import.md`.
 //!
 //! # What goes in a packet
 //!
@@ -39,7 +39,7 @@
 //! STORE-method ZIP of the members ([`rabbithole_legacy_qwk::zip`]), what a
 //! QWK reader actually downloads — and the **raw members** (`MESSAGES.DAT`,
 //! `CONTROL.DAT`, `DOOR.ID`, per-conference `NNN.NDX`) into a per-user spool
-//! directory (`<qwk_spool_dir>/<login>/`, wiped and rebuilt each time). The
+//! directory (`<qwk_spool_dir>/<login>/<export_id>/`, immutable per export). The
 //! telnet surface mints one `files_http_base` handoff link per member (the
 //! raw members remain so those per-file links keep working). An HTTP route
 //! serving the `.QWK` directly and a zmodem transfer path are documented
@@ -47,7 +47,9 @@
 //!
 //! # `.REP` ingest
 //!
-//! `qwk-ingest` parses the already-unzipped `<BBSID>.MSG` member with
+//! `qwk-ingest` accepts bounded STORE/DEFLATE REP archives with an explicit
+//! export id. Its legacy `.MSG` compatibility path parses an already-unzipped
+//! `<BBSID>.MSG` member with
 //! [`ReplyPacket::parse`], validates each reply against the known conference
 //! numbers ([`rabbithole_legacy_qwk::reply::check`]), and posts the accepted
 //! ones through [`BoardService`](rabbithole_server_core::BoardService) **as
@@ -76,6 +78,9 @@ use rabbithole_store_server::repo4::{BoardRow, ReadMarksRepo};
 
 use crate::nntp::group_articles;
 use crate::Shared;
+mod archive;
+pub use archive::ingest_rep_archive_for;
+use rabbithole_store_server::qwk::exports::{ExportReference, QwkExportsRepo};
 
 /// Most messages packed per conference per build (classic mail doors bound
 /// packets the same way). Oldest-first + pointer advance means a capped
@@ -177,6 +182,8 @@ pub struct QwkMember {
 /// The result of a packet build.
 #[derive(Debug, Clone)]
 pub struct QwkBuild {
+    /// Supply this account-scoped id when importing the corresponding REP ZIP.
+    pub export_id: String,
     /// The per-user spool directory the members were written into.
     pub spool_dir: PathBuf,
     /// The delivered `.QWK` file (a STORE-method ZIP of the members), inside
@@ -233,7 +240,14 @@ pub async fn build_for(shared: &Shared, account: &Account) -> Result<QwkBuild, Q
     if !cfg.qwk_enabled {
         return Err(QwkGateError::Disabled);
     }
-    let subject = subject_for(shared, account);
+    // Synthetic guests have no durable identity for a snapshot. Refresh
+    // stale/deleted/disabled callers before creating any spool artifacts.
+    let account = rabbithole_store_server::repo::AccountsRepo(&shared.pool)
+        .by_id(account.id)
+        .await?
+        .filter(|a| !a.disabled)
+        .ok_or(QwkGateError::Forbidden)?;
+    let subject = subject_for(shared, &account);
     if !shared.perms.allows(&subject, "board", Caps::BOARD_READ) {
         return Err(QwkGateError::Forbidden);
     }
@@ -242,7 +256,17 @@ pub async fn build_for(shared: &Shared, account: &Account) -> Result<QwkBuild, Q
     // spool or advancing any message read pointers.
     let bulletins = configured_bulletins(&cfg.qwk_bulletins)?;
 
-    let confs = conferences(shared).await?;
+    let snapshots = QwkExportsRepo(&shared.pool).conferences().await?;
+    let mut confs = Vec::new();
+    for snapshot in &snapshots {
+        let board = shared
+            .boards
+            .board(&snapshot.slug)
+            .await?
+            .ok_or_else(|| QwkGateError::Internal("board changed during export".into()))?;
+        confs.push((snapshot.conference, board));
+    }
+    let mut references = Vec::new();
     let marks = ReadMarksRepo(&shared.pool);
     let mut messages: Vec<QwkMessage> = Vec::new();
     // Per-board packed high-water marks, applied only after the spool write
@@ -282,6 +306,18 @@ pub async fn build_for(shared: &Shared, account: &Account) -> Result<QwkBuild, Q
                 .and_then(|pid| arts.iter().position(|p| p.event_id == pid))
                 .map(|i| (i + 1) as u32)
                 .unwrap_or(0);
+            references.push(ExportReference {
+                conference: *num,
+                number: (idx + 1) as u32,
+                event_id: post.event_id,
+            });
+            if reference > 0 {
+                references.push(ExportReference {
+                    conference: *num,
+                    number: reference,
+                    event_id: arts[reference as usize - 1].event_id,
+                });
+            }
             let (date, time) = qwk_stamp(post.created_at);
             messages.push(QwkMessage {
                 status: b' ',
@@ -324,14 +360,24 @@ pub async fn build_for(shared: &Shared, account: &Account) -> Result<QwkBuild, Q
         .set_bulletins(bulletins)
         .map_err(QwkGateError::Packet)?;
 
-    // Spool the members: <qwk_spool_dir>/<login>/, wiped per build so stale
-    // members from a previous (larger) packet never linger.
+    // Immutable per-export artifacts keep concurrent/later builds from
+    // replacing the packet associated with an id. Failed builds remove only
+    // their own directory; committed evictions are pruned after success.
     let spool_root = crate::resolve_dir(&cfg.data_dir, &cfg.qwk_spool_dir);
-    let dir = spool_root.join(spool_component(&account.login));
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir)?;
+    let user_dir = spool_root.join(spool_component(&account.login));
+    std::fs::create_dir_all(&user_dir)?;
+    let export_id = QwkExportsRepo(&shared.pool).new_id().await?;
+    let dir = user_dir.join(&export_id);
+    std::fs::create_dir(&dir)?;
+    struct IncompleteSpool(Option<PathBuf>);
+    impl Drop for IncompleteSpool {
+        fn drop(&mut self) {
+            if let Some(path) = &self.0 {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
     }
-    std::fs::create_dir_all(&dir)?;
+    let mut incomplete = IncompleteSpool(Some(dir.clone()));
     let mut members = Vec::new();
     for (name, bytes) in packet.members() {
         let path = dir.join(name);
@@ -348,13 +394,43 @@ pub async fn build_for(shared: &Shared, account: &Account) -> Result<QwkBuild, Q
     let packet_path = dir.join(format!("{}.QWK", bbs_id(&cfg.name)));
     std::fs::write(&packet_path, packet.to_zip())?;
 
-    // The packet is on disk: advance the shared read pointers.
-    for (slug, ms) in &high_water {
-        marks.set(account.id, slug, *ms).await?;
+    // Disarm before awaiting publication: cancellation or an uncertain commit
+    // may occur after SQLite commits read marks. Keeping an orphan is safer
+    // than deleting a packet whose mail was already marked read.
+    incomplete.0 = None;
+    // Snapshot and read marks commit together only after every spool write.
+    let evicted = QwkExportsRepo(&shared.pool)
+        .record(
+            &export_id,
+            account.id,
+            &bbs_id(&cfg.name),
+            &snapshots,
+            &references,
+            &high_water,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await?;
+    let Some(evicted) = evicted else {
+        // None is a definitive pre-commit validation failure, not an
+        // uncertain database commit result.
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(QwkGateError::Internal(
+            "board identities changed during export; build again".into(),
+        ));
+    };
+    for old in evicted {
+        // IDs are generated by SQLite, never by packet contents.
+        if old.len() == 32 && old.bytes().all(|b| b.is_ascii_hexdigit()) {
+            if let Err(error) = std::fs::remove_dir_all(user_dir.join(old)) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(%error,"could not remove expired QWK spool");
+                }
+            }
+        }
     }
-
     shared.stats.incr("qwk", "packets_built");
     Ok(QwkBuild {
+        export_id,
         spool_dir: dir,
         packet_path,
         members,
@@ -507,7 +583,7 @@ fn bbs_id(name: &str) -> String {
 /// A login as a safe single spool path component: anything outside
 /// `[A-Za-z0-9._-]` becomes `_`, and a component that is all dots (or empty)
 /// is replaced outright — no traversal, no hidden aliasing.
-fn spool_component(login: &str) -> String {
+pub(crate) fn spool_component(login: &str) -> String {
     let s: String = login
         .chars()
         .map(|c| {

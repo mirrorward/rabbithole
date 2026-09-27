@@ -277,6 +277,42 @@ impl BoardService {
             .then_some(row))
     }
 
+    /// Import using an explicit durable QWK export. Its board and parent
+    /// identities are rechecked inside the receipt/post transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn post_qwk_reply_from_export(
+        &self,
+        account_id: i64,
+        digest: &[u8; 32],
+        board: &str,
+        parent: Option<[u8; 32]>,
+        author_display: &str,
+        author_seed: &[u8; 32],
+        subject: &str,
+        body: &str,
+        now_ms: i64,
+        guard: &rabbithole_store_server::qwk::exports::ExportGuard,
+    ) -> Result<Option<PostRow>, BoardError> {
+        let (event, max_threads) = self
+            .prepare_post(
+                board,
+                parent,
+                author_display,
+                author_seed,
+                subject,
+                body,
+                "text/plain",
+                now_ms,
+            )
+            .await?;
+        let row = self.project_post(&event).await?;
+        let inserted = QwkRepliesRepo(&self.pool)
+            .post_once_for_export(account_id, digest, &row, max_threads, guard)
+            .await?
+            .ok_or(BoardError::Forbidden)?;
+        Ok(inserted.then_some(row))
+    }
+
     /// Validate and mint through the same author, board and thread rules for
     /// ordinary posts and atomic QWK imports. No writes happen here.
     #[allow(clippy::too_many_arguments)]

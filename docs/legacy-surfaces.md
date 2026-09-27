@@ -148,7 +148,14 @@ disables that class.
   the connection, including connections opened before exhaustion. The master
   switch or `ratelimit_auth_per_min = 0` disables this gate. Outgoing polls are
   unchanged.
-- **QWK**: `qwk_enabled` (default off, live), `qwk_spool_dir` (default `qwk`,
+- **QWK**: `qwk-build` returns a durable `export_id`; supply it with the
+  matching account and actual REP ZIP to `qwk-ingest`. STORE/DEFLATE extraction
+  validates the expected BBS member and bounds without extracting filesystem
+  paths. The export pins original conference and reply-reference identities,
+  and later packet builds use separate artifact directories. See
+  [offline reply import](qwk-reply-import.md) for limits, retained exports,
+  exceptional crash artifacts and the separate raw `.MSG` compatibility path.
+  `qwk_enabled` (default off, live), `qwk_spool_dir` (default `qwk`,
   under `data_dir`; live). No listener — delivery is the telnet `[M]` menu plus
   the `ctl qwk-build`/`qwk-ingest` admin commands. Conferences are postable
   boards (sorted by slug, numbered 1–255); message selection and read pointers

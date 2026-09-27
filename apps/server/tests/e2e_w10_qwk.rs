@@ -324,8 +324,8 @@ async fn configured_bulletins_are_bounded_safe_and_removed_on_rebuild() {
         "failed build did not eat the next message"
     );
     assert!(
-        !bulletin.exists(),
-        "removed bulletin does not linger in the spool"
+        bulletin.exists(),
+        "previous immutable export retains its original members"
     );
     assert!(next
         .members
@@ -762,17 +762,23 @@ async fn telnet_qwk_mints_links_and_refuses_politely() {
     // `qwk` builds the packet and mints one link per raw member.
     c.send("qwk").await;
     c.expect(b"1 new message(s)").await;
-    c.expect(b"http://dl.example:8080/qwk/alice/MESSAGES.DAT")
-        .await;
-    c.expect(b"http://dl.example:8080/qwk/alice/CONTROL.DAT")
-        .await;
-    c.expect(b"http://dl.example:8080/qwk/alice/DOOR.ID").await;
-    c.expect(b"http://dl.example:8080/qwk/alice/001.NDX").await;
+    c.expect(b"Export id: ").await;
     c.expect(b"Command: ").await;
-
-    // The spool holds the members the links point at.
     let spool = work.path().join("srv").join("qwk").join("alice");
-    assert!(spool.join("MESSAGES.DAT").is_file(), "spooled member");
+    let dirs: Vec<_> = std::fs::read_dir(&spool)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(dirs.len(), 1);
+    let id = dirs[0].file_name().unwrap().to_str().unwrap();
+    for member in ["MESSAGES.DAT", "CONTROL.DAT", "DOOR.ID", "001.NDX"] {
+        let expected = format!("http://dl.example:8080/qwk/alice/{id}/{member}");
+        assert!(
+            find(&c.buf, expected.as_bytes()).is_some(),
+            "missing immutable handoff {expected}"
+        );
+        assert!(dirs[0].join(member).is_file());
+    }
 
     // No handoff base → the polite no-transfers notice (before any build).
     burrow.shared.config.set_key("files_http_base", "").unwrap();

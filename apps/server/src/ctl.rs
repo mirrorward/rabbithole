@@ -448,6 +448,7 @@ async fn dispatch(shared: &Arc<Shared>, req: &Value) -> Result<Value, String> {
             Ok(json!({
                 "spool_dir": build.spool_dir.display().to_string(),
                 "packet": build.packet_path.display().to_string(),
+                "export_id": build.export_id,
                 "total_messages": build.total_messages,
                 "conferences": conferences,
                 "members": members,
@@ -461,12 +462,28 @@ async fn dispatch(shared: &Arc<Shared>, req: &Value) -> Result<Value, String> {
                 .await
                 .map_err(|e| e.to_string())?
                 .ok_or("no such account")?;
-            let bytes = tokio::fs::read(&path)
+            use tokio::io::AsyncReadExt;
+            let file = tokio::fs::File::open(&path)
                 .await
                 .map_err(|e| format!("read {path}: {e}"))?;
-            let report = crate::qwk::ingest_rep_for(shared, &account, &bytes)
+            let mut bytes = Vec::new();
+            let cap = rabbithole_legacy_qwk::rep_archive::MAX_ARCHIVE_BYTES;
+            file.take((cap + 1) as u64)
+                .read_to_end(&mut bytes)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format!("read {path}: {e}"))?;
+            if bytes.len() > cap {
+                return Err("QWK reply upload exceeds 8 MiB".into());
+            }
+            let report = if let Some(export_id)=req.get("export_id").and_then(Value::as_str) {
+                crate::qwk::ingest_rep_archive_for(shared,&account,export_id,&bytes).await
+            } else {
+                // Never downgrade a malformed ZIP/REP to the legacy member
+                // parser. The raw compatibility surface is explicitly .MSG.
+                let raw=std::path::Path::new(&path).extension().and_then(|s|s.to_str()).is_some_and(|s|s.eq_ignore_ascii_case("msg"));
+                if !raw || bytes.starts_with(b"PK") {return Err("REP archives require the export_id returned by qwk-build; raw members must use .MSG".into());}
+                crate::qwk::ingest_rep_for(shared,&account,&bytes).await
+            }.map_err(|e|e.to_string())?;
             audit(
                 "qwk-ingest",
                 format!(
