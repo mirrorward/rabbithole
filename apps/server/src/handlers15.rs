@@ -68,7 +68,7 @@ pub fn role_from_wire(n: u8) -> Option<Role> {
     (n <= Role::Superuser as u8).then(|| Role::from_ordinal(n))
 }
 
-fn login_is_acceptable(login: &str) -> bool {
+pub(crate) fn login_is_acceptable(login: &str) -> bool {
     let n = login.chars().count();
     (1..=MAX_LOGIN_CHARS).contains(&n)
         && login == login.trim()

@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rabbithole_identity::totp::{check_recovery_code, TotpEnrollment};
 use rabbithole_identity::{hash_password, needs_rehash, verify_password, SessionToken};
-use rabbithole_store_server::repo::{Account, AccountsRepo, ClassesRepo, SessionsRepo};
+use rabbithole_store_server::repo::{
+    Account, AccountAccess, AccountsRepo, ClassesRepo, SessionsRepo,
+};
 use rabbithole_store_server::repo2::{InvitesRepo, PersonaRow, PersonasRepo, TotpRepo};
 use rabbithole_store_server::SqlitePool;
 
@@ -160,6 +162,22 @@ impl AuthService {
             .create(account.id, login, true)
             .await?;
         Ok(account)
+    }
+
+    /// Create a Hotline-style account with an already-validated access
+    /// projection. The account, overrides and default persona become visible
+    /// together; there is no temporary interval with broader role defaults.
+    pub async fn create_account_with_access(
+        &self,
+        login: &str,
+        password: &str,
+        access: AccountAccess,
+    ) -> Result<Account, AuthError> {
+        let phc = hash_password(password)?;
+        AccountsRepo(&self.pool)
+            .create_with_access(login, &phc, access)
+            .await?
+            .ok_or(AuthError::LoginTaken)
     }
 
     /// Self-service registration, honoring the server's mode. On success

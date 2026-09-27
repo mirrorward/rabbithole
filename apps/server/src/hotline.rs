@@ -81,7 +81,8 @@
 //!   onto the shared [`AuthService`](rabbithole_server_core::AuthService)
 //!   accounts and RBAC classes. The access bitmap is a *projection* of
 //!   RabbitHole roles/capabilities — see [`access_mask_for`] and
-//!   [`role_for_access`] for the exact (documented, lossy) mapping.
+//!   [`role_for_access`] for the coarse role inference. Supported bit choices
+//!   persist as account overrides; unrepresentable combinations are refused.
 //!   DeleteUser permanently removes the account and its credentials/personas,
 //!   signs out its sessions, and retires its names while preserving signed
 //!   history. Native account-management standing and last-keeper checks apply.
@@ -130,7 +131,9 @@ use rabbithole_server_core::chat::{ChatError, Sender, LOBBY};
 use rabbithole_server_core::files::{KIND_ALIAS, KIND_FILE, KIND_FOLDER};
 use rabbithole_server_core::ratelimit::{class as rl, now_ms, Scope};
 use rabbithole_server_core::{AuthError, Caps, PresenceEntry, Role, ServerEvent, Subject};
-use rabbithole_store_server::repo::{Account, AccountsRepo, AuditRepo, ClassesRepo};
+use rabbithole_store_server::repo::{Account, AccountAccess, AccountsRepo, AuditRepo, ClassesRepo};
+
+mod access;
 use rabbithole_store_server::repo4::{BoardRow, PostRow};
 use rabbithole_store_server::repo6::FileNodeRow;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -2768,16 +2771,18 @@ async fn upload_file(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -
 //   disconnect bit, board caps -> the news bits, file caps -> the file bits,
 //   and so on. Every account additionally gets *show in list*; real (non-
 //   guest) accounts get *change own password* and *use any name*.
-// - **NewUser/SetUser** map an incoming bitmap back to the **nearest role**
-//   (and its same-named class): any user-admin bit -> admin; any moderation
+// - **NewUser/SetUser** retain exact mapped rights through account overrides.
+//   For changed masks, coarse standing uses the **nearest role** (and its
+//   same-named class): user-admin group -> admin; any moderation
 //   bit (disconnect / news-delete / close-chat) -> moderator; any member bit
 //   (post news / upload / download / private messages / open chat) -> member;
 //   otherwise guest.
 //
-// **Documented lossy cases**: individual bit grants beyond a role's default
-// set are dropped (they are not translated into per-account grant/revoke
-// masks — a follow-up); the superuser role projects as a full bitmap but can
-// never be *assigned* from a bitmap (SetUser never up- or downgrades a
+// Partial shared-capability groups and unsupported enabled bits are refused.
+// Identity-policy indicators are read-only projections. Native rights outside
+// the projection retain their effective values when an existing role changes.
+// The superuser role projects as a full supported bitmap but can never be
+// *assigned* from a bitmap (SetUser never up- or downgrades a
 // superuser). DeleteUser permanently removes the account, but its login and
 // persona names stay reserved to protect historical attribution.
 
@@ -2794,89 +2799,14 @@ fn audit(shared: &Arc<Shared>, actor: &str, action: &str, detail: String) {
 /// Project a role + effective capability mask into the classic Hotline
 /// 64-bit access bitmap. See the section docs above for the mapping table.
 fn access_mask_for(role: Role, caps: u64) -> AccessMask {
-    let has = |c: Caps| caps & c.0 == c.0;
     let mut m = AccessMask::NONE;
-    // Everyone appears in the online user list.
     m.grant(Privilege::ShowInList);
-    if has(Caps::WHO) {
-        m.grant(Privilege::GetClientInfo);
-    }
-    if has(Caps::CHAT_READ) {
-        m.grant(Privilege::ReadChat);
-    }
-    if has(Caps::CHAT_SEND) {
-        m.grant(Privilege::SendChat);
-    }
-    if has(Caps::CHAT_CREATE_ROOM) {
-        m.grant(Privilege::OpenChat);
-    }
-    if has(Caps::CHAT_MODERATE) {
-        m.grant(Privilege::CloseChat);
-    }
-    if has(Caps::DM_SEND) {
-        m.grant(Privilege::SendPrivateMessages);
-    }
-    if has(Caps::BOARD_READ) {
-        m.grant(Privilege::NewsReadArticle);
-    }
-    if has(Caps::BOARD_POST) {
-        m.grant(Privilege::NewsPostArticle);
-    }
-    if has(Caps::BOARD_MODERATE) {
-        for p in [
-            Privilege::NewsDeleteArticle,
-            Privilege::NewsCreateCategory,
-            Privilege::NewsDeleteCategory,
-            Privilege::NewsCreateFolder,
-            Privilege::NewsDeleteFolder,
-        ] {
-            m.grant(p);
+    for (cap, bits) in access::GROUPS {
+        if caps & cap.0 == cap.0 {
+            for bit in *bits {
+                m.grant(*bit);
+            }
         }
-    }
-    if has(Caps::FILE_DOWNLOAD) {
-        m.grant(Privilege::DownloadFiles);
-    }
-    if has(Caps::FILE_UPLOAD) {
-        m.grant(Privilege::UploadFiles);
-    }
-    if has(Caps::FILE_MANAGE) {
-        for p in [
-            Privilege::DeleteFiles,
-            Privilege::RenameFiles,
-            Privilege::MoveFiles,
-            Privilege::CreateFolders,
-            Privilege::DeleteFolders,
-            Privilege::RenameFolders,
-            Privilege::MoveFolders,
-            Privilege::UploadAnywhere,
-            Privilege::SetFileComment,
-            Privilege::SetFolderComment,
-            Privilege::MakeAliases,
-        ] {
-            m.grant(p);
-        }
-    }
-    if has(Caps::DROPBOX_VIEW) {
-        m.grant(Privilege::ViewDropBoxes);
-    }
-    if has(Caps::USER_KICK) {
-        m.grant(Privilege::DisconnectUsers);
-    }
-    if has(Caps::CANNOT_BE_KICKED) {
-        m.grant(Privilege::CannotBeDisconnected);
-    }
-    if has(Caps::ACCOUNT_ADMIN) {
-        for p in [
-            Privilege::CreateUsers,
-            Privilege::DeleteUsers,
-            Privilege::OpenUsers,
-            Privilege::ModifyUsers,
-        ] {
-            m.grant(p);
-        }
-    }
-    if has(Caps::BROADCAST) {
-        m.grant(Privilege::Broadcast);
     }
     // Real accounts (not guests) manage their own password and pick names.
     if role >= Role::User {
@@ -2915,17 +2845,17 @@ fn role_for_access(mask: &AccessMask) -> Role {
 
 /// The effective base capabilities of a stored account row (role default |
 /// class mask | grants, minus revokes) — the same layering a live session's
-/// `Subject` uses, sourced from the live class cache.
-fn account_base_caps(shared: &Shared, account: &Account) -> u64 {
-    Subject {
+/// `Subject` uses, read from the current stored class.
+async fn account_base_caps(shared: &Shared, account: &Account) -> Result<u64> {
+    Ok(Subject {
         account_id: account.id,
         role: Role::from_ordinal(account.role),
         class_id: account.class_id,
-        class_mask: shared.classes.mask(account.class_id),
+        class_mask: current_class_mask(shared, account.class_id).await?,
         grant_mask: account.grant_mask,
         revoke_mask: account.revoke_mask,
     }
-    .base_caps()
+    .base_caps())
 }
 
 /// Does the caller hold `needed` on the `admin` resource? (Identical to the
@@ -2943,30 +2873,121 @@ async fn visible_account(shared: &Shared, login: &str) -> Result<Option<Account>
         .filter(|a| !a.disabled))
 }
 
-/// NewUser (350): create an account. The access bitmap picks the nearest
-/// role (and its same-named class); a missing bitmap defaults to member.
+/// Reload operator authority for every account mutation: the login-time
+/// snapshot must not retain a later-disabled account or removed class grant.
+async fn current_account_admin(
+    shared: &Shared,
+    active: &Active,
+) -> Result<Option<(Account, Subject)>> {
+    let Some(account) = AccountsRepo(&shared.pool)
+        .by_id(active.subject.account_id)
+        .await?
+        .filter(|a| !a.disabled)
+    else {
+        return Ok(None);
+    };
+    let class_mask = current_class_mask(shared, account.class_id).await?;
+    let subject = Subject {
+        account_id: account.id,
+        role: Role::from_ordinal(account.role),
+        class_id: account.class_id,
+        class_mask,
+        grant_mask: account.grant_mask,
+        revoke_mask: account.revoke_mask,
+    };
+    Ok(shared
+        .perms
+        .allows(&subject, "admin", Caps::ACCOUNT_ADMIN)
+        .then_some((account, subject)))
+}
+
+async fn current_class_mask(shared: &Shared, class_id: Option<i64>) -> Result<u64> {
+    match class_id {
+        Some(id) => ClassesRepo(&shared.pool)
+            .by_id(id)
+            .await?
+            .map(|c| c.base_mask)
+            .ok_or_else(|| anyhow::anyhow!("account class changed")),
+        None => Ok(0),
+    }
+}
+
+fn requested_access(
+    txn: &Transaction,
+) -> std::result::Result<Option<(AccessMask, u64)>, &'static str> {
+    field_bytes(txn, field::USER_ACCESS)
+        .map(|bytes| {
+            let mask = AccessMask::decode(bytes).map_err(|_| "invalid access bitmap")?;
+            Ok((mask, access::requested_caps(&mask)?))
+        })
+        .transpose()
+}
+
+/// NewUser (350): role inference remains a coarse ordering, while explicit
+/// grant/revoke masks preserve exactly the representable incoming rights.
 async fn new_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
     let ty = transaction::NEW_USER;
     let id = txn.header.id;
-    if !admin_allowed(shared, active, Caps::ACCOUNT_ADMIN) {
-        return err_reply(ty, id, "not permitted");
+    let (actor, subject) = match current_account_admin(shared, active).await {
+        Ok(Some(actor)) => actor,
+        Ok(None) => return err_reply(ty, id, "not permitted"),
+        Err(e) => return err_reply(ty, id, &format!("{e}")),
+    };
+    let login = field_text_deobf(txn, field::USER_LOGIN);
+    if !crate::handlers15::login_is_acceptable(&login) {
+        return err_reply(ty, id, "invalid login");
     }
-    let login = field_text_deobf(txn, field::USER_LOGIN).trim().to_string();
-    if login.is_empty() {
-        return err_reply(ty, id, "no login given");
-    }
-    let password = field_text_deobf(txn, field::USER_PASSWORD);
-    let role = field_bytes(txn, field::USER_ACCESS)
-        .and_then(|b| AccessMask::decode(b).ok())
-        .map(|m| role_for_access(&m))
+    let requested = match requested_access(txn) {
+        Ok(requested) => requested,
+        Err(e) => return err_reply(ty, id, e),
+    };
+    let role = requested
+        .map(|(mask, _)| role_for_access(&mask))
         .unwrap_or(Role::User);
-    match shared.auth.create_account(&login, &password, role).await {
+    let standing = crate::handlers15::Standing {
+        account_id: actor.id,
+        role: subject.role,
+    };
+    if !standing.may_assign(role) {
+        return err_reply(ty, id, "cannot assign that role");
+    }
+    let class = match ClassesRepo(&shared.pool).by_name(role.class_name()).await {
+        Ok(class) => class,
+        Err(e) => return err_reply(ty, id, &format!("{e}")),
+    };
+    let class_id = class.as_ref().map(|c| c.id);
+    let class_mask = class.map(|c| c.base_mask).unwrap_or(0);
+    // An explicit Hotline mask cannot grant unrelated native administration
+    // rights simply because its nearest role is Admin. Native visibility and
+    // file browsing remain available; omitted masks keep member defaults.
+    let desired = requested
+        .map(|(_, caps)| caps | Caps::SEE.0 | Caps::FILE_LIST.0)
+        .unwrap_or(role.default_caps().0 | class_mask);
+    if desired & !subject.base_caps() != 0 {
+        return err_reply(ty, id, "cannot grant access you do not hold");
+    }
+    let access = if requested.is_some() {
+        access::overrides(role, class_id, class_mask, desired, None)
+    } else {
+        AccountAccess {
+            role: role as u8,
+            class_id,
+            grant_mask: 0,
+            revoke_mask: 0,
+        }
+    };
+    let password = field_text_deobf(txn, field::USER_PASSWORD);
+    match shared
+        .auth
+        .create_account_with_access(&login, &password, access)
+        .await
+    {
         Ok(_) => {
             audit(
                 shared,
-                &active.login,
+                &actor.login,
                 "account-create",
-                format!("{login} role={role:?} via=hotline"),
+                format!("{login} role={role:?} access via=hotline"),
             );
             Transaction::reply(ty, id, 0, Vec::new())
         }
@@ -2982,35 +3003,11 @@ async fn new_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> T
 async fn delete_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
     let ty = transaction::DELETE_USER;
     let id = txn.header.id;
-    // Active.subject is a login-time snapshot. A destructive operation must
-    // honor a later disable, demotion, class change, or revoked admin grant.
-    let actor = match AccountsRepo(&shared.pool)
-        .by_id(active.subject.account_id)
-        .await
-    {
-        Ok(Some(a)) if !a.disabled => a,
-        Ok(_) => return err_reply(ty, id, "not permitted"),
+    let (actor, subject) = match current_account_admin(shared, active).await {
+        Ok(Some(actor)) => actor,
+        Ok(None) => return err_reply(ty, id, "not permitted"),
         Err(e) => return err_reply(ty, id, &format!("{e}")),
     };
-    let class_mask = match actor.class_id {
-        Some(class_id) => match ClassesRepo(&shared.pool).by_id(class_id).await {
-            Ok(Some(class)) => class.base_mask,
-            Ok(None) => return err_reply(ty, id, "not permitted"),
-            Err(e) => return err_reply(ty, id, &format!("{e}")),
-        },
-        None => 0,
-    };
-    let subject = Subject {
-        account_id: actor.id,
-        role: Role::from_ordinal(actor.role),
-        class_id: actor.class_id,
-        class_mask,
-        grant_mask: actor.grant_mask,
-        revoke_mask: actor.revoke_mask,
-    };
-    if !shared.perms.allows(&subject, "admin", Caps::ACCOUNT_ADMIN) {
-        return err_reply(ty, id, "not permitted");
-    }
     let login = field_text_deobf(txn, field::USER_LOGIN).trim().to_string();
     let account = match AccountsRepo(&shared.pool).by_login(&login).await {
         Ok(Some(a)) => a,
@@ -3051,9 +3048,11 @@ async fn delete_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -
 async fn get_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
     let ty = transaction::GET_USER;
     let id = txn.header.id;
-    if !admin_allowed(shared, active, Caps::ACCOUNT_ADMIN) {
-        return err_reply(ty, id, "not permitted");
-    }
+    let (actor, _) = match current_account_admin(shared, active).await {
+        Ok(Some(actor)) => actor,
+        Ok(None) => return err_reply(ty, id, "not permitted"),
+        Err(e) => return err_reply(ty, id, &format!("{e}")),
+    };
     let login = field_text_deobf(txn, field::USER_LOGIN).trim().to_string();
     let account = match visible_account(shared, &login).await {
         Ok(Some(a)) => a,
@@ -3062,11 +3061,14 @@ async fn get_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> T
     };
     let mask = access_mask_for(
         Role::from_ordinal(account.role),
-        account_base_caps(shared, &account),
+        match account_base_caps(shared, &account).await {
+            Ok(caps) => caps,
+            Err(e) => return err_reply(ty, id, &format!("{e}")),
+        },
     );
     audit(
         shared,
-        &active.login,
+        &actor.login,
         "account-get",
         format!("{login} via=hotline"),
     );
@@ -3083,81 +3085,130 @@ async fn get_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> T
     )
 }
 
-/// SetUser (353): update an account. A non-empty password re-hashes it; the
-/// access bitmap re-maps role + class **only when the projected role
-/// changes** (so a round-tripped GetUser bitmap is a no-op), and never
-/// touches a superuser's role. Login rename and screen-name edits are not
-/// supported on this surface (documented lossy cases).
+/// SetUser (353): validate the entire edit before a single atomic store
+/// update. Access rights are exact within the supported projection; an
+/// unchanged GetUser bitmap preserves native role/class and explicit masks.
+/// Login rename and display-name edits remain outside this transaction.
 async fn set_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
     let ty = transaction::SET_USER;
     let id = txn.header.id;
-    if !admin_allowed(shared, active, Caps::ACCOUNT_ADMIN) {
-        return err_reply(ty, id, "not permitted");
-    }
+    let (actor, subject) = match current_account_admin(shared, active).await {
+        Ok(Some(actor)) => actor,
+        Ok(None) => return err_reply(ty, id, "not permitted"),
+        Err(e) => return err_reply(ty, id, &format!("{e}")),
+    };
     let login = field_text_deobf(txn, field::USER_LOGIN).trim().to_string();
     let account = match visible_account(shared, &login).await {
         Ok(Some(a)) => a,
         Ok(None) => return err_reply(ty, id, "no such account"),
         Err(e) => return err_reply(ty, id, &format!("{e}")),
     };
-
-    let mut detail = Vec::new();
-
-    // Password: empty means unchanged (GetUser sends an empty placeholder).
+    let requested = match requested_access(txn) {
+        Ok(requested) => requested,
+        Err(e) => return err_reply(ty, id, e),
+    };
+    let class_mask = match current_class_mask(shared, account.class_id).await {
+        Ok(mask) => mask,
+        Err(e) => return err_reply(ty, id, &format!("{e}")),
+    };
+    let current = Role::from_ordinal(account.role);
+    let current_caps = Subject {
+        account_id: account.id,
+        role: current,
+        class_id: account.class_id,
+        class_mask,
+        grant_mask: account.grant_mask,
+        revoke_mask: account.revoke_mask,
+    }
+    .base_caps();
     let password = field_text_deobf(txn, field::USER_PASSWORD);
-    if !password.is_empty() {
-        let Ok(phc) = hash_password(&password) else {
-            return err_reply(ty, id, "password rejected");
+    let mut edit = AccountAccess::from(&account);
+    let mut next_caps = current_caps;
+    if let Some((mask, desired_mapped)) = requested {
+        if desired_mapped != current_caps & access::mapped_caps() {
+            // Superuser ignores revokes in the shared evaluator. Accepting an
+            // edited bitmap would falsely promise restrictions that cannot hold.
+            if current == Role::Superuser {
+                return err_reply(ty, id, "cannot change superuser access");
+            }
+            let wanted = role_for_access(&mask);
+            let (class_id, class_mask) = if wanted == current {
+                (account.class_id, class_mask)
+            } else {
+                match ClassesRepo(&shared.pool).by_name(wanted.class_name()).await {
+                    Ok(Some(class)) => (Some(class.id), class.base_mask),
+                    Ok(None) => (None, 0),
+                    Err(e) => return err_reply(ty, id, &format!("{e}")),
+                }
+            };
+            let desired = (current_caps & !access::mapped_caps()) | desired_mapped;
+            if (desired & !current_caps) & !subject.base_caps() != 0 {
+                return err_reply(ty, id, "cannot grant access you do not hold");
+            }
+            edit = access::overrides(wanted, class_id, class_mask, desired, Some(&account));
+            next_caps = desired;
+        }
+    }
+    // Reading a peer's account and saving an unchanged projected mask is safe,
+    // including a superuser's. Actual edits use the shared target ordering.
+    let changed = edit != AccountAccess::from(&account) || !password.is_empty();
+    if changed {
+        let standing = crate::handlers15::Standing {
+            account_id: actor.id,
+            role: subject.role,
         };
-        if let Err(e) = AccountsRepo(&shared.pool)
-            .update_phc(account.id, &phc)
+        if !standing.may_manage(&account) || !standing.may_assign(Role::from_ordinal(edit.role)) {
+            return err_reply(ty, id, "cannot change that account");
+        }
+        let phc = if password.is_empty() {
+            None
+        } else {
+            match hash_password(&password) {
+                Ok(phc) => Some(phc),
+                Err(_) => return err_reply(ty, id, "password rejected"),
+            }
+        };
+        match AccountsRepo(&shared.pool)
+            .update_credentials_and_access(&account, phc.as_deref(), edit)
             .await
         {
-            return err_reply(ty, id, &format!("{e}"));
+            Ok(true) => {}
+            Ok(false) => return err_reply(ty, id, "account changed; reopen it and retry"),
+            Err(e) => return err_reply(ty, id, &format!("{e}")),
         }
-        detail.push("password".to_string());
-    }
-
-    // Access bitmap -> nearest role + same-named class, when it changes.
-    if let Some(mask) =
-        field_bytes(txn, field::USER_ACCESS).and_then(|b| AccessMask::decode(b).ok())
-    {
-        let current = Role::from_ordinal(account.role);
-        let wanted = role_for_access(&mask);
-        if wanted != current && current != Role::Superuser {
-            let class = shared.classes.id_by_name(wanted.class_name());
-            match AccountsRepo(&shared.pool)
-                .admin_set(&login, Some(wanted as u8), Some(class), None)
-                .await
-            {
-                Ok(true) => detail.push(format!("role={wanted:?}")),
-                Ok(false) => return err_reply(ty, id, "no such account"),
-                Err(e) => return err_reply(ty, id, &format!("{e}")),
-            }
-            // Push the new bitmap (UserAccess, 354) to the account's live
-            // Hotline sessions so their menus update immediately.
-            if let Ok(Some(updated)) = AccountsRepo(&shared.pool).by_login(&login).await {
-                let mask = access_mask_for(wanted, account_base_caps(shared, &updated));
-                let push = Transaction::request(
-                    transaction::USER_ACCESS,
-                    0,
-                    vec![Field::new(field::USER_ACCESS, mask.to_bytes().to_vec())],
-                )
-                .encode();
-                for e in shared.presence.snapshot() {
-                    if e.account_id == account.id {
-                        shared.hotline.deliver(e.session_id as u32, push.clone());
-                    }
-                }
+        // Session subjects hold snapshots. Send the new menu mask before
+        // closing all surfaces, so no old session can retain removed rights.
+        let mask = access_mask_for(Role::from_ordinal(edit.role), next_caps);
+        let push = Transaction::request(
+            transaction::USER_ACCESS,
+            0,
+            vec![Field::new(field::USER_ACCESS, mask.to_bytes().to_vec())],
+        )
+        .encode();
+        for entry in shared.presence.snapshot() {
+            if entry.account_id == account.id {
+                shared
+                    .hotline
+                    .deliver(entry.session_id as u32, push.clone());
             }
         }
+        crate::handlers15::sign_out_everywhere(
+            shared,
+            account.id,
+            "account access or password changed",
+        )
+        .await;
     }
-
+    let detail = match (changed, password.is_empty()) {
+        (false, _) => "unchanged",
+        (true, true) => "access",
+        (true, false) => "password/access",
+    };
     audit(
         shared,
-        &active.login,
+        &actor.login,
         "account-set",
-        format!("{login} [{}] via=hotline", detail.join(", ")),
+        format!("{} [{detail}] via=hotline", account.login),
     );
     Transaction::reply(ty, id, 0, Vec::new())
 }

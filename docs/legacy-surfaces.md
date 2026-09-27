@@ -140,7 +140,9 @@ disables that class.
   permissions and native self/role protections. Successful removal signs out
   active sessions and retires account/persona names while preserving signed
   content. Disabled accounts can be removed too. See
-  [Hotline account removal](hotline-account-admin.md) for the policy and limits.
+  [Hotline account administration](hotline-account-admin.md) for the policy and limits.
+  Supported access-mask groups now persist exact grants/revocations (RH-36);
+  partial groups and unsupported bits are refused without changing the account.
 - **FTN**: `ftn_enabled`, `ftn_addr`, `ftn_node`, `ftn_uplink`,
   `ftn_uplink_host`, `ftn_password`, `ftn_inbound_dir` (default
   `ftn/inbound`), `ftn_outbound_dir` (default `ftn/outbound`), `ftn_areas`

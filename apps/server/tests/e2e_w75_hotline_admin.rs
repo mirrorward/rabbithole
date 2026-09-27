@@ -157,6 +157,7 @@ fn admin_mask() -> AccessMask {
     let mut m = member_mask();
     m.grant(Privilege::CreateUsers);
     m.grant(Privilege::DeleteUsers);
+    m.grant(Privilege::OpenUsers);
     m.grant(Privilege::ModifyUsers);
     m.grant(Privilege::DisconnectUsers);
     m
@@ -320,7 +321,14 @@ async fn hotline_admin_account_lifecycle_roundtrips_access_mask() {
         .await;
     assert_ne!(refused.header.error, 0, "cannot delete an equal role");
 
-    // ...so demote back to member first, then delete.
+    // The shared standing rule forbids an admin changing a peer. Grant this
+    // fixture operator Superuser before demoting the target; the existing
+    // socket must use the newly loaded operator standing.
+    rabbithole_store_server::repo::AccountsRepo(&burrow.shared.pool)
+        .admin_set("root", Some(Role::Superuser as u8), None, None)
+        .await
+        .unwrap();
+    // ...then demote back to member and delete.
     let demoted = root
         .roundtrip(
             transaction::SET_USER,
@@ -564,3 +572,6 @@ async fn hotline_broadcast_kick_and_ban() {
 
 #[path = "e2e_w75_hotline_admin/delete.rs"]
 mod delete;
+
+#[path = "e2e_w75_hotline_admin/access.rs"]
+mod access;

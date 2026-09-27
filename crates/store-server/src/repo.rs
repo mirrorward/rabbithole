@@ -38,7 +38,119 @@ fn row_to_account(row: &sqlx::sqlite::SqliteRow) -> Account {
 
 pub struct AccountsRepo<'a>(pub &'a SqlitePool);
 
+/// A complete account access edit. Credentials and these fields can be
+/// committed together, without exposing a partially edited account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountAccess {
+    pub role: u8,
+    pub class_id: Option<i64>,
+    pub grant_mask: u64,
+    pub revoke_mask: u64,
+}
+
+impl From<&Account> for AccountAccess {
+    fn from(account: &Account) -> Self {
+        Self {
+            role: account.role,
+            class_id: account.class_id,
+            grant_mask: account.grant_mask,
+            revoke_mask: account.revoke_mask,
+        }
+    }
+}
+
 impl AccountsRepo<'_> {
+    /// Create credentials, access and the default persona in one transaction.
+    /// An occupied or retired identity returns `None`, without creating rows.
+    pub async fn create_with_access(
+        &self,
+        login: &str,
+        phc: &str,
+        access: AccountAccess,
+    ) -> Result<Option<Account>, StoreError> {
+        let mut tx = self.0.begin().await?;
+        let taken: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM accounts WHERE login = ?)
+                 OR EXISTS(SELECT 1 FROM personas WHERE screen_name = ?)
+                 OR EXISTS(SELECT 1 FROM retired_names WHERE name = ?)",
+        )
+        .bind(login)
+        .bind(login)
+        .bind(login)
+        .fetch_one(&mut *tx)
+        .await?;
+        if taken != 0 {
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            "INSERT INTO accounts
+             (login, phc, screen_name, role, class_id, grant_mask, revoke_mask, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, unixepoch()) RETURNING *",
+        )
+        .bind(login)
+        .bind(phc)
+        .bind(login)
+        .bind(i64::from(access.role))
+        .bind(access.class_id)
+        .bind(access.grant_mask as i64)
+        .bind(access.revoke_mask as i64)
+        .fetch_one(&mut *tx)
+        .await?;
+        let account = row_to_account(&row);
+        sqlx::query(
+            "INSERT INTO personas (account_id, screen_name, is_default, created_at)
+             VALUES (?, ?, 1, unixepoch())",
+        )
+        .bind(account.id)
+        .bind(login)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(account))
+    }
+
+    /// Compare and apply an already-authorized credential/access edit, and
+    /// invalidate saved sign-ins atomically. A concurrently edited or disabled
+    /// target returns false; no password or access changes are then written.
+    pub async fn update_credentials_and_access(
+        &self,
+        expected: &Account,
+        phc: Option<&str>,
+        access: AccountAccess,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.0.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE accounts SET phc = COALESCE(?, phc), role = ?, class_id = ?,
+                                 grant_mask = ?, revoke_mask = ?
+             WHERE id = ? AND login = ? AND phc IS ? AND role = ? AND class_id IS ?
+               AND grant_mask = ? AND revoke_mask = ? AND disabled = 0",
+        )
+        .bind(phc)
+        .bind(i64::from(access.role))
+        .bind(access.class_id)
+        .bind(access.grant_mask as i64)
+        .bind(access.revoke_mask as i64)
+        .bind(expected.id)
+        .bind(&expected.login)
+        .bind(&expected.phc)
+        .bind(i64::from(expected.role))
+        .bind(expected.class_id)
+        .bind(expected.grant_mask as i64)
+        .bind(expected.revoke_mask as i64)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return Ok(false);
+        }
+        sqlx::query("DELETE FROM sessions WHERE account_id = ?")
+            .bind(expected.id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn create(
         &self,
         login: &str,
@@ -722,3 +834,7 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "repo/access_tests.rs"]
+mod access_tests;
