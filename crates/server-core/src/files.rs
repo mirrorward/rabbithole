@@ -215,6 +215,53 @@ impl FileService {
             .await?)
     }
 
+    /// Publish an upload only if its authorized destination still has the
+    /// expected database identities and path. Validation and insertion are
+    /// one database statement, so a concurrent move or replacement cannot
+    /// redirect the upload. `None` means the destination changed or the name
+    /// is now occupied. The caller still owns authorization and quota checks.
+    ///
+    /// Return the inserted ID without a later row lookup: a concurrent deletion
+    /// after publication must not turn a successful insert into a panic.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_file_if_target(
+        &self,
+        area_slug: &str,
+        parent_path: Option<&str>,
+        expected_area_id: i64,
+        expected_parent_id: Option<i64>,
+        name: &str,
+        blob_id: &[u8; 32],
+        size: i64,
+        mime: &str,
+        icon: &str,
+        comment: &str,
+        uploader: &str,
+        uploader_id: i64,
+    ) -> Result<Option<i64>, FileError> {
+        let name = clean_name(name)?;
+        let parent_path = parent_path.filter(|path| !path.is_empty());
+        let path = child_path(parent_path, &name);
+        Ok(self
+            .repo()
+            .create_file_if_target(
+                expected_area_id,
+                expected_parent_id,
+                area_slug,
+                parent_path.unwrap_or(""),
+                &name,
+                &path,
+                blob_id,
+                size,
+                mime,
+                icon,
+                comment,
+                uploader,
+                uploader_id,
+            )
+            .await?)
+    }
+
     pub async fn add_alias(
         &self,
         area_slug: &str,
@@ -564,6 +611,10 @@ impl FileService {
         Ok(self.repo().search(area_id, query, limit).await?)
     }
 }
+
+#[cfg(test)]
+#[path = "files/conditional_target_tests.rs"]
+mod conditional_target_tests;
 
 #[cfg(test)]
 mod tests {

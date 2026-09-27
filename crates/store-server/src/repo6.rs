@@ -239,6 +239,56 @@ impl FilesRepo<'_> {
         Ok(self.node_by_id(id).await?.expect("just inserted"))
     }
 
+    /// Atomically validate an upload's pinned destination and insert without
+    /// overwriting an occupied path. No earlier lookup grants publication:
+    /// both the area and folder must still match at this statement's write.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_file_if_target(
+        &self,
+        area_id: i64,
+        parent_id: Option<i64>,
+        area_slug: &str,
+        parent_path: &str,
+        name: &str,
+        path: &str,
+        blob_id: &[u8; 32],
+        size: i64,
+        mime: &str,
+        icon: &str,
+        comment: &str,
+        uploader: &str,
+        uploader_id: i64,
+    ) -> Result<Option<i64>, StoreError> {
+        Ok(sqlx::query(
+            "INSERT INTO file_nodes
+                 (area_id, parent_id, kind, name, path, blob_id, size, mime, icon,
+                  comment, uploader, uploader_id, created_at)
+             SELECT ?1, ?2, 1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, unixepoch()
+             WHERE EXISTS (SELECT 1 FROM file_areas WHERE id = ?1 AND slug = ?12)
+               AND ((?2 IS NULL AND ?13 = '') OR EXISTS (
+                    SELECT 1 FROM file_nodes
+                    WHERE id = ?2 AND area_id = ?1 AND kind = 0 AND path = ?13))
+             ON CONFLICT (area_id, path) DO NOTHING
+             RETURNING id",
+        )
+        .bind(area_id)
+        .bind(parent_id)
+        .bind(name)
+        .bind(path)
+        .bind(&blob_id[..])
+        .bind(size)
+        .bind(mime)
+        .bind(icon)
+        .bind(comment)
+        .bind(uploader)
+        .bind(uploader_id)
+        .bind(area_slug)
+        .bind(parent_path)
+        .fetch_optional(self.0)
+        .await?
+        .map(|row| row.get("id")))
+    }
+
     pub async fn create_alias(
         &self,
         area_id: i64,

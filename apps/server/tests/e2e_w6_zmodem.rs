@@ -21,6 +21,8 @@ use rabbithole_server_core::{Role, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+#[path = "e2e_w6_zmodem/durable.rs"]
+mod durable;
 #[path = "e2e_w6_zmodem/recovery.rs"]
 mod recovery;
 

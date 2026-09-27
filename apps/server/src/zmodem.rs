@@ -13,11 +13,11 @@
 //! - **`zput`** — the server runs the codec's [`Receiver`]: accept `ZFILE`,
 //!   sanitize the offered name (basename only, no control bytes, the
 //!   [`FileService`](rabbithole_server_core::FileService) length cap, no
-//!   clobbering), stream subpackets into in-memory staging under the
+//!   clobbering), checkpoint subpackets to private disk staging under the
 //!   declared-size/quota caps, and on `ZEOF` finalize with the native
 //!   upload discipline — blake3, the moderation hash-deny list, quota
 //!   re-checked on actual bytes, content-addressed blob commit,
-//!   `add_file` + [`ServerEvent::FileAdded`]. Batches work: each `ZFILE`
+//!   target-conditional insertion + [`ServerEvent::FileAdded`]. Batches work: each `ZFILE`
 //!   in the session is vetted and finalized independently.
 //!
 //! ## 8-bit cleanliness
@@ -35,13 +35,13 @@
 //!
 //! - **Downloads**: the codec's `Sender` honors any `ZRPOS`, so a receiver
 //!   that answers `ZFILE` with `ZRPOS(n)` gets only the tail.
-//! - **Uploads**: interrupted `zput` staging is parked in [`Partials`]
-//!   (in-memory, TTL'd — the Hotline HTXF partial-upload discipline),
+//! - **Uploads**: interrupted `zput` staging is checkpointed to private disk files
+//!   with validated target metadata and a 30-minute TTL,
 //!   keyed by `(account, area, folder, name)`. When the same account
 //!   re-offers the same destination, the server arms
 //!   [`Receiver::set_resume_offset`] and answers the `ZFILE` with
-//!   `ZRPOS(staged)`; the client seeks and sends only the tail. Persisting
-//!   partials across restarts is a follow-up, matching HTXF.
+//!   `ZRPOS(staged)`; the client seeks and sends only the tail. Each CRC-validated
+//!   subpacket is durable before acknowledgement, including across restarts.
 //!
 //! ## Teardown discipline
 //!
@@ -51,12 +51,11 @@
 //! in-flight transfer residue is drained (bounded quiet-wait) so stray
 //! frames never replay into `read_line` as garbage commands.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
 use rabbithole_blobs::BlobId;
 use rabbithole_legacy_telnet::TelnetStream;
 use rabbithole_legacy_zmodem::subpacket::MAX_PAYLOAD;
@@ -70,6 +69,7 @@ use rabbithole_store_server::repo::AuditRepo;
 use rabbithole_store_server::repo6::FileNodeRow;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::legacy_staging::{Lease, Offer, Protocol, Target};
 use crate::Shared;
 
 /// Idle budget for one read or write during a transfer; a peer that goes
@@ -81,9 +81,6 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// 32-bit anyway; larger files belong on the native transfer path). Matches
 /// the Hotline HTXF in-memory staging bound.
 const MAX_ZPUT_BYTES: u64 = 64 * 1024 * 1024;
-
-/// How long interrupted-upload staging is kept for resume (HTXF parity).
-const PARTIAL_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Consecutive CANs from the peer that abort the session (the spec's five).
 const CANCEL_CANS: u32 = 5;
@@ -105,66 +102,6 @@ const ABORT_SEQ: [u8; 16] = [
 const DRAIN_QUIET: Duration = Duration::from_millis(250);
 /// ...and the drain never runs longer than this in total.
 const DRAIN_MAX: Duration = Duration::from_secs(2);
-
-// ---------------------------------------------------------------------------
-// Interrupted-upload staging (resume across reconnects)
-// ---------------------------------------------------------------------------
-
-/// Parked partial uploads, keyed by `(account, area, folder, name)` — the
-/// zmodem twin of the Hotline hub's HTXF partial store. In-memory with a
-/// TTL; persistence across restarts is a documented follow-up.
-pub struct Partials {
-    inner: Mutex<HashMap<String, Partial>>,
-}
-
-struct Partial {
-    data: Vec<u8>,
-    expires: Instant,
-}
-
-impl Default for Partials {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Partials {
-    /// An empty store.
-    pub fn new() -> Partials {
-        Partials {
-            inner: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Take (and remove) parked bytes for a destination; empty when none
-    /// (or only an expired entry) is live.
-    fn take(&self, key: &str) -> Vec<u8> {
-        match self.inner.lock().remove(key) {
-            Some(p) if p.expires > Instant::now() => p.data,
-            _ => Vec::new(),
-        }
-    }
-
-    /// Park an interrupted upload's bytes for resume (fresh TTL).
-    fn save(&self, key: String, data: Vec<u8>) {
-        self.inner.lock().insert(
-            key,
-            Partial {
-                data,
-                expires: Instant::now() + PARTIAL_TTL,
-            },
-        );
-    }
-}
-
-/// The staging key: per uploader account and destination, so a resume can
-/// only continue *your own* interrupted upload of that file.
-fn partial_key(account_id: i64, area: &str, folder: Option<&str>, name: &str) -> String {
-    format!(
-        "{account_id}\u{1f}{area}\u{1f}{}\u{1f}{name}",
-        folder.unwrap_or("")
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Transfer-level errors
@@ -579,12 +516,15 @@ where
 struct InFlight {
     /// Sanitized destination file name.
     name: String,
-    /// Staged bytes so far (seeded from [`Partials`] on resume).
+    /// Staged bytes so far (seeded from the validated durable prefix).
     data: Vec<u8>,
     /// Per-file byte ceiling (declared size capped by [`MAX_ZPUT_BYTES`]).
     cap: u64,
-    /// Staging key for parking on interruption.
-    key: String,
+    /// Exclusive destination claim, retained across final publication.
+    lease: Lease,
+    target: Target,
+    /// False after a checkpoint error: never promise that failed IO was saved.
+    durable: bool,
     /// Whether the sender declared a length (else `cap` is the ceiling).
     declared: bool,
 }
@@ -739,12 +679,25 @@ where
                         failed = Some(Zx::Refused(if cur.declared {
                             "more data than declared".into()
                         } else {
-                            current = None;
                             crate::upload_gate::Refusal::TooBig {
                                 max: crate::upload_gate::file_ceiling(shared, MAX_ZPUT_BYTES),
                             }
                             .line()
                         }));
+                        if let Err(error) = cur.lease.discard().await {
+                            tracing::warn!(%error, "cannot discard refused upload checkpoint");
+                        }
+                        current = None;
+                        break;
+                    }
+                    // CRC verification preceded this action. Commit before any
+                    // later SendHeader ACK, so acknowledged bytes survive a kill.
+                    if let Err(error) = cur.lease.append(offset as u64, &data).await {
+                        tracing::warn!(%error, "upload checkpoint failed");
+                        cur.durable = false;
+                        failed = Some(Zx::Refused(
+                            "upload staging is unavailable; try again later".into(),
+                        ));
                         break;
                     }
                     cur.data.extend_from_slice(&data);
@@ -789,9 +742,8 @@ where
         Err(zx) => {
             // Park what arrived so a reconnect can resume from the offset.
             let parked = match current.take() {
-                Some(cur) if !cur.data.is_empty() => {
+                Some(cur) if cur.durable && !cur.data.is_empty() => {
                     let at = cur.data.len();
-                    shared.zpartials.save(cur.key, cur.data);
                     Some(format!(
                         "{at} byte(s) kept for resume — run zput again to continue"
                     ))
@@ -868,22 +820,59 @@ async fn vet_offer(
             _ => OfferError::Declined(refused.line()),
         });
     }
-    // Resume: seed staging when a live partial fits under the declared size.
-    let key = partial_key(authed.account.id, area, folder, &name);
-    let staged = shared.zpartials.take(&key);
-    let data = match declared {
-        Some(d) if staged.len() as u64 >= d => Vec::new(), // stale: start over
-        _ => staged,
+    // Bind the durable target to canonical database IDs. A replaced folder
+    // at the same visible path cannot inherit the previous folder's prefix.
+    let canonical = shared
+        .files
+        .area(area)
+        .await
+        .map_err(|e| OfferError::Fatal(e.to_string()))?;
+    let parent = match folder {
+        Some(path) => {
+            let node = shared
+                .files
+                .node_by_path(&canonical.slug, path)
+                .await
+                .map_err(|e| OfferError::Fatal(e.to_string()))?
+                .filter(|node| node.kind == rabbithole_server_core::files::KIND_FOLDER)
+                .ok_or_else(|| OfferError::Declined("destination folder is unavailable".into()))?;
+            Some(node.id)
+        }
+        None => None,
     };
+    let cap = declared
+        .unwrap_or(MAX_ZPUT_BYTES)
+        .min(crate::upload_gate::file_ceiling(shared, MAX_ZPUT_BYTES));
+    let target = Target {
+        protocol: Protocol::Zmodem,
+        account: authed.account.id,
+        area: canonical.id,
+        parent,
+        name: name.clone(),
+    };
+    let (lease, data) = shared
+        .upload_staging
+        .claim(
+            target.clone(),
+            Offer {
+                length: info.length,
+                mtime: info.mtime,
+            },
+            cap,
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "cannot claim upload checkpoint");
+            OfferError::Declined("upload staging unavailable or destination already active".into())
+        })?;
     Ok(InFlight {
         name,
         data,
-        cap: {
-            let ceiling = crate::upload_gate::file_ceiling(shared, MAX_ZPUT_BYTES);
-            declared.unwrap_or(ceiling).min(ceiling)
-        },
+        cap,
+        lease,
+        target,
+        durable: true,
         declared: declared.is_some(),
-        key,
     })
 }
 
@@ -896,7 +885,29 @@ async fn finalize_upload(
     folder: Option<&str>,
     done: InFlight,
 ) -> String {
-    let InFlight { name, data, .. } = done;
+    let lease = done.lease.clone();
+    let result = finalize_upload_inner(shared, authed, area, folder, done).await;
+    match result {
+        Ok(message) => {
+            if let Err(error) = lease.discard().await {
+                tracing::warn!(%error, "cannot clean completed upload checkpoint");
+            }
+            message
+        }
+        Err(message) => message,
+    }
+}
+
+async fn finalize_upload_inner(
+    shared: &Arc<Shared>,
+    authed: &AuthedUser,
+    area: &str,
+    folder: Option<&str>,
+    done: InFlight,
+) -> Result<String, String> {
+    let InFlight {
+        name, data, target, ..
+    } = done;
     let size = data.len();
     let root = *blake3::hash(&data).as_bytes();
     let detail = format!("{area}/{} name={name} bytes={size}", folder.unwrap_or(""));
@@ -909,7 +920,9 @@ async fn finalize_upload(
             "zmodem-recv",
             format!("{detail} outcome=denied-hash"),
         );
-        return format!("{name}: refused (that content is not allowed here)");
+        return Ok(format!(
+            "{name}: refused (that content is not allowed here)"
+        ));
     }
     // The largest file and the account's space, re-checked against the
     // actual byte count, and held until the file is recorded.
@@ -926,20 +939,34 @@ async fn finalize_upload(
             "zmodem-recv",
             format!("{detail} outcome={outcome}"),
         );
-        return format!("{name}: refused ({said})");
+        let message = format!("{name}: refused ({said})");
+        return if matches!(refused, crate::upload_gate::Refusal::Unavailable) {
+            Err(message)
+        } else {
+            Ok(message)
+        };
     }
     let blobs = shared.blobs.clone();
     let blob_id = match tokio::task::spawn_blocking(move || blobs.put(&data)).await {
         Ok(Ok(id)) => id,
-        _ => return format!("{name}: the file store is unavailable; try again later"),
+        _ => {
+            return Err(format!(
+                "{name}: the file store is unavailable; try again later"
+            ))
+        }
     };
     debug_assert_eq!(blob_id.0, root, "blob id is the blake3 of the bytes");
     let uploader = format!("{}@{}", authed.persona.screen_name, shared.origin_name());
     match shared
         .files
-        .add_file(
+        // Validate the captured database identities and original placement in
+        // the insertion itself: quota/blob awaits must not redirect the upload
+        // to a newly created folder at the same path.
+        .add_file_if_target(
             area,
             folder,
+            target.area,
+            target.parent,
             &name,
             &blob_id.0,
             size as i64,
@@ -951,10 +978,10 @@ async fn finalize_upload(
         )
         .await
     {
-        Ok(node) => {
+        Ok(Some(id)) => {
             shared.bus.publish(ServerEvent::FileAdded {
                 area: area.to_string(),
-                id: node.id,
+                id,
             });
             audit(
                 shared,
@@ -962,7 +989,18 @@ async fn finalize_upload(
                 "zmodem-recv",
                 format!("{detail} outcome=complete"),
             );
-            format!("Received {name} ({size} bytes).")
+            Ok(format!("Received {name} ({size} bytes)."))
+        }
+        Ok(None) => {
+            audit(
+                shared,
+                &authed.account.login,
+                "zmodem-recv",
+                format!("{detail} outcome=destination-changed-or-occupied"),
+            );
+            Ok(format!(
+                "{name}: refused (destination changed during upload or file already exists)"
+            ))
         }
         Err(e) => {
             audit(
@@ -971,7 +1009,12 @@ async fn finalize_upload(
                 "zmodem-recv",
                 format!("{detail} outcome=not-registered({e})"),
             );
-            format!("{name}: not registered ({e})")
+            let message = format!("{name}: not registered ({e})");
+            if matches!(e, rabbithole_server_core::FileError::Exists) {
+                Ok(message)
+            } else {
+                Err(message)
+            }
         }
     }
 }
@@ -1063,3 +1106,6 @@ fn audit(shared: &Arc<Shared>, actor: &str, action: &str, detail: String) {
 #[cfg(test)]
 #[path = "zmodem/recovery_tests.rs"]
 mod recovery_tests;
+
+#[cfg(test)]
+mod staging_tests;

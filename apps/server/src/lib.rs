@@ -32,6 +32,7 @@ pub mod hotline;
 pub mod http;
 pub mod identity_store;
 pub mod legacy;
+mod legacy_staging;
 pub mod nntp;
 pub mod nntp_feed;
 pub mod portmap;
@@ -119,10 +120,9 @@ pub struct Shared {
     /// The moderation suite: report queue, quarantine set, hash-deny list
     /// (Wave 13). Quarantine/deny lookups are cheap in-memory mirrors.
     pub moderation: ModerationService,
-    /// Interrupted telnet ZMODEM uploads parked for resume (Wave 6.x),
-    /// keyed per (account, area, folder, name) — the HTXF partial-upload
-    /// discipline.
-    pub zpartials: zmodem::Partials,
+    /// Durable, bounded legacy upload checkpoints (currently ZMODEM only),
+    /// bound to the authenticated account and canonical destination IDs.
+    pub(crate) upload_staging: legacy_staging::Staging,
     /// Live syndication/legacy-gateway activity counters (Wave 10),
     /// surfaced over the admin family and `ctl gateway-stats`.
     pub stats: stats::GatewayStats,
@@ -253,6 +253,8 @@ impl Burrow {
         s2s::sweep_staging(&data_dir);
 
         let identity = identity_store::load_or_create(&data_dir, &["localhost".into()])?;
+        let upload_staging =
+            legacy_staging::Staging::open(&data_dir, &identity.signing.seed()).await?;
         let fingerprint = identity.tls.fingerprint();
 
         let pool = rabbithole_store_server::open(&data_dir.join("burrow.db")).await?;
@@ -340,7 +342,7 @@ impl Burrow {
             fed_flood: fed_flood::FloodState::load(&data_dir),
             ratelimit: RateLimiter::new(),
             moderation,
-            zpartials: zmodem::Partials::new(),
+            upload_staging,
             stats: stats::GatewayStats::new(),
             surfaces: surfaces::Surfaces::new(tls_acceptor.clone(), data_dir.clone()),
             next_session: AtomicU64::new(1),

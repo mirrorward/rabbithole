@@ -22,9 +22,9 @@ disables that class.
 
 | Surface | Default port | Enable key | Min-role gate | Rate classes | Deferred |
 |---|---|---|---|---|---|
-| Telnet BBS | 2323 (`telnet_addr`) | `telnet_enabled` | `telnet_min_role` (default guest) | conn, auth, legacy | real-terminal ZMODEM interoperability validation; restart-persistent upload staging |
+| Telnet BBS | 2323 (`telnet_addr`) | `telnet_enabled` | `telnet_min_role` (default guest) | conn, auth, legacy | real-terminal ZMODEM interoperability validation |
 | — doors (on telnet) | — | `doors_enabled` (+ `telnet_enabled`) | cap `DOOR_RUN` on `doors/<id>` (member+ default) | (telnet's) | socket-handle inheritance (`%H` is always `0`; both io modes bridge stdio) |
-| — files browser (on telnet) | — | (with telnet) | caps `FILE_LIST` / `FILE_DOWNLOAD` / `DROPBOX_VIEW`, same ACLs as native/Hotline | legacy, transfer (starts) | `get` offers an HTTP handoff when `files_http_base` is set; `zget`/`zput` transfer bytes directly over telnet. Persistent ZMODEM staging remains deferred |
+| — files browser (on telnet) | — | (with telnet) | caps `FILE_LIST` / `FILE_DOWNLOAD` / `DROPBOX_VIEW`, same ACLs as native/Hotline | legacy, transfer (starts) | `get` offers an HTTP handoff when `files_http_base` is set; `zget`/`zput` transfer bytes directly over telnet, with durable upload resume |
 | Finger (RFC 1288) | 7979 (`finger_addr`) | `finger_enabled` | `finger_min_role` — finger is anonymous, so **any value above guest refuses every query** with a polite notice | conn | — (one capped query per connection by design) |
 | NNTP reader (RFC 3977; STARTTLS per RFC 4642) | 1119 (`nntp_addr`) | `nntp_enabled` | `nntp_min_role` — anonymous reading counts as guest; above that, unauthenticated commands get 480 and a below-minimum `AUTHINFO` gets 481. `AUTHINFO` on plaintext answers 483 while `nntp_auth_require_tls` (default **on**) holds | conn, legacy, auth (failed AUTHINFO), post (`POST`, per account) | article numbering shifts when retention drops posts (accepted for a read gateway) |
 | NNTPS reader (implicit TLS, RFC 8143) | 563 (`nntp_tls_addr`; privileged) | `nntp_tls_enabled` | same as the reader — the TLS transport satisfies the `AUTHINFO` gate | conn, legacy, auth, post | self-signed identity only (clients pin the burrow fingerprint; ACME certs land with the web slice) |
@@ -72,9 +72,33 @@ disables that class.
   session, independent of good intervening headers. Header scanning and waits
   are bounded; exhaustion cancels the exchange and drains transfer residue
   before restoring the prompt. Data-subpacket corruption still aborts, with
-  valid partial upload bytes retained under the existing reconnect policy.
-  Staging does not survive a server restart; real-terminal interoperability
-  validation remains separate from the automated TCP fixtures.
+  valid partial upload bytes retained for resume.
+  ZMODEM checkpoints validated data before acknowledging it, so a re-offer
+  after reconnect, restart or a daemon crash can resume the committed prefix.
+  Staging is private to the authenticated account and canonical destination;
+  the offered length and modification time must match. ZMODEM does not supply
+  a whole-file content hash for this comparison. Local checkpoint integrity
+  checks detect modified stored bytes; they do not authenticate a remote file.
+  Resume still runs current destination permissions and final quota and
+  hash-deny checks; published content retains existing quarantine visibility
+  rules. Publication atomically requires the original
+  area/folder identities and paths, so a replacement cannot receive the upload.
+  Only one active upload can claim a given
+  destination. Successful publication or a definitive rejection removes its
+  staging after data was received; transport interruption preserves it until expiry. These temporary
+  checkpoints survive restart in the same data directory but are not included
+  in operator backup snapshots. Real-terminal interoperability validation
+  remains separate from the automated TCP fixtures.
+  Checkpoints live under `legacy-upload-staging/` in the data directory, with
+  opaque names and authenticated metadata tied to the burrow identity. Limits
+  are 64 MiB per upload, 256 MiB in total (active uploads reserve their cap),
+  128 records, and 4 KiB per metadata file. The 30-minute expiry advances only
+  when new data is committed; expired and invalid records are cleaned at
+  startup and on subsequent claims. A storage failure refuses further staging
+  until storage is repaired and the server restarted. Keep one burrow process
+  per data directory. Files are flushed before metadata replacement; Unix also
+  flushes the directory. Windows coverage establishes daemon-crash recovery,
+  without promising durability across a machine power failure.
 - **Doors**: `doors_enabled`, `doors_dir` (default `doors/`, relative to
   `data_dir`), `doors_max_nodes` (default 4; 0 refuses every launch),
   `doors_session_max_secs` (default 3600; 0 = unlimited), `[[doors]]` array
