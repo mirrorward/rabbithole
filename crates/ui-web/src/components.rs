@@ -954,12 +954,29 @@ fn PersonFiles(handle: Signal<String>) -> impl IntoView {
 pub fn Transfers() -> impl IntoView {
     use crate::files::{TransferDir, TransferStatus};
     let app = expect_context::<AppState>();
+    // Kept outside the progress-keyed rows. Chunk updates leave this memo's
+    // text unchanged, so they cannot repeatedly announce the same diagnostic.
+    let diagnostic_notice = create_memo(move |_| {
+        app.all_transfers()
+            .into_iter()
+            .rev()
+            .find(|(_, _, row)| !row.diagnostics.is_empty())
+            .map(|(_, _, row)| {
+                format!(
+                    "{}: {}",
+                    row.name,
+                    crate::files::diagnostic_summary(row.status)
+                )
+            })
+            .unwrap_or_default()
+    });
     view! {
         <StatusBar/>
         <main class="rh-body" id=a11y::MAIN_ID tabindex="-1">
             <h1 class="rh-visually-hidden" id=a11y::VIEW_TITLE_ID tabindex="-1">"Transfers"</h1>
             <section class="rh-panel">
                 <h2 class="rh-panel-title">"Transfers"<span class="rh-panel-sub">"across your burrows"</span></h2>
+                <span class="rh-visually-hidden" role="status" aria-live="polite">{move || diagnostic_notice.get()}</span>
                 <Show
                     when=move || !app.all_transfers().is_empty()
                     fallback=|| view! {
@@ -973,8 +990,8 @@ pub fn Transfers() -> impl IntoView {
                     <ul class="rh-xfers">
                         <For
                             each=move || app.all_transfers()
-                            key=|(burrow, t)| (burrow.clone(), t.id, t.done, t.status, t.error.clone(), t.source_strategy)
-                            children=move |(burrow, t)| {
+                            key=|(server, _, t)| (server.clone(), t.native_attempt, t.id, t.done, t.status, t.error.clone(), t.source_strategy, t.diagnostics.clone())
+                            children=move |(server, burrow, t)| {
                                 let pct = if let Some(pct) = t.done.min(t.total).saturating_mul(100)
                                     .checked_div(t.total)
                                 {
@@ -1016,6 +1033,7 @@ pub fn Transfers() -> impl IntoView {
                                         || (t.status == TransferStatus::Active && t.done < t.total)))
                                     .then_some(t.id);
                                 let upload = t.dir == TransferDir::Upload;
+                                let native_attempt = t.native_attempt;
                                 let failure = matches!(t.status, TransferStatus::Failed).then(|| {
                                     (
                                         t.error.clone().unwrap_or_else(|| {
@@ -1076,18 +1094,19 @@ pub fn Transfers() -> impl IntoView {
                                                 </button>
                                             })}
                                         </div>
+                                        <TransferDiagnostics diagnostics=t.diagnostics.clone() status=t.status/>
                                         // A failed transfer says WHY, and
                                         // offers to try again when trying
                                         // again could plausibly work.
                                         {failure.map(|(why, retryable, id)| view! {
                                             <div class="rh-xfer-error">
                                                 <span class="rh-xfer-why">{why}</span>
-                                                <Show when=move || { retryable } fallback=|| ()>
+                                                {retryable.then(|| view! {
                                                     <button
                                                         class="rh-btn ghost small"
-                                                        on:click=move |_| app.retry_transfer(id)
+                                                        on:click=move |_| app.retry_transfer(&server, id, native_attempt)
                                                     >"Try again"</button>
-                                                </Show>
+                                                })}
                                             </div>
                                         })}
                                     </li>
@@ -5279,13 +5298,31 @@ fn MoveBar() -> impl IntoView {
 fn TransferQueue() -> impl IntoView {
     let app = expect_context::<AppState>();
     let files = app.focused().files;
+    let diagnostic_notice = create_memo(move |_| {
+        files.with(|files| {
+            files
+                .transfers
+                .iter()
+                .rev()
+                .find(|row| !row.diagnostics.is_empty())
+                .map(|row| {
+                    format!(
+                        "{}: {}",
+                        row.name,
+                        crate::files::diagnostic_summary(row.status)
+                    )
+                })
+                .unwrap_or_default()
+        })
+    });
     view! {
         <Show when=move || files.with(|f| !f.transfers.is_empty()) fallback=|| ()>
             <h2 class="rh-panel-title">"Transfers"</h2>
+            <span class="rh-visually-hidden" role="status" aria-live="polite">{move || diagnostic_notice.get()}</span>
             <ul class="rh-queue">
                 <For
                     each=move || files.with(|f| f.transfers.clone())
-                    key=|t| format!("{}:{}:{:?}:{:?}:{:?}", t.id, t.percent(), t.status, t.error, t.source_strategy)
+                    key=|t| (t.native_attempt, t.id, t.percent(), t.status, t.error.clone(), t.source_strategy, t.diagnostics.clone())
                     children=move |t| {
                         let pct = t.percent();
                         let (badge, bar) = match t.status {
@@ -5332,6 +5369,7 @@ fn TransferQueue() -> impl IntoView {
                                     <p class="rh-queue-why" title=sources.explanation()>{sources.label()}</p>
                                 })}
                                 {why.map(|why| view! { <p class="rh-queue-why">{why}</p> })}
+                                <TransferDiagnostics diagnostics=t.diagnostics.clone() status=t.status/>
                                 <div
                                     class="rh-bar"
                                     role="progressbar"
@@ -5347,6 +5385,35 @@ fn TransferQueue() -> impl IntoView {
                     }
                 />
             </ul>
+        </Show>
+    }
+}
+
+/// Rejected bytes are a recoverable diagnostic, independent of the row's
+/// terminal status. Keep bounded details visible: progress updates rebuild the
+/// incumbent rows, so a disclosure would lose its focus and expanded state.
+#[component]
+fn TransferDiagnostics(
+    diagnostics: crate::files::SourceDiagnostics,
+    status: TransferStatus,
+) -> impl IntoView {
+    let visible = !diagnostics.is_empty();
+    let summary = crate::files::diagnostic_summary(status);
+    let omitted = diagnostics.omitted;
+    view! {
+        <Show when=move || visible fallback=|| ()>
+            <div class="rh-xfer-detail">
+                <span>{summary}</span>
+                    <ul aria-label="Verification details">
+                        {diagnostics.rejections.iter().map(|record| {
+                            let message = format!("Source {} at byte {}: {}. Rejected responses: {}.",
+                                u64::from(record.source_index) + 1, record.first_offset,
+                                record.reason.explanation(), record.occurrences);
+                            view! { <li>{message}</li> }
+                        }).collect_view()}
+                        {(omitted > 0).then(|| view! { <li>{format!("Additional rejected responses: {omitted}. Only the first 32 source details are kept.")}</li> })}
+                    </ul>
+            </div>
         </Show>
     }
 }

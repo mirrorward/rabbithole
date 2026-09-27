@@ -151,7 +151,7 @@ struct WorkState {
     sharing: Option<Sharing>,
     /// A unit could not be written here (a full disk, a removed file): the
     /// fetch fails with this, not as if no source could serve.
-    local: Option<std::io::Error>,
+    local: Option<PeerError>,
     /// Units a source lent rather than gave: never offered on.
     borrowed: HashSet<u64>,
     /// One availability record per source, shared by all of its lanes.
@@ -495,7 +495,7 @@ async fn resumable(
         Ok(*hasher.finalize().as_bytes() == root)
     })
     .await
-    .map_err(|e| PeerError::Verify(e.to_string()))??;
+    .map_err(|e| PeerError::Processing(e.to_string()))??;
     if !ok {
         // A prior partial lied (a completed unit's on-disk bytes are corrupt, or
         // a stale `.rhstate` for a since-changed file). Remove BOTH the state and
@@ -689,7 +689,12 @@ async fn fetch_swarm_inner(
     {
         let joined = async {
             for w in workers.handles.iter_mut() {
-                let _ = w.await;
+                if let Err(error) = w.await {
+                    let mut state = state.lock().expect("not poisoned");
+                    if state.local.is_none() {
+                        state.local = Some(PeerError::Processing(error.to_string()));
+                    }
+                }
             }
         };
         tokio::select! {
@@ -700,7 +705,7 @@ async fn fetch_swarm_inner(
 
     let mut state = state.lock().expect("not poisoned");
     if let Some(e) = state.local.take() {
-        return Err(PeerError::Io(e));
+        return Err(e);
     }
     let per_source = sources
         .iter()
@@ -999,7 +1004,7 @@ async fn worker(
                         // the fetch's error, and stop.
                         let mut s = state.lock().expect("not poisoned");
                         if !s.stopped && s.local.is_none() {
-                            s.local = Some(e);
+                            s.local = Some(PeerError::Io(e));
                         }
                         give_back(&mut s, off, len, index, endgame, &complete);
                         break;
@@ -1042,7 +1047,26 @@ async fn worker(
                     break;
                 }
             }
-            Ok(_) | Err(_) => {
+            outcome => {
+                // Only verified rejection of remote data is a source diagnostic.
+                // Local verification task failures are terminal local failures.
+                match outcome {
+                    Ok(_) => availability.rejected(
+                        index,
+                        off,
+                        crate::peer::SourceRejection::UnexpectedLength,
+                    ),
+                    Err(PeerError::SourceRejected(reason)) => {
+                        availability.rejected(index, off, reason)
+                    }
+                    Err(error @ PeerError::Processing(_)) => {
+                        let mut s = state.lock().expect("not poisoned");
+                        if s.local.is_none() {
+                            s.local = Some(error);
+                        }
+                    }
+                    _ => {}
+                }
                 // This source failed: hand the unit back and retire it.
                 give_back(
                     &mut state.lock().expect("not poisoned"),

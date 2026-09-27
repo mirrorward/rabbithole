@@ -428,6 +428,15 @@ async fn mixed_partial_sources_finish_and_a_lying_source_never_verifies_a_unit()
     assert_eq!(std::fs::read(output).unwrap(), data);
     let snapshot = observer.snapshot(0, 3);
     assert_eq!(snapshot.phase, AvailabilityPhase::Complete);
+    let diagnostics = observer.diagnostics();
+    assert_eq!(diagnostics.omitted, 0);
+    assert_eq!(diagnostics.rejections.len(), 1);
+    let rejected = &diagnostics.rejections[0];
+    assert_eq!(rejected.source_index, 0);
+    assert_eq!(rejected.first_offset, bad.asks.lock().unwrap()[0]);
+    assert_eq!(rejected.reason, crate::peer::SourceRejection::InvalidProof);
+    assert_eq!(rejected.occurrences, 1);
+
     assert!(snapshot
         .units
         .iter()
@@ -503,5 +512,125 @@ async fn resume_records_are_not_claimed_verified_until_the_whole_file_passes() {
                 .all(|u| u.local == LocalUnit::Verified));
             assert_eq!(std::fs::read(output).unwrap(), data);
         }
+    }
+}
+
+#[test]
+fn source_diagnostics_are_bounded_coalesced_and_kept_after_success() {
+    use crate::peer::SourceRejection;
+    let (reporter, observer) = availability_channel();
+    let tracker = &reporter.tracker;
+    tracker.begin([1; 32], UNIT_SIZE * 80);
+    tracker.initialize(&[1; 80], &HashSet::new());
+    for _ in 0..10_000 {
+        tracker.rejected(0, 0, SourceRejection::InvalidProof);
+    }
+    for source in 1..80 {
+        tracker.rejected(
+            source,
+            source as u64 * UNIT_SIZE,
+            SourceRejection::InvalidProof,
+        );
+    }
+    let before = observer.diagnostics();
+    assert_eq!(before.rejections.len(), 32);
+    assert_eq!(before.rejections[0].occurrences, 10_000);
+    assert_eq!(before.omitted, 48);
+    tracker.finish(AvailabilityPhase::Complete);
+    tracker.rejected(0, 0, SourceRejection::InvalidProof);
+    assert_eq!(observer.diagnostics(), before);
+}
+
+#[tokio::test]
+async fn local_storage_failure_does_not_accuse_a_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = body(1);
+    let gate = Arc::new(Semaphore::new(0));
+    let source = Arc::new(Controlled::new(
+        dir.path(),
+        "healthy",
+        &data,
+        None,
+        1,
+        Some(gate.clone()),
+        false,
+    ));
+    let (root, size) = (source.root, source.size);
+    let sources: Vec<Arc<dyn RangeSource>> = vec![source.clone()];
+    let dest = dir.path().join("out");
+    let output = dest.clone();
+    let (reporter, observer) = availability_channel();
+    let task = tokio::spawn(async move {
+        fetch_swarm_from_with_availability(&sources, root, size, &dest, None, None, reporter).await
+    });
+    tokio::time::timeout(Duration::from_secs(12), source.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    std::fs::remove_file(&output).unwrap();
+    std::fs::create_dir(&output).unwrap();
+    gate.add_permits(1);
+    let result = tokio::time::timeout(Duration::from_secs(12), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(PeerError::Io(_))), "{result:?}");
+    assert_eq!(observer.snapshot(0, 1).phase, AvailabilityPhase::Failed);
+    assert_eq!(observer.diagnostics(), Default::default());
+}
+
+#[tokio::test]
+async fn local_processing_failure_is_terminal_and_has_no_source_rejection() {
+    struct BrokenWorker;
+    #[async_trait::async_trait]
+    impl RangeSource for BrokenWorker {
+        async fn have(&self) -> Result<Option<HaveMap>, PeerError> {
+            Ok(None)
+        }
+        fn label(&self) -> String {
+            "not a source diagnosis".into()
+        }
+        async fn bao(&self, _: u64, _: u64) -> Result<Vec<BaoPiece>, PeerError> {
+            Err(PeerError::Processing("worker unavailable".into()))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let sources: Vec<Arc<dyn RangeSource>> = vec![Arc::new(BrokenWorker)];
+    let (reporter, observer) = availability_channel();
+    let result = fetch_swarm_from_with_availability(
+        &sources,
+        [1; 32],
+        10,
+        &dir.path().join("out"),
+        None,
+        None,
+        reporter,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(PeerError::Processing(_))),
+        "{result:?}"
+    );
+    assert_eq!(observer.diagnostics(), Default::default());
+}
+
+#[test]
+fn nonempty_diagnostics_survive_failed_and_cancelled_fetches() {
+    for phase in [AvailabilityPhase::Failed, AvailabilityPhase::Cancelled] {
+        let (reporter, observer) = availability_channel();
+        reporter.tracker.begin([1; 32], UNIT_SIZE);
+        reporter.tracker.initialize(&[1], &HashSet::new());
+        reporter
+            .tracker
+            .rejected(0, 0, crate::peer::SourceRejection::InvalidProof);
+        let before = observer.diagnostics();
+        if phase == AvailabilityPhase::Failed {
+            reporter.tracker.finish(phase);
+        }
+        drop(reporter);
+        assert_eq!(observer.snapshot(0, 1).phase, phase);
+        assert_eq!(observer.diagnostics(), before);
+        assert_eq!(before.rejections.len(), 1);
     }
 }

@@ -422,9 +422,20 @@ impl AppState {
             list.iter()
                 .find(|(_, s)| {
                     s.files
-                        .with_untracked(|fs| fs.transfers.iter().any(|t| t.id == transfer_id))
+                        .with_untracked(|fs| fs.owns_native_attempt(transfer_id))
                 })
                 .map(|(_, s)| s.files)
+        })
+    }
+
+    /// An asynchronous native allocation still belongs to this exact session,
+    /// even if focus changed or the same endpoint was left and reconnected.
+    #[cfg(target_arch = "wasm32")]
+    pub fn owns_files_session(&self, id: &ServerId, files: RwSignal<FilesState>) -> bool {
+        self.sessions.with_untracked(|sessions| {
+            sessions
+                .iter()
+                .any(|(server, session)| server == id && session.files == files)
         })
     }
 
@@ -515,7 +526,7 @@ impl AppState {
 
     /// Every transfer across every connected burrow, tagged with the burrow it
     /// belongs to — the unified Transfers manager's list (reactive).
-    pub fn all_transfers(&self) -> Vec<(String, crate::files::Transfer)> {
+    pub fn all_transfers(&self) -> Vec<(ServerId, String, crate::files::Transfer)> {
         self.sessions.with(|list| {
             list.iter()
                 .flat_map(|(id, session)| {
@@ -527,7 +538,7 @@ impl AppState {
                     session.files.with(|f| {
                         f.transfers
                             .iter()
-                            .map(|t| (name.clone(), t.clone()))
+                            .map(|t| (id.clone(), name.clone(), t.clone()))
                             .collect::<Vec<_>>()
                     })
                 })
@@ -2313,17 +2324,19 @@ impl AppState {
     /// Drive one [`FileCommand`] through the seam and fold its file events into
     /// the [`FilesState`].
     fn dispatch_file(&self, command: FileCommand) {
+        self.dispatch_file_to(self.focused(), command);
+    }
+
+    fn dispatch_file_to(&self, session: Session, command: FileCommand) {
         // Live: send over the socket; replies fold in through the file sink
         // registered in `connect_live`. Mock: drive the seam synchronously.
         #[cfg(target_arch = "wasm32")]
-        if self.focused().live.get_untracked() {
-            self.focused()
-                .ws
-                .update_value(|c| c.dispatch_file(&command));
+        if session.live.get_untracked() {
+            session.ws.update_value(|c| c.dispatch_file(&command));
             return;
         }
-        let files = self.focused().files;
-        self.focused().client.update_value(|client| {
+        let files = session.files;
+        session.client.update_value(|client| {
             let events: Vec<FileEvent> = client.dispatch_file(command);
             files.update(|f| {
                 for event in &events {
@@ -3206,17 +3219,20 @@ impl AppState {
 
     /// Download a file inline; the completed transfer lands in the queue.
     pub fn download(&self, id: i64) {
+        self.download_from(self.focused_id.get_untracked(), self.focused(), id);
+    }
+
+    fn download_from(&self, _session_id: ServerId, session: Session, id: i64) {
         // In the native shell, a content-addressed file downloads via the
         // in-process swarm (many peers at once) instead of the WS inline path.
         // A seeded demo burrow has no swarm to ask. In the desktop shell this
         // used to go to the swarm anyway, asking for the all-zero root every
         // seeded node carries, and fail: "downloads don't work in the demo".
-        if !self.focused().live.get_untracked() {
-            let file = self
-                .focused()
+        if !session.live.get_untracked() {
+            let file = session
                 .client
                 .with_value(|client| client.download_bytes(id));
-            self.dispatch_file(FileCommand::Download { id });
+            self.dispatch_file_to(session, FileCommand::Download { id });
             if let Some(file) = file {
                 crate::save::save_bytes(&file.name, &file.mime, &file.bytes);
             }
@@ -3226,8 +3242,8 @@ impl AppState {
         // its own to this burrow. The webview's socket does: download over
         // that, and the bytes are still saved through the shell.
         #[cfg(target_arch = "wasm32")]
-        if crate::native::native_available() && !self.focused().is_guest.get_untracked() {
-            let info = self.focused().files.with_untracked(|f| {
+        if crate::native::native_available() && !session.is_guest.get_untracked() {
+            let info = session.files.with_untracked(|f| {
                 f.nodes.iter().find(|n| n.id == id).and_then(|n| {
                     n.blob_id.map(|b| {
                         (
@@ -3239,42 +3255,30 @@ impl AppState {
                 })
             });
             if let Some((root_hex, size, name)) = info {
-                let transfer_id = id as u64;
-                // Seed the local Transfer so the UI (and the swarm listener, which
-                // reads the size back off it) knows the total up front.
-                self.focused().files.update(|f| {
-                    f.apply(&crate::wire::FileEvent::TransferOpened {
-                        transfer_id,
-                        size,
-                        server_have: 0,
-                    })
-                });
-                // Remember which node this transfer came from so a failure
-                // can be retried without hunting for it again.
-                self.focused().files.update(|f| {
-                    if let Some(t) = f.transfers.iter_mut().find(|t| t.id == transfer_id) {
-                        t.node_id = Some(id);
-                    }
-                });
                 let max_sources =
                     crate::settings::clamp_max_sources(self.settings.get_untracked().max_sources);
-                crate::native::start_swarm_download(
+                let burrow = session
+                    .name
+                    .get_untracked()
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| server_label(&_session_id));
+                crate::native::queue_swarm_download(
                     *self,
-                    transfer_id,
-                    &root_hex,
+                    _session_id,
+                    session.files,
+                    root_hex,
                     size,
-                    &name,
+                    name,
                     max_sources,
-                    &self.focused_burrow_label(),
+                    burrow,
                     id,
                     self.settings.get_untracked().download_from,
-                    &self.focused_endpoint(),
                 );
                 return;
             }
             // No content hash (e.g. a legacy blob): fall through to the WS path.
         }
-        self.dispatch_file(FileCommand::Download { id });
+        self.dispatch_file_to(session, FileCommand::Download { id });
     }
 
     /// Try a failed transfer again.
@@ -3283,31 +3287,33 @@ impl AppState {
     /// destination listing the units already verified, so a second attempt
     /// re-fetches only what's missing — and re-runs source discovery, which is
     /// the point when the last attempt failed because a peer went away.
-    pub fn retry_transfer(&self, transfer_id: u64) {
-        let node = self.focused().files.with_untracked(|f| {
+    pub fn retry_transfer(&self, server: &ServerId, transfer_id: u64, native_attempt: bool) {
+        let session = self.sessions.with_untracked(|sessions| {
+            sessions
+                .iter()
+                .find(|(id, _)| id == server)
+                .map(|(_, session)| *session)
+        });
+        let Some(session) = session else {
+            return;
+        };
+        let node = session.files.with_untracked(|f| {
             f.transfers
                 .iter()
-                .find(|t| t.id == transfer_id)
+                .find(|t| {
+                    t.id == transfer_id
+                        && t.native_attempt == native_attempt
+                        && t.status == crate::files::TransferStatus::Failed
+                        && t.retryable
+                })
                 .and_then(|t| t.node_id)
         });
         match node {
-            Some(id) => {
-                self.focused().files.update(|f| {
-                    if let Some(t) = f.transfers.iter_mut().find(|t| t.id == transfer_id) {
-                        t.status = crate::files::TransferStatus::Queued;
-                        t.error = None;
-                        t.done = 0;
-                    }
-                });
-                self.download(id);
-            }
-            // A transfer we didn't start from a known node (a resumed queue
-            // entry from a previous run) has nothing to retry against — say so
-            // rather than pretending the button did something.
+            Some(id) => self.download_from(server.clone(), session, id),
             None => {
                 self.notify(
                     crate::toasts::ToastKind::Warn,
-                    "That transfer's file isn't in view \u{2014} open its folder and download it again."
+                    "That transfer's file isn't in view — open its folder and download it again."
                         .to_string(),
                 );
             }
@@ -5591,6 +5597,63 @@ mod theme_session_tests {
         session.set_server_theme(Some(overlay("Verified")));
         app.load_server_theme();
         assert_eq!(app.server_theme_name().as_deref(), Some("Verified"));
+        runtime.dispose();
+    }
+}
+
+#[cfg(test)]
+mod transfer_routing_tests {
+    use super::*;
+    use crate::files::TransferStatus;
+    use crate::wire::SwarmWireEvent;
+
+    #[test]
+    fn attempts_route_by_owner_after_focus_switch_and_late_retry_events_are_ignored() {
+        let runtime = create_runtime();
+        let app = AppState::new();
+        let first = app.focused();
+        let second = AppState::new().focused();
+        let first_id = ServerId("wss://first.example/ws".into());
+        let second_id = ServerId("wss://second.example/ws".into());
+        app.sessions
+            .set(vec![(first_id.clone(), first), (second_id.clone(), second)]);
+        first
+            .files
+            .update(|f| f.start_native_download(100, 7, "first.zip".into(), 32, "aa".into()));
+        second
+            .files
+            .update(|f| f.start_native_download(101, 7, "second.zip".into(), 32, "bb".into()));
+        // Even an ordinary ticket with the same numeric id cannot steal routing.
+        second.files.update(|f| {
+            f.apply(&FileEvent::TransferOpened {
+                transfer_id: 100,
+                size: 20,
+                server_have: 0,
+            })
+        });
+        app.focus(&second_id);
+        assert_eq!(app.transfer_session_files(100), Some(first.files));
+        assert_eq!(app.transfer_session_files(101), Some(second.files));
+        app.transfer_session_files(100).unwrap().update(|f| {
+            f.apply_swarm_event(&SwarmWireEvent::Failed {
+                transfer_id: 100,
+                reason: "first source stopped".into(),
+                sources_tried: 1,
+                retryable: true,
+            })
+        });
+        first
+            .files
+            .update(|f| f.start_native_download(102, 7, "first.zip".into(), 32, "aa".into()));
+        assert!(app.transfer_session_files(100).is_none());
+        assert_eq!(app.transfer_session_files(102), Some(first.files));
+        assert_eq!(
+            second.files.with_untracked(|f| f.transfers[0].status),
+            TransferStatus::Queued
+        );
+        app.sessions
+            .update(|sessions| sessions.retain(|(id, _)| *id != first_id));
+        assert!(app.transfer_session_files(102).is_none());
         runtime.dispose();
     }
 }

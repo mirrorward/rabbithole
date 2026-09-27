@@ -53,7 +53,82 @@ pub struct TransfersManager {
     seeding_note: std::sync::Mutex<Option<String>>,
     /// Downloads running now, by the transfer the webview knows them as, so
     /// the person can stop one.
-    running: Mutex<std::collections::HashMap<u64, Arc<Stopper>>>,
+    running: std::sync::Mutex<std::collections::HashMap<u64, RunningDownload>>,
+}
+
+struct RunningDownload {
+    stop: Arc<Stopper>,
+    destination: PathBuf,
+    endpoint: String,
+    root: [u8; 32],
+}
+
+/// No await under the reservation lock. Held through seeding and final save,
+/// then released even when setup fails or the command future is dropped.
+struct DownloadReservation<'a> {
+    running: &'a std::sync::Mutex<std::collections::HashMap<u64, RunningDownload>>,
+    id: u64,
+    stop: Arc<Stopper>,
+}
+
+impl Drop for DownloadReservation<'_> {
+    fn drop(&mut self) {
+        let mut running = self.running.lock().expect("not poisoned");
+        if running.get(&self.id).is_some_and(|live| Arc::ptr_eq(&live.stop, &self.stop)) {
+            running.remove(&self.id);
+        }
+    }
+}
+
+fn destination_identity(dest: &std::path::Path) -> Result<PathBuf, String> {
+    let path = if dest.exists() {
+        std::fs::canonicalize(dest).map_err(|e| e.to_string())?
+    } else {
+        let parent = dest.parent().ok_or("The download has no destination folder.")?;
+        let name = dest.file_name().ok_or("The download has no filename.")?;
+        std::fs::canonicalize(parent).map_err(|e| e.to_string())?.join(name)
+    };
+    // Conservatively exclude case aliases on platforms that commonly use
+    // case-insensitive volumes; a false-positive refusal is safer than racing.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let path = PathBuf::from(path.to_string_lossy().to_lowercase());
+    Ok(path)
+}
+
+fn reserve_download<'a>(
+    running: &'a std::sync::Mutex<std::collections::HashMap<u64, RunningDownload>>,
+    id: u64,
+    dest: &std::path::Path,
+    endpoint: &str,
+    root: [u8; 32],
+) -> Result<DownloadReservation<'a>, String> {
+    let destination = destination_identity(dest)?;
+    let mut active = running.lock().expect("not poisoned");
+    if active.contains_key(&id) || active.values().any(|live|
+        live.destination == destination || (live.endpoint == endpoint && live.root == root)) {
+        return Err("That file is already downloading. Wait for it to finish before trying again.".to_string());
+    }
+    let stop = Arc::new(Stopper::default());
+    active.insert(id, RunningDownload { stop: stop.clone(), destination, endpoint: endpoint.into(), root });
+    Ok(DownloadReservation { running, id, stop })
+}
+
+/// Fresh for every attempt and never reused while this native process lives,
+/// including across webview reloads. Every value survives JS Number exactly.
+const FIRST_ATTEMPT_ID: u64 = 1 << 52;
+const LAST_ATTEMPT_ID: u64 = (1 << 53) - 1;
+static NEXT_ATTEMPT_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(FIRST_ATTEMPT_ID);
+
+fn allocate_attempt_id(next: &std::sync::atomic::AtomicU64) -> Result<u64, String> {
+    next.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed,
+        |id| if id <= LAST_ATTEMPT_ID { id.checked_add(1) } else { None })
+        .map_err(|_| "Restart RabbitHole before starting another download.".to_string())
+}
+
+#[tauri::command]
+pub fn swarm_next_transfer_id() -> Result<u64, String> {
+    allocate_attempt_id(&NEXT_ATTEMPT_ID)
 }
 
 /// A running download's stop switch: set once, and whoever is waiting on it
@@ -327,6 +402,9 @@ pub async fn swarm_start_download(
     node_id: Option<i64>,
     mode: Option<String>,
 ) -> Result<(), String> {
+    if !(FIRST_ATTEMPT_ID..=LAST_ATTEMPT_ID).contains(&transfer_id) {
+        return Err("Invalid download attempt.".to_string());
+    }
     let root = parse_root(&root_hex)?;
     // Where it goes is settled before a byte moves: asking after the fetch
     // would download a file the person then declines to keep.
@@ -356,6 +434,10 @@ pub async fn swarm_start_download(
     // nothing about what happened.
     let emit_app = app.clone();
     let want = Wanted { root, size, node_id, max_sources: max_sources as usize, mode };
+    // Reserve the destination and this burrow's partial seed before setup can
+    // touch either. A new attempt ID is never permission for concurrent writes.
+    let reservation = reserve_download(&state.running, transfer_id, &dest, &endpoint, root)?;
+    let stopper = reservation.stop.clone();
     // Opted in, and the size is known: offer the file from the start, so
     // what lands is fetched from here while the rest is still coming.
     let seeding = downloads::load(&prefs_path(&app)?).seed;
@@ -373,19 +455,6 @@ pub async fn swarm_start_download(
         None
     };
     let sharing = share.is_some();
-    // Registered before a byte moves, so Cancel works from the first moment
-    // the row appears, and taken away however this ends.
-    let stopper = Arc::new(Stopper::default());
-    {
-        // One download of a file at a time: a second start would write the
-        // same file from two fetches, count two downloads, and leave the
-        // first with no stop switch of its own.
-        let mut running = state.running.lock().await;
-        if running.contains_key(&transfer_id) {
-            return Err("that download is already running".to_string());
-        }
-        running.insert(transfer_id, stopper.clone());
-    }
     // What the fetch said it had to work with, so a row that ends badly can
     // say whether it had three sources or none.
     let sources_tried = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -393,7 +462,7 @@ pub async fn swarm_start_download(
     let result = {
         let fetch = run_download_sharing(&session, &want, &dest, share, &others, move |event| {
             if let crate::swarm::SwarmEvent::Opened { source_count, .. } = &event {
-                counted.store(*source_count, std::sync::atomic::Ordering::Relaxed);
+                counted.fetch_max(*source_count, std::sync::atomic::Ordering::Relaxed);
             }
             let _ = emit_app.emit("swarm://event", TransferEvent { transfer_id, event });
         });
@@ -405,17 +474,6 @@ pub async fn swarm_start_download(
             _ = stopper.stopped() => Err(crate::swarm::SwarmError::Cancelled),
         }
     };
-    {
-        // Only this download's switch: a later start for the same transfer
-        // has its own, and must keep it.
-        let mut running = state.running.lock().await;
-        if running
-            .get(&transfer_id)
-            .is_some_and(|live| Arc::ptr_eq(live, &stopper))
-        {
-            running.remove(&transfer_id);
-        }
-    }
     // Nothing landed, or what landed is not this burrow's to be offered:
     // take back what was offered in part.
     if sharing && !matches!(result, Ok(done) if done.may_share) {
@@ -503,7 +561,7 @@ pub async fn swarm_cancel_download(
     state: State<'_, TransfersManager>,
     transfer_id: u64,
 ) -> Result<bool, String> {
-    let stopper = state.running.lock().await.get(&transfer_id).cloned();
+    let stopper = state.running.lock().expect("not poisoned").get(&transfer_id).map(|live| live.stop.clone());
     match stopper {
         Some(stopper) => {
             stopper.stop();
@@ -874,5 +932,65 @@ mod tests {
         // Windows drive-relative prefix + NTFS alternate data stream: reject the ':'.
         assert_eq!(sanitize_name("C:evil.exe"), "download.bin");
         assert_eq!(sanitize_name("report.txt:hidden"), "download.bin");
+    }
+}
+
+#[cfg(test)]
+mod attempt_identity_tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    #[test]
+    fn native_attempt_ids_are_unique_js_safe_and_never_wrap() {
+        let next = Arc::new(AtomicU64::new(FIRST_ATTEMPT_ID));
+        let threads: Vec<_> = (0..4).map(|_| {
+            let next = next.clone();
+            std::thread::spawn(move || (0..100).map(|_| allocate_attempt_id(&next).unwrap()).collect::<Vec<_>>())
+        }).collect();
+        let ids: std::collections::HashSet<u64> = threads.into_iter().flat_map(|thread| thread.join().unwrap()).collect();
+        assert_eq!(ids.len(), 400);
+        assert!(ids.iter().all(|&id| id >= FIRST_ATTEMPT_ID && (id as f64) as u64 == id));
+        let last = AtomicU64::new(LAST_ATTEMPT_ID);
+        assert_eq!(allocate_attempt_id(&last).unwrap(), LAST_ATTEMPT_ID);
+        assert!(allocate_attempt_id(&last).is_err());
+        assert!(allocate_attempt_id(&last).is_err());
+        assert!(allocate_attempt_id(&AtomicU64::new(u64::MAX)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::*;
+
+    #[test]
+    fn distinct_attempts_cannot_race_a_destination_or_shared_partial_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = std::sync::Mutex::new(std::collections::HashMap::new());
+        let dest = dir.path().join("file.bin");
+        let first = reserve_download(&running, FIRST_ATTEMPT_ID, &dest, "wss://one", [1; 32]).unwrap();
+        assert!(reserve_download(&running, FIRST_ATTEMPT_ID + 1, &dir.path().join(".").join("file.bin"), "wss://two", [2; 32]).is_err());
+        assert!(reserve_download(&running, FIRST_ATTEMPT_ID + 1, &dir.path().join("another.bin"), "wss://one", [1; 32]).is_err());
+        assert_eq!(running.lock().unwrap().len(), 1);
+        let other = reserve_download(&running, FIRST_ATTEMPT_ID + 2, &dir.path().join("other.bin"), "wss://two", [1; 32]).unwrap();
+        assert_eq!(running.lock().unwrap().len(), 2);
+        drop(first);
+        let retry = reserve_download(&running, FIRST_ATTEMPT_ID + 3, &dest, "wss://one", [1; 32]).unwrap();
+        assert_eq!(running.lock().unwrap().len(), 2);
+        drop(retry);
+        drop(other);
+        assert!(running.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_symlink_destination_resolves_to_the_same_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("file.bin");
+        std::fs::write(&dest, b"partial").unwrap();
+        let alias = dir.path().join("alias.bin");
+        std::os::unix::fs::symlink(&dest, &alias).unwrap();
+        let running = std::sync::Mutex::new(std::collections::HashMap::new());
+        let _first = reserve_download(&running, FIRST_ATTEMPT_ID, &dest, "wss://one", [1; 32]).unwrap();
+        assert!(reserve_download(&running, FIRST_ATTEMPT_ID + 1, &alias, "wss://two", [2; 32]).is_err());
     }
 }

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use rabbithole_proto::swarm::AdvertEntry;
 use rabbithole_swarm::{
-    fetch_swarm_from, FetchReport, PeerSource, RangeSource, SeedStore,
+    FetchReport, PeerSource, RangeSource, SeedStore,
     SourcePeer, UNIT_SIZE,
 };
 
@@ -95,6 +95,47 @@ pub struct ShareAs {
     pub ttl_secs: u32,
 }
 
+use rabbithole_swarm::scheduler::{
+    availability::{availability_channel, SourceDiagnostics},
+    fetch_swarm_from_with_availability,
+};
+
+/// IPC diagnostics contain only fixed reasons and bounded integer counts.
+/// Offsets are decimal strings so JavaScript cannot round large file offsets.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SourceDiagnosticWire {
+    pub source_index: u32,
+    pub first_offset: String,
+    pub reason: rabbithole_swarm::peer::SourceRejection,
+    pub occurrences: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SourceDiagnosticsWire {
+    pub rejections: Vec<SourceDiagnosticWire>,
+    pub omitted: u32,
+}
+
+impl From<&SourceDiagnostics> for SourceDiagnosticsWire {
+    fn from(snapshot: &SourceDiagnostics) -> Self {
+        let mut out = Self { rejections: Vec::new(), omitted: snapshot.omitted.min(u32::MAX as u64) as u32 };
+        for record in &snapshot.rejections {
+            let index = u32::try_from(record.source_index);
+            if out.rejections.len() >= rabbithole_swarm::scheduler::availability::SOURCE_DIAGNOSTICS_MAX || index.is_err() {
+                out.omitted = out.omitted.saturating_add(record.occurrences.min(u32::MAX as u64) as u32);
+                continue;
+            }
+            out.rejections.push(SourceDiagnosticWire {
+                source_index: index.expect("checked"),
+                first_offset: record.first_offset.to_string(),
+                reason: record.reason,
+                occurrences: record.occurrences.min(u32::MAX as u64) as u32,
+            });
+        }
+        out
+    }
+}
+
 /// A download's lifecycle, surfaced to the caller and forwarded over Tauri IPC
 /// to the ui-web Transfers manager as the swarm fills. The JSON shape (an
 /// internally-tagged `kind` + snake_case fields) is the wire contract the wasm
@@ -111,6 +152,8 @@ pub enum SwarmEvent {
         done_units: u64,
         total_units: u64,
     },
+    /// Cumulative, bounded verification rejections; never a terminal failure.
+    SourceDiagnostics { diagnostics: SourceDiagnosticsWire },
     /// The fetch finished; `per_source` is the final (endpoint, units) split.
     Done {
         bytes: u64,
@@ -414,10 +457,21 @@ async fn swarm_download(
     // Opted in: every unit that lands is offered on at once, with its
     // proof, and the whole file when it is done — unless another burrow
     // carried part of it, which is not this one's to be given.
+    let (reporter, mut observer) = availability_channel();
     let mut fetch = FetchTask(tokio::spawn(async move {
-        fetch_swarm_from(&all, root, size, &dest_owned, Some(tx), seeds).await
+        fetch_swarm_from_with_availability(&all, root, size, &dest_owned, Some(tx), seeds, reporter).await
     }));
-    while let Some(u) = rx.recv().await {
+    let mut last_diagnostics = SourceDiagnostics::default();
+    let mut observing = true;
+    loop {
+        let u = tokio::select! {
+            u = rx.recv() => match u { Some(u) => u, None => break },
+            changed = observer.changed(), if observing => {
+                observing = changed;
+                emit_diagnostics(&observer.diagnostics(), &mut last_diagnostics, emit);
+                continue;
+            }
+        };
         if let Some((entry, ttl)) = &advert {
             let due = advertised.is_none_or(|(at, after)| at.elapsed().as_secs() >= after);
             let any_held = offered
@@ -462,10 +516,13 @@ async fn swarm_download(
             total_units: u.total_units,
         });
     }
-    let report = (&mut fetch.0)
-        .await
-        .map_err(|e| SwarmError::Fetch(rabbithole_swarm::peer::PeerError::Verify(e.to_string())))?
-        .map_err(SwarmError::Fetch);
+    let report = match (&mut fetch.0).await {
+        Ok(result) => result.map_err(SwarmError::Fetch),
+        Err(error) => Err(SwarmError::Fetch(rabbithole_swarm::peer::PeerError::Processing(error.to_string()))),
+    };
+    // The final snapshot is read after joining; even a fast failed source or a
+    // fully recovered fetch cannot lose its final diagnostic to channel closure.
+    emit_diagnostics(&observer.diagnostics(), &mut last_diagnostics, emit);
     // The burrow of the download gives its ticket back here — unless the
     // fetch failed and it is the one the file may yet come from, in which
     // case the ticket is handed on rather than opened again.
@@ -482,6 +539,17 @@ async fn swarm_download(
         per_source: report.per_source.clone(),
     });
     Ok(report)
+}
+
+fn emit_diagnostics(
+    snapshot: &SourceDiagnostics,
+    previous: &mut SourceDiagnostics,
+    emit: &mut impl FnMut(SwarmEvent),
+) {
+    if snapshot != previous {
+        *previous = snapshot.clone();
+        emit(SwarmEvent::SourceDiagnostics { diagnostics: snapshot.into() });
+    }
 }
 
 /// One download, as asked for.
@@ -621,9 +689,8 @@ pub async fn run_download_sharing(
                     }
                     // On the ticket the swarm attempt already opened, when
                     // it got that far: one file is one download.
-                    run_origin_download(&mut client, node_id, kept.take(), size, dest, &mut emit)
+                    run_origin_download(&mut client, node_id, kept.take(), root, size, dest, &mut emit)
                         .await?;
-                    check_origin_copy(dest, root)?;
                     Ok(Downloaded {
                         route: Route::Origin,
                         may_share: true,
@@ -653,8 +720,7 @@ pub async fn run_download_sharing(
             }
             let node_id = node_id.expect("choose_route requires a reachable origin");
             let mut client = session.lock().await;
-            run_origin_download(&mut client, node_id, None, size, dest, &mut emit).await?;
-            check_origin_copy(dest, root)?;
+            run_origin_download(&mut client, node_id, None, root, size, dest, &mut emit).await?;
             Ok(Downloaded {
                 route: Route::Origin,
                 may_share: true,
@@ -666,15 +732,15 @@ pub async fn run_download_sharing(
 /// Whether a download failed on this machine (writing the file), not at the
 /// sources.
 fn is_local(e: &SwarmError) -> bool {
-    matches!(e, SwarmError::Fetch(rabbithole_swarm::peer::PeerError::Io(_)))
+    matches!(e, SwarmError::Fetch(rabbithole_swarm::peer::PeerError::Io(_) | rabbithole_swarm::peer::PeerError::Processing(_)))
 }
 
 /// The origin verified the file against *its* ticket. Check it against what
 /// was asked for: a node id is only a number, and the content hash is the
 /// identity.
 fn check_origin_copy(dest: &Path, root: [u8; 32]) -> Result<(), SwarmError> {
-    let got = Client::hash_file(dest).map(|(root, _)| root).ok();
-    if got != Some(root) {
+    let (got, _) = Client::hash_file(dest).map_err(SwarmError::Client)?;
+    if got != root {
         let _ = std::fs::remove_file(dest);
         return Err(SwarmError::Fetch(rabbithole_swarm::peer::PeerError::Verify(
             "the burrow sent a different file than the one asked for".to_string(),
@@ -692,6 +758,7 @@ async fn run_origin_download(
     // A ticket the swarm attempt already opened for this very file, when
     // there is one: the burrow counts and charges one download, not two.
     open: Option<rabbithole_proto::transfer::TransferTicket>,
+    root: [u8; 32],
     size: u64,
     dest: &Path,
     emit: &mut impl FnMut(SwarmEvent),
@@ -746,6 +813,7 @@ async fn run_origin_download(
             }
         }
     };
+    check_origin_copy(dest, root)?;
     report_up_to(total_units, emit);
     emit(SwarmEvent::Done {
         bytes,
@@ -927,5 +995,39 @@ mod tests {
             ],
         );
         assert_eq!(size_from_list(&list), 900);
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use rabbithole_swarm::{peer::SourceRejection, scheduler::availability::SourceDiagnostic};
+
+    #[test]
+    fn diagnostics_ipc_bounds_counts_and_preserves_exact_offset_without_remote_text() {
+        let record = SourceDiagnostic { source_index: 0, first_offset: u64::MAX, reason: SourceRejection::InvalidProof, occurrences: u64::MAX };
+        let snapshot = SourceDiagnostics { rejections: vec![record; 40], omitted: u64::MAX };
+        let wire = SourceDiagnosticsWire::from(&snapshot);
+        assert_eq!(wire.rejections.len(), 32);
+        assert_eq!(wire.omitted, u32::MAX);
+        assert_eq!(wire.rejections[0].occurrences, u32::MAX);
+        let json = serde_json::to_value(SwarmEvent::SourceDiagnostics { diagnostics: wire }).unwrap();
+        assert_eq!(json["kind"], "source_diagnostics");
+        assert_eq!(json["diagnostics"]["rejections"][0]["first_offset"], "18446744073709551615");
+        assert_eq!(json["diagnostics"]["rejections"][0]["reason"], "invalid_proof");
+    }
+
+    #[test]
+    fn diagnostics_forward_cumulative_changes_once_and_retain_final_snapshot() {
+        let mut previous = SourceDiagnostics::default();
+        let mut emitted = Vec::new();
+        let first = SourceDiagnostics { rejections: vec![SourceDiagnostic { source_index: 0, first_offset: 0, reason: SourceRejection::InvalidProof, occurrences: 1 }], omitted: 0 };
+        emit_diagnostics(&first, &mut previous, &mut |event| emitted.push(event));
+        emit_diagnostics(&first, &mut previous, &mut |event| emitted.push(event));
+        let mut final_snapshot = first.clone();
+        final_snapshot.rejections[0].occurrences = 2;
+        emit_diagnostics(&final_snapshot, &mut previous, &mut |event| emitted.push(event));
+        assert_eq!(emitted.len(), 2);
+        assert_eq!(previous, final_snapshot);
     }
 }

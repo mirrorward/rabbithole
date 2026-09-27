@@ -113,7 +113,9 @@ async fn with_nobody_seeding_the_file_comes_from_the_burrow() {
         .unwrap();
     let wrong = work.path().join("wrong.bin");
     let mismatched = Wanted { root, size: body.len() as u64, node_id: Some(other_node.id), max_sources: 4, mode: SourceMode::OriginOnly };
-    let refused = run_download(&admin, &mismatched, &wrong, |_| {}).await.expect_err("wrong content");
+    let mut wrong_events = Vec::new();
+    let refused = run_download(&admin, &mismatched, &wrong, |event| wrong_events.push(event)).await.expect_err("wrong content");
+    assert!(!wrong_events.iter().any(|event| matches!(event, SwarmEvent::Done { .. })), "wrong requested content cannot announce success");
     assert!(refused.to_string().contains("different file"), "{refused}");
     assert!(!wrong.exists(), "the wrong file is not left on disk");
 

@@ -267,6 +267,7 @@ pub fn run() {
             tracker_index,
             transfers::native_available,
             transfers::connect_native,
+            transfers::swarm_next_transfer_id,
             transfers::swarm_start_download,
             transfers::swarm_cancel_download,
             transfers::save_file,

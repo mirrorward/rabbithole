@@ -176,6 +176,27 @@ pub struct PeerResponseHeader {
     pub size: u64,
 }
 
+/// A bounded, non-peer-controlled description of rejected source data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceRejection {
+    InvalidResponse,
+    InvalidProof,
+    InvalidRange,
+    UnexpectedLength,
+}
+
+impl std::fmt::Display for SourceRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidResponse => "malformed source response",
+            Self::InvalidProof => "data did not pass Bao verification",
+            Self::InvalidRange => "source returned the wrong range",
+            Self::UnexpectedLength => "source returned the wrong length",
+        })
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PeerError {
     #[error("net: {0}")]
@@ -186,6 +207,10 @@ pub enum PeerError {
     Refused(u8),
     #[error("verification failed: {0}")]
     Verify(String),
+    #[error("source data rejected: {0}")]
+    SourceRejected(SourceRejection),
+    #[error("local verification task failed: {0}")]
+    Processing(String),
     #[error("seeded file does not hash to the declared root")]
     RootMismatch,
     #[error("request is malformed or too large")]
@@ -902,7 +927,7 @@ pub async fn fetch_range_proved(
     let (size, stream) = (piece.size, piece.stream);
     tokio::task::spawn_blocking(move || decode_proved(root, size, offset, len, &stream))
         .await
-        .map_err(|e| PeerError::Verify(e.to_string()))?
+        .map_err(|e| PeerError::Processing(e.to_string()))?
 }
 
 /// A range as a source sends it: the Bao stream for `[offset, offset +
@@ -1129,7 +1154,9 @@ pub trait RangeSource: Send + Sync {
 
     /// `[offset, offset + len)` as Bao streams: one piece, or several that
     /// cover the range in order (a source whose messages are smaller than a
-    /// unit sends it in parts).
+    /// unit sends it in parts). `Verify` from this boundary means malformed
+    /// remote response data and becomes a source rejection; local task failures
+    /// must use `Processing`, and transport/file I/O must use `Net`/`Io`.
     async fn bao(&self, offset: u64, len: u64) -> Result<Vec<BaoPiece>, PeerError>;
 
     /// How many units it may be asked for at once. The fetch never asks it
@@ -1191,7 +1218,10 @@ pub async fn fetch_proved(
     offset: u64,
     len: u64,
 ) -> Result<Proved, PeerError> {
-    let pieces = source.bao(offset, len).await?;
+    let pieces = source.bao(offset, len).await.map_err(|error| match error {
+        PeerError::Verify(_) => PeerError::SourceRejected(SourceRejection::InvalidResponse),
+        other => other,
+    })?;
     tokio::task::spawn_blocking(move || {
         let mut out = Proved {
             bytes: Vec::new(),
@@ -1202,27 +1232,24 @@ pub async fn fetch_proved(
         for piece in pieces {
             // One file size throughout, and pieces in order with no gap.
             if piece.offset != at || *size.get_or_insert(piece.size) != piece.size {
-                return Err(PeerError::Verify(
-                    "pieces that do not make the range".into(),
-                ));
+                return Err(PeerError::SourceRejected(SourceRejection::InvalidRange));
             }
-            let proved = decode_proved(root, piece.size, piece.offset, piece.len, &piece.stream)?;
+            let proved = decode_proved(root, piece.size, piece.offset, piece.len, &piece.stream)
+                .map_err(|_| PeerError::SourceRejected(SourceRejection::InvalidProof))?;
             at += proved.bytes.len() as u64;
             out.bytes.extend_from_slice(&proved.bytes);
             out.parents.extend(proved.parents);
         }
         let Some(size) = size else {
-            return Err(PeerError::Verify("no pieces".into()));
+            return Err(PeerError::SourceRejected(SourceRejection::InvalidRange));
         };
         if at != offset + len.min(size.saturating_sub(offset)) {
-            return Err(PeerError::Verify(
-                "pieces that do not make the range".into(),
-            ));
+            return Err(PeerError::SourceRejected(SourceRejection::InvalidRange));
         }
         Ok(out)
     })
     .await
-    .map_err(|e| PeerError::Verify(e.to_string()))?
+    .map_err(|e| PeerError::Processing(e.to_string()))?
 }
 
 /// Fetch a whole file from one peer, verified block-by-block, writing it

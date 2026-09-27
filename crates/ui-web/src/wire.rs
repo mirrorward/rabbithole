@@ -1487,6 +1487,11 @@ pub enum SwarmWireEvent {
         done_units: u64,
         total_units: u64,
     },
+    /// Bounded, cumulative source verification rejections for this attempt.
+    SourceDiagnostics {
+        transfer_id: u64,
+        diagnostics: crate::files::SourceDiagnostics,
+    },
     /// The fetch finished.
     Done {
         transfer_id: u64,
@@ -1510,18 +1515,32 @@ pub enum SwarmWireEvent {
     },
 }
 
+impl SwarmWireEvent {
+    pub fn transfer_id(&self) -> u64 {
+        match self {
+            Self::Opened { transfer_id, .. }
+            | Self::Chunk { transfer_id, .. }
+            | Self::Done { transfer_id, .. }
+            | Self::Failed { transfer_id, .. }
+            | Self::SourceDiagnostics { transfer_id, .. } => *transfer_id,
+        }
+    }
+}
+
 /// `serde` default for [`SwarmWireEvent::Failed::retryable`] — an older shell
 /// that doesn't send the field gets the forgiving answer.
 fn yes() -> bool {
     true
 }
 
-/// Translate a native [`SwarmWireEvent`] into the [`FileEvent`]s that drive the
-/// same `FilesState` reducer the WebSocket path uses — so the Transfers UI is
-/// identical whether bytes arrive over WS or the in-process swarm. `size` is the
-/// file's byte length (known when the download starts). Pure — host-tested.
+/// Compatibility projection into the FILE-family vocabulary. Native desktop
+/// events use [`crate::files::FilesState::apply_swarm_event`] instead, preserving
+/// attempt identity, diagnostics and final-verification completion semantics.
+/// This older projection has no FILE counterpart for source diagnostics.
+/// `size` is the file's byte length. Pure and host-tested.
 pub fn swarm_event_to_file_events(ev: &SwarmWireEvent, size: u64) -> Vec<FileEvent> {
     match ev {
+        SwarmWireEvent::SourceDiagnostics { .. } => Vec::new(),
         SwarmWireEvent::Opened { transfer_id, .. } => vec![FileEvent::TransferOpened {
             transfer_id: *transfer_id,
             size,

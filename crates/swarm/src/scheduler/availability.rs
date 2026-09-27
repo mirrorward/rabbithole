@@ -6,6 +6,7 @@
 //! Maps never cross the coordinator wire or change the verification anchor.
 
 use super::{Holds, UNIT_SIZE};
+use crate::peer::SourceRejection;
 use crate::peer::{HaveMap, PeerError, PEER_BLOCK_BYTES, STATUS_DENIED, STATUS_NOT_FOUND};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -13,6 +14,27 @@ use tokio::sync::watch;
 
 /// Maximum units returned by one snapshot, even when the caller asks for more.
 pub const AVAILABILITY_PAGE_MAX: usize = 4096;
+
+/// At most this many source/reason pairs are retained for one invocation.
+pub const SOURCE_DIAGNOSTICS_MAX: usize = 32;
+
+/// Evidence of rejected bytes, without remote labels, paths or error text.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SourceDiagnostic {
+    /// Zero-based position in this invocation's source list; labels are not identities.
+    pub source_index: usize,
+    pub first_offset: u64,
+    pub reason: SourceRejection,
+    pub occurrences: u64,
+}
+
+/// A bounded cumulative snapshot, retained even when another source succeeds.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SourceDiagnostics {
+    pub rejections: Vec<SourceDiagnostic>,
+    /// Further rejected responses whose source/reason did not fit the bound.
+    pub omitted: u64,
+}
 
 /// Local bytes and remote claims are deliberately separate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +129,18 @@ pub fn availability_channel() -> (AvailabilityReporter, AvailabilityObserver) {
 }
 
 impl AvailabilityObserver {
+    /// Source verification failures only. Storage, worker and transport failures
+    /// are not evidence that a source supplied invalid bytes.
+    pub fn diagnostics(&self) -> SourceDiagnostics {
+        self.tracker
+            .0
+            .state
+            .lock()
+            .expect("not poisoned")
+            .diagnostics
+            .clone()
+    }
+
     /// Page by unit index, not byte offset. Pages are capped and out-of-range
     /// requests return an empty page; callers can inspect `total_units`.
     pub fn snapshot(&self, start_unit: u64, limit: usize) -> AvailabilitySnapshot {
@@ -208,6 +242,7 @@ struct State {
     sources: Vec<Source>,
     resumed: HashSet<u64>,
     verified: HashSet<u64>,
+    diagnostics: SourceDiagnostics,
 }
 
 struct Shared {
@@ -230,6 +265,7 @@ impl Tracker {
                 sources: Vec::new(),
                 resumed: HashSet::new(),
                 verified: HashSet::new(),
+                diagnostics: SourceDiagnostics::default(),
             }),
             changed,
         }))
@@ -303,6 +339,31 @@ impl Tracker {
     pub(super) fn landed(&self, off: u64) {
         let mut state = self.0.state.lock().expect("not poisoned");
         state.verified.insert(off / UNIT_SIZE);
+        self.publish(&mut state);
+    }
+
+    pub(super) fn rejected(&self, index: usize, offset: u64, reason: SourceRejection) {
+        let mut state = self.0.state.lock().expect("not poisoned");
+        if state.phase.terminal() || index >= state.sources.len() {
+            return;
+        }
+        let diagnostics = &mut state.diagnostics;
+        if let Some(found) = diagnostics
+            .rejections
+            .iter_mut()
+            .find(|d| d.source_index == index && d.reason == reason)
+        {
+            found.occurrences = found.occurrences.saturating_add(1);
+        } else if diagnostics.rejections.len() < SOURCE_DIAGNOSTICS_MAX {
+            diagnostics.rejections.push(SourceDiagnostic {
+                source_index: index,
+                first_offset: offset,
+                reason,
+                occurrences: 1,
+            });
+        } else {
+            diagnostics.omitted = diagnostics.omitted.saturating_add(1);
+        }
         self.publish(&mut state);
     }
 

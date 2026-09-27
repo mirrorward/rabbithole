@@ -4,19 +4,19 @@
 //! core** over the `window.__RH_NATIVE__` IPC bridge (`rabbithole-desktop`,
 //! Slice 3) instead of the WebSocket transport — so a download pulls chunks from
 //! many peers at once. Progress arrives as `swarm://event` and folds into the
-//! *same* [`crate::files::FilesState`] reducer the WS path uses (via
-//! [`crate::wire::swarm_event_to_file_events`]), so the Transfers UI is identical.
+//! [`crate::files::FilesState::apply_swarm_event`] reducer, preserving native
+//! attempt identity and diagnostics in the shared Transfers UI.
 //!
 //! Wasm-only. On the plain web build [`native_available`] is `false` and none of
 //! this runs; the download falls through to the WebSocket path.
 
-use leptos::{SignalUpdate, SignalWithUntracked};
+use leptos::SignalUpdate;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
 use crate::app::AppState;
-use crate::wire::{swarm_event_to_file_events, SwarmWireEvent};
+use crate::wire::SwarmWireEvent;
 
 /// The `window.__RH_NATIVE__` bridge object, if the shell injected it.
 fn bridge() -> Option<js_sys::Object> {
@@ -102,9 +102,94 @@ pub fn cancel_swarm_download(transfer_id: u64) {
     }
 }
 
+/// Allocate an attempt in the native process, then seed the captured session
+/// before its first progress event. Allocating in the shell prevents ID reuse
+/// after a webview reload while an older native download is still running.
+#[allow(clippy::too_many_arguments)]
+pub fn queue_swarm_download(
+    app: AppState,
+    session_id: crate::app::ServerId,
+    files: leptos::RwSignal<crate::files::FilesState>,
+    root_hex: String,
+    size: u64,
+    name: String,
+    max_sources: u32,
+    burrow: String,
+    node_id: i64,
+    from: crate::settings::DownloadFrom,
+) {
+    let Some(b) = bridge() else { return };
+    let Some(invoke) = method(&b, "invoke") else {
+        return;
+    };
+    spawn_local(async move {
+        let allocated = async {
+            let returned = invoke.call2(
+                &b,
+                &JsValue::from_str("swarm_next_transfer_id"),
+                &js_sys::Object::new(),
+            )?;
+            let value = JsFuture::from(returned.dyn_into::<js_sys::Promise>()?).await?;
+            let id = value
+                .as_f64()
+                .filter(|n| {
+                    n.is_finite()
+                        && n.fract() == 0.0
+                        && *n >= (1u64 << 52) as f64
+                        && *n <= ((1u64 << 53) - 1) as f64
+                })
+                .ok_or_else(|| {
+                    JsValue::from_str("The desktop app returned an invalid download ID.")
+                })?;
+            Ok::<u64, JsValue>(id as u64)
+        }
+        .await;
+        // Closing and reconnecting to the same burrow creates another session;
+        // this pending click belongs only to the signal captured above.
+        if !app.owns_files_session(&session_id, files) {
+            return;
+        }
+        match allocated {
+            Ok(transfer_id) => {
+                files.update(|f| {
+                    f.start_native_download(
+                        transfer_id,
+                        node_id,
+                        name.clone(),
+                        size,
+                        root_hex.clone(),
+                    )
+                });
+                start_swarm_download(
+                    app,
+                    transfer_id,
+                    &root_hex,
+                    size,
+                    &name,
+                    max_sources,
+                    &burrow,
+                    node_id,
+                    from,
+                    &session_id.0,
+                );
+            }
+            Err(error) => {
+                app.notify(
+                    crate::toasts::ToastKind::Warn,
+                    error.as_string().unwrap_or_else(|| {
+                        "The desktop app could not start the download. Try again.".to_string()
+                    }),
+                );
+            }
+        }
+    });
+}
+
 /// Invoke the native `swarm_start_download` command: fetch content `root_hex`
 /// (`size` bytes) named `name` from the swarm. Fire-and-forget — progress is
 /// delivered to the [`install_swarm_listener`] callback.
+// The arguments mirror the native IPC command.
+#[allow(clippy::too_many_arguments)]
 pub fn start_swarm_download(
     app: AppState,
     transfer_id: u64,
@@ -192,9 +277,9 @@ pub fn start_swarm_download(
                         .unwrap_or_else(|| "the download could not be started".to_string());
                     if let Some(files) = app.transfer_session_files(transfer_id) {
                         files.update(|f| {
-                            f.apply(&crate::wire::FileEvent::TransferFailed {
+                            f.apply_swarm_event(&SwarmWireEvent::Failed {
                                 transfer_id,
-                                detail,
+                                reason: detail,
                                 sources_tried: 0,
                                 retryable: true,
                             })
@@ -380,29 +465,10 @@ pub fn install_swarm_listener(app: AppState) {
 /// have switched burrows mid-transfer). The byte `size` comes from the Transfer
 /// seeded when the download started (native events carry units, not bytes).
 fn apply_swarm_event(app: AppState, ev: &SwarmWireEvent) {
-    let tid = match ev {
-        SwarmWireEvent::Opened { transfer_id, .. }
-        | SwarmWireEvent::Chunk { transfer_id, .. }
-        | SwarmWireEvent::Done { transfer_id, .. }
-        | SwarmWireEvent::Failed { transfer_id, .. } => *transfer_id,
-    };
-    // The download's own session (seeded the Transfer at start). If it's gone
-    // (session closed), drop the event rather than leak a phantom into whatever
-    // burrow happens to be focused.
-    let Some(files) = app.transfer_session_files(tid) else {
+    let Some(files) = app.transfer_session_files(ev.transfer_id()) else {
         return;
     };
-    let size = files
-        .with_untracked(|f| f.transfers.iter().find(|t| t.id == tid).map(|t| t.total))
-        .unwrap_or(0);
-    let events = swarm_event_to_file_events(ev, size);
-    if !events.is_empty() {
-        files.update(|f| {
-            for fe in &events {
-                f.apply(fe);
-            }
-        });
-    }
+    files.update(|f| f.apply_swarm_event(ev));
 }
 
 /// Ask the native core for a Looking Glass tracker's `INDEX` listing.

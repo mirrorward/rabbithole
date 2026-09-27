@@ -80,6 +80,87 @@ pub struct Transfer {
     /// because you clicked Retry; a peer that timed out might. Offering Retry
     /// either way trains people to ignore the button.
     pub retryable: bool,
+    /// Native attempt IDs have their own namespace, never a server ticket.
+    pub native_attempt: bool,
+    /// Rejected source data is kept separately from a terminal transfer error.
+    pub diagnostics: SourceDiagnostics,
+}
+
+/// Fixed diagnostic vocabulary from the native swarm IPC contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceRejection {
+    InvalidResponse,
+    InvalidProof,
+    InvalidRange,
+    UnexpectedLength,
+}
+
+impl SourceRejection {
+    pub fn explanation(self) -> &'static str {
+        match self {
+            Self::InvalidResponse => "the source sent an invalid response",
+            Self::InvalidProof => "the data did not pass verification",
+            Self::InvalidRange => "the source sent the wrong part of the file",
+            Self::UnexpectedLength => "the source sent the wrong number of bytes",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize)]
+pub struct SourceDiagnostic {
+    pub source_index: u32,
+    /// Decimal u64, preserved exactly across JavaScript IPC.
+    pub first_offset: String,
+    pub reason: SourceRejection,
+    pub occurrences: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Deserialize)]
+pub struct SourceDiagnostics {
+    pub rejections: Vec<SourceDiagnostic>,
+    pub omitted: u32,
+}
+
+impl SourceDiagnostics {
+    pub fn is_empty(&self) -> bool {
+        self.rejections.is_empty() && self.omitted == 0
+    }
+
+    fn bounded(&self, sources: u32, size: u64) -> Self {
+        let mut result = Self {
+            rejections: Vec::new(),
+            omitted: self.omitted,
+        };
+        for record in &self.rejections {
+            let Ok(offset) = record.first_offset.parse::<u64>() else {
+                continue;
+            };
+            if record.source_index >= sources || offset >= size || record.occurrences == 0 {
+                continue;
+            }
+            if result.rejections.len() == 32 {
+                result.omitted = result.omitted.saturating_add(record.occurrences);
+                continue;
+            }
+            result.rejections.push(SourceDiagnostic {
+                first_offset: offset.to_string(),
+                ..record.clone()
+            });
+        }
+        result
+    }
+}
+
+/// Recoverable verification detail is separate from the terminal reason.
+pub fn diagnostic_summary(status: TransferStatus) -> &'static str {
+    match status {
+        TransferStatus::Done => "Some source data was rejected. The download is verified.",
+        TransferStatus::Queued | TransferStatus::Active => {
+            "Some source data was rejected. The download is continuing."
+        }
+        TransferStatus::Failed => "Some source data was rejected during this attempt.",
+    }
 }
 
 /// Format a 32-byte blob id as lowercase hex.
@@ -199,6 +280,8 @@ impl FilesState {
                     source_strategy: None,
                     node_id: Some(node.id),
                     retryable: true,
+                    native_attempt: false,
+                    diagnostics: SourceDiagnostics::default(),
                 });
                 self.status = format!("Downloaded {} ({})", node.name, human_size(*size as i64));
             }
@@ -230,6 +313,8 @@ impl FilesState {
                     source_strategy: None,
                     node_id: None,
                     retryable: true,
+                    native_attempt: false,
+                    diagnostics: SourceDiagnostics::default(),
                 });
             }
             FileEvent::ChunkReceived {
@@ -238,7 +323,11 @@ impl FilesState {
                 last,
                 len,
             } => {
-                if let Some(t) = self.transfers.iter_mut().find(|t| t.id == *transfer_id) {
+                if let Some(t) = self
+                    .transfers
+                    .iter_mut()
+                    .find(|t| t.id == *transfer_id && !t.native_attempt)
+                {
                     // `offset + len` is authoritative for the high-water mark;
                     // out-of-order chunks never move it backwards.
                     t.done = t.done.max(offset.saturating_add(*len as u64));
@@ -260,6 +349,7 @@ impl FilesState {
                 // must not take one over.
                 if let Some(t) = self.transfers.iter_mut().rev().find(|t| {
                     t.dir == TransferDir::Download
+                        && !t.native_attempt
                         && matches!(t.status, TransferStatus::Queued | TransferStatus::Active)
                 }) {
                     t.status = TransferStatus::Failed;
@@ -276,7 +366,11 @@ impl FilesState {
                 retryable,
             } => {
                 self.status = format!("Error: {detail}");
-                match self.transfers.iter_mut().find(|t| t.id == *transfer_id) {
+                match self
+                    .transfers
+                    .iter_mut()
+                    .find(|t| t.id == *transfer_id && !t.native_attempt)
+                {
                     Some(t) => {
                         t.status = TransferStatus::Failed;
                         t.error = Some(detail.clone());
@@ -307,9 +401,101 @@ impl FilesState {
                             source_strategy: None,
                             node_id,
                             retryable: *retryable,
+                            native_attempt: false,
+                            diagnostics: SourceDiagnostics::default(),
                         });
                     }
                 }
+            }
+        }
+    }
+
+    /// Seed one native attempt before invoking the download. The same node may
+    /// have old terminal attempts, or be downloading on another burrow.
+    pub fn start_native_download(
+        &mut self,
+        id: u64,
+        node_id: i64,
+        name: String,
+        size: u64,
+        hash: String,
+    ) {
+        self.record_transfer(Transfer {
+            id,
+            node_id: Some(node_id),
+            name,
+            total: size,
+            done: 0,
+            status: TransferStatus::Queued,
+            dir: TransferDir::Download,
+            hash: Some(hash),
+            error: None,
+            sources: None,
+            source_strategy: None,
+            retryable: true,
+            native_attempt: true,
+            diagnostics: SourceDiagnostics::default(),
+        });
+    }
+
+    pub fn owns_native_attempt(&self, id: u64) -> bool {
+        self.transfers.iter().any(|t| {
+            t.id == id
+                && t.native_attempt
+                && matches!(t.status, TransferStatus::Queued | TransferStatus::Active)
+        })
+    }
+
+    /// Native events never create rows or revive terminal attempts. Their IDs
+    /// are process-wide, so late events cannot update a retry or another burrow.
+    pub fn apply_swarm_event(&mut self, event: &crate::wire::SwarmWireEvent) {
+        use crate::wire::SwarmWireEvent;
+        let Some(row) = self.transfers.iter_mut().find(|t| {
+            t.id == event.transfer_id()
+                && t.native_attempt
+                && matches!(t.status, TransferStatus::Queued | TransferStatus::Active)
+        }) else {
+            return;
+        };
+        match event {
+            SwarmWireEvent::Opened { source_count, .. } => {
+                row.sources = Some(
+                    row.sources
+                        .unwrap_or(0)
+                        .max((*source_count).min(u32::MAX as u64) as u32),
+                );
+                row.status = TransferStatus::Active;
+            }
+            SwarmWireEvent::Chunk { done_units, .. } => {
+                row.done = row
+                    .done
+                    .max(done_units.saturating_mul(1024 * 1024).min(row.total));
+                // The final whole-file verification can still fail after every
+                // chunk lands. Only Done is a successful terminal event.
+                row.status = TransferStatus::Active;
+            }
+            SwarmWireEvent::SourceDiagnostics { diagnostics, .. } => {
+                row.diagnostics = diagnostics.bounded(row.sources.unwrap_or(0), row.total);
+            }
+            SwarmWireEvent::Done { bytes, .. } => {
+                row.done = *bytes;
+                row.total = *bytes;
+                row.status = TransferStatus::Done;
+            }
+            SwarmWireEvent::Failed {
+                reason,
+                sources_tried,
+                retryable,
+                ..
+            } => {
+                row.error = Some(reason.clone());
+                row.sources = Some(
+                    row.sources
+                        .unwrap_or(0)
+                        .max((*sources_tried).min(u32::MAX as u64) as u32),
+                );
+                row.retryable = *retryable;
+                row.status = TransferStatus::Failed;
             }
         }
     }
@@ -325,7 +511,11 @@ impl FilesState {
 
     /// Insert or replace a transfer keyed by id.
     fn record_transfer(&mut self, transfer: Transfer) {
-        if let Some(slot) = self.transfers.iter_mut().find(|t| t.id == transfer.id) {
+        if let Some(slot) = self
+            .transfers
+            .iter_mut()
+            .find(|t| t.id == transfer.id && t.native_attempt == transfer.native_attempt)
+        {
             *slot = transfer;
         } else {
             self.transfers.push(transfer);
@@ -413,6 +603,8 @@ impl FilesState {
             source_strategy: None,
             node_id: None,
             retryable: false,
+            native_attempt: false,
+            diagnostics: SourceDiagnostics::default(),
         });
         key
     }
@@ -463,6 +655,8 @@ impl FilesState {
             source_strategy: None,
             node_id: None,
             retryable: false,
+            native_attempt: false,
+            diagnostics: SourceDiagnostics::default(),
         });
         key
     }
@@ -1028,6 +1222,8 @@ mod tests {
             source_strategy: None,
             node_id: None,
             retryable: true,
+            native_attempt: false,
+            diagnostics: SourceDiagnostics::default(),
         };
         assert_eq!(t.progress(), 0.0);
         let done = Transfer {
@@ -1082,5 +1278,150 @@ mod tests {
         assert_eq!(human_size(1536), "1.5 KB");
         assert_eq!(human_size(1024 * 1024), "1.0 MB");
         assert_eq!(human_size(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
+}
+
+#[cfg(test)]
+mod native_attempt_tests {
+    use super::*;
+    use crate::wire::SwarmWireEvent;
+
+    fn start(files: &mut FilesState, id: u64) {
+        files.start_native_download(id, 7, "archive.zip".into(), 32, "aabb".into());
+        files.apply_swarm_event(&SwarmWireEvent::Opened {
+            transfer_id: id,
+            total_units: 1,
+            source_count: 2,
+        });
+    }
+
+    fn rejected(id: u64) -> SwarmWireEvent {
+        serde_json::from_value(serde_json::json!({
+            "kind": "source_diagnostics", "transfer_id": id,
+            "diagnostics": {"rejections": [{"source_index": 0, "first_offset": "0", "reason": "invalid_proof", "occurrences": 1}], "omitted": 0}
+        })).unwrap()
+    }
+
+    #[test]
+    fn successful_failover_keeps_diagnostics_and_metadata_until_final_verification() {
+        let mut files = FilesState::default();
+        start(&mut files, 100);
+        files.apply_swarm_event(&rejected(100));
+        files.apply_swarm_event(&SwarmWireEvent::Chunk {
+            transfer_id: 100,
+            offset: 0,
+            done_units: 1,
+            total_units: 1,
+        });
+        assert_eq!(files.transfers[0].status, TransferStatus::Active);
+        assert_eq!(files.transfers[0].done, 32);
+        files.apply_swarm_event(&SwarmWireEvent::Done {
+            transfer_id: 100,
+            bytes: 32,
+            per_source: vec![("healthy".into(), 1)],
+        });
+        let row = &files.transfers[0];
+        assert_eq!(row.status, TransferStatus::Done);
+        assert_eq!(row.name, "archive.zip");
+        assert_eq!(row.node_id, Some(7));
+        assert_eq!(row.hash.as_deref(), Some("aabb"));
+        assert_eq!(
+            row.diagnostics.rejections[0].reason,
+            SourceRejection::InvalidProof
+        );
+        assert!(row.error.is_none());
+        let final_row = row.clone();
+        files.apply_swarm_event(&SwarmWireEvent::Failed {
+            transfer_id: 100,
+            reason: "late failure".into(),
+            sources_tried: 2,
+            retryable: true,
+        });
+        assert_eq!(files.transfers[0], final_row);
+    }
+
+    #[test]
+    fn failed_attempt_diagnostics_never_cross_a_retry_or_same_id_server_ticket() {
+        let mut files = FilesState::default();
+        start(&mut files, 100);
+        files.apply(&FileEvent::TransferOpened {
+            transfer_id: 100,
+            size: 12,
+            server_have: 0,
+        });
+        files.apply_swarm_event(&rejected(100));
+        files.apply_swarm_event(&SwarmWireEvent::Failed {
+            transfer_id: 100,
+            reason: "local disk full".into(),
+            sources_tried: 2,
+            retryable: true,
+        });
+        assert_eq!(files.transfers.len(), 2);
+        assert_eq!(files.transfers[0].error.as_deref(), Some("local disk full"));
+        assert!(!files.transfers[0].diagnostics.is_empty());
+        assert_eq!(files.transfers[1].status, TransferStatus::Queued);
+        assert!(files.transfers[1].diagnostics.is_empty());
+        start(&mut files, 101);
+        let before = files.transfers.clone();
+        files.apply_swarm_event(&rejected(100));
+        files.apply_swarm_event(&SwarmWireEvent::Opened {
+            transfer_id: 100,
+            total_units: 1,
+            source_count: 99,
+        });
+        files.apply_swarm_event(&SwarmWireEvent::Done {
+            transfer_id: 100,
+            bytes: 32,
+            per_source: vec![],
+        });
+        assert_eq!(files.transfers, before);
+        assert!(files.owns_native_attempt(101));
+        assert!(!files.owns_native_attempt(100));
+        files.apply(&FileEvent::ChunkReceived {
+            transfer_id: 100,
+            offset: 0,
+            len: 12,
+            last: true,
+        });
+        assert_eq!(files.transfers[0].status, TransferStatus::Failed);
+        assert_eq!(files.transfers[1].status, TransferStatus::Done);
+    }
+
+    #[test]
+    fn diagnostics_reducer_caps_and_rejects_unusable_offsets_and_source_ids() {
+        let mut files = FilesState::default();
+        start(&mut files, 100);
+        let one = SourceDiagnostic {
+            source_index: 0,
+            first_offset: "0000".into(),
+            reason: SourceRejection::InvalidRange,
+            occurrences: 2,
+        };
+        let mut diagnostics = SourceDiagnostics {
+            rejections: vec![one.clone(); 50],
+            omitted: 4,
+        };
+        diagnostics.rejections.extend([
+            SourceDiagnostic {
+                first_offset: "<script>".into(),
+                ..one.clone()
+            },
+            SourceDiagnostic {
+                first_offset: "32".into(),
+                ..one.clone()
+            },
+            SourceDiagnostic {
+                source_index: 5,
+                ..one
+            },
+        ]);
+        files.apply_swarm_event(&SwarmWireEvent::SourceDiagnostics {
+            transfer_id: 100,
+            diagnostics,
+        });
+        let diagnostic = &files.transfers[0].diagnostics;
+        assert_eq!(diagnostic.rejections.len(), 32);
+        assert_eq!(diagnostic.omitted, 40);
+        assert_eq!(diagnostic.rejections[0].first_offset, "0");
     }
 }
