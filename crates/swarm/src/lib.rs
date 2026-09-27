@@ -31,7 +31,10 @@ pub use cap::{
 pub use link::{
     DestinationHash, DestinationHashError, LinkAuthority, LinkError, LinkTarget, RabbitLink,
 };
-pub use manifest::{Manifest, ManifestError, ManifestFile, CHUNK_SIZE};
+pub use manifest::{
+    Manifest, ManifestCborError, ManifestError, ManifestFile, CHUNK_SIZE,
+    MANIFEST_CBOR_VERSION, MAX_MANIFEST_CBOR_BYTES, MAX_MANIFEST_CBOR_FILES,
+};
 pub use peer::{
     decode_proved, encode_proved, fetch_file, fetch_have, fetch_proved, fetch_range,
     fetch_range_proved, proofs_path, stream_limit, write_outboard, BaoPiece, HaveMap, PeerAsk,

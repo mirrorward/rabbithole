@@ -22,6 +22,46 @@ person sharing a download as it comes in has an advert of their own).
 FindSources never lists a partial seed, so a client from before them never
 meets a peer that lacks units.
 
+## Manifest interchange
+
+`Manifest::encode`, `Manifest::decode` and `Manifest::id` retain the existing
+postcard representation. A manifest ID, including a `rabbit://` manifest pin,
+remains BLAKE3 of those postcard bytes. CBOR is an explicit interchange format
+through `encode_cbor` / `decode_cbor`; importing it does not change this identity
+rule or negotiate a different peer-wire format. To verify an imported manifest
+against an existing pin, compare the decoded manifest's `id()`, not a hash of
+the CBOR document.
+
+Version 1 uses this integer-keyed map, with file entries represented as arrays:
+
+```text
+{ 0: 1, 1: name, 2: chunk_size, 3: [[path, size, root, mime], ...] }
+```
+
+| Field | Representation |
+|---|---|
+| version (`0`) | unsigned integer, exactly `1` |
+| name (`1`) | UTF-8 text |
+| chunk size (`2`) | unsigned 32-bit integer |
+| files (`3`) | array of four-element file arrays |
+| path, MIME type | UTF-8 text |
+| file size | unsigned 64-bit integer |
+| file root | byte string of exactly 32 bytes |
+
+The codec follows [RFC 8949 core deterministic encoding](https://www.rfc-editor.org/rfc/rfc8949.html#section-4.2.1):
+definite lengths, shortest integer/length encodings, and map keys in encoded
+order (`0`, `1`, `2`, `3`). It rejects extra, missing, duplicate or reordered
+keys, unknown versions, wrong types, indefinite forms, tags, trailing bytes,
+invalid UTF-8 and out-of-range values. Input and output are bounded to 16 MiB
+and 65,536 files.
+
+Import/export preserves file order, duplicate paths and exact Unicode text;
+it never normalizes or sorts an existing manifest behind the caller's back.
+`Manifest::new` still sorts newly constructed file sets as before. This codec
+does not authorize paths for extraction: a consumer writing files must separately
+validate destinations, collisions and traversal. Pinned CBOR and postcard
+fixtures cover representation and identity compatibility.
+
 ## List-without-upload
 
 A peer **advertises** files it holds locally — just the blake3 root and
