@@ -509,6 +509,86 @@ fn row_to_followup(r: &sqlx::sqlite::SqliteRow) -> FollowupRow {
 
 pub struct FollowupsRepo<'a>(pub &'a SqlitePool);
 
+/// A stable position through the union of stored posts and board follow-ups.
+/// Content IDs, rather than peer-controlled timestamps, order history passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct HistoryCursor {
+    pub event_id: [u8; 32],
+    /// 0 = post, 1 = follow-up; breaks a tie without skipping either table.
+    pub kind: u8,
+}
+
+/// Metadata only: scanning history does not allocate signed event bodies.
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    pub cursor: HistoryCursor,
+    pub board: String,
+    pub postable: bool,
+    pub root_id: [u8; 32],
+    pub target_id: [u8; 32],
+}
+
+impl PostsRepo<'_> {
+    /// At most 256 rows, read through primary-key ranges on each event table.
+    /// Callers advance through filtered rows too and wrap after an empty page.
+    pub async fn history_page(
+        &self,
+        after: Option<HistoryCursor>,
+        limit: usize,
+    ) -> Result<Vec<HistoryEntry>, StoreError> {
+        let lower = after
+            .map(|cursor| cursor.event_id.to_vec())
+            .unwrap_or_default();
+        let kind = after.map_or(-1, |cursor| i64::from(cursor.kind));
+        let rows = sqlx::query(
+            "SELECT * FROM (
+                SELECT p.event_id, 0 AS kind, COALESCE(b.slug, p.board_slug) AS board,
+                       COALESCE(b.kind = 2, 0) AS postable,
+                       COALESCE(p.root_id, p.event_id) AS root_id, p.event_id AS target_id
+                FROM (SELECT event_id, board_slug, root_id FROM posts
+                      WHERE event_id >= ?1 AND (event_id != ?1 OR 0 > ?2)
+                      ORDER BY event_id LIMIT ?3) p
+                LEFT JOIN boards b ON b.slug = p.board_slug
+                UNION ALL
+                SELECT f.event_id, 1 AS kind, COALESCE(b.slug, f.board_slug) AS board,
+                       COALESCE(b.kind = 2, 0) AS postable, f.root_id, f.target_id
+                FROM (SELECT event_id, board_slug, root_id, target_id FROM board_followups
+                      WHERE event_id >= ?1 AND (event_id != ?1 OR 1 > ?2)
+                      ORDER BY event_id LIMIT ?3) f
+                LEFT JOIN boards b ON b.slug = f.board_slug
+             ) ORDER BY event_id, kind LIMIT ?3",
+        )
+        .bind(lower)
+        .bind(kind)
+        .bind(limit.min(256) as i64)
+        .fetch_all(self.0)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let id = |column: &str| -> Result<[u8; 32], StoreError> {
+                    row.try_get::<Vec<u8>, _>(column)?.try_into().map_err(|_| {
+                        sqlx::Error::Decode(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid history event ID",
+                        )))
+                        .into()
+                    })
+                };
+                Ok(HistoryEntry {
+                    cursor: HistoryCursor {
+                        event_id: id("event_id")?,
+                        kind: row.get::<i64, _>("kind") as u8,
+                    },
+                    board: row.get("board"),
+                    postable: row.get::<i64, _>("postable") != 0,
+                    root_id: id("root_id")?,
+                    target_id: id("target_id")?,
+                })
+            })
+            .collect()
+    }
+}
+
 impl FollowupsRepo<'_> {
     /// Insert a follow-up. Idempotent on the content id — a duplicate (same
     /// event flooded twice) is a no-op returning `false`.
@@ -975,3 +1055,6 @@ mod tests {
         assert_eq!(marks.get(1, "b").await.unwrap(), 5000);
     }
 }
+
+#[cfg(test)]
+mod history_tests;

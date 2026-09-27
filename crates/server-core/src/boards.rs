@@ -591,6 +591,15 @@ impl BoardService {
         Ok(FollowupsRepo(&self.pool).by_id(id).await?)
     }
 
+    /// Bounded metadata-only history across posts and signed follow-ups.
+    pub async fn history_page(
+        &self,
+        after: Option<rabbithole_store_server::repo4::HistoryCursor>,
+        limit: usize,
+    ) -> Result<Vec<rabbithole_store_server::repo4::HistoryEntry>, BoardError> {
+        Ok(PostsRepo(&self.pool).history_page(after, limit).await?)
+    }
+
     /// Insert one follow-up row (idempotent on content id).
     async fn store_followup(
         &self,

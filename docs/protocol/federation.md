@@ -251,6 +251,55 @@ arrives as `.well-known` JSON or postcard over a tracker/S2S relay. Automated
 peer fetch + authoritative consumption of the descriptor is the remaining
 half.
 
+## Periodic board history
+
+Approved live sessions reuse `Subscribe` / `IHave` / `Pull` / `Events` for
+history recovery; there are no new wire messages or protocol negotiation.
+`federation_board_subscribe` is a TOML array of board slugs (`"*"` or `"all"`
+means all). A history offer requires both this burrow's local opt-in and the
+connected peer's subscription, a current postable board, and no quarantine on
+the event's target or thread root. Approval is checked again after database
+reads, before sending. Empty local subscriptions disable history offers.
+This setting expresses subscription interest, not an authorization boundary
+for incoming event ingestion.
+
+`federation_history_reoffer_secs` is live-editable with `ctl config set`:
+
+| Value | Behavior |
+|---|---|
+| `60` (default) | One bounded history opportunity per approved peer each minute |
+| `5`–`3600` | Custom interval in seconds |
+| `0` | Disable subsequent periodic passes; subscription-triggered catch-up remains bounded by a 60-second peer cooldown |
+
+The live setter rejects other values; nonzero values read from TOML are
+clamped to 5–3600 seconds. A delayed task performs one pass, without accruing
+a burst of missed intervals. Subscription repeats and reconnects cannot reset
+the shared peer cooldown. Initial catch-up uses the same budget as periodic
+work, so large histories converge over multiple passes.
+
+Each pass returns/processes at most 256 metadata candidates from a keyset
+union of stored posts and edit/tombstone follow-ups, then offers at most 128
+IDs in at most eight board-scoped frames. Each table contributes at most 256
+rows to that merged query; this is not a total database scan-cost guarantee.
+Positions use `(event_id, event-kind)` rather than peer-supplied timestamps.
+The cursor advances over filtered candidates and wraps after reaching the
+end. Live Bloom seen filters never suppress these recovery offers. Receivers
+check both durable event tables as well as their duplicate window, so repeated
+history does not produce repeated post or follow-up pushes. A failed or
+cancelled ingest releases its temporary duplicate reservation for later retry.
+Successful duplicate records still protect retention-pruned events from
+immediate resurrection.
+
+A peer has one shared cooldown and round-robin turns across at most eight
+registered live links; each link keeps its own cursor for its own subscription.
+At most 4,096 peer scheduling records are retained. Active records are never
+evicted; disconnected records expire after an hour. Excess peers/links keep
+their existing live traffic but receive no history scheduling slot. Local
+history-query failures keep the session alive and retry after the normal
+cooldown. Cursors are in memory and reset on a new link or server restart.
+Recovery covers events still retained by an eligible connected peer; it does
+not restore content every peer has already deleted.
+
 ## Origin provenance and relayed events
 
 `MT_EVENTS` carries an origin key next to each signed event, but that key is

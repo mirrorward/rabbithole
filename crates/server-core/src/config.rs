@@ -352,11 +352,17 @@ pub struct ServerConfig {
     /// (Wave 9 board-event flood-fill). We advertise this interest to every
     /// approved peer via `MT_SUBSCRIBE`; a peer then offers matching events it
     /// holds. The single entry `"all"` (or `"*"`) is a wildcard for every
-    /// board. **Default empty = opt-in**: with no entries a burrow floods
-    /// nothing outbound and receives nothing inbound. Serialized as a TOML
+    /// board. Default empty advertises no subscriptions and disables outbound
+    /// history passes. This is subscription policy, not an ingest authorization
+    /// gate; live offers also follow the remote peer's declared interest. Serialized as a TOML
     /// array and edited on disk (like `federation_peers`), not via
     /// `ctl config set`.
     pub federation_board_subscribe: Vec<String>,
+    /// Re-offer stored board posts and follow-ups on live federation sessions.
+    /// Seconds per bounded pass per peer (default 60; nonzero values clamp to
+    /// 5–3600). Zero disables periodic passes; subscription-triggered catch-up
+    /// remains bounded by a 60-second per-peer cooldown.
+    pub federation_history_reoffer_secs: u64,
     /// Best-effort UPnP-IGD / NAT-PMP / PCP port mapping: on startup ask the
     /// LAN router to open the QUIC and WS ports so a self-hosted burrow behind
     /// a consumer NAT is reachable without a manual port-forward. Off by
@@ -579,6 +585,7 @@ impl Default for ServerConfig {
             s2s_swarm_sources: false,
             federation_peers: Vec::new(),
             federation_board_subscribe: Vec::new(),
+            federation_history_reoffer_secs: 60,
             portmap_enabled: false,
             portmap_gateway: String::new(),
             portmap_lifetime_secs: 7200,
@@ -875,6 +882,7 @@ impl ServerConfig {
             "federation_enabled" => self.federation_enabled.to_string(),
             "federation_origin" => self.federation_origin.clone(),
             "federation_addr" => self.federation_addr.to_string(),
+            "federation_history_reoffer_secs" => self.federation_history_reoffer_secs.to_string(),
             "s2s_grants_enabled" => self.s2s_grants_enabled.to_string(),
             "s2s_pull_enabled" => self.s2s_pull_enabled.to_string(),
             "s2s_max_concurrent" => self.s2s_max_concurrent.to_string(),
@@ -1352,6 +1360,20 @@ impl ServerConfig {
                 self.federation_addr = parse_addr(key, value)?;
                 Ok(false)
             }
+            "federation_history_reoffer_secs" => {
+                let seconds: u64 = value.parse().map_err(|_| ConfigError::BadValue {
+                    key: key.into(),
+                    detail: value.into(),
+                })?;
+                if seconds != 0 && !(5..=3600).contains(&seconds) {
+                    return Err(ConfigError::BadValue {
+                        key: key.into(),
+                        detail: "expected 0 (off) or 5–3600 seconds".into(),
+                    });
+                }
+                self.federation_history_reoffer_secs = seconds;
+                Ok(true)
+            }
             // Pulls ride federation sessions that are already up: all live.
             "s2s_grants_enabled" => {
                 self.s2s_grants_enabled = parse_bool(key, value)?;
@@ -1630,6 +1652,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "federation_enabled",
     "federation_origin",
     "federation_addr",
+    "federation_history_reoffer_secs",
     "s2s_grants_enabled",
     "s2s_pull_enabled",
     "s2s_max_concurrent",
@@ -1931,6 +1954,32 @@ impl LiveConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_reoffer_cadence_is_live_bounded_and_roundtrips() {
+        let live = LiveConfig::new(ServerConfig::default());
+        assert_eq!(live.read().federation_history_reoffer_secs, 60);
+        for value in ["0", "5", "60", "3600"] {
+            assert!(live
+                .set_key("federation_history_reoffer_secs", value)
+                .unwrap());
+            assert_eq!(
+                live.read()
+                    .get_key("federation_history_reoffer_secs")
+                    .unwrap(),
+                value
+            );
+        }
+        for value in ["1", "4", "3601", "-1", "oops"] {
+            assert!(live
+                .set_key("federation_history_reoffer_secs", value)
+                .is_err());
+            assert_eq!(live.read().federation_history_reoffer_secs, 3600);
+        }
+        let encoded = toml::to_string(&live.read()).unwrap();
+        let decoded: ServerConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.federation_history_reoffer_secs, 3600);
+    }
 
     #[test]
     fn transfer_class_rates_inherit_replace_and_roundtrip_live() {

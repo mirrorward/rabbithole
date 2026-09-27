@@ -72,8 +72,10 @@
 //! shared [`rabbithole_server_core::DedupStore`], and the post is projected via
 //! `BoardService` **unchanged** — never re-signed as local. A fresh ingest
 //! re-fires `BoardPost`, which floods it to the next hop, so a post reaches
-//! every subscribed burrow through the mesh. A per-edge Bloom seen-set makes an
-//! event flood each edge once and never bounce back to its source (loop-safe).
+//! every subscribed burrow through the mesh. A per-edge Bloom seen-set suppresses
+//! repeated live notifications; bounded periodic history passes bypass that
+//! approximate filter so a missed offer can recover. Durable post/follow-up
+//! checks and the shared duplicate gate prevent repeated ingestion and pushes.
 //!
 //! **Board follow-ups** (Edit/Tombstone) flood the same way: they are signed
 //! events too, served from the `board_followups` table (see
@@ -114,6 +116,8 @@ use tokio::task::JoinHandle;
 use crate::Shared;
 
 mod catalog_sync;
+mod history;
+pub(crate) use history::HistoryState;
 
 /// Domain separator for the S2S handshake proof signatures.
 const AUTH_CONTEXT: &[u8] = b"rhp-fed-s2s-auth-v2";
@@ -277,8 +281,10 @@ struct FloodEdge {
     /// Whether we've already announced our own interest to the peer, so a
     /// received `MT_SUBSCRIBE` triggers exactly one reply (no ping-pong).
     sent_subscription: bool,
-    /// Event ids already offered to / exchanged with this peer, so an event
-    /// floods each edge exactly once and never bounces back to its source.
+    /// Per-link cursor with a shared, fair per-peer history budget.
+    history: Option<history::Registration>,
+    /// Event ids already offered to / exchanged with this peer, suppressing
+    /// repeated live offers. Periodic history deliberately bypasses this filter.
     /// A Bloom filter: fixed footprint, no false negatives (the loop-safety
     /// guarantee), salted per edge so ids collide differently on each hop.
     seen: BloomFilter,
@@ -293,6 +299,7 @@ impl FloodEdge {
             peer_origin,
             interest: Interest::None,
             sent_subscription: false,
+            history: None,
             seen: BloomFilter::with_capacity_salted(EDGE_SEEN_CAPACITY, EDGE_SEEN_FP, salt),
         }
     }
@@ -702,6 +709,9 @@ async fn run_peer_session(
     serve_catalog: bool,
 ) {
     let mut edge = FloodEdge::new(peer_key, peer_origin);
+    edge.history = shared
+        .fed_history
+        .register(peer_key, tokio::time::Instant::now());
     // Pulls between burrows ride this session's bulk streams: offer it to
     // this burrow's pulls, and answer the peer's pull streams on it.
     let pull_link = conn
@@ -767,6 +777,10 @@ async fn run_peer_session(
                     tracing::debug!(%error, "federation live catalog sync ended");
                     break;
                 }
+                if let Err(error) = history::offer(conn.as_mut(), &shared, &mut edge, true).await {
+                    tracing::debug!(%error, "federation history exchange ended");
+                    break;
+                }
             }
             incoming = conn.recv() => {
                 match incoming {
@@ -809,8 +823,8 @@ async fn run_peer_session(
                         }
                     }
                     Ok(ServerEvent::Shutdown) | Err(RecvError::Closed) => break,
-                    // A lagged flood subscriber simply misses some live offers;
-                    // catch-up on the next subscribe (or the next post) recovers.
+                    // The next bounded history pass recovers skipped offers;
+                    // lag never triggers an immediate unbudgeted scan.
                     Ok(_) | Err(RecvError::Lagged(_)) => {}
                 }
             }
@@ -985,38 +999,7 @@ async fn catchup_offer(
     shared: &Arc<Shared>,
     edge: &mut FloodEdge,
 ) -> Result<()> {
-    let boards = shared.boards.boards().await.map_err(anyhow::Error::msg)?;
-    for b in boards {
-        if b.kind != 2 || !edge.interest.covers(&b.slug) {
-            continue;
-        }
-        let posts = crate::nntp::group_articles(shared, &b.slug).await?;
-        let mut ids: Vec<[u8; 32]> = Vec::new();
-        // Newest first, bounded — an offer never grows without limit.
-        for p in posts.iter().rev() {
-            if ids.len() >= MAX_IHAVE_IDS {
-                break;
-            }
-            if edge.seen.contains(&p.event_id) {
-                continue;
-            }
-            edge.seen.insert(&p.event_id);
-            ids.push(p.event_id);
-        }
-        if ids.is_empty() {
-            continue;
-        }
-        conn.send(fed_frame(
-            FrameKind::Push,
-            MT_IHAVE,
-            &IHave {
-                board: b.slug.clone(),
-                event_ids: ids,
-            },
-        ))
-        .await?;
-    }
-    Ok(())
+    history::offer(conn, shared, edge, false).await
 }
 
 /// The live half of offering: a local `BoardPost` fired (authored here or just
@@ -1070,6 +1053,15 @@ async fn handle_ihave(
         if shared
             .boards
             .post_by_id(&id)
+            .await
+            .map_err(anyhow::Error::msg)?
+            .is_some()
+        {
+            continue;
+        }
+        if shared
+            .boards
+            .followup_by_id(&id)
             .await
             .map_err(anyhow::Error::msg)?
             .is_some()
@@ -1288,13 +1280,10 @@ async fn ingest_fed_event(
     // Cross-edge dedupe window: the first sighting acts; a copy arriving over
     // another edge drops here without a second projection or re-fire.
     let now = chrono::Utc::now().timestamp_millis();
-    if !shared
-        .dedup
-        .check_and_record(SeenKey::Event(signed.id), now)
-    {
+    let Some(reservation) = shared.dedup.reserve(SeenKey::Event(signed.id), now) else {
         edge.seen.insert(&fe.id);
         return Ok(());
-    }
+    };
     edge.seen.insert(&fe.id);
 
     // Ingest without re-signing (origin author + signed blob kept). An
@@ -1306,6 +1295,7 @@ async fn ingest_fed_event(
     {
         Ok(o) => o,
         Err(BoardError::Forbidden) => {
+            reservation.commit();
             tracing::debug!(
                 peer = %PublicKey(edge.peer_key).fingerprint(),
                 origin = %signed.origin,
@@ -1315,6 +1305,7 @@ async fn ingest_fed_event(
         }
         Err(e) => return Err(anyhow!("ingest: {e}")),
     };
+    reservation.commit();
     // Re-fire on the bus: floods to the next hop, and for a post also updates
     // local unread/pushes. A follow-up fires BoardEvent (no unread bump) — even
     // a pending one, so peers who hold the target apply it.
@@ -2060,7 +2051,9 @@ mod auth_tests {
         assert!(b
             .shared
             .ratelimit
-            .peek_with(key, policy, now + retry_after_ms - 1)
+            // Stay away from the ceil-derived floating-point boundary: a
+            // rounded delay can be one millisecond above full refill.
+            .peek_with(key, policy, now + retry_after_ms / 2)
             .is_limited());
         assert!(!b
             .shared

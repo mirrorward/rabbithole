@@ -111,6 +111,8 @@ pub struct Shared {
     pub peers: PeerRegistry,
     /// Local signed file-catalog + verified peer catalogs (Wave 9.x).
     pub catalogs: fed_catalog::CatalogState,
+    /// Shared per-peer cadence and cursors for bounded history recovery.
+    pub(crate) fed_history: federation::HistoryState,
     /// Board-event flood-fill shared state: the pinned origin-key registry
     /// (Wave 9). Per-edge subscription/seen state lives in the session tasks.
     pub fed_flood: fed_flood::FloodState,
@@ -337,6 +339,7 @@ impl Burrow {
             // Reload the last signed local catalog so the generation chain
             // survives restarts (peers must never see a stale "fresh" gen 1).
             catalogs: fed_catalog::CatalogState::load(&data_dir, &identity.signing.seed()),
+            fed_history: federation::HistoryState::default(),
             // Reload pinned origin keys so key-continuity survives a restart
             // (a reboot must not reopen the origin to a spoofer's re-pin).
             fed_flood: fed_flood::FloodState::load(&data_dir),

@@ -41,17 +41,52 @@ pub enum SeenKey {
 }
 
 struct Inner {
-    /// key → first-seen unix ms.
-    seen: HashMap<SeenKey, i64>,
-    /// (seen_at_ms, key) in insertion order for windowed eviction.
-    order: VecDeque<(i64, SeenKey)>,
+    /// key → first-seen time and unique insertion generation.
+    seen: HashMap<SeenKey, (i64, u64)>,
+    /// (seen_at_ms, key, generation) in insertion order for windowed eviction.
+    order: VecDeque<(i64, SeenKey, u64)>,
     window_ms: i64,
     capacity: usize,
+    next_generation: u64,
 }
 
 /// A time-windowed, capacity-bounded seen set.
 pub struct DedupStore {
     inner: Mutex<Inner>,
+}
+
+/// A temporary duplicate gate around a fallible ingest. Commit after durable
+/// success; failure or cancellation drops only this insertion's generation.
+#[must_use]
+pub struct SeenReservation<'a> {
+    store: &'a DedupStore,
+    key: SeenKey,
+    generation: u64,
+    committed: bool,
+}
+
+impl SeenReservation<'_> {
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for SeenReservation<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let mut inner = self.store.inner.lock();
+        if inner
+            .seen
+            .get(&self.key)
+            .is_some_and(|(_, generation)| *generation == self.generation)
+        {
+            inner.seen.remove(&self.key);
+        }
+        // The bounded ring entry can remain until normal eviction. Generation
+        // comparisons ensure it can never evict a later insertion of this key.
+    }
 }
 
 impl DedupStore {
@@ -64,6 +99,7 @@ impl DedupStore {
                 order: VecDeque::new(),
                 window_ms,
                 capacity,
+                next_generation: 0,
             }),
         }
     }
@@ -76,20 +112,45 @@ impl DedupStore {
     /// Record a key as seen at `now_ms`. Returns `true` if it was **new**
     /// (act on it), `false` if already seen (drop it — a dupe/loop).
     pub fn check_and_record(&self, key: SeenKey, now_ms: i64) -> bool {
+        self.record(key, now_ms).is_some()
+    }
+
+    /// Reserve processing once across concurrent callers, rolling back on
+    /// dropped futures and failures. Existing permanent-record callers keep
+    /// using `check_and_record` unchanged.
+    pub fn reserve(&self, key: SeenKey, now_ms: i64) -> Option<SeenReservation<'_>> {
+        let generation = self.record(key.clone(), now_ms)?;
+        Some(SeenReservation {
+            store: self,
+            key,
+            generation,
+            committed: false,
+        })
+    }
+
+    fn record(&self, key: SeenKey, now_ms: i64) -> Option<u64> {
         let mut inner = self.inner.lock();
         Self::evict(&mut inner, now_ms);
         if inner.seen.contains_key(&key) {
-            return false;
+            return None;
         }
-        inner.seen.insert(key.clone(), now_ms);
-        inner.order.push_back((now_ms, key));
+        let generation = inner.next_generation.checked_add(1)?;
+        inner.next_generation = generation;
+        inner.seen.insert(key.clone(), (now_ms, generation));
+        inner.order.push_back((now_ms, key, generation));
         // Capacity backstop even within the window.
         while inner.order.len() > inner.capacity {
-            if let Some((_, old)) = inner.order.pop_front() {
-                inner.seen.remove(&old);
+            if let Some((_, old, old_generation)) = inner.order.pop_front() {
+                if inner
+                    .seen
+                    .get(&old)
+                    .is_some_and(|(_, current)| *current == old_generation)
+                {
+                    inner.seen.remove(&old);
+                }
             }
         }
-        true
+        Some(generation)
     }
 
     /// Non-mutating check.
@@ -107,12 +168,18 @@ impl DedupStore {
 
     fn evict(inner: &mut Inner, now_ms: i64) {
         let cutoff = now_ms - inner.window_ms;
-        while let Some((ts, _)) = inner.order.front() {
+        while let Some((ts, _, _)) = inner.order.front() {
             if *ts >= cutoff {
                 break;
             }
-            if let Some((_, key)) = inner.order.pop_front() {
-                inner.seen.remove(&key);
+            if let Some((_, key, generation)) = inner.order.pop_front() {
+                if inner
+                    .seen
+                    .get(&key)
+                    .is_some_and(|(_, current)| *current == generation)
+                {
+                    inner.seen.remove(&key);
+                }
             }
         }
     }
@@ -192,5 +259,58 @@ mod tests {
             !d.check_and_record(msgid, 200),
             "second copy from a loop is dropped"
         );
+    }
+    #[test]
+    fn reservation_rollback_and_commit_are_distinct() {
+        let d = DedupStore::new(1000, 100);
+        let key = SeenKey::Event([1; 32]);
+        let pending = d.reserve(key.clone(), 0).unwrap();
+        assert!(d.reserve(key.clone(), 0).is_none());
+        drop(pending);
+        assert!(!d.seen(&key));
+        d.reserve(key.clone(), 1).unwrap().commit();
+        assert!(d.seen(&key));
+        assert!(d.reserve(key, 2).is_none());
+    }
+
+    #[test]
+    fn expired_or_evicted_reservations_cannot_remove_new_generations() {
+        for capacity in [1, 100] {
+            let d = DedupStore::new(10, capacity);
+            let key = SeenKey::Event([1; 32]);
+            let old = d.reserve(key.clone(), 0).unwrap();
+            d.check_and_record(SeenKey::Event([2; 32]), 0);
+            d.reserve(key.clone(), 20).unwrap().commit();
+            drop(old);
+            assert!(d.seen(&key), "old rollback must not remove renewed key");
+        }
+        let d = DedupStore::new(10, 100);
+        let key = SeenKey::Event([3; 32]);
+        drop(d.reserve(key.clone(), 0).unwrap());
+        d.reserve(key.clone(), 5).unwrap().commit();
+        d.check_and_record(SeenKey::Event([4; 32]), 11);
+        assert!(
+            d.seen(&key),
+            "expired ghost entry must not evict renewed key"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_ingest_releases_its_reservation() {
+        let d = std::sync::Arc::new(DedupStore::default());
+        let key = SeenKey::Event([5; 32]);
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let task_store = d.clone();
+        let task_key = key.clone();
+        let task = tokio::spawn(async move {
+            let _pending = task_store.reserve(task_key, 0).unwrap();
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        waiting.await.unwrap();
+        assert!(d.seen(&key));
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(d.reserve(key, 1).is_some(), "next delivery can retry");
     }
 }
