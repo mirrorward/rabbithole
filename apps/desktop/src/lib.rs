@@ -54,14 +54,35 @@ fn native_shim(main_window: bool) -> String {
 /// only "we could not ask".
 #[tauri::command]
 async fn tracker_index() -> Option<String> {
-    // A local `just up` glass first (127.0.0.1 + $RABBIT_TRACKER_STATUS /
-    // .rabbithole/looking-glass-status / 5497). If nothing is listening,
-    // the public glass — so a shipped app still finds tracker.rabbit.direct.
-    match rabbithole_directory::fetch::query_tracker(&local_tracker_status_addr(), "INDEX").await {
-        Ok(text) => Some(text),
-        Err(_) => rabbithole_directory::fetch::query_tracker(&tracker_status_addr(), "INDEX")
+    tracker_listing().await.map(|listing| listing.text)
+}
+
+/// The coordinator that actually answered, alongside its unmodified INDEX.
+/// A local glass must never be credited to the public tracker or share its cache.
+#[derive(serde::Serialize)]
+struct TrackerListing {
+    source: String,
+    text: String,
+}
+
+#[tauri::command]
+async fn tracker_listing() -> Option<TrackerListing> {
+    tracker_listing_from(&local_tracker_status_addr(), &tracker_status_addr()).await
+}
+
+async fn tracker_listing_from(local: &str, public: &str) -> Option<TrackerListing> {
+    match rabbithole_directory::fetch::query_tracker(local, "INDEX").await {
+        Ok(text) => Some(TrackerListing {
+            source: local.into(),
+            text,
+        }),
+        Err(_) => rabbithole_directory::fetch::query_tracker(public, "INDEX")
             .await
-            .ok(),
+            .ok()
+            .map(|text| TrackerListing {
+                source: public.into(),
+                text,
+            }),
     }
 }
 
@@ -265,6 +286,7 @@ pub fn run() {
             navigation_state,
             fullscreen_state,
             tracker_index,
+            tracker_listing,
             transfers::native_available,
             transfers::connect_native,
             transfers::swarm_next_transfer_id,
@@ -353,6 +375,41 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    async fn tracker_fixture(reply: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut command = [0u8; 6];
+            stream.read_exact(&mut command).await.unwrap();
+            assert_eq!(&command, b"INDEX\n");
+            stream.write_all(reply.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        (address, task)
+    }
+
+    #[tokio::test]
+    async fn tracker_reply_keeps_the_actual_source_even_for_an_empty_local_listing() {
+        let (local, task) = tracker_fixture("").await;
+        let result = super::tracker_listing_from(&local, "127.0.0.1:1")
+            .await
+            .unwrap();
+        assert_eq!(result.source, local);
+        assert_eq!(result.text, "");
+        task.await.unwrap();
+        let (public, task) = tracker_fixture("fixture\n").await;
+        let result = super::tracker_listing_from("127.0.0.1:1", &public)
+            .await
+            .unwrap();
+        assert_eq!(result.source, public);
+        assert_eq!(result.text, "fixture\n");
+        let wire = serde_json::to_value(result).unwrap();
+        assert_eq!(wire["source"], public);
+        task.await.unwrap();
+    }
+
     fn first_quoted(text: &str, prefix: &str) -> Option<String> {
         text.lines().find_map(|l| {
             l.trim()

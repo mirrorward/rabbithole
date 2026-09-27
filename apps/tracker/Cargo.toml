@@ -16,6 +16,7 @@ name = "looking-glass"
 path = "src/main.rs"
 
 [dependencies]
+rabbithole-directory = { workspace = true, features = ["signing"] }
 anyhow.workspace = true
 clap.workspace = true
 hex.workspace = true

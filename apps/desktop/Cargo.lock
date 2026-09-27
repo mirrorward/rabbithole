@@ -376,6 +376,7 @@ dependencies = [
  "rabbithole-audio",
  "rabbithole-blobs",
  "rabbithole-core",
+ "rabbithole-directory",
  "rabbithole-federation",
  "rabbithole-identity",
  "rabbithole-legacy-binkp",
@@ -3446,8 +3447,15 @@ dependencies = [
 name = "rabbithole-directory"
 version = "0.268.0"
 dependencies = [
+ "blake3",
+ "ed25519-dalek",
+ "hex",
+ "postcard",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
  "webpki-roots 1.0.9",

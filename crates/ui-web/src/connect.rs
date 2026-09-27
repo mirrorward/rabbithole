@@ -53,6 +53,8 @@ pub struct Row {
     /// `None` when nobody has said: a saved burrow that no directory lists.
     pub reachable: Option<bool>,
     pub listeners: Vec<String>,
+    /// Recomputed from complete proof, never inferred from reachability.
+    pub verification: rabbithole_directory::DirectoryVerification,
 }
 
 impl Row {
@@ -60,14 +62,15 @@ impl Row {
     /// refreshed listing re-renders the rows it touched and no others.
     pub fn key(&self) -> String {
         format!(
-            "{:?}|{}|{}|{}|{:?}|{:?}|{:?}",
+            "{:?}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}",
             self.shelf,
             self.endpoint,
             self.name,
             self.description,
             self.users,
             self.uptime,
-            self.reachable
+            self.reachable,
+            self.verification
         )
     }
 }
@@ -153,6 +156,7 @@ pub fn bookmarked(
                 uptime: known.and_then(|s| s.uptime_pct),
                 reachable: reachable(&kept.endpoint, known, probes),
                 listeners: known.map(|s| s.listeners.clone()).unwrap_or_default(),
+                verification: rabbithole_directory::DirectoryVerification::Unverified,
             }
         })
         .collect()
@@ -187,6 +191,7 @@ pub fn yours(
                 uptime: known.and_then(|s| s.uptime_pct),
                 reachable: reachable(&saved.endpoint, known, probes),
                 listeners: known.map(|s| s.listeners.clone()).unwrap_or_default(),
+                verification: rabbithole_directory::DirectoryVerification::Unverified,
             }
         })
         .collect()
@@ -204,6 +209,7 @@ pub fn to_knock(
 ) -> Vec<String> {
     let vouched = |endpoint: &str| {
         *source != DirectorySource::Seeded
+            && !source.is_cached()
             && listed.iter().any(|s| same_place(&s.endpoint, endpoint))
     };
     let mut out: Vec<String> = Vec::new();
@@ -252,6 +258,7 @@ pub fn discover(
             uptime: s.uptime_pct,
             reachable: Some(s.reachable),
             listeners: s.listeners,
+            verification: rabbithole_directory::DirectoryVerification::Unverified,
         })
         .collect()
 }
@@ -272,6 +279,7 @@ pub fn demos() -> Vec<Row> {
                 uptime: None,
                 reachable: Some(true),
                 listeners: Vec::new(),
+                verification: rabbithole_directory::DirectoryVerification::Unverified,
             })
             .collect()
     }
@@ -308,6 +316,35 @@ pub fn filter(rows: Vec<Row>, query: &str) -> Vec<Row> {
         .collect()
 }
 
+/// Verify the original signed listing, while preserving a bookmark's custom
+/// name. Shelf matching ignores schemes; proof matching deliberately does not.
+pub fn with_verification(
+    mut rows: Vec<Row>,
+    listed: &[DirectoryServer],
+    source: &DirectorySource,
+    probes: &Probes,
+    now_ms: i64,
+) -> Vec<Row> {
+    for row in &mut rows {
+        row.verification = listed
+            .iter()
+            .find(|listed| listed.endpoint == row.endpoint)
+            .filter(|_| !matches!(row.shelf, Shelf::Demo))
+            .map(|listed| listed.verification(now_ms))
+            .unwrap_or(rabbithole_directory::DirectoryVerification::Unverified);
+        if source.is_cached() {
+            // A cached signature can verify offline; cached health is not a
+            // current observation. Only a fresh local probe can answer that.
+            row.users = None;
+            row.uptime = None;
+            row.reachable = probes
+                .get(&probe_key(&row.endpoint))
+                .and_then(|probe| probe.reachable());
+        }
+    }
+    rows
+}
+
 /// The status strip under the list. Says what is true and nothing more:
 /// a count of people appears only when some source reported one.
 pub fn status_line(loading: bool, source: &DirectorySource, listed: &[DirectoryServer]) -> String {
@@ -318,6 +355,10 @@ pub fn status_line(loading: bool, source: &DirectorySource, listed: &[DirectoryS
         return "No directory answered.".to_string();
     }
     let burrows = listed.iter().filter(|s| !is_demo(&s.endpoint)).count();
+    if source.is_cached() {
+        let noun = if burrows == 1 { "burrow" } else { "burrows" };
+        return format!("{burrows} saved {noun} · current availability unknown");
+    }
     if burrows == 0 {
         return "No burrows are listed right now.".to_string();
     }
@@ -359,6 +400,7 @@ mod tests {
             users_online: users,
             listeners: vec!["ws".into()],
             uptime_pct: Some(99),
+            proof: None,
             reachable,
         }
     }
@@ -370,6 +412,103 @@ mod tests {
             handle: handle.into(),
             token: None,
         }
+    }
+
+    fn signed_listing(issued_at_ms: i64) -> DirectoryServer {
+        use ed25519_dalek::Signer;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[31; 32]);
+        let mut row = listed("Signed burrow", "wss://signed.example/Chat", Some(8), true);
+        let descriptor = serde_json::json!({
+            "name": row.name, "publicKey": hex::encode(key.verifying_key().as_bytes()),
+            "timestamp": issued_at_ms, "ttl": 30,
+            "endpoints": {"ws": row.endpoint}
+        });
+        let signature =
+            key.sign(rabbithole_directory::verification::canonical_json(&descriptor).as_bytes());
+        row.proof = Some(rabbithole_directory::DirectoryProof::Announce(
+            serde_json::json!({"descriptor": descriptor, "signature": hex::encode(signature.to_bytes())}).to_string(),
+        ));
+        row
+    }
+
+    #[test]
+    fn bookmark_names_are_local_but_signed_endpoints_must_match_exactly() {
+        use rabbithole_directory::DirectoryVerification;
+        let listed = vec![signed_listing(1_000)];
+        let bookmarks: Vec<_> = [
+            "wss://signed.example/Chat",
+            "ws://signed.example/Chat",
+            "wss://signed.example/chat",
+        ]
+        .into_iter()
+        .map(|endpoint| Bookmark {
+            name: "My custom name".into(),
+            endpoint: endpoint.into(),
+            ..Default::default()
+        })
+        .collect();
+        let rows = with_verification(
+            bookmarked(&bookmarks, &[], &listed, &Probes::new()),
+            &listed,
+            &DirectorySource::Directory,
+            &Probes::new(),
+            2_000,
+        );
+        assert_eq!(rows[0].name, "My custom name");
+        assert!(matches!(
+            rows[0].verification,
+            DirectoryVerification::Verified(_)
+        ));
+        assert_eq!(
+            rows[1].verification,
+            DirectoryVerification::Unverified,
+            "scheme downgrade is not signed"
+        );
+        assert_eq!(
+            rows[2].verification,
+            DirectoryVerification::Unverified,
+            "path case is significant"
+        );
+    }
+
+    #[test]
+    fn cached_proofs_expire_without_turning_old_health_into_current_presence() {
+        use rabbithole_directory::DirectoryVerification;
+        let listed = vec![signed_listing(1_000)];
+        let source = DirectorySource::Cached("saved fixture".into());
+        let rows = || discover(&listed, &source, &[], &[]);
+        let fresh = with_verification(rows(), &listed, &source, &Probes::new(), 2_000);
+        assert!(matches!(
+            fresh[0].verification,
+            DirectoryVerification::Verified(_)
+        ));
+        assert_eq!(fresh[0].reachable, None);
+        assert_eq!(fresh[0].users, None);
+        assert_eq!(fresh[0].uptime, None);
+        let stale = with_verification(rows(), &listed, &source, &Probes::new(), 31_000);
+        assert!(matches!(
+            stale[0].verification,
+            DirectoryVerification::Stale(_)
+        ));
+        assert_ne!(
+            fresh[0].key(),
+            stale[0].key(),
+            "expiry updates the rendered row"
+        );
+        assert_eq!(
+            status_line(false, &source, &listed),
+            "1 saved burrow · current availability unknown"
+        );
+        let mut tampered = listed.clone();
+        tampered[0].name = "Forged name".into();
+        let invalid = with_verification(
+            discover(&tampered, &source, &[], &[]),
+            &tampered,
+            &source,
+            &Probes::new(),
+            2_000,
+        );
+        assert_eq!(invalid[0].verification, DirectoryVerification::Invalid);
     }
 
     #[test]

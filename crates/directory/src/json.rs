@@ -6,10 +6,10 @@
 //! row), and under that heuristic a nested object starts a new "row" and its
 //! fields leak into the wrong entry. So the shape is actually parsed.
 //!
-//! `serde_json` isn't used here because this crate is compiled into the wasm
-//! SPA, where one endpoint's worth of parsing is not worth serde's derive
-//! machinery in the bundle. What is needed is small: read a document, walk to a
-//! field, read a string or an array of strings.
+//! This tolerant display parser remains small: read a document, walk to a
+//! field, read a string or an array of strings. Signature verification uses a
+//! separate serde JSON parse of the complete statement so canonical signed
+//! integers are never reconstructed from this reader's floating-point values.
 //!
 //! Total by construction: every entry point returns `Result`/`Option`, the
 //! parser is depth-limited so a hostile reply can't blow the stack, and no

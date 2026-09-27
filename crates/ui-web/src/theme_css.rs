@@ -807,6 +807,8 @@ html.rh-fullscreen .rh-app.native{padding-top:0}\
 .rh-glass-mark svg{display:block;border-radius:.3rem}\
 .rh-glass-mark .rh-dot{position:absolute;right:-.2rem;bottom:-.15rem;box-shadow:0 0 0 2px var(--rh-bg)}\
 .rh-glass-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--rh-font-display);font-weight:600;letter-spacing:-.01em}\
+.rh-glass-trust{font-weight:600}\
+.rh-glass-proof{flex:1 1 100%;margin:0;font-size:var(--rh-font-xs);line-height:1.45;color:var(--rh-text);max-width:72ch}.rh-glass-proof code{overflow-wrap:anywhere}\
 .rh-glass-desc{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--rh-muted)}\
 .rh-glass-as{margin-right:.6rem;color:var(--rh-text)}\
 .rh-glass-users,.rh-glass-uptime{font-family:var(--rh-font-mono);font-size:var(--rh-font-xs);font-variant-numeric:tabular-nums slashed-zero;text-align:right;white-space:nowrap}\

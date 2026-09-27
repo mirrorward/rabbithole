@@ -57,6 +57,11 @@ js-sys.workspace = true
 web-sys = { workspace = true, features = [
     "Window",
     "Storage",
+    "AbortController",
+    "AbortSignal",
+    "RequestInit",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
     "MediaQueryList",
     "HtmlCanvasElement",
     "CanvasRenderingContext2d",

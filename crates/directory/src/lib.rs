@@ -28,7 +28,7 @@
 //! # Why this is its own crate
 //!
 //! The wasm SPA and the terminal clients need exactly the same parsers.
-//! The pure half here therefore has **no dependencies at all** and compiles for
+//! The pure half here therefore uses only portable verification dependencies and compiles for
 //! both; the network edge is behind the `native` feature, since a browser tab
 //! has no TCP and reaches the directory through `fetch` instead.
 //!
@@ -41,12 +41,18 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cache;
+pub mod descriptor;
 #[cfg(feature = "native")]
 pub mod fetch;
 pub mod json;
+pub mod verification;
+pub use verification::{Binding, DirectoryProof, DirectoryVerification, VerifiedDescriptor};
+
+use serde::{Deserialize, Serialize};
 
 /// One directory entry: a public burrow and its latest health snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryServer {
     /// Human-facing burrow name.
     pub name: String,
@@ -69,6 +75,15 @@ pub struct DirectoryServer {
     pub uptime_pct: Option<u8>,
     /// Whether the source's most recent probe reached it.
     pub reachable: bool,
+    /// Complete untrusted signed statement; verification is always recomputed.
+    #[serde(default)]
+    pub proof: Option<DirectoryProof>,
+}
+
+impl DirectoryServer {
+    pub fn verification(&self, now_ms: i64) -> DirectoryVerification {
+        verification::verify(self, now_ms)
+    }
 }
 
 /// Browse the directory: keep entries matching `query` (case-insensitive
@@ -111,6 +126,8 @@ pub enum DirectorySource {
     Tracker(String),
     /// The built-in sample list — nothing reachable answered.
     Seeded,
+    /// An offline saved listing. The label includes its original source.
+    Cached(String),
 }
 
 impl DirectorySource {
@@ -125,10 +142,14 @@ impl DirectorySource {
         DirectorySource::Tracker(tracker_label(entry))
     }
 
+    pub fn is_cached(&self) -> bool {
+        matches!(self, Self::Cached(_))
+    }
+
     pub fn label(&self) -> &str {
         match self {
             DirectorySource::Directory => "rabbithole.directory",
-            DirectorySource::Tracker(host) => host,
+            DirectorySource::Tracker(host) | DirectorySource::Cached(host) => host,
             DirectorySource::Seeded => "built-in sample \u{2014} no directory reachable",
         }
     }
@@ -525,8 +546,10 @@ pub fn parse_directory_json_with(
     text: &str,
     endpoint_fields: &[&str],
 ) -> Result<Vec<DirectoryServer>, String> {
+    verification::check_listing_size(text)?;
     let doc = json::parse(text).map_err(|e| format!("That directory reply isn't JSON: {e}"))?;
     let rows = listed_burrows(&doc, "directory")?;
+    let proofs = verification::json_proofs(text);
     if rows.is_empty() {
         // The directory answered and said nobody is listed. That is a
         // listing, not a fetch failure — substituting a sample would claim
@@ -535,7 +558,8 @@ pub fn parse_directory_json_with(
     }
     let out: Vec<DirectoryServer> = rows
         .iter()
-        .filter_map(|row| {
+        .enumerate()
+        .filter_map(|(index, row)| {
             // The directory publishes flat `wsUri` / `quicUri` fields.
             let endpoint = endpoint_fields
                 .iter()
@@ -549,6 +573,7 @@ pub fn parse_directory_json_with(
                 listeners: row.str_array_field("listeners"),
                 uptime_pct: percent(row.str_field("uptime")),
                 reachable: row.str_field("status") == Some("online"),
+                proof: proofs.get(index).cloned().flatten(),
             })
         })
         .collect();
@@ -569,8 +594,10 @@ pub fn parse_glass_json(
     text: &str,
     endpoint_kinds: &[&str],
 ) -> Result<Vec<DirectoryServer>, String> {
+    verification::check_listing_size(text)?;
     let doc = json::parse(text).map_err(|e| format!("That tracker reply isn't JSON: {e}"))?;
     let rows = listed_burrows(&doc, "tracker")?;
+    let proofs = verification::json_proofs(text);
     if rows.is_empty() {
         // A glass with nobody announced serves `burrows: []`. Keep that
         // answer; falling through to a seeded sample would look like
@@ -579,7 +606,8 @@ pub fn parse_glass_json(
     }
     let out: Vec<DirectoryServer> = rows
         .iter()
-        .filter_map(|row| {
+        .enumerate()
+        .filter_map(|(index, row)| {
             let endpoints = row.get("endpoints")?;
             let endpoint = endpoint_kinds
                 .iter()
@@ -602,6 +630,7 @@ pub fn parse_glass_json(
                 // 100% because it answered would be inventing a history.
                 uptime_pct: None,
                 reachable: row.str_field("status") == Some("online"),
+                proof: proofs.get(index).cloned().flatten(),
             })
         })
         .collect();
@@ -654,6 +683,7 @@ fn percent(raw: Option<&str>) -> Option<u8> {
 /// (see `apps/tracker`). Short rows are skipped rather than failing the whole
 /// listing — a tracker that grows a column must not blank the browser.
 pub fn parse_tracker_index(text: &str) -> Result<Vec<DirectoryServer>, String> {
+    verification::check_listing_size(text)?;
     if let Some(first) = text.lines().next() {
         let first = first.trim();
         if !first.contains('\t') && first.starts_with("ERR") {
@@ -685,6 +715,10 @@ pub fn parse_tracker_index(text: &str) -> Result<Vec<DirectoryServer>, String> {
             listeners: Vec::new(),
             uptime_pct: percent(Some(f[4])),
             reachable: true,
+            proof: f
+                .get(9)
+                .filter(|p| **p != "-")
+                .map(|p| DirectoryProof::gossip(p)),
         });
     }
     if out.is_empty() {
@@ -724,6 +758,7 @@ mod tests {
             listeners: Vec::new(),
             uptime_pct: Some(uptime),
             reachable,
+            proof: None,
         }
     }
 

@@ -9,7 +9,6 @@
 //! so the INDEX `signed` column stays `no` — we will not pretend a
 //! coordinator signature is a gossip descriptor.
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use rabbithole_identity::{PublicKey, Signature};
@@ -79,40 +78,7 @@ pub fn ingest_announce(body: &str) -> Result<ServerEntry, AnnounceError> {
 /// Serialize `value` as canonical JSON: object keys sorted recursively, no
 /// insignificant whitespace, UTF-8. Twin of `burrow::announce::canonical_json`
 /// — both sides of an announce hash these bytes.
-pub fn canonical_json(value: &Value) -> String {
-    let mut out = String::new();
-    write_canonical(value, &mut out);
-    out
-}
-
-fn write_canonical(value: &Value, out: &mut String) {
-    match value {
-        Value::Object(map) => {
-            let sorted: BTreeMap<&String, &Value> = map.iter().collect();
-            out.push('{');
-            for (i, (k, v)) in sorted.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                out.push_str(&Value::String((*k).clone()).to_string());
-                out.push(':');
-                write_canonical(v, out);
-            }
-            out.push('}');
-        }
-        Value::Array(items) => {
-            out.push('[');
-            for (i, v) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_canonical(v, out);
-            }
-            out.push(']');
-        }
-        other => out.push_str(&other.to_string()),
-    }
-}
+pub use rabbithole_directory::verification::canonical_json;
 
 /// Prefer the QUIC endpoint a burrow actually advertised, then WS.
 fn endpoint_addr(descriptor: &Value) -> Option<SocketAddr> {

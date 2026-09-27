@@ -75,9 +75,9 @@ async fn index_and_health_round_trip_over_the_status_port() {
         .with_timestamp(1_700_000_000_000)
         .sign(&key)
         .unwrap();
-    registry.register_descriptor(signed, None).unwrap();
+    registry.register_descriptor(signed.clone(), None).unwrap();
 
-    // INDEX: signed row first, nine tab-separated columns per line.
+    // INDEX: signed row first, ten tab-separated columns per line.
     let index = status_query(status_addr, "INDEX\n").await;
     let lines: Vec<&str> = index.lines().collect();
     assert_eq!(lines.len(), 2);
@@ -97,7 +97,23 @@ async fn index_and_health_round_trip_over_the_status_port() {
         &unsigned_cols[..4],
         ["Cheshire", "127.0.0.1:4653", "2", "-"]
     );
-    assert_eq!(&unsigned_cols[6..], ["no", "-", "-"]);
+    assert_eq!(&unsigned_cols[6..], ["no", "-", "-", "-"]);
+    assert_eq!(signed_cols[9], hex::encode(signed.to_bytes()));
+    let rows = rabbithole_directory::parse_tracker_index(&index).unwrap();
+    assert!(matches!(
+        rows[0].verification(1_700_000_000_001),
+        rabbithole_directory::DirectoryVerification::Verified(_)
+    ));
+    assert_eq!(
+        rows[1].verification(1_700_000_000_001),
+        rabbithole_directory::DirectoryVerification::Unverified
+    );
+    let cached = rabbithole_directory::cache::encode("fixture", 1_700_000_000_001, &rows).unwrap();
+    let offline = rabbithole_directory::cache::decode("fixture", &cached).unwrap();
+    assert_eq!(
+        offline.servers[0].verification(1_700_000_000_001),
+        rows[0].verification(1_700_000_000_001)
+    );
 
     // INDEX cat= filters like LIST cat=.
     let chat = status_query(status_addr, "INDEX cat=CHAT\n").await;

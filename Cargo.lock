@@ -2060,6 +2060,7 @@ dependencies = [
  "clap",
  "hex",
  "postcard",
+ "rabbithole-directory",
  "rabbithole-identity",
  "serde",
  "serde_json",
@@ -2767,6 +2768,7 @@ dependencies = [
  "looking-glass",
  "rabbithole-core",
  "rabbithole-directory",
+ "rabbithole-identity",
  "rabbithole-proto",
  "ratatui",
  "serde",
@@ -2826,8 +2828,16 @@ dependencies = [
 name = "rabbithole-directory"
 version = "0.268.0"
 dependencies = [
+ "blake3",
+ "ed25519-dalek",
+ "hex",
+ "postcard",
+ "rabbithole-identity",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
  "webpki-roots 1.0.8",

@@ -491,3 +491,33 @@ pub async fn tracker_index() -> Option<String> {
         .ok()?;
     JsFuture::from(promise).await.ok()?.as_string()
 }
+
+/// Preserve the actual native TCP source. Older shells can still supply an
+/// INDEX reply, but their unknown provenance must not enter the saved cache.
+#[cfg(target_arch = "wasm32")]
+pub async fn tracker_listing() -> Option<(Option<String>, String)> {
+    let b = bridge()?;
+    let invoke = method(&b, "invoke")?;
+    let args = js_sys::Object::new();
+    let response = match invoke
+        .call2(&b, &JsValue::from_str("tracker_listing"), &args.into())
+        .ok()
+        .and_then(|value| value.dyn_into::<js_sys::Promise>().ok())
+    {
+        Some(promise) => JsFuture::from(promise).await,
+        None => return tracker_index().await.map(|text| (None, text)),
+    };
+    match response {
+        Ok(value) if value.is_null() => None,
+        Ok(value) => {
+            let source = js_sys::Reflect::get(&value, &JsValue::from_str("source"))
+                .ok()?
+                .as_string()?;
+            let text = js_sys::Reflect::get(&value, &JsValue::from_str("text"))
+                .ok()?
+                .as_string()?;
+            crate::directory_status::native_source_valid(&source).then_some((Some(source), text))
+        }
+        Err(_) => tracker_index().await.map(|text| (None, text)),
+    }
+}

@@ -50,6 +50,7 @@ pub fn sample_directory() -> Vec<DirectoryServer> {
             users_online: Some(users),
             listeners: Vec::new(),
             uptime_pct: Some(uptime),
+            proof: None,
             reachable,
         };
     #[allow(unused_mut)]
@@ -109,6 +110,7 @@ pub fn sample_directory() -> Vec<DirectoryServer> {
                 users_online: Some(d.who.len() as u32),
                 listeners: vec!["ws".to_string()],
                 uptime_pct: Some(100),
+                proof: None,
                 reachable: true,
             })
             .collect();

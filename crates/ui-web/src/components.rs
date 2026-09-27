@@ -2210,6 +2210,10 @@ fn GlassRow(row: crate::connect::Row, browsing: Browsing) -> impl IntoView {
     let address = row.endpoint.clone();
     let listeners = row.listeners.join(" \u{00b7} ");
     let shelf = store_value(row.shelf.clone());
+    let proof_label = crate::directory_status::label(&row.verification);
+    let proof_explanation = crate::directory_status::explanation(&row.verification);
+    let proof_key = crate::directory_status::signing_key(&row.verification).map(str::to_string);
+    let show_proof = row.shelf != Shelf::Demo;
     let renaming = create_rw_signal(false);
     let new_name = create_rw_signal(row.name.clone());
     let bookmark = move |_| {
@@ -2253,6 +2257,7 @@ fn GlassRow(row: crate::connect::Row, browsing: Browsing) -> impl IntoView {
                 <span class="rh-glass-name">{row.name.clone()}</span>
                 <span class="rh-glass-desc">
                     {presence.map(|p| view! { <span class="rh-visually-hidden">{p}" "</span> })}
+                    {show_proof.then(|| view! { <span class="rh-glass-trust">{proof_label}" · "</span> })}
                     {as_handle.map(|h| view! { <span class="rh-glass-as">"as "{h}</span> })}
                     {description}
                 </span>
@@ -2282,6 +2287,12 @@ fn GlassRow(row: crate::connect::Row, browsing: Browsing) -> impl IntoView {
                         {(!listeners.is_empty()).then(|| view! { <span>{listeners.clone()}</span> })}
                         {(shelf.get_value() == Shelf::Demo).then(|| view! { <span>"seeded demo"</span> })}
                     </p>
+                    {show_proof.then(|| view! {
+                        <p class="rh-glass-proof">
+                            <strong>{proof_label}". "</strong>{proof_explanation}
+                            {proof_key.clone().map(|key| view! { <span>" Signing key: "<code>{key}</code></span> })}
+                        </p>
+                    })}
                     <Show
                         when=move || renaming.get()
                         fallback=move || view! {
@@ -2449,6 +2460,35 @@ fn BurrowBrowser(
     let loading = app.directory_loading;
     let bookmarks = app.bookmarks;
     let probes = app.probes;
+    let proof_clock = create_rw_signal(crate::clock::now_ms());
+    #[cfg(target_arch = "wasm32")]
+    {
+        let timer = gloo_timers::callback::Interval::new(30_000, move || {
+            proof_clock.set(crate::clock::now_ms());
+        });
+        let focus = window_event_listener(leptos::ev::focus, move |_| {
+            proof_clock.set(crate::clock::now_ms());
+        });
+        on_cleanup(move || {
+            drop(timer);
+            focus.remove();
+        });
+    }
+    let verify = move |rows| {
+        listed.with(|listed| {
+            source.with(|source| {
+                probes.with(|probes| {
+                    crate::connect::with_verification(
+                        rows,
+                        listed,
+                        source,
+                        probes,
+                        proof_clock.get(),
+                    )
+                })
+            })
+        })
+    };
     // Ask the network on arrival: what is in memory may be the built-in
     // sample, which this list never shows as places. A render effect so a
     // route re-entry doesn't fire it against a disposed view.
@@ -2482,29 +2522,29 @@ fn BurrowBrowser(
     let filter_text = create_rw_signal(String::new());
     let kept = Signal::derive(move || {
         crate::connect::filter(
-            bookmarks.with(|b| {
+            verify(bookmarks.with(|b| {
                 recent.with(|r| {
                     listed.with(|l| probes.with(|p| crate::connect::bookmarked(b, r, l, p)))
                 })
-            }),
+            })),
             &filter_text.get(),
         )
     });
     let yours = Signal::derive(move || {
         crate::connect::filter(
-            bookmarks.with(|b| {
+            verify(bookmarks.with(|b| {
                 recent.with(|r| listed.with(|l| probes.with(|p| crate::connect::yours(r, l, b, p))))
-            }),
+            })),
             &filter_text.get(),
         )
     });
     let discover = Signal::derive(move || {
         crate::connect::filter(
-            bookmarks.with(|b| {
+            verify(bookmarks.with(|b| {
                 recent.with(|r| {
                     listed.with(|l| source.with(|s| crate::connect::discover(l, s, r, b)))
                 })
-            }),
+            })),
             &filter_text.get(),
         )
     });

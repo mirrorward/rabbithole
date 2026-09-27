@@ -29,7 +29,6 @@
 //! to be listed is attributable to you and survives the retelling, rather than
 //! depending on the good behaviour of everyone who ever saw you.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,45 +60,7 @@ const MAX_LISTENERS: usize = 12;
 ///
 /// Both sides of an announce hash *these* bytes, so this is the actual signed
 /// message. See the module docs for why it isn't left to `serde_json`.
-pub fn canonical_json(value: &Value) -> String {
-    let mut out = String::new();
-    write_canonical(value, &mut out);
-    out
-}
-
-fn write_canonical(value: &Value, out: &mut String) {
-    match value {
-        Value::Object(map) => {
-            // BTreeMap sorts by Rust's `Ord` for `String`, i.e. by UTF-8 bytes,
-            // which is what "sorted keys" means for a JSON canonicalization.
-            let sorted: BTreeMap<&String, &Value> = map.iter().collect();
-            out.push('{');
-            for (i, (k, v)) in sorted.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                out.push_str(&Value::String((*k).clone()).to_string());
-                out.push(':');
-                write_canonical(v, out);
-            }
-            out.push('}');
-        }
-        Value::Array(items) => {
-            // Arrays are ordered data, not a set: order is preserved.
-            out.push('[');
-            for (i, v) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_canonical(v, out);
-            }
-            out.push(']');
-        }
-        // Scalars have one JSON spelling each, and `serde_json` already emits
-        // strings with the escaping the spec requires.
-        other => out.push_str(&other.to_string()),
-    }
-}
+pub use rabbithole_directory::verification::canonical_json;
 
 /// The announced name, in the glass's `handle@host` form (`alice@wonderland`).
 ///

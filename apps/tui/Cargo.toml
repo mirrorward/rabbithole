@@ -26,6 +26,7 @@ toml.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
+rabbithole-identity.workspace = true
 # Embedded Looking Glass for the #[ignore]d server-browser smoke test only
 # (lib API, no tracker binary). No cycle: the tracker never depends on the
 # TUI or anything that does.

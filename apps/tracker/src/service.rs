@@ -153,7 +153,7 @@ async fn serve_listing(mut stream: TcpStream, registry: &Registry) -> Result<()>
 /// - `INDEX` (and `INDEX cat=<name>`) — the directory index, one line per
 ///   live server, sorted signed-first, then observed uptime descending,
 ///   then name:
-///   `name<TAB>ip:port<TAB>users<TAB>categories<TAB>uptime_24h<TAB>last_seen_secs<TAB>signed<TAB>key<TAB>gen`
+///   `name<TAB>ip:port<TAB>users<TAB>categories<TAB>uptime_24h<TAB>last_seen_secs<TAB>signed<TAB>key<TAB>gen<TAB>proof`
 ///   where `uptime_24h` is a percent (this tracker's **local observation**,
 ///   never a signed claim — see [`crate::health`]), `signed` is `yes`/`no`,
 ///   `key` is the first 8 bytes of the verified server key in hex (`-` when
@@ -161,7 +161,9 @@ async fn serve_listing(mut stream: TcpStream, registry: &Registry) -> Result<()>
 ///   timestamp (unix ms; the descriptor's `timestamp` doubles as both — see
 ///   [`crate::descriptor`]). `key` + `gen` let a client fetch the full
 ///   signed descriptor (e.g. a gossip `Want` to this tracker) and verify it
-///   offline instead of trusting the line.
+///   offline instead of trusting the line. `proof` now carries the complete
+///   signed postcard bytes as hex (`-` when absent), so browsers need no UDP
+///   gossip request. The first nine columns remain backward compatible.
 /// - `HEALTH <ip:port>` — one slot's detail plus a bucket sparkline:
 ///   `ip:port<TAB>live=…<TAB>uptime_24h=…<TAB>first_seen_secs=…<TAB>last_seen_secs=…<TAB>flaps=…`
 ///   then a line of `#`/`+`/`.` per 15-minute bucket, oldest first (see
@@ -345,17 +347,18 @@ fn index_lines(rows: &[IndexRow]) -> String {
     let mut out = String::new();
     for row in rows {
         let entry = &row.entry;
-        let (signed, key, generation) = match &entry.signed {
+        let (signed, key, generation, proof) = match &entry.signed {
             Some(sd) => (
                 "yes",
                 key_prefix(&sd.descriptor.server_key),
                 sd.descriptor.timestamp.to_string(),
+                hex::encode(sd.to_bytes()),
             ),
-            None => ("no", "-".to_owned(), "-".to_owned()),
+            None => ("no", "-".to_owned(), "-".to_owned(), "-".to_owned()),
         };
         let _ = writeln!(
             out,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             sanitize(&entry.name),
             entry.addr,
             entry.users_online,
@@ -365,6 +368,7 @@ fn index_lines(rows: &[IndexRow]) -> String {
             signed,
             key,
             generation,
+            proof,
         );
     }
     out
@@ -608,17 +612,24 @@ mod tests {
         let out = index_lines(&registry.index_at(now));
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);
-        // Signed sorts first; every line has exactly nine columns.
+        // Signed sorts first; complete proof extends the original nine columns.
         let expected_prefix = key_prefix(&key);
-        assert_eq!(
-            lines[0],
-            format!(
-                "Wonderland\t10.0.0.1:5500\t12\tchat\t100.0\t0\tyes\t{expected_prefix}\t1700000000000"
+        assert!(lines[0].starts_with(&format!("Wonderland\t10.0.0.1:5500\t12\tchat\t100.0\t0\tyes\t{expected_prefix}\t1700000000000\t")));
+        let proof = lines[0].split('\t').nth(9).unwrap();
+        assert!(
+            rabbithole_directory::descriptor::SignedDescriptor::from_bytes(
+                &hex::decode(proof).unwrap()
             )
+            .unwrap()
+            .verify()
+            .is_ok()
         );
-        assert_eq!(lines[1], "Plain\t10.0.0.2:5510\t3\t-\t100.0\t0\tno\t-\t-");
+        assert_eq!(
+            lines[1],
+            "Plain\t10.0.0.2:5510\t3\t-\t100.0\t0\tno\t-\t-\t-"
+        );
         for line in lines {
-            assert_eq!(line.split('\t').count(), 9);
+            assert_eq!(line.split('\t').count(), 10);
         }
     }
 

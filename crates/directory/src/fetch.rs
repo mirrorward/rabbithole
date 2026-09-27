@@ -54,23 +54,54 @@ pub struct Listing {
 /// `["ws", "quic"]`. (The directory spells these `wsUri`/`quicUri`; the
 /// suffix is added here so callers state the protocol once.)
 pub async fn discover(tracker: Option<&str>, endpoint_fields: &[&str]) -> Result<Listing, String> {
+    let key = discovery_cache_key(tracker, endpoint_fields);
+    match discover_live(tracker, endpoint_fields).await {
+        Ok(mut listing) => {
+            let previous = read_cached(&key);
+            save_cached(&key, &mut listing, previous.as_ref());
+            Ok(listing)
+        }
+        Err(error) => match read_cached(&key) {
+            Some(saved) => {
+                let mut servers = saved.servers;
+                // Saved observations are not current population or uptime.
+                for row in &mut servers {
+                    row.users_online = None;
+                    row.uptime_pct = None;
+                }
+                Ok(Listing {
+                    servers,
+                    source: DirectorySource::Cached(format!(
+                        "saved {} · {}",
+                        saved.source_label,
+                        saved_age_label(saved.fetched_at_ms, now_ms())
+                    )),
+                    fallback_reason: Some(error),
+                })
+            }
+            None => Err(error),
+        },
+    }
+}
+
+async fn discover_live(tracker: Option<&str>, endpoint_fields: &[&str]) -> Result<Listing, String> {
     if let Some(named) = tracker.map(str::trim).filter(|t| !t.is_empty()) {
         return named_tracker(named, endpoint_fields).await;
     }
 
-    let directory = match fetch_directory(endpoint_fields).await {
+    let mut directory = match fetch_directory(endpoint_fields).await {
         Ok(servers) => Ok((servers, DirectorySource::Directory)),
         Err(e) => Err(e),
     };
-    // A live empty directory is not the last word — ask the glass too.
-    // A directory with rows is; skip the extra round-trip.
-    let glass = match &directory {
-        Ok((servers, _)) if !servers.is_empty() => None,
-        _ => Some(match fetch_glass(TRACKER_URL, endpoint_fields).await {
-            Ok(servers) => Ok((servers, DirectorySource::standard_glass())),
-            Err(e) => Err(e),
-        }),
+    // Ask only the configured standard glass for complete statements. The
+    // public aggregate may omit them; no row-supplied URL is ever fetched.
+    let glass = match fetch_glass(TRACKER_URL, endpoint_fields).await {
+        Ok(servers) => Some(Ok((servers, DirectorySource::standard_glass()))),
+        Err(error) => Some(Err(error)),
     };
+    if let (Ok((rows, _)), Some(Ok((proof_rows, _)))) = (&mut directory, &glass) {
+        crate::verification::with_proofs_from(rows, proof_rows, now_ms());
+    }
 
     let directory_error = directory.as_ref().err().cloned();
     let glass_error = glass.as_ref().and_then(|g| g.as_ref().err().cloned());
@@ -385,6 +416,106 @@ fn dechunk(body: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
+fn saved_age_label(saved_at: i64, now: i64) -> String {
+    let minutes = now.saturating_sub(saved_at).max(0) / 60_000;
+    match minutes {
+        0 => "just now".into(),
+        1..=59 => format!("{minutes} min ago"),
+        60..=1439 => format!("{} h ago", minutes / 60),
+        _ => format!("{} days ago", minutes / 1440),
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+fn cache_path(key: &str) -> Option<std::path::PathBuf> {
+    if key.len() > 256 {
+        return None;
+    }
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache"))
+        })?;
+    Some(base.join("rabbithole").join(format!(
+        "directory-{}.json",
+        blake3::hash(key.as_bytes()).to_hex()
+    )))
+}
+
+fn read_cached(key: &str) -> Option<crate::cache::CachedListing> {
+    read_cached_file(&cache_path(key)?, key)
+}
+
+fn read_cached_file(path: &std::path::Path, key: &str) -> Option<crate::cache::CachedListing> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut text = String::new();
+    file.take(crate::cache::MAX_CACHE_BYTES as u64 + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    crate::cache::decode(key, &text)
+}
+
+fn discovery_cache_key(tracker: Option<&str>, protocols: &[&str]) -> String {
+    // Structured source variants cannot collide with an explicitly named
+    // tracker called "default", or delimiter characters in a hostname.
+    serde_json::to_string(&(tracker.map(str::trim).filter(|s| !s.is_empty()), protocols))
+        .expect("strings encode")
+}
+
+fn save_cached(key: &str, listing: &mut Listing, previous: Option<&crate::cache::CachedListing>) {
+    let Some(text) = crate::cache::update(
+        key,
+        listing.source.label(),
+        now_ms(),
+        &mut listing.servers,
+        previous,
+    ) else {
+        return;
+    };
+    let Some(path) = cache_path(key) else {
+        return;
+    };
+    let _ = write_cached_file(&path, &text);
+}
+
+fn write_cached_file(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("cache has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = path.with_extension(format!("{}-{nonce}.tmp", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +677,55 @@ mod tests {
         // Port 1 on loopback refuses immediately — the error path, fast.
         let err = query_tracker("127.0.0.1:1", "INDEX").await.unwrap_err();
         assert!(err.contains("connect"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod cache_file_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_tracker_and_automatic_sources_have_distinct_cache_keys() {
+        assert_ne!(
+            discovery_cache_key(None, &["ws"]),
+            discovery_cache_key(Some("default"), &["ws"])
+        );
+        assert_ne!(
+            discovery_cache_key(Some("a|ws"), &["quic"]),
+            discovery_cache_key(Some("a"), &["ws", "quic"])
+        );
+        assert_ne!(
+            discovery_cache_key(None, &["ws"]),
+            discovery_cache_key(None, &["quic"])
+        );
+    }
+
+    #[test]
+    fn disk_cache_roundtrip_is_atomic_bounded_and_source_bound() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "rabbithole-directory-cache-{}-{nonce}",
+            std::process::id()
+        ));
+        let path = dir.join("listing.json");
+        let text = crate::cache::encode("fixture", 123, &[]).unwrap();
+        write_cached_file(&path, &text).unwrap();
+        assert_eq!(
+            read_cached_file(&path, "fixture").unwrap().fetched_at_ms,
+            123
+        );
+        assert!(read_cached_file(&path, "different").is_none());
+        write_cached_file(&path, &crate::cache::encode("fixture", 456, &[]).unwrap()).unwrap();
+        assert_eq!(
+            read_cached_file(&path, "fixture").unwrap().fetched_at_ms,
+            456
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::write(&path, " ".repeat(crate::cache::MAX_CACHE_BYTES + 1)).unwrap();
+        assert!(read_cached_file(&path, "fixture").is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

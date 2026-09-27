@@ -2448,6 +2448,14 @@ impl AppState {
             .with_untracked(|s| s.dm_threads.iter().find(|t| t.peer == handle).cloned())
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn accept_directory(&self, mut listing: crate::servers::LiveListing) {
+        crate::directory_status::storage::remember(&mut listing, crate::clock::now_ms());
+        self.servers.set(listing.servers);
+        self.directory_source.set(listing.source);
+        self.directory_loading.set(false);
+    }
+
     /// Refresh the Looking Glass from the network.
     ///
     /// Three sources, in preference order:
@@ -2468,6 +2476,9 @@ impl AppState {
     pub fn load_directory(&self) {
         #[cfg(target_arch = "wasm32")]
         {
+            if self.directory_loading.get_untracked() {
+                return;
+            }
             let servers = self.servers;
             let source = self.directory_source;
             let loading = self.directory_loading;
@@ -2488,10 +2499,20 @@ impl AppState {
                     .and_then(|a| a.as_ref().ok())
                     .is_some_and(|(rows, _)| !rows.is_empty())
                 {
-                    let listing = crate::servers::pick_live_listing(answers).expect("rows");
-                    servers.set(listing.servers);
-                    source.set(listing.source);
-                    loading.set(false);
+                    let mut listing = crate::servers::pick_live_listing(answers).expect("rows");
+                    // The aggregator may omit proofs. Ask only the configured
+                    // standard glass, then attach complete matching proofs;
+                    // health still belongs to the original directory.
+                    if let Some(text) = crate::net::fetch_text(crate::servers::TRACKER_URL).await {
+                        if let Ok(proofs) = crate::servers::parse_glass_json(&text, &["ws"]) {
+                            rabbithole_directory::verification::with_proofs_from(
+                                &mut listing.servers,
+                                &proofs,
+                                crate::clock::now_ms(),
+                            );
+                        }
+                    }
+                    app.accept_directory(listing);
                     return;
                 }
                 // The standard Looking Glass, over HTTPS with CORS open — so
@@ -2512,24 +2533,26 @@ impl AppState {
                     .is_some_and(|(rows, _)| !rows.is_empty())
                 {
                     let listing = crate::servers::pick_live_listing(answers).expect("rows");
-                    servers.set(listing.servers);
-                    source.set(listing.source);
-                    loading.set(false);
+                    app.accept_directory(listing);
                     return;
                 }
                 // Last: the shell's TCP status-port INDEX. `None` in a browser
                 // tab, where there is no shell to ask.
-                match crate::native::tracker_index().await {
-                    Some(text) => answers.push(
-                        crate::servers::parse_tracker_index(&text)
-                            .map(|rows| (rows, crate::servers::DirectorySource::standard_glass())),
-                    ),
+                match crate::native::tracker_listing().await {
+                    Some((source, text)) => {
+                        answers.push(crate::servers::parse_tracker_index(&text).map(|rows| {
+                            (
+                                rows,
+                                crate::servers::DirectorySource::Tracker(source.unwrap_or_else(
+                                    || crate::directory_status::UNKNOWN_NATIVE_SOURCE.into(),
+                                )),
+                            )
+                        }))
+                    }
                     None => answers.push(Err("the status port did not answer".into())),
                 }
                 if let Some(listing) = crate::servers::pick_live_listing(answers) {
-                    servers.set(listing.servers);
-                    source.set(listing.source);
-                    loading.set(false);
+                    app.accept_directory(listing);
                     return;
                 }
                 // Nobody answered. A listing already on screen stays there,
@@ -2537,6 +2560,22 @@ impl AppState {
                 // the built-in sample (what this used to do on a failed
                 // refresh) is wrong twice over, and the connect window, which
                 // never shows the sample, would drop a good list for nothing.
+                if let Some(saved) = crate::directory_status::storage::load(crate::clock::now_ms())
+                {
+                    servers.set(saved.servers);
+                    source.set(saved.source);
+                } else {
+                    // Storage may be disabled. Retain the in-memory proof,
+                    // while ceasing to present old health as a live answer.
+                    source.update(|held| {
+                        if *held != crate::servers::DirectorySource::Seeded && !held.is_cached() {
+                            *held = crate::servers::DirectorySource::Cached(format!(
+                                "saved {}",
+                                held.label()
+                            ));
+                        }
+                    });
+                }
                 let held_live =
                     source.with_untracked(|s| *s != crate::servers::DirectorySource::Seeded);
                 app.notify(

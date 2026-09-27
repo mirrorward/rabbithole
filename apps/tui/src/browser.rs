@@ -20,9 +20,9 @@
 //! uptime/flaps are what that one tracker saw, never a property the server
 //! proved. The UI therefore labels uptime as *tracker-observed*. What a
 //! client *can* verify is the signed descriptor behind a row: `INDEX`
-//! carries the Ed25519 key prefix + generation so the full descriptor can be
-//! fetched (tracker gossip `Want`) and checked offline. This view surfaces
-//! the badge + key material; it does not itself fetch descriptors yet.
+//! carries a complete optional signed descriptor in its tenth column. This
+//! view checks that proof locally, including signature, address and freshness;
+//! a tracker flag or key prefix alone never produces a verified badge.
 //!
 //! ## Totality
 //!
@@ -80,9 +80,11 @@ fn directory_row(s: &rabbithole_directory::DirectoryServer) -> IndexEntry {
             .map(|p| format!("{:.1}", f64::from(p)))
             .unwrap_or_else(|| "-".into()),
         last_seen_secs: 0,
+        last_seen_known: false,
         signed: false,
         key_prefix: None,
         generation: None,
+        proof_row: Some(s.clone()),
     }
 }
 
@@ -118,11 +120,14 @@ pub struct IndexEntry {
     /// a percent with one decimal). Validated numeric, kept verbatim.
     pub uptime_pct: String,
     pub last_seen_secs: u64,
+    pub last_seen_known: bool,
     pub signed: bool,
     /// First 8 bytes of the verified server key (hex) for signed rows.
     pub key_prefix: Option<String>,
     /// Signed descriptor generation/attestation timestamp (unix ms, as text).
     pub generation: Option<String>,
+    /// Full untrusted statement, reverified at rendering time.
+    pub proof_row: Option<rabbithole_directory::DirectoryServer>,
 }
 
 /// One `CATEGORIES` row: category name plus its live-server count.
@@ -202,9 +207,14 @@ pub fn parse_index_line(line: &str) -> Option<IndexEntry> {
         categories,
         uptime_pct: uptime_pct.to_string(),
         last_seen_secs,
+        last_seen_known: true,
         signed,
         key_prefix: (key != "-" && !key.is_empty()).then(|| key.to_string()),
         generation: (generation != "-" && !generation.is_empty()).then(|| generation.to_string()),
+        proof_row: rabbithole_directory::parse_tracker_index(line)
+            .ok()?
+            .into_iter()
+            .next(),
     })
 }
 
@@ -532,7 +542,7 @@ pub fn table_header() -> String {
 /// One table row, columns aligned with [`table_header`].
 pub fn format_row(entry: &IndexEntry) -> String {
     format!(
-        "{:<18.18} {:<21.21} {:>5} {:>6.6} {:>5}s  {:<3} {}",
+        "{:<18.18} {:<21.21} {:>5} {:>6.6} {:>6}  {:<3} {}",
         entry.name,
         entry.addr,
         // "-" rather than "0": the directory doesn't count people.
@@ -540,23 +550,61 @@ pub fn format_row(entry: &IndexEntry) -> String {
             .users
             .map_or_else(|| "-".to_string(), |u| u.to_string()),
         entry.uptime_pct,
-        entry.last_seen_secs,
-        if entry.signed { "✓" } else { "-" },
+        if entry.last_seen_known {
+            format!("{}s", entry.last_seen_secs)
+        } else {
+            "-".into()
+        },
+        match entry_verification(entry) {
+            rabbithole_directory::DirectoryVerification::Verified(_) => "✓",
+            rabbithole_directory::DirectoryVerification::Stale(_) => "old",
+            rabbithole_directory::DirectoryVerification::Invalid
+            | rabbithole_directory::DirectoryVerification::Future => "!",
+            _ => "-",
+        },
         entry.categories.join(",")
     )
 }
 
-/// One-line verification detail for the selected row: the signed badge is
-/// backed by key prefix + generation so the descriptor can be fetched and
-/// checked offline; unsigned rows say so.
+/// Verification detail is recomputed from complete signed bytes at the current
+/// clock. Tracker assertions and missing proof are explicitly unverified.
 pub fn selection_detail(entry: &IndexEntry) -> String {
-    match (&entry.key_prefix, &entry.generation) {
-        (Some(key), Some(generation)) => format!(
-            "sel {}: signed ✓ key={key} gen={generation} — descriptor verifiable offline",
-            entry.name
+    use rabbithole_directory::{Binding, DirectoryVerification as V};
+    let detail = match entry_verification(entry) {
+        V::Verified(proof) => format!(
+            "signature verified; signed {} key={} gen={} (not uptime or reputation)",
+            if proof.binding == Binding::Endpoint {
+                "name and endpoint"
+            } else {
+                "name and address; transport not signed"
+            },
+            proof.public_key,
+            proof.issued_at_ms
         ),
-        _ => format!("sel {}: unsigned — nothing to verify", entry.name),
-    }
+        V::Stale(_) => {
+            "signature valid but descriptor expired; refresh before relying on it".into()
+        }
+        V::Future => "unverified: descriptor timestamp is in the future".into(),
+        V::Invalid => {
+            "unverified: supplied descriptor is invalid or does not match this row".into()
+        }
+        V::Unverified => {
+            "unverified: no complete signed descriptor (tracker flags are not proof)".into()
+        }
+    };
+    format!("sel {}: {detail}", entry.name)
+}
+
+fn entry_verification(entry: &IndexEntry) -> rabbithole_directory::DirectoryVerification {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0);
+    entry
+        .proof_row
+        .as_ref()
+        .map(|row| row.verification(now))
+        .unwrap_or(rabbithole_directory::DirectoryVerification::Unverified)
 }
 
 // ---------------------------------------------------------------------------
@@ -912,6 +960,7 @@ mod tests {
             users_online: None,
             listeners: vec!["quic".into(), "ws".into()],
             uptime_pct: Some(99),
+            proof: None,
             reachable: true,
         });
         assert_eq!(mapped.name, "alice@wonderland");
@@ -922,8 +971,13 @@ mod tests {
         // The ✓ means "this client verified a signed descriptor". The
         // directory doesn't ship one, so the badge stays off.
         assert!(!mapped.signed);
+        assert!(!mapped.last_seen_known);
+        assert!(
+            !format_row(&mapped).contains("0s"),
+            "unreported last-seen is unknown, not just now"
+        );
         assert!(mapped.key_prefix.is_none());
-        assert!(selection_detail(&mapped).contains("unsigned"));
+        assert!(selection_detail(&mapped).contains("unverified"));
 
         // A glass reports liveness, not a history. "-" not "0.0".
         let glass = directory_row(&rabbithole_directory::DirectoryServer {
@@ -933,6 +987,7 @@ mod tests {
             users_online: None,
             listeners: vec!["quic".into()],
             uptime_pct: None,
+            proof: None,
             reachable: false,
         });
         assert_eq!(glass.uptime_pct, "-");
@@ -1092,7 +1147,10 @@ mod tests {
 
         let signed = format_row(&parse_index_line(SIGNED_ROW).unwrap());
         assert!(signed.contains("Wonderland"));
-        assert!(signed.contains("✓"));
+        assert!(
+            !signed.contains("✓"),
+            "a tracker flag without full proof is not verification"
+        );
         assert!(signed.contains("100.0"));
         assert!(signed.contains("chat"));
 
@@ -1101,10 +1159,39 @@ mod tests {
         assert!(!unsigned.contains('✓'));
 
         let detail = selection_detail(&parse_index_line(SIGNED_ROW).unwrap());
-        assert!(detail.contains("key=ab00000000000001"));
-        assert!(detail.contains("gen=1700000000000"));
+        assert!(detail.contains("no complete signed descriptor"));
         let detail = selection_detail(&parse_index_line(UNSIGNED_ROW).unwrap());
-        assert!(detail.contains("unsigned"));
+        assert!(detail.contains("unverified"));
+    }
+
+    #[test]
+    fn a_complete_current_proof_is_checked_before_the_terminal_badge() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let signed =
+            looking_glass::descriptor::Descriptor::new("Proof", "127.0.0.1:4654".parse().unwrap())
+                .with_timestamp(now)
+                .sign(&rabbithole_identity::IdentityKey::from_seed(&[7; 32]))
+                .unwrap();
+        let proof: String = signed
+            .to_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let row = parse_index_line(&format!(
+            "Proof\t127.0.0.1:4654\t0\t-\t100\t0\tyes\tignored\t{now}\t{proof}"
+        ))
+        .unwrap();
+        assert!(format_row(&row).contains('✓'));
+        let detail = selection_detail(&row);
+        assert!(detail.contains("signature verified"));
+        assert!(detail.contains("transport not signed"));
+        let mut bad = row;
+        bad.proof_row.as_mut().unwrap().endpoint = "ws://127.0.0.1:9999".into();
+        assert!(!format_row(&bad).contains('✓'));
+        assert!(selection_detail(&bad).contains("invalid"));
     }
 
     /// End-to-end smoke against an **embedded** Looking Glass (the lib API,
