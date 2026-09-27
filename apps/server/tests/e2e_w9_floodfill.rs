@@ -1,6 +1,6 @@
 //! Wave 9 end-to-end tests: **board-event flood-fill over the S2S federation
 //! transport**. Where `e2e_w9_catalog.rs` / `e2e_w9_testnet.rs` prove signed
-//! *file catalogs* sync one hop (dialer-pull), this file proves signed *board
+//! *file catalogs* sync one hop, this file proves signed *board
 //! posts* gossip across the mesh: a subscription-driven `ihave → pull →
 //! events` exchange that relays events **unchanged**, verifying the origin
 //! signature on ingest and re-flooding to the next hop.

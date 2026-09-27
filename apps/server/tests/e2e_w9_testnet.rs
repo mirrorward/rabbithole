@@ -1,7 +1,8 @@
 //! Wave 9 end-to-end tests: a three-burrow CI testnet exercising the S2S
 //! federation layer as it exists **today** — authenticated peering with
-//! admin approval, plus signed-catalog announce/get/verify where sync is
-//! strictly **dialer-pull** (see `apps/server/src/federation.rs`). Building
+//! admin approval, plus signed-catalog announce/get/verify. Each dial retains
+//! its initial synchronous pull; negotiated live updates are independently
+//! covered in `e2e_symmetric_catalogs.rs`. Building
 //! on the two-burrow harness in `e2e_w9_federation.rs` / `e2e_w9_catalog.rs`,
 //! this file proves at three-node scale:
 //!
@@ -152,10 +153,9 @@ fn source_of<'a>(rows: &'a [Value], name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no search row for {name}"))
 }
 
-/// Full mesh A/B/C: all six directed edges approved and dialed. Because
-/// catalog sync is dialer-pull, full mutual visibility needs every directed
-/// edge — after which each burrow's fed-search sees all three libraries with
-/// correct provenance.
+/// Full mesh A/B/C: retain all six directed dials to exercise deterministic
+/// initial-pull readiness and redundant edges. Live catalog sync needs only
+/// one dial per pair; every burrow still sees all libraries with provenance.
 #[tokio::test]
 async fn three_server_full_mesh() {
     let work = tempfile::tempdir().unwrap();

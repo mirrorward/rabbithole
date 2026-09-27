@@ -64,6 +64,10 @@ Message-type constants from `apps/server/src/federation.rs`
 | 9 | IHave | both, post-welcome | bounded signed-event ids available for a board |
 | 10 | Pull | both, post-welcome | bounded signed-event ids requested for a board |
 | 11 | Events | both, post-welcome | signed events plus parallel origin-key selectors; selectors never establish trust |
+| 12 | CatalogSyncSupport | dialer probe / listener reply | `catalog-sync-v1` capability string; correlated nonzero request ID |
+| 13 | LiveCatalogAnnounce | both, after negotiation | `catalog_id`, `generation`; push with ID zero |
+| 14 | LiveCatalogGet | both, after negotiation | empty request; nonzero request ID |
+| 15 | LiveCatalogReply | both, after negotiation | signed catalog bytes or an error; echoes the request ID |
 
 `PeerHello`/`PeerHelloAck` are the `crates/federation::handshake` types.
 
@@ -143,11 +147,11 @@ redials any without a live session.
 
 ## Catalog sync
 
-Sync is **dialer-pull**. After `Welcome { connected: true }`:
+The initial exchange remains **dialer-pull** for compatibility. After
+`Welcome { connected: true }`:
 
 1. The dialer sends `CatalogAnnounce` for its local catalog; the listener
-   answers with its own id/generation (it does not fetch back on this
-   connection — it pulls the dialer's catalog when it dials back itself).
+   answers with its own id/generation.
 2. If the announced generation is fresher than what the dialer holds for
    this peer, it sends `CatalogGet`; the listener replies `Catalog` with the
    `SignedCatalog` bytes.
@@ -155,10 +159,32 @@ Sync is **dialer-pull**. After `Welcome { connected: true }`:
    Ed25519 key the handshake just proved, not any key named inside the
    bytes — plus generation staleness, before storing it.
 
-Sync failure is non-fatal (the peering session stands; the next dial
-retries). Cross-server search runs locally over the verified stored
-catalogs (`ctl fed-search`); a client-facing RHP search over federated
-catalogs is a follow-up.
+After this exchange, a supporting dialer sends a `catalog-sync-v1` probe.
+Only a matching capability reply enables live synchronization. Older listeners
+ignore the additive probe; newer listeners send no extension traffic to an
+older dialer. Protocol-2 authentication and the initial sync remain unchanged.
+
+When negotiated, both endpoints check local catalog content every 30 seconds
+and announce changed IDs on the existing connection. This also catches moves,
+deletions and moderation changes that do not emit file-added events. Both
+sides can request a newer catalog without a reciprocal dial. Only local file
+catalogs are advertised; this remains one-hop exchange, with no transitive
+relay of cached peer catalogs.
+
+Each direction permits one outstanding fetch. Replies must have the expected
+message type, reply kind and exact nonzero request ID; wrong, unsolicited or
+expired IDs leave the active fetch untouched. Probe/fetch deadlines are 15
+seconds, and fetch attempts are spaced at least 30 seconds apart. Control
+payloads are capped at 128 bytes and catalog replies at 4 MiB including their
+encoded payload envelope. A signed reply at the announced generation must
+match its announced ID; a newer signed generation is also accepted. Signature,
+approval-revision and replay checks still run before persistence.
+
+Local catalog/cache failures and explicit fetch refusals leave board traffic
+usable and retry at the next interval. Invalid peer envelopes, signatures or
+authorization can close the connection. Cross-server search runs locally over
+the verified stored catalogs (`ctl fed-search`); a client-facing RHP search
+over federated catalogs is a follow-up.
 
 ### Peer cache and restart behavior
 

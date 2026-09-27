@@ -49,9 +49,10 @@
 //!   Ed25519 key the handshake proved) and generation staleness before
 //!   storing it (see [`crate::fed_catalog::ingest_peer_catalog`]).
 //!
-//! Sync is **dialer-pull**: the listener serves announces/fetches but pulls
-//! the dialer's catalog only when it dials back itself (the background dialer
-//! does this for configured peers). Building/serving the local catalog and
+//! That initial dialer-pull exchange remains compatible with older peers.
+//! After it completes, supporting peers negotiate `catalog-sync-v1` and
+//! announce/fetch changed catalogs in both directions on the same session,
+//! using correlated requests separate from board traffic. Building/serving the local catalog and
 //! the per-peer verified store live in [`crate::fed_catalog`]; `fed-search`
 //! in `ctl` runs the cross-server search over them. Client-facing RHP search
 //! over federated catalogs is a follow-up.
@@ -111,6 +112,8 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
 use crate::Shared;
+
+mod catalog_sync;
 
 /// Domain separator for the S2S handshake proof signatures.
 const AUTH_CONTEXT: &[u8] = b"rhp-fed-s2s-auth-v2";
@@ -212,7 +215,7 @@ struct WelcomeMsg {
 
 /// Both directions, post-welcome: "my current catalog is `catalog_id` at
 /// `generation`" — enough for the other side to detect staleness cheaply.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct CatalogAnnounceMsg {
     catalog_id: [u8; 32],
     generation: u64,
@@ -683,7 +686,8 @@ const PULL_STREAMS_PER_LINK: usize = 16;
 /// The post-welcome session loop, shared by both the listener (`serve_peer`)
 /// and the dialer (`hold_dialer`). It drives board-event flood-fill —
 /// announcing our board interest, offering/pulling/delivering signed events —
-/// and, on the listener side, still answers catalog announce/get.
+/// and negotiated live catalogs in both directions. The listener also answers
+/// the legacy initial catalog announce/get before capability negotiation.
 ///
 /// Two branches, one `&mut conn` (like `session.rs`): an inbound federation
 /// frame, or a local `ServerEvent::BoardPost` that we may offer to this peer.
@@ -726,6 +730,15 @@ async fn run_peer_session(
     // listener stays quiet until it receives a subscription, then replies with
     // its own — this keeps the dialer's catalog exchange frame-ordered.
     let is_dialer = !serve_catalog;
+    let mut catalogs = catalog_sync::CatalogSync::new();
+    if is_dialer {
+        if let Err(error) = catalogs
+            .probe(conn.as_mut(), tokio::time::Instant::now())
+            .await
+        {
+            tracing::debug!(%error, "federation catalog capability probe failed");
+        }
+    }
     if is_dialer {
         if let Err(e) = announce_subscription(conn.as_mut(), &shared, &mut edge).await {
             tracing::debug!(
@@ -750,14 +763,22 @@ async fn run_peer_session(
                     );
                     break;
                 }
+                if let Err(error) = catalogs.tick(conn.as_mut(), &shared, &edge.peer_key, &edge.peer_origin, tokio::time::Instant::now()).await {
+                    tracing::debug!(%error, "federation live catalog sync ended");
+                    break;
+                }
             }
             incoming = conn.recv() => {
                 match incoming {
                     Ok(Some(frame)) => {
-                        if let Err(e) =
-                            handle_peer_frame(conn.as_mut(), &shared, &mut edge, &frame, serve_catalog)
-                                .await
-                        {
+                        let result = async {
+                            if catalog_sync::handles(frame.message_type) {
+                                catalogs.handle(conn.as_mut(), &shared, &edge.peer_key, &edge.peer_origin, &frame, tokio::time::Instant::now()).await
+                            } else {
+                                handle_peer_frame(conn.as_mut(), &shared, &mut edge, &frame, serve_catalog).await
+                            }
+                        }.await;
+                        if let Err(e) = result {
                             tracing::debug!(
                                 peer = %PublicKey(peer_key).fingerprint(),
                                 "federation session exchange ended: {e}"
@@ -1519,9 +1540,8 @@ async fn sync_catalogs(
 }
 
 /// Keep a dialer-side session alive until the peer drops it, running
-/// board-event flood-fill over it. The dialer's catalog sync already ran
-/// before this hold, so catalog serving here is disabled (the listener side
-/// answers those).
+/// board-event flood-fill and negotiated live catalogs. The legacy initial
+/// catalog exchange already ran, so only its listener-side handlers are off.
 async fn hold_dialer(
     conn: Box<dyn Connection>,
     peer_key: [u8; 32],
