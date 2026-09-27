@@ -376,3 +376,165 @@ async fn staged_symlinks_are_unlinked_without_touching_external_files() {
     symlink(dir.path().join("stage"), &link).unwrap();
     assert!(Staging::open_with_clock(link, [3; 32], Arc::new(|| 100)).is_err());
 }
+
+fn hotline_target(name: &str) -> Target {
+    Target {
+        protocol: Protocol::Hotline,
+        ..target(name)
+    }
+}
+
+#[tokio::test]
+async fn hotline_resume_binds_complete_length_without_resetting_active_claims_or_expiry() {
+    let dir = tempfile::tempdir().unwrap();
+    let time = Arc::new(AtomicU64::new(100));
+    let s = open(dir.path(), &time);
+    let (lease, bytes) = s
+        .claim_hotline(hotline_target("a"), false, 10)
+        .await
+        .unwrap();
+    assert!(bytes.is_empty());
+    assert!(lease.bind_hotline_length(10).await.unwrap());
+    lease.append(0, b"hello").await.unwrap();
+    assert!(s
+        .claim_hotline(hotline_target("a"), true, 10)
+        .await
+        .is_err());
+    assert!(s
+        .claim_hotline(hotline_target("a"), false, 10)
+        .await
+        .is_err());
+    drop(lease);
+    drop(s);
+    let s = open(dir.path(), &time);
+    let (lease, bytes) = s
+        .claim_hotline(hotline_target("a"), true, 10)
+        .await
+        .unwrap();
+    assert_eq!(bytes, b"hello");
+    assert!(!lease.bind_hotline_length(9).await.unwrap());
+    assert!(!lease.bind_hotline_length(11).await.unwrap());
+    time.store(100 + TTL - 1, Ordering::SeqCst);
+    assert!(lease.bind_hotline_length(10).await.unwrap());
+    assert!(lease.append(5, b"too-long").await.is_err());
+    drop(lease);
+    time.store(100 + TTL, Ordering::SeqCst);
+    let (lease, bytes) = s
+        .claim_hotline(hotline_target("a"), true, 10)
+        .await
+        .unwrap();
+    assert!(
+        bytes.is_empty(),
+        "negotiation and length checks did not extend expiry"
+    );
+    assert!(lease.bind_hotline_length(3).await.unwrap());
+    lease.append(0, b"new").await.unwrap();
+    drop(lease);
+    let (lease, bytes) = s
+        .claim_hotline(hotline_target("a"), false, 10)
+        .await
+        .unwrap();
+    assert!(
+        bytes.is_empty(),
+        "explicit fresh upload resets an idle checkpoint"
+    );
+    assert!(lease.bind_hotline_length(2).await.unwrap());
+}
+
+#[tokio::test]
+async fn hotline_and_zmodem_targets_are_separate_but_share_reservations() {
+    let dir = tempfile::tempdir().unwrap();
+    let time = Arc::new(AtomicU64::new(100));
+    let s = open(dir.path(), &time);
+    let (zmodem, _) = s.claim(target("a"), offer(), MAX_FILE).await.unwrap();
+    zmodem.append(0, b"hello").await.unwrap();
+    let (hotline, bytes) = s
+        .claim_hotline(hotline_target("a"), true, MAX_FILE)
+        .await
+        .unwrap();
+    assert!(bytes.is_empty());
+    let (second, _) = s
+        .claim_hotline(hotline_target("b"), false, MAX_FILE)
+        .await
+        .unwrap();
+    let (third, _) = s
+        .claim_hotline(hotline_target("c"), false, MAX_FILE)
+        .await
+        .unwrap();
+    assert!(s
+        .claim_hotline(hotline_target("d"), false, MAX_FILE)
+        .await
+        .is_err());
+    drop((hotline, second, third));
+    assert!(s
+        .claim_hotline(hotline_target("d"), false, MAX_FILE)
+        .await
+        .is_ok());
+    assert!(s
+        .claim_hotline(target("wrong-protocol"), true, 10)
+        .await
+        .is_err());
+    assert!(zmodem.bind_hotline_length(10).await.is_err());
+}
+
+#[tokio::test]
+async fn pre_hotline_version_one_zmodem_records_remain_readable() {
+    // Mirror RH27's persisted structure, with no new protocol variant or fields.
+    #[derive(Serialize)]
+    enum OldProtocol {
+        Zmodem,
+    }
+    #[derive(Serialize)]
+    struct OldTarget {
+        protocol: OldProtocol,
+        account: i64,
+        area: i64,
+        parent: Option<i64>,
+        name: String,
+    }
+    #[derive(Serialize)]
+    struct OldOffer {
+        length: Option<u64>,
+        mtime: Option<u64>,
+    }
+    #[derive(Serialize)]
+    struct OldRecord {
+        version: u8,
+        target: OldTarget,
+        offer: OldOffer,
+        len: u64,
+        digest: [u8; 32],
+        expires: u64,
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let time = Arc::new(AtomicU64::new(100));
+    let s = open(dir.path(), &time);
+    let id = target_id(&target("old")).unwrap();
+    let record = OldRecord {
+        version: 1,
+        target: OldTarget {
+            protocol: OldProtocol::Zmodem,
+            account: 1,
+            area: 1,
+            parent: None,
+            name: "old".into(),
+        },
+        offer: OldOffer {
+            length: Some(10),
+            mtime: Some(7),
+        },
+        len: 5,
+        digest: *blake3::hash(b"hello").as_bytes(),
+        expires: 100 + TTL,
+    };
+    let body = postcard::to_allocvec(&record).unwrap();
+    let mut signed = blake3::keyed_hash(&s.0.key, &body).as_bytes().to_vec();
+    signed.extend_from_slice(&body);
+    fs::write(s.0.path(&id, "meta"), signed).unwrap();
+    fs::write(s.0.path(&id, "part"), b"hello").unwrap();
+    drop(s);
+    let s = open(dir.path(), &time);
+    let (lease, bytes) = s.claim(target("old"), offer(), 10).await.unwrap();
+    assert_eq!(bytes, b"hello");
+    lease.append(5, b"world").await.unwrap();
+}

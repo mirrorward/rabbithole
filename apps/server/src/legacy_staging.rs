@@ -24,6 +24,8 @@ const MAX_SCAN: usize = MAX_RECORDS * 4;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Protocol {
     Zmodem,
+    // Append only: the Zmodem discriminant is persisted in version-1 records.
+    Hotline,
 }
 
 /// Database identities prevent a newly created folder at an old path from
@@ -37,7 +39,8 @@ pub(crate) struct Target {
     pub name: String,
 }
 
-/// The identification available in a ZFILE offer; it supplies no content hash.
+/// Resume metadata, without a remote content hash. ZMODEM knows it at offer;
+/// Hotline binds the complete DATA length when its first DATA header arrives.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Offer {
     pub length: Option<u64>,
@@ -98,6 +101,11 @@ impl Drop for Claim {
 
 #[derive(Clone)]
 pub(crate) struct Lease(Arc<Claim>);
+
+enum ClaimMode {
+    Exact(Offer),
+    Hotline { resume: bool },
+}
 
 impl Staging {
     pub async fn open(data_dir: &Path, seed: &[u8; 32]) -> Result<Self> {
@@ -219,6 +227,30 @@ impl Staging {
     }
 
     pub async fn claim(&self, target: Target, offer: Offer, cap: u64) -> Result<(Lease, Vec<u8>)> {
+        self.claim_inner(target, ClaimMode::Exact(offer), cap).await
+    }
+
+    /// Hotline asks for RFLT before its DATA header is available. Atomically
+    /// claim the saved offer or reset a fresh upload; never reset an active one.
+    pub async fn claim_hotline(
+        &self,
+        target: Target,
+        resume: bool,
+        cap: u64,
+    ) -> Result<(Lease, Vec<u8>)> {
+        if target.protocol != Protocol::Hotline {
+            bail!("invalid Hotline staging protocol");
+        }
+        self.claim_inner(target, ClaimMode::Hotline { resume }, cap)
+            .await
+    }
+
+    async fn claim_inner(
+        &self,
+        target: Target,
+        mode: ClaimMode,
+        cap: u64,
+    ) -> Result<(Lease, Vec<u8>)> {
         let store = self.0.clone();
         tokio::task::spawn_blocking(move || {
             #[cfg(test)]
@@ -231,13 +263,28 @@ impl Staging {
                     bail!("staging IO failed; restart after repairing storage");
                 }
                 let id = target_id(&target)?;
-                if cap > MAX_FILE || offer.length.is_some_and(|len| len > cap) {
-                    bail!("staging file limit exceeded");
-                }
                 let now = (store.clock)();
                 store.expire(&mut index, now)?;
                 if index.claimed.contains_key(&id) {
                     bail!("this destination already has an active upload");
+                }
+                let (offer, resume) = match &mode {
+                    ClaimMode::Exact(offer) => (offer.clone(), true),
+                    ClaimMode::Hotline { resume } => (
+                        index
+                            .records
+                            .get(&id)
+                            .filter(|_| *resume)
+                            .map(|r| r.offer.clone())
+                            .unwrap_or(Offer {
+                                length: None,
+                                mtime: None,
+                            }),
+                        *resume,
+                    ),
+                };
+                if cap > MAX_FILE || offer.length.is_some_and(|len| len > cap) {
+                    bail!("staging file limit exceeded");
                 }
                 let reserved: u64 = index
                     .records
@@ -248,18 +295,17 @@ impl Staging {
                 if reserved.saturating_add(cap) > MAX_TOTAL {
                     bail!("staging byte reservation limit reached");
                 }
-                let loaded = match index
-                    .records
-                    .get(&id)
-                    .filter(|r| r.target == target && r.offer == offer && r.len <= cap)
-                {
-                    Some(record) => match store.read_prefix(&id, record) {
-                        Ok(data) => Some(data),
-                        Err(error) if storage_error(&error) => return Err(error),
-                        Err(_) => None,
-                    },
-                    None => None,
-                };
+                let loaded =
+                    match index.records.get(&id).filter(|r| {
+                        resume && r.target == target && r.offer == offer && r.len <= cap
+                    }) {
+                        Some(record) => match store.read_prefix(&id, record) {
+                            Ok(data) => Some(data),
+                            Err(error) if storage_error(&error) => return Err(error),
+                            Err(_) => None,
+                        },
+                        None => None,
+                    };
                 let data = match loaded {
                     Some(data) => data,
                     None => {
@@ -310,7 +356,43 @@ impl Staging {
 }
 
 impl Lease {
-    /// Commit only newly CRC-validated contiguous bytes. Sync data first; if
+    /// Bind the assembled Hotline DATA length once, before checkpointing any
+    /// bytes. Subsequent resumes must carry exactly the remaining length. This
+    /// does not renew expiry: metadata-only negotiations are not progress.
+    pub async fn bind_hotline_length(&self, length: u64) -> Result<bool> {
+        let claim = self.0.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut index = claim.store.index.lock();
+            let result = (|| -> Result<bool> {
+                if index.failed {
+                    bail!("staging IO failed; restart after repairing storage");
+                }
+                let old = index
+                    .records
+                    .get(&claim.id)
+                    .context("staging was discarded")?;
+                if old.target.protocol != Protocol::Hotline {
+                    bail!("invalid Hotline staging protocol");
+                }
+                if length > claim.cap || length < old.len {
+                    return Ok(false);
+                }
+                if let Some(expected) = old.offer.length {
+                    return Ok(expected == length);
+                }
+                let mut record = old.clone();
+                record.offer.length = Some(length);
+                claim.store.write_record(&claim.id, &record)?;
+                index.records.insert(claim.id.clone(), record);
+                Ok(true)
+            })();
+            claim.store.latch_error(&mut index, &result);
+            result
+        })
+        .await?
+    }
+
+    /// Commit only newly validated contiguous bytes. Sync data first; if
     /// metadata replacement fails, the old signed prefix still names safe data.
     pub async fn append(&self, offset: u64, bytes: &[u8]) -> Result<()> {
         let claim = self.0.clone();
@@ -333,7 +415,10 @@ impl Lease {
                 let len = offset
                     .checked_add(bytes.len() as u64)
                     .context("staging size overflow")?;
-                if old.len != offset || len > claim.cap {
+                if old.len != offset
+                    || len > claim.cap
+                    || old.offer.length.is_some_and(|expected| len > expected)
+                {
                     bail!("invalid staging offset or length");
                 }
                 if bytes.is_empty() {

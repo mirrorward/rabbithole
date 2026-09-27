@@ -69,9 +69,10 @@
 //! the FILE_TRANSFER_OPTIONS field is answered with the already-received
 //! DATA-fork size in an `RFLT` reply field, and the client's next HTXF send
 //! (whose DATA fork holds only the tail) is appended to the partial. Partial
-//! uploads live in the [`Hub`] **in memory with a TTL** — they do not
-//! survive a server restart (persisting partials to staging files is a
-//! documented follow-up).
+//! uploads use authenticated, bounded disk checkpoints with a 30-minute TTL.
+//! A control request claims the prefix exclusively until its HTXF completes
+//! or the pending reference expires. Matching re-offers survive daemon restart;
+//! the resumed DATA length must complete the original declared DATA fork.
 //!
 //! The account-admin slice adds the classic **admin transactions**:
 //!
@@ -129,7 +130,7 @@ use rabbithole_server_core::chat::{ChatError, Sender, LOBBY};
 use rabbithole_server_core::files::{KIND_ALIAS, KIND_FILE, KIND_FOLDER};
 use rabbithole_server_core::ratelimit::{class as rl, now_ms, Scope};
 use rabbithole_server_core::{AuthError, Caps, PresenceEntry, Role, ServerEvent, Subject};
-use rabbithole_store_server::repo::{Account, AccountsRepo, AuditRepo};
+use rabbithole_store_server::repo::{Account, AccountsRepo, AuditRepo, ClassesRepo};
 use rabbithole_store_server::repo4::{BoardRow, PostRow};
 use rabbithole_store_server::repo6::FileNodeRow;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -138,6 +139,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
+use crate::legacy_staging::{Lease, Protocol, Target};
 use crate::Shared;
 
 /// Field id for the packed "user name with info" record returned in the user
@@ -169,10 +171,8 @@ const MAX_FRAME_BODY: usize = 16 * 1024 * 1024;
 /// bans (and exposing an unban admin op) is a documented follow-up.
 const TEMP_BAN: Duration = Duration::from_secs(30 * 60);
 
-/// Hard ceiling on one HTXF upload's assembled DATA fork. Uploads stage in
-/// memory (matching the staged-download design), so this bounds a session's
-/// stage; larger files belong on the native transfer path. Streaming HTXF
-/// uploads to disk staging is a documented follow-up.
+/// Hard ceiling on one HTXF upload's assembled DATA fork, held in bounded
+/// memory and checkpointed to private disk. Larger files use native transfers.
 const MAX_HTXF_UPLOAD: u64 = 64 * 1024 * 1024;
 
 /// Room for the flattened-object wrapping around a file's DATA fork when its
@@ -186,10 +186,6 @@ const MAX_INFO_FORK: u32 = 64 * 1024;
 /// How long a negotiated upload reference stays claimable before the HTXF
 /// connection must arrive. Expired references are pruned lazily.
 const UPLOAD_REF_TTL: Duration = Duration::from_secs(10 * 60);
-
-/// How long an interrupted upload's partial DATA fork is kept for resume.
-/// In-memory only (see the module docs) — persistence is a follow-up.
-const PARTIAL_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Per-read idle timeout on an HTXF upload: a stalled sender is treated as
 /// interrupted (its bytes so far are kept for resume) and the socket closed.
@@ -212,11 +208,6 @@ pub struct Hub {
     /// data channel, quotes the reference, and *sends* a flattened file
     /// object. Consumed on the HTXF read; expired entries pruned lazily.
     uploads: Mutex<HashMap<u32, UploadTicket>>,
-    /// Interrupted uploads' partial DATA forks, keyed by
-    /// `(account, area, folder, name)` (see [`partial_key`]), kept for
-    /// [`PARTIAL_TTL`] so the classic resume flow can append the tail.
-    /// In-memory only; persisting partials across restarts is a follow-up.
-    partials: Mutex<HashMap<String, PartialUpload>>,
     /// Monotonic reference-number source for staged transfers.
     next_ref: AtomicU32,
     /// Temporary ban list: namespaced key (`"login:<name>"` / `"ip:<addr>"`)
@@ -250,25 +241,13 @@ struct UploadTicket {
     /// a DATA fork claiming more than this is refused. `None` on resume —
     /// classic clients omit the field then.
     declared_total: Option<u64>,
-    /// Partial-state key (see [`partial_key`]) this upload appends to.
-    key: String,
+    /// Exclusive durable claim held from RFLT negotiation through HTXF.
+    lease: Lease,
+    target: Target,
+    /// Verified saved prefix; capped together with every pending/active claim.
+    data: Vec<u8>,
     /// When this reference stops being claimable.
     expires: Instant,
-}
-
-/// An interrupted upload's bytes-so-far, kept for the classic resume flow.
-struct PartialUpload {
-    data: Vec<u8>,
-    expires: Instant,
-}
-
-/// The partial-upload state key: per uploader account and destination, so a
-/// resume can only continue *your own* interrupted upload of that file.
-fn partial_key(account_id: i64, area: &str, folder: Option<&str>, name: &str) -> String {
-    format!(
-        "{account_id}\u{1f}{area}\u{1f}{}\u{1f}{name}",
-        folder.unwrap_or("")
-    )
 }
 
 /// A connected Hotline client's routing handle.
@@ -325,45 +304,11 @@ impl Hub {
         }
     }
 
-    /// The already-received DATA-fork size for a partial upload, if one is
-    /// live — what the UploadFile resume reply quotes. Expired partials are
-    /// pruned.
-    fn partial_len(&self, key: &str) -> usize {
-        let mut partials = self.partials.lock();
-        match partials.get(key) {
-            Some(p) if p.expires > Instant::now() => p.data.len(),
-            Some(_) => {
-                partials.remove(key);
-                0
-            }
-            None => 0,
-        }
-    }
-
-    /// Take (and remove) a partial upload's bytes; empty when none is live.
-    fn take_partial(&self, key: &str) -> Vec<u8> {
-        let mut partials = self.partials.lock();
-        match partials.remove(key) {
-            Some(p) if p.expires > Instant::now() => p.data,
-            _ => Vec::new(),
-        }
-    }
-
-    /// Keep an interrupted upload's bytes for resume (fresh TTL).
-    fn save_partial(&self, key: String, data: Vec<u8>) {
-        self.partials.lock().insert(
-            key,
-            PartialUpload {
-                data,
-                expires: Instant::now() + PARTIAL_TTL,
-            },
-        );
-    }
-
-    /// Discard any partial state for a destination (a fresh, non-resuming
-    /// upload starts over).
-    fn drop_partial(&self, key: &str) {
-        self.partials.lock().remove(key);
+    /// Drop expired tickets before admitting new durable claims: each ticket
+    /// owns an exclusive lease and capacity reservation until taken or expired.
+    fn prune_uploads(&self) {
+        let now = Instant::now();
+        self.uploads.lock().retain(|_, ticket| ticket.expires > now);
     }
 
     fn register(&self, id: u32, tx: mpsc::UnboundedSender<Vec<u8>>, icon: u16, ip: Option<IpAddr>) {
@@ -588,168 +533,221 @@ async fn serve_htxf(sock: TcpStream, shared: Arc<Shared>) -> Result<()> {
     Ok(())
 }
 
-/// Receive one HTXF upload: parse the flattened file object off the wire
-/// (FILP header, INFO fork, DATA fork; a MACR resource fork is drained and
-/// dropped — this store keeps data forks only), appending the DATA fork to
-/// any resumed partial. A cleanly-completed DATA fork finalizes through
-/// [`finalize_htxf_upload`]; an interrupted or stalled one parks its bytes
-/// for resume; an object that violates the declared/hard size caps is
-/// refused outright (its partial state is discarded).
-///
-/// Never returns an error to the caller: the HTXF channel has no error
-/// vocabulary, so every outcome ends in the caller's graceful close and the
-/// control channel tells the story (the file either appears or it doesn't —
-/// exactly how classic servers behave).
-async fn receive_htxf_upload<R>(rd: &mut R, shared: &Arc<Shared>, ticket: UploadTicket)
+/// Receive a complete, bounded flattened object. A lease already holds the
+/// prefix advertised by RFLT; interrupted IO retains that prefix and every new
+/// durable checkpoint. Malformed input is a definitive rejection.
+async fn receive_htxf_upload<R>(rd: &mut R, shared: &Arc<Shared>, mut ticket: UploadTicket)
 where
     R: AsyncReadExt + Unpin,
 {
-    /// `read_exact` with the per-read idle timeout; `false` on EOF/timeout.
+    if receive_htxf_inner(rd, shared, &mut ticket).await {
+        if let Err(error) = ticket.lease.discard().await {
+            tracing::warn!(%error, "cannot clean Hotline upload checkpoint");
+        }
+    }
+}
+
+/// True discards a completed/rejected upload; false preserves a retryable one.
+async fn receive_htxf_inner<R>(rd: &mut R, shared: &Arc<Shared>, ticket: &mut UploadTicket) -> bool
+where
+    R: AsyncReadExt + Unpin,
+{
     async fn read_full<R: AsyncReadExt + Unpin>(rd: &mut R, buf: &mut [u8]) -> bool {
         matches!(
             tokio::time::timeout(HTXF_IDLE, rd.read_exact(buf)).await,
             Ok(Ok(_))
         )
     }
-
+    match current_upload_allowed(
+        shared,
+        ticket.account_id,
+        &ticket.area,
+        ticket.folder.as_deref(),
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => return true,
+        Err(_) => return false,
+    }
     let mut flat = [0u8; FlatHeader::LEN];
     if !read_full(rd, &mut flat).await {
-        return;
+        return false;
+    }
+    if flat[4..6] != [0, 1] {
+        return true;
     }
     let Ok(flat) = FlatHeader::decode(&flat) else {
-        return; // not a flattened file object; drop it
+        return true;
     };
-
-    // Resumed bytes (empty for a fresh upload). Taken — an interruption
-    // below re-parks the accumulated buffer under the same key.
-    let mut data = shared.hotline.take_partial(&ticket.key);
+    if flat.fork_count == 0 || flat.fork_count > 8 {
+        return true;
+    }
+    let mut data = std::mem::take(&mut ticket.data);
     let base = data.len() as u64;
-    let mut info: Option<InfoFork> = None;
+    let mut info = None;
     let mut got_data = false;
-
-    for _ in 0..flat.fork_count.min(8) {
+    let mut auxiliary = 0u64;
+    let mut wire_size = FlatHeader::LEN as u64;
+    for _ in 0..flat.fork_count {
         let mut fh = [0u8; ForkHeader::LEN];
         if !read_full(rd, &mut fh).await {
-            break;
+            return false; // never publish an incomplete later fork
+        }
+        if fh[4..8] != [0; 4] {
+            return true; // compressed forks are unsupported
         }
         let Ok(fork) = ForkHeader::decode(&fh) else {
-            break;
+            return true;
         };
-        if fork.fork_type == FORK_INFO {
-            if fork.data_size > MAX_INFO_FORK {
-                return; // hostile metadata; refuse (partial already taken)
+        let claim = u64::from(fork.data_size);
+        wire_size += ForkHeader::LEN as u64 + claim;
+        if ticket.declared_total.is_some_and(|total| wire_size > total) {
+            return true;
+        }
+        if fork.fork_type == FORK_DATA {
+            if got_data || base + claim > crate::upload_gate::file_ceiling(shared, MAX_HTXF_UPLOAD)
+            {
+                return true;
             }
-            let mut body = vec![0u8; fork.data_size as usize];
-            if !read_full(rd, &mut body).await {
-                break;
+            match ticket.lease.bind_hotline_length(base + claim).await {
+                Ok(true) => {}
+                Ok(false) => return true,
+                Err(error) => {
+                    tracing::warn!(%error, "cannot bind Hotline upload length");
+                    return false;
+                }
             }
-            info = InfoFork::decode(&body).ok();
-        } else if fork.fork_type == FORK_DATA {
-            // Enforce the declared TRANSFER_SIZE and the hard cap up front:
-            // a fork claiming more than the client declared on the control
-            // channel (or more than the stage allows) is refused, not
-            // truncated.
-            let claim = u64::from(fork.data_size);
-            let ceiling = crate::upload_gate::file_ceiling(shared, MAX_HTXF_UPLOAD);
-            let oversized = base.saturating_add(claim) > ceiling
-                || ticket.declared_total.is_some_and(|d| claim > d);
-            if oversized {
-                tracing::debug!(
-                    name = %ticket.name,
-                    claim,
-                    declared = ?ticket.declared_total,
-                    "hotline upload refused: DATA fork exceeds declared/hard cap"
-                );
-                return;
-            }
-            // Stream the fork in bounded chunks; EOF or a stall mid-fork
-            // parks the bytes so the classic resume flow can continue them.
             let mut remaining = fork.data_size as usize;
             let mut chunk = vec![0u8; 64 * 1024];
-            let mut interrupted = false;
             while remaining > 0 {
                 let want = remaining.min(chunk.len());
-                match tokio::time::timeout(HTXF_IDLE, rd.read(&mut chunk[..want])).await {
-                    Ok(Ok(n)) if n > 0 => {
-                        data.extend_from_slice(&chunk[..n]);
-                        remaining -= n;
-                    }
-                    _ => {
-                        interrupted = true;
-                        break;
-                    }
+                let n = match tokio::time::timeout(HTXF_IDLE, rd.read(&mut chunk[..want])).await {
+                    Ok(Ok(n)) if n > 0 => n,
+                    _ => return false,
+                };
+                if let Err(error) = ticket.lease.append(data.len() as u64, &chunk[..n]).await {
+                    tracing::warn!(%error, "cannot checkpoint Hotline upload");
+                    return false;
                 }
-            }
-            if interrupted {
-                if !data.is_empty() {
-                    shared.hotline.save_partial(ticket.key.clone(), data);
-                }
-                return;
+                data.extend_from_slice(&chunk[..n]);
+                remaining -= n;
             }
             got_data = true;
         } else {
-            // Unknown fork (MACR resource fork and friends): drain and drop,
-            // bounded by the same hard cap.
-            if u64::from(fork.data_size) > MAX_HTXF_UPLOAD {
-                return;
+            auxiliary += claim;
+            if auxiliary > MAX_HTXF_UPLOAD {
+                return true;
             }
-            let mut remaining = fork.data_size as usize;
-            let mut chunk = vec![0u8; 64 * 1024];
-            while remaining > 0 {
-                let want = remaining.min(chunk.len());
-                match tokio::time::timeout(HTXF_IDLE, rd.read(&mut chunk[..want])).await {
-                    Ok(Ok(n)) if n > 0 => remaining -= n,
-                    _ => return,
+            if fork.fork_type == FORK_INFO {
+                if info.is_some() || fork.data_size > MAX_INFO_FORK {
+                    return true;
+                }
+                let mut body = vec![0u8; fork.data_size as usize];
+                if !read_full(rd, &mut body).await {
+                    return false;
+                }
+                let Ok(decoded) = InfoFork::decode(&body) else {
+                    return true;
+                };
+                info = Some(decoded);
+            } else {
+                // Resource and unknown forks are drained, never checkpointed.
+                let mut remaining = fork.data_size as usize;
+                let mut chunk = vec![0u8; 64 * 1024];
+                while remaining > 0 {
+                    let want = remaining.min(chunk.len());
+                    match tokio::time::timeout(HTXF_IDLE, rd.read(&mut chunk[..want])).await {
+                        Ok(Ok(n)) if n > 0 => remaining -= n,
+                        _ => return false,
+                    }
                 }
             }
         }
     }
-
     if !got_data {
-        // The object carried no (complete) DATA fork: keep whatever resumed
-        // bytes we were holding so the client can still continue later.
-        if base > 0 {
-            shared.hotline.save_partial(ticket.key.clone(), data);
-        }
-        return;
+        return true;
     }
-    finalize_htxf_upload(shared, ticket, data, info).await;
+    finalize_htxf_upload(shared, ticket, data, info).await
 }
 
-/// Finalize a completely-received HTXF upload with the same enforcement
-/// gates as the native `UploadFinish` path: hash-deny, storage quota, then
-/// the content-addressed blob commit and file-node registration.
+/// A fresh database subject is used only for the upload path; changing class,
+/// grants or account status must apply to pending tickets and resumed files.
+async fn current_upload_allowed(
+    shared: &Shared,
+    account_id: i64,
+    area: &str,
+    folder: Option<&str>,
+) -> Result<bool> {
+    let Some(account) = AccountsRepo(&shared.pool)
+        .by_id(account_id)
+        .await?
+        .filter(|account| !account.disabled && account.role > Role::Guest as u8)
+    else {
+        return Ok(false);
+    };
+    let class_mask = match account.class_id {
+        Some(id) => match ClassesRepo(&shared.pool).by_id(id).await? {
+            Some(class) => class.base_mask,
+            None => return Ok(false),
+        },
+        None => 0,
+    };
+    let subject = Subject {
+        account_id,
+        role: Role::from_ordinal(account.role),
+        class_id: account.class_id,
+        class_mask,
+        grant_mask: account.grant_mask,
+        revoke_mask: account.revoke_mask,
+    };
+    Ok(shared
+        .perms
+        .allows(&subject, &file_resource(area, folder), Caps::FILE_UPLOAD))
+}
+
+/// Quota/hash/blob checks and the original target identity are rechecked at
+/// publication. Infrastructure failures retain the checkpoint for a retry.
 async fn finalize_htxf_upload(
     shared: &Arc<Shared>,
-    ticket: UploadTicket,
+    ticket: &UploadTicket,
     data: Vec<u8>,
     info: Option<InfoFork>,
-) {
+) -> bool {
     let size = data.len();
     let root = *blake3::hash(&data).as_bytes();
-    // Hash-deny gate at finalize — the enforcement point, exactly like the
-    // native path: a hash denied after the transfer opened still never
-    // commits. The refused bytes are dropped, not parked.
     if shared.moderation.is_denied(&root) {
-        tracing::info!(name = %ticket.name, "hotline upload refused: denied hash");
-        return;
+        return true;
     }
-    // The largest file and the account's space, re-checked against the
-    // *actual* byte count (the control-channel check trusted the declared
-    // size), and held until the file is recorded.
     let _commit = crate::upload_gate::commit_lock(shared).await;
     if let Err(refused) = crate::upload_gate::check(shared, ticket.account_id, size as u64).await {
         tracing::info!(name = %ticket.name, reason = %refused.line(), "hotline upload refused");
-        return;
+        return !matches!(refused, crate::upload_gate::Refusal::Unavailable);
     }
     let blobs = shared.blobs.clone();
     let blob_id = match tokio::task::spawn_blocking(move || blobs.put(&data)).await {
         Ok(Ok(id)) => id,
-        _ => return,
+        _ => return false,
     };
-    debug_assert_eq!(blob_id.0, root, "blob id is the blake3 of the bytes");
-    // Classic metadata from the INFO fork: a TEXT type reads as text/plain,
-    // and the comment is carried onto the node.
+    debug_assert_eq!(blob_id.0, root);
+    match current_upload_allowed(
+        shared,
+        ticket.account_id,
+        &ticket.area,
+        ticket.folder.as_deref(),
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => return true,
+        Err(_) => return false,
+    }
+    // Check after the commit lock and blob IO: a deny added while waiting is
+    // effective before any file-node publication.
+    if shared.moderation.is_denied(&root) {
+        tracing::info!(name = %ticket.name, "hotline upload refused: denied hash");
+        return true;
+    }
     let mime = match info.as_ref().map(|i| i.type_code) {
         Some(tc) if tc == *b"TEXT" => "text/plain",
         _ => "application/octet-stream",
@@ -760,9 +758,11 @@ async fn finalize_htxf_upload(
         .unwrap_or_default();
     match shared
         .files
-        .add_file(
+        .add_file_if_target(
             &ticket.area,
             ticket.folder.as_deref(),
+            ticket.target.area,
+            ticket.target.parent,
             &ticket.name,
             &blob_id.0,
             size as i64,
@@ -774,15 +774,18 @@ async fn finalize_htxf_upload(
         )
         .await
     {
-        Ok(node) => {
+        Ok(Some(id)) => {
             shared.bus.publish(ServerEvent::FileAdded {
                 area: ticket.area.clone(),
-                id: node.id,
+                id,
             });
             tracing::info!(area = %ticket.area, name = %ticket.name, size, "hotline upload finalized");
+            true
         }
-        Err(e) => {
-            tracing::info!(name = %ticket.name, "hotline upload not registered: {e}");
+        Ok(None) => true, // original destination changed, or name is occupied
+        Err(error) => {
+            tracing::info!(name = %ticket.name, %error, "hotline upload not registered");
+            !matches!(error, rabbithole_server_core::FileError::Store(_))
         }
     }
 }
@@ -2626,7 +2629,13 @@ async fn upload_file(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -
     }
     let name = field_text(txn, field::FILE_NAME)
         .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty() && !n.contains('/'));
+        .filter(|n| {
+            !n.is_empty()
+                && n.len() <= 128
+                && !matches!(n.as_str(), "." | "..")
+                && !n.contains(['/', '\\'])
+                && !n.chars().any(char::is_control)
+        });
     let Some(name) = name else {
         return err_reply(ty, id, "no file name");
     };
@@ -2637,21 +2646,24 @@ async fn upload_file(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -
         return err_reply(ty, id, "no file path");
     };
     let folder = (path.len() > 1).then(|| path[1..].join("/"));
-    let resource = file_resource(&area, folder.as_deref());
-    if !shared
-        .perms
-        .allows(&active.subject, &resource, Caps::FILE_UPLOAD)
-    {
-        return err_reply(ty, id, "not permitted");
-    }
-    // The destination folder must exist (the area root always does).
-    if let Some(f) = folder.as_deref() {
-        match shared.files.node_by_path(&area, f).await {
-            Ok(Some(n)) if n.kind == KIND_FOLDER => {}
-            Ok(Some(_)) => return err_reply(ty, id, "not a folder"),
-            Ok(None) => return err_reply(ty, id, "no such folder"),
-            Err(e) => return err_reply(ty, id, &format!("{e}")),
+    let canonical = match shared.files.area(&area).await {
+        Ok(area) => area,
+        Err(_) => return err_reply(ty, id, "no such area"),
+    };
+    let area = canonical.slug;
+    let parent = if let Some(path) = folder.as_deref() {
+        match shared.files.node_by_path(&area, path).await {
+            Ok(Some(node)) if node.kind == KIND_FOLDER => Some(node.id),
+            _ => return err_reply(ty, id, "no such folder"),
         }
+    } else {
+        None
+    };
+    if !matches!(
+        current_upload_allowed(shared, active.subject.account_id, &area, folder.as_deref()).await,
+        Ok(true)
+    ) {
+        return err_reply(ty, id, "not permitted or file library unavailable");
     }
     // No clobbering: the classic conflict error when the name is taken.
     let full = match folder.as_deref() {
@@ -2686,15 +2698,36 @@ async fn upload_file(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -
     {
         return err_reply(ty, id, &refused.line());
     }
-    let key = partial_key(active.subject.account_id, &area, folder.as_deref(), &name);
     let resuming = field_bytes(txn, field::FILE_TRANSFER_OPTIONS).is_some();
-    let offset = if resuming {
-        shared.hotline.partial_len(&key)
-    } else {
-        // A fresh upload starts over: discard any stale partial state.
-        shared.hotline.drop_partial(&key);
-        0
+    let target = Target {
+        protocol: Protocol::Hotline,
+        account: active.subject.account_id,
+        area: canonical.id,
+        parent,
+        name: name.clone(),
     };
+    let cap = crate::upload_gate::file_ceiling(shared, MAX_HTXF_UPLOAD).min(if resuming {
+        MAX_HTXF_UPLOAD
+    } else {
+        declared_total.unwrap_or(MAX_HTXF_UPLOAD)
+    });
+    shared.hotline.prune_uploads();
+    let (lease, data) = match shared
+        .upload_staging
+        .claim_hotline(target.clone(), resuming, cap)
+        .await
+    {
+        Ok(claim) => claim,
+        Err(error) => {
+            tracing::debug!(%error, "cannot claim Hotline upload checkpoint");
+            return err_reply(
+                ty,
+                id,
+                "upload staging unavailable or destination already active",
+            );
+        }
+    };
+    let offset = data.len();
     let uploader = format!("{}@{}", active.screen_name, shared.origin_name());
     let refnum = shared.hotline.stage_upload(UploadTicket {
         account_id: active.subject.account_id,
@@ -2703,7 +2736,9 @@ async fn upload_file(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -
         folder,
         name,
         declared_total,
-        key,
+        lease,
+        target,
+        data,
         expires: Instant::now() + UPLOAD_REF_TTL,
     });
     let mut fields = vec![Field::int(field::REF_NUM, refnum)];
@@ -3511,3 +3546,6 @@ mod tests {
         assert!(access_mask_for(Role::User, caps).has(Privilege::CannotBeDisconnected));
     }
 }
+
+#[cfg(test)]
+mod upload_tests;

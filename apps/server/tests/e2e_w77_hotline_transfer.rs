@@ -22,6 +22,9 @@ use rabbithole_server_core::{Role, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+#[path = "e2e_w77_hotline_transfer/durable.rs"]
+mod durable;
+
 fn test_config(dir: &std::path::Path) -> ServerConfig {
     ServerConfig {
         name: "Hotline Warren".into(),

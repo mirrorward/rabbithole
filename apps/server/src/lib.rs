@@ -120,7 +120,7 @@ pub struct Shared {
     /// The moderation suite: report queue, quarantine set, hash-deny list
     /// (Wave 13). Quarantine/deny lookups are cheap in-memory mirrors.
     pub moderation: ModerationService,
-    /// Durable, bounded legacy upload checkpoints (currently ZMODEM only),
+    /// Durable, bounded ZMODEM and Hotline upload checkpoints,
     /// bound to the authenticated account and canonical destination IDs.
     pub(crate) upload_staging: legacy_staging::Staging,
     /// Live syndication/legacy-gateway activity counters (Wave 10),
