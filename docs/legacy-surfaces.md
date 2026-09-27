@@ -30,7 +30,7 @@ disables that class.
 | NNTPS reader (implicit TLS, RFC 8143) | 563 (`nntp_tls_addr`; privileged) | `nntp_tls_enabled` | same as the reader — the TLS transport satisfies the `AUTHINFO` gate | conn, legacy, auth, post | self-signed identity only (clients pin the burrow fingerprint; ACME certs land with the web slice) |
 | NNTP peer feed (IHAVE + RFC 4644 CHECK/TAKETHIS, NEWNEWS; STARTTLS) | 1120 (`nntp_feed_addr`) | `nntp_feed_enabled` | `nntp_feed_peers` allowlist (user → password, *TOML-only*); **empty = refuse every peer** (fail safe); every transit verb answers 480 until authenticated; plaintext `AUTHINFO` answers 483 under `nntp_auth_require_tls` | conn, legacy, auth | — |
 | NNTP peer feed over implicit TLS | 1563 (`nntp_feed_tls_addr`) | `nntp_feed_tls_enabled` | same allowlist as the plaintext feed | conn, legacy, auth | — |
-| Hotline (+HTXF) | 5500 (`hotline_addr`); HTXF bulk channel binds control port + 1 (5501) | `hotline_enabled` | `hotline_min_role` — Hotline guest sign-ins (empty credentials) count as guest and are refused above it | conn, auth (login), legacy (per transaction), post (news), transfer (downloads) | HTXF **upload**, durable fork-offset upload resume, folder downloads (tolerated with empty success replies); DisconnectUser bans are in-memory only; DeleteUser is a soft delete (disable); a few private-chat push edges (native topic set not echoed as 119) |
+| Hotline (+HTXF) | 5500 (`hotline_addr`); HTXF bulk channel binds control port + 1 (5501) | `hotline_enabled` | `hotline_min_role` — Hotline guest sign-ins (empty credentials) count as guest and are refused above it | conn, auth (login), legacy (per transaction), post (news), transfer (downloads) | HTXF **upload**, durable fork-offset upload resume, folder downloads (tolerated with empty success replies); DisconnectUser bans are in-memory only; a few private-chat push edges (native topic set not echoed as 119) |
 | FTN / binkp mailer | 24554 (`ftn_addr`) | `ftn_enabled` (tossing/scanning also needs non-empty `ftn_node`) | binkp session password `ftn_password` (`""`/`"-"` = unsecured); gateway posts/DMs only under a member-baseline subject holding the `board`/`dm` caps | conn, auth (failed inbound password verification) | ARCmail bundle decompression (raw `.PKT` only; bundles left in spool), answering-side sending (outbound rides `poll_uplink` dials), crash-recovery resume / `M_GET` |
 | QWK / QWKE | — (no listener; telnet `[M]` + `ctl qwk-build`/`qwk-ingest`) | `qwk_enabled` | telnet's `telnet_min_role`; REP ingest posts under `BOARD_POST` per board | (telnet's) | HTTP spool serving, zmodem upload path, per-user scheduled packets |
 | Radio delivery (Icecast/ICY) | 8000 (`radio_addr`) | `radio_enabled` | listeners (`GET`) are anonymous; a `SOURCE`/`PUT` DJ on this port authenticates HTTP Basic against a **real account** and needs cap `BROADCAST` on the `radio` resource | conn, auth (failed source logins) | live sources are fanned out **verbatim** (no decode/transcode into the audio `Station` playout) |
@@ -136,6 +136,11 @@ disables that class.
   original destination without overwriting existing files. See
   [Hotline upload checkpoints](hotline-upload-resume.md) for resource bounds,
   expiry, crash recovery and the one-active-instance requirement.
+  `DeleteUser` now uses shared permanent account removal, current caller
+  permissions and native self/role protections. Successful removal signs out
+  active sessions and retires account/persona names while preserving signed
+  content. Disabled accounts can be removed too. See
+  [Hotline account removal](hotline-account-admin.md) for the policy and limits.
 - **FTN**: `ftn_enabled`, `ftn_addr`, `ftn_node`, `ftn_uplink`,
   `ftn_uplink_host`, `ftn_password`, `ftn_inbound_dir` (default
   `ftn/inbound`), `ftn_outbound_dir` (default `ftn/outbound`), `ftn_areas`

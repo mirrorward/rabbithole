@@ -561,3 +561,6 @@ async fn hotline_broadcast_kick_and_ban() {
     root.close().await;
     burrow.shutdown().await;
 }
+
+#[path = "e2e_w75_hotline_admin/delete.rs"]
+mod delete;

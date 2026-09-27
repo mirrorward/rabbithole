@@ -82,9 +82,9 @@
 //!   accounts and RBAC classes. The access bitmap is a *projection* of
 //!   RabbitHole roles/capabilities — see [`access_mask_for`] and
 //!   [`role_for_access`] for the exact (documented, lossy) mapping.
-//!   DeleteUser is a **soft delete**: the account is disabled (it can no
-//!   longer log in and reads as absent on this surface) rather than having
-//!   its row destroyed; hard removal is a follow-up.
+//!   DeleteUser permanently removes the account and its credentials/personas,
+//!   signs out its sessions, and retires its names while preserving signed
+//!   history. Native account-management standing and last-keeper checks apply.
 //! - **DisconnectUser (110)** — kick via the same
 //!   [`ServerEvent::Kick`] bus path the native admin Kick uses (same
 //!   capability + role-ordering checks); the optional ban rides an
@@ -2778,7 +2778,8 @@ async fn upload_file(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -
 // set are dropped (they are not translated into per-account grant/revoke
 // masks — a follow-up); the superuser role projects as a full bitmap but can
 // never be *assigned* from a bitmap (SetUser never up- or downgrades a
-// superuser); DeleteUser is a soft delete (the login stays reserved).
+// superuser). DeleteUser permanently removes the account, but its login and
+// persona names stay reserved to protect historical attribution.
 
 /// Fire-and-forget audit record, same conventions as the native admin family.
 fn audit(shared: &Arc<Shared>, actor: &str, action: &str, detail: String) {
@@ -2974,51 +2975,69 @@ async fn new_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> T
     }
 }
 
-/// DeleteUser (351): soft-delete an account — it is disabled (login refused,
-/// absent from this surface) and its live sessions are kicked. The row (and
-/// the login) is retained; hard removal is a documented follow-up.
+/// DeleteUser (351): permanently remove an account through the shared store
+/// transaction. Disabled accounts are removable too. Current caller standing,
+/// self protection and the store's last-enabled-keeper guard match native
+/// account removal. Only a successful deletion signs out the target.
 async fn delete_user(shared: &Arc<Shared>, active: &Active, txn: &Transaction) -> Transaction {
     let ty = transaction::DELETE_USER;
     let id = txn.header.id;
-    if !admin_allowed(shared, active, Caps::ACCOUNT_ADMIN) {
+    // Active.subject is a login-time snapshot. A destructive operation must
+    // honor a later disable, demotion, class change, or revoked admin grant.
+    let actor = match AccountsRepo(&shared.pool)
+        .by_id(active.subject.account_id)
+        .await
+    {
+        Ok(Some(a)) if !a.disabled => a,
+        Ok(_) => return err_reply(ty, id, "not permitted"),
+        Err(e) => return err_reply(ty, id, &format!("{e}")),
+    };
+    let class_mask = match actor.class_id {
+        Some(class_id) => match ClassesRepo(&shared.pool).by_id(class_id).await {
+            Ok(Some(class)) => class.base_mask,
+            Ok(None) => return err_reply(ty, id, "not permitted"),
+            Err(e) => return err_reply(ty, id, &format!("{e}")),
+        },
+        None => 0,
+    };
+    let subject = Subject {
+        account_id: actor.id,
+        role: Role::from_ordinal(actor.role),
+        class_id: actor.class_id,
+        class_mask,
+        grant_mask: actor.grant_mask,
+        revoke_mask: actor.revoke_mask,
+    };
+    if !shared.perms.allows(&subject, "admin", Caps::ACCOUNT_ADMIN) {
         return err_reply(ty, id, "not permitted");
     }
     let login = field_text_deobf(txn, field::USER_LOGIN).trim().to_string();
-    let account = match visible_account(shared, &login).await {
+    let account = match AccountsRepo(&shared.pool).by_login(&login).await {
         Ok(Some(a)) => a,
         Ok(None) => return err_reply(ty, id, "no such account"),
         Err(e) => return err_reply(ty, id, &format!("{e}")),
     };
-    // Never let a Hotline admin soft-delete a superuser (or themselves out
-    // from under their own session by role trickery): role ordering applies,
-    // same as the kick path.
-    if Role::from_ordinal(account.role) >= active.subject.role
-        && active.subject.role != Role::Superuser
-    {
+    let standing = crate::handlers15::Standing {
+        account_id: actor.id,
+        role: subject.role,
+    };
+    if !standing.may_manage(&account) {
         return err_reply(ty, id, "cannot delete that account");
     }
     match AccountsRepo(&shared.pool)
-        .admin_set(&login, None, None, Some(true))
+        .delete(account.id, Role::Admin as u8)
         .await
     {
         Ok(true) => {}
-        Ok(false) => return err_reply(ty, id, "no such account"),
+        Ok(false) => return err_reply(ty, id, "cannot delete that account"),
         Err(e) => return err_reply(ty, id, &format!("{e}")),
     }
-    // Classic servers drop the deleted account's live sessions.
-    for e in shared.presence.snapshot() {
-        if e.account_id == account.id {
-            shared.bus.publish(ServerEvent::Kick {
-                session_id: e.session_id,
-                reason: "account deleted".into(),
-            });
-        }
-    }
+    crate::handlers15::sign_out_everywhere(shared, account.id, "account removed").await;
     audit(
         shared,
-        &active.login,
+        &actor.login,
         "account-delete",
-        format!("{login} via=hotline (soft delete: disabled)"),
+        format!("{} via=hotline permanent", account.login),
     );
     Transaction::reply(ty, id, 0, Vec::new())
 }
