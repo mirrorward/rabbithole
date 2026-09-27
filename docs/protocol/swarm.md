@@ -93,8 +93,10 @@ catalog metadata, no bytes. The server keeps the who-has-what map as
 name + metadata; wire endpoints arrive with the peer-wire slice) and
 whether **this server's own blob store** holds the full file
 (`server_has`/`server_size`) so a fetcher can always fall back to the
-origin via the Wave 4.2 transfer engine. `sources.len()` doubles as the
-root's rarity signal until per-chunk rarity arrives with the scheduler.
+origin via the Wave 4.2 transfer engine. `sources.len()` is a root-level
+availability hint. Per-unit availability is measured by the fetch scheduler
+from the sources' HaveMaps; it is not inferred by the coordinator or added to
+these wire replies.
 
 Cheshire mode is respected: sources whose session is invisible are
 omitted for sub-moderator callers (naming an advert's holder would also
@@ -255,12 +257,14 @@ its unit back and retires; when the queue drains, idle workers enter
 endgame and duplicate units still in flight (verified writes are
 idempotent, first-done wins), so one stalled peer can't hold the tail.
 
-Each worker first asks its source for its `HaveMap` and takes only units
-the source holds. A source holding none of what is left (a partial seed
-still fetching) is asked again every 3 seconds and let go after a minute
-(by the clock) without anything new; a known partial seed that does not
-answer a re-ask keeps its last map. One that answers `NOT_HELD` loses
-that unit, not its place (after eight such answers against its own map it
+Each source has one shared `HaveMap` across all its worker lanes. One probe
+loop per source waits 3 seconds after each query before refreshing it again,
+including while byte streams are busy. A source holding none of what is left (a partial seed still
+fetching) is let go after a minute without anything new; a known partial
+seed that does not answer a re-ask keeps its last map marked stale. A reply
+to a query started before a contrary range reply cannot restore that stale
+claim. One that answers `NOT_HELD` loses
+that unit, not its place (after repeated misses against its own map it
 is let go). A fetch can so be completed from peers that each hold only
 parts of the file. A unit that cannot be written on this machine (a full
 disk) fails the fetch with that error, not as if no source could serve,
@@ -268,6 +272,33 @@ and the desktop app then keeps the verified progress for a retry instead
 of falling back to the burrow.
 Rarest-first ordering applies across files (from coordinator source
 counts) and arrives with manifest-set fetching.
+
+### Live per-unit availability
+
+`scheduler::availability::availability_channel()` returns a one-use reporter
+and a cloneable observer. Pass the reporter to
+`scheduler::fetch_swarm_from_with_availability`; existing fetch functions,
+wire messages and `FetchReport` remain compatible. The observer survives the
+fetch and provides `snapshot(start_unit, limit)` pages of at most 4,096 units.
+Its `changed()` notification coalesces revisions instead of queuing every
+update for a slow consumer. A snapshot examines only the requested units
+against the configured source set.
+
+Each unit reports live `claimed_sources`, compatibility `assumed_sources`,
+and the stale subset of claimed sources separately. An unanswered initial
+query may retain the existing whole-file assumption; it is never a verified
+claim. A source counts once across its lanes, and loses its count after its
+last lane retires. Callers must deduplicate source entries before fetching;
+human-readable source labels are not identity keys.
+
+Local state is `Missing`, `Resumed`, or `Verified`. Resume-record entries stay
+`Resumed` until the current fetch verifies them; incoming bytes become
+`Verified` only after Bao verification. Successful whole-file hashing verifies
+the assembled result, while a mismatching final hash clears local annotations.
+Peer claims never promote local state. The observer also reports waiting,
+fetching, verifying and terminal completion/failure/cancellation phases. These
+annotations leave unit ordering, endgame behavior and borrowed-source sharing
+restrictions intact; they do not implement cross-file rarest-first scheduling.
 
 Fetches are interruption-proof: `fetch_swarm_resumable` records each
 completed unit in `<dest>.rhstate` (written atomically as units land),

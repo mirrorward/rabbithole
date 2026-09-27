@@ -10,9 +10,10 @@
 //! in flight elsewhere (verified writes are idempotent, so first-done wins
 //! and a stalled peer can't hold the tail hostage).
 //!
-//! Sources need not hold the whole file. Each worker first asks its source
-//! which units it holds (a [`HaveMap`](crate::peer::HaveMap); a source that
-//! predates the question holds the whole file) and takes only those. A
+//! Sources need not hold the whole file. One probe per source shares its
+//! [`HaveMap`](crate::peer::HaveMap) across all lanes and refreshes while
+//! streams are busy; workers take only held units. A source that predates
+//! the question is assumed to hold the whole file. A
 //! source holding none of what is left (a partial seed still fetching) is
 //! asked again every few seconds, and let go after a minute without
 //! anything new; one that says it does not hold a unit after all
@@ -32,10 +33,15 @@ use std::time::Duration;
 use bao_tree::io::outboard::PreOrderOutboard;
 use serde::{Deserialize, Serialize};
 
+pub mod availability;
+use availability::{AvailabilityPhase, AvailabilityReporter, Tracker};
+
+#[cfg(test)]
+mod availability_tests;
+
 use crate::peer::{
     fetch_proved, open_proofs, proofs_path, proven_ranges, HaveMap, PeerError, PeerSource,
-    RangeSource, SeedStore, Sharing, HAVE_UNIT, PEER_REQUEST_MAX, STATUS_BUSY, STATUS_DENIED,
-    STATUS_NOT_FOUND, STATUS_NOT_HELD,
+    RangeSource, SeedStore, Sharing, HAVE_UNIT, PEER_REQUEST_MAX, STATUS_BUSY, STATUS_NOT_HELD,
 };
 
 /// One fetchable source for a root (from a `SourceList` entry).
@@ -148,6 +154,8 @@ struct WorkState {
     local: Option<std::io::Error>,
     /// Units a source lent rather than gave: never offered on.
     borrowed: HashSet<u64>,
+    /// One availability record per source, shared by all of its lanes.
+    availability: Tracker,
 }
 
 /// What a fetch keeps as it goes: its resume record, the proofs of what
@@ -232,6 +240,7 @@ pub async fn fetch_swarm(
         HashSet::new(),
         Keep::default(),
         None,
+        None,
     )
     .await
 }
@@ -263,7 +272,16 @@ pub async fn fetch_swarm_resumable(
     size: u64,
     dest: &Path,
 ) -> Result<FetchReport, PeerError> {
-    resumable(&peers(sources, token, root), root, size, dest, None, None).await
+    resumable(
+        &peers(sources, token, root),
+        root,
+        size,
+        dest,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// [`fetch_swarm_resumable`] plus a live [`UnitDone`] stream on `progress` —
@@ -282,6 +300,7 @@ pub async fn fetch_swarm_resumable_with_progress(
         size,
         dest,
         Some(progress),
+        None,
         None,
     )
     .await
@@ -308,6 +327,7 @@ pub async fn fetch_swarm_sharing(
         dest,
         progress,
         Some(seeds),
+        None,
     )
     .await
 }
@@ -325,7 +345,39 @@ pub async fn fetch_swarm_from(
     progress: Option<ProgressSink>,
     seeds: Option<Arc<SeedStore>>,
 ) -> Result<FetchReport, PeerError> {
-    resumable(sources, root, size, dest, progress, seeds).await
+    resumable(sources, root, size, dest, progress, seeds, None).await
+}
+
+/// [`fetch_swarm_from`] with bounded, live availability snapshots. The
+/// one-use producer from [`availability::availability_channel`] belongs to
+/// this invocation alone. Its observer remains readable on every exit.
+pub async fn fetch_swarm_from_with_availability(
+    sources: &[Arc<dyn RangeSource>],
+    root: [u8; 32],
+    size: u64,
+    dest: &Path,
+    progress: Option<ProgressSink>,
+    seeds: Option<Arc<SeedStore>>,
+    availability: AvailabilityReporter,
+) -> Result<FetchReport, PeerError> {
+    let tracker = availability.tracker.clone();
+    tracker.begin(root, size);
+    let result = resumable(
+        sources,
+        root,
+        size,
+        dest,
+        progress,
+        seeds,
+        Some(tracker.clone()),
+    )
+    .await;
+    tracker.finish(if result.is_ok() {
+        AvailabilityPhase::Complete
+    } else {
+        AvailabilityPhase::Failed
+    });
+    result
 }
 
 /// Stops sharing a fetch's part when the fetch ends without the whole file
@@ -350,6 +402,7 @@ async fn resumable(
     dest: &Path,
     progress: Option<ProgressSink>,
     seeds: Option<Arc<SeedStore>>,
+    availability: Option<Tracker>,
 ) -> Result<FetchReport, PeerError> {
     // An empty file has nothing to fetch: it is the empty file, if that is
     // what the root says.
@@ -419,8 +472,12 @@ async fn resumable(
             sharing,
         },
         progress,
+        availability.clone(),
     )
     .await?;
+    if let Some(availability) = &availability {
+        availability.verifying();
+    }
     // The resume trusted prior units from disk; verify the whole file.
     let path = dest.to_path_buf();
     let ok = tokio::task::spawn_blocking(move || -> Result<bool, std::io::Error> {
@@ -448,6 +505,9 @@ async fn resumable(
         let _ = std::fs::remove_file(&state_path);
         let _ = std::fs::remove_file(&proofs_at);
         let _ = std::fs::remove_file(dest);
+        if let Some(availability) = &availability {
+            availability.invalidate_local();
+        }
         return Err(PeerError::Verify(
             "assembled file does not hash to the root (stale partial removed; retry)".into(),
         ));
@@ -470,6 +530,7 @@ async fn resumable(
 /// must not leave workers still fetching and writing its file.
 struct Workers {
     handles: Vec<tokio::task::JoinHandle<(String, u64)>>,
+    probes: Vec<tokio::task::JoinHandle<()>>,
     state: Arc<Mutex<WorkState>>,
 }
 
@@ -477,6 +538,9 @@ impl Drop for Workers {
     fn drop(&mut self) {
         for worker in &self.handles {
             worker.abort();
+        }
+        for probe in &self.probes {
+            probe.abort();
         }
         // A worker running on another thread finishes the unit it is
         // writing, which it does holding this lock, and writes nothing
@@ -489,6 +553,7 @@ impl Drop for Workers {
         }
         state.stopped = true;
         state.persist_to = None;
+        state.availability.stop_sources();
     }
 }
 
@@ -502,6 +567,7 @@ async fn fetch_swarm_inner(
     borrowed: HashSet<u64>,
     keep: Keep,
     progress: Option<ProgressSink>,
+    availability: Option<Tracker>,
 ) -> Result<FetchReport, PeerError> {
     let state_path = keep.state_path;
     // Total units in the file (for progress denominators).
@@ -537,6 +603,23 @@ async fn fetch_swarm_inner(
     }
     pending.reverse();
     let units_left = pending.len().max(1);
+    let has_work = !pending.is_empty();
+    let availability = availability.unwrap_or_else(|| {
+        let tracker = Tracker::new();
+        tracker.begin(root, size);
+        tracker
+    });
+    let lanes: Vec<usize> = sources
+        .iter()
+        .map(|source| {
+            if has_work {
+                source.lanes().clamp(1, units_left)
+            } else {
+                0
+            }
+        })
+        .collect();
+    availability.initialize(&lanes, &done);
     let state = Arc::new(Mutex::new(WorkState {
         pending,
         in_flight: HashSet::new(),
@@ -551,6 +634,7 @@ async fn fetch_swarm_inner(
         sharing: keep.sharing,
         local: None,
         borrowed,
+        availability: availability.clone(),
     }));
     // Told by the worker that lands the last unit, so a worker still stuck
     // on a slow peer does not hold back a file that is already whole.
@@ -558,17 +642,33 @@ async fn fetch_swarm_inner(
 
     let mut workers = Workers {
         handles: Vec::new(),
+        probes: Vec::new(),
         state: state.clone(),
     };
     // A worker per lane of each source (never more than there are units).
     for (index, source) in sources.iter().enumerate() {
-        for _ in 0..source.lanes().clamp(1, units_left) {
+        if lanes[index] == 0 {
+            continue;
+        }
+        let probe_source = source.clone();
+        let probe_availability = availability.clone();
+        workers.probes.push(tokio::spawn(async move {
+            refresh_availability(index, probe_source, probe_availability).await;
+        }));
+        for _ in 0..lanes[index] {
             let source = source.clone();
             let state = state.clone();
             let dest = dest.to_path_buf();
             let progress = progress.clone();
             let complete = complete.clone();
+            let availability = availability.clone();
             workers.handles.push(tokio::spawn(async move {
+                // Construct before the worker's first await, so normal
+                // failure retires only this lane, not healthy siblings.
+                let _lane = LaneGuard {
+                    index,
+                    availability,
+                };
                 worker(
                     index,
                     source,
@@ -628,6 +728,29 @@ const IDLE_LIMIT: Duration = Duration::from_secs(60);
 /// Units a source may say it does not hold after all (against its own
 /// have-map) before it is let go.
 const MAX_MISSES: u32 = 8;
+
+struct LaneGuard {
+    index: usize,
+    availability: Tracker,
+}
+
+impl Drop for LaneGuard {
+    fn drop(&mut self) {
+        self.availability.leave_lane(self.index);
+    }
+}
+
+/// Exactly one probe loop per caller-supplied source, regardless of lanes.
+/// Probes continue while byte streams are busy. Every reply is conditional on
+/// the generation at query start, so a late map cannot undo NOT_HELD or revive
+/// a retired source. Existing transports bound their own availability asks.
+async fn refresh_availability(index: usize, source: Arc<dyn RangeSource>, tracker: Tracker) {
+    while let Some(generation) = tracker.query_generation(index) {
+        let result = source.have().await;
+        tracker.queried(index, generation, result);
+        tokio::time::sleep(HAVE_REFRESH).await;
+    }
+}
 
 /// What a worker knows of which units its source holds.
 enum Holds {
@@ -778,15 +901,10 @@ async fn worker(
         }
     }
     let label = source.label();
-    let mut holds = match source.have().await {
-        Ok(Some(map)) => Holds::Map(map),
-        Ok(None) => Holds::All,
-        // No capability for it here, or it has none of this file: not a
-        // source at all.
-        Err(PeerError::Refused(STATUS_DENIED | STATUS_NOT_FOUND)) => return (label, 0),
-        // Unreachable, or unclear: the first unit will tell.
-        Err(_) => Holds::All,
-    };
+    let availability = state.lock().expect("not poisoned").availability.clone();
+    if !availability.ready(index).await {
+        return (label, 0);
+    }
     let mut idle_since: Option<std::time::Instant> = None;
     let mut misses = 0u32;
     loop {
@@ -795,7 +913,10 @@ async fn worker(
             if s.stopped {
                 break;
             }
-            next_unit(&mut s, &holds, size, index)
+            availability.with_holds(index, |holds| match holds {
+                Some(holds) => next_unit(&mut s, holds, size, index),
+                None => Next::Done,
+            })
         };
         let (off, len, endgame) = match next {
             Next::Done => break,
@@ -808,17 +929,12 @@ async fn worker(
                 // A partial seed may have more by now: ask again, a while
                 // later, and let it go after a minute without anything new.
                 let since = *idle_since.get_or_insert_with(std::time::Instant::now);
-                if matches!(holds, Holds::All) || since.elapsed() >= IDLE_LIMIT {
+                let whole =
+                    availability.with_holds(index, |holds| matches!(holds, Some(Holds::All)));
+                if whole || since.elapsed() >= IDLE_LIMIT {
                     break;
                 }
-                tokio::time::sleep(HAVE_REFRESH).await;
-                match source.have().await {
-                    Ok(Some(map)) => holds = Holds::Map(map),
-                    // A known partial seed that did not answer this time
-                    // keeps its last map (it is not taken to hold it all).
-                    Ok(None) => {}
-                    Err(_) => break,
-                }
+                tokio::time::sleep(SIBLING_WAIT).await;
                 continue;
             }
         };
@@ -855,6 +971,7 @@ async fn worker(
                         }
                     }
                     s.done.insert(off);
+                    availability.landed(off);
                     s.served[index] += 1;
                     s.landed();
                     s.settle(off, &complete);
@@ -911,7 +1028,7 @@ async fn worker(
             // the unit would not prove out there): the unit goes to another
             // source, and this one stays for the rest.
             Err(PeerError::Refused(STATUS_NOT_HELD)) => {
-                holds.lacks(off, want, size);
+                availability.lacks(index, off, want);
                 give_back(
                     &mut state.lock().expect("not poisoned"),
                     off,
