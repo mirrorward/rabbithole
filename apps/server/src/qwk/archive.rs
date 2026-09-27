@@ -3,14 +3,13 @@ use super::*;
 use rabbithole_store_server::qwk::exports::{ExportGuard, QwkExportsRepo};
 use rabbithole_store_server::repo::AccountsRepo;
 
-/// Ingest an actual REP ZIP using the exact account-owned QWK export id.
+/// Check the current account, posting permission, and account-owned QWK export.
 /// Missing/expired provenance is never replaced by today's conference map.
-pub async fn ingest_rep_archive_for(
+pub(crate) async fn preflight_rep_archive(
     shared: &Shared,
     account: &Account,
     export_id: &str,
-    bytes: &[u8],
-) -> Result<RepReport, QwkGateError> {
+) -> Result<(Account, String), QwkGateError> {
     if !shared.config.read().qwk_enabled {
         return Err(QwkGateError::Disabled);
     }
@@ -32,6 +31,20 @@ pub async fn ingest_rep_archive_for(
                 "missing, foreign, or expired QWK export id; build a new packet".into(),
             )
         })?;
+    Ok((account, bbs))
+}
+
+/// Ingest an actual REP ZIP using the exact account-owned QWK export id.
+/// Recheck admission here even when a transport preflighted before receiving.
+pub async fn ingest_rep_archive_for(
+    shared: &Shared,
+    account: &Account,
+    export_id: &str,
+    bytes: &[u8],
+) -> Result<RepReport, QwkGateError> {
+    let (account, bbs) = preflight_rep_archive(shared, account, export_id).await?;
+    let subject = subject_for(shared, &account);
+    let exports = QwkExportsRepo(&shared.pool);
     let packet = rabbithole_legacy_qwk::rep_archive::parse(bytes, &bbs)
         .map_err(|e| QwkGateError::Internal(e.to_string()))?;
     let author = format!("{}@{}", account.screen_name, shared.origin_name());

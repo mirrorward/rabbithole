@@ -32,7 +32,7 @@ disables that class.
 | NNTP peer feed over implicit TLS | 1563 (`nntp_feed_tls_addr`) | `nntp_feed_tls_enabled` | same allowlist as the plaintext feed | conn, legacy, auth | — |
 | Hotline (+HTXF) | 5500 (`hotline_addr`); HTXF bulk channel binds control port + 1 (5501) | `hotline_enabled` | `hotline_min_role` — Hotline guest sign-ins (empty credentials) count as guest and are refused above it | conn, auth (login), legacy (per transaction), post (news), transfer (downloads) | HTXF **upload**, durable fork-offset upload resume, folder downloads (tolerated with empty success replies); DisconnectUser bans are in-memory only; a few private-chat push edges (native topic set not echoed as 119) |
 | FTN / binkp mailer | 24554 (`ftn_addr`) | `ftn_enabled` (tossing/scanning also needs non-empty `ftn_node`) | binkp session password `ftn_password` (`""`/`"-"` = unsecured); gateway posts/DMs only under a member-baseline subject holding the `board`/`dm` caps | conn, auth (failed inbound password verification) | ARCmail bundle decompression (raw `.PKT` only; bundles left in spool), answering-side sending (outbound rides `poll_uplink` dials), crash-recovery resume / `M_GET` |
-| QWK / QWKE | — (no listener; telnet `[M]` + `ctl qwk-build`/`qwk-ingest`) | `qwk_enabled` | telnet's `telnet_min_role`; REP ingest posts under `BOARD_POST` per board | (telnet's) | HTTP spool serving, zmodem upload path, per-user scheduled packets |
+| QWK / QWKE | — (no listener; telnet `[M]` + `ctl qwk-build`/`qwk-ingest`) | `qwk_enabled` | telnet's `telnet_min_role`; REP ingest posts under `BOARD_POST` per board | (telnet's) | HTTP spool serving, per-user scheduled packets |
 | Radio delivery (Icecast/ICY) | 8000 (`radio_addr`) | `radio_enabled` | listeners (`GET`) are anonymous; a `SOURCE`/`PUT` DJ on this port authenticates HTTP Basic against a **real account** and needs cap `BROADCAST` on the `radio` resource | conn, auth (failed source logins) | live sources are fanned out **verbatim** (no decode/transcode into the audio `Station` playout) |
 | Radio source ingest + updinfo | 8001 (`radio_source_addr`) | `radio_source_enabled` | shared credentials `radio_source_user` (default `"source"`) / `radio_source_password` — **empty password refuses every source and updinfo** (fail safe); guests never broadcast | conn, auth | same passthrough caveat as delivery |
 | Syndication fetcher (RSS/Atom) | — (outbound only, no listener) | `syndication_enabled` (+ non-empty `syndication_feeds`) | gateway posts under a member-baseline subject holding `BOARD_POST` | — (its own politeness floor + per-feed backoff) | calendar-aligned `sy:updateBase`, content codings other than identity/gzip |
@@ -165,7 +165,12 @@ disables that class.
   the `ctl qwk-build`/`qwk-ingest` admin commands. Conferences are postable
   boards (sorted by slug, numbered 1–255); message selection and read pointers
   share the Wave-3 offline-read subsystem. REP ingest posts with the user's
-  author seed. Successful REP imports have durable receipts scoped to the
+  author seed. Telnet `qwk-reply <export_id>` receives one REP over ZMODEM
+  under the current account and export permissions, without requiring file
+  upload permission or HTTP setup. Bytes stay in bounded memory until a
+  complete batch arrives; refusal or cancellation discards them and restores
+  the connected caller's prompt. Counts and capped, sanitized rejection
+  details follow import. Successful REP imports have durable receipts scoped to the
   uploading account and resolved board within this server database's QWK
   namespace. The semantic hash covers To/From/subject/body, ignoring mutable
   conference numbering and the codec's existing volatile header fields.

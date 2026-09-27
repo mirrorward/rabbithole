@@ -83,6 +83,9 @@ use rabbithole_store_server::repo6::FileNodeRow;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast::{error::RecvError, error::TryRecvError, Receiver};
 
+#[path = "telnet/rep.rs"]
+mod rep;
+
 use crate::{doors, Shared};
 
 /// Failed logins allowed before the connection is closed.
@@ -579,7 +582,9 @@ where
              [D] Direct mail\n [F] Files\n",
         );
         if shared.config.read().qwk_enabled {
-            menu.push_str(" [M] QWK offline mail\n");
+            menu.push_str(
+                " [M] QWK offline mail\n     qwk-reply <export_id>  Upload REP replies\n",
+            );
         }
         if shared.doors.enabled() {
             menu.push_str(" [O] Doors\n");
@@ -626,6 +631,7 @@ where
                 pending = browse_files(t, shared, authed, peer_ip, None).await?;
             }
             ("m" | "qwk", _) => qwk_packet(t, shared, authed).await?,
+            ("qwk-reply", _) => rep::upload(t, shared, authed, arg).await?,
             ("o" | "doors", None) => list_doors(t, shared).await?,
             ("door" | "doors" | "open", Some(id)) => {
                 doors::run_door(&mut t.stream, shared, authed, id).await?;
@@ -636,6 +642,7 @@ where
             ("help" | "?", _) => {
                 t.write_str(
                     "\nb boards   c chat   d mail   f files   doors   q quit\n\
+                     qwk offline mail   qwk-reply <export_id> upload REP replies\n\
                      /go <keyword> jumps to a board, file area, door, room, or user.\n",
                 )
                 .await?;
@@ -1430,7 +1437,11 @@ where
             url_encode_path(&m.name)
         ));
     }
-    out.push_str("Read pointers advanced; the next packet starts after this mail.\n");
+    out.push_str(&format!(
+        "Read pointers advanced; the next packet starts after this mail.\n\
+         To upload replies: qwk-reply {} (then send one REP via ZMODEM).\n",
+        build.export_id
+    ));
     t.write_str(&out).await
 }
 

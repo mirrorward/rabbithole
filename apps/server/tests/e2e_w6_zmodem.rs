@@ -25,6 +25,8 @@ use tokio::net::TcpStream;
 mod durable;
 #[path = "e2e_w6_zmodem/recovery.rs"]
 mod recovery;
+#[path = "e2e_w6_zmodem/rep.rs"]
+mod rep;
 
 fn test_config(dir: &Path) -> ServerConfig {
     ServerConfig {

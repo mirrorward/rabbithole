@@ -10,7 +10,7 @@ the same account and id:
 ```
 
 These are requests to the existing local operator control interface. This does
-not add a web upload, native upload, HTTP file-serving route, or ZMODEM handoff.
+not add a web upload, native upload, or HTTP file-serving route.
 The response reports accepted and duplicate counts and rejected reply subjects
 with reasons. A malformed archive fails before any reply is posted. A valid
 archive may contain both accepted and rejected messages.
@@ -25,7 +25,7 @@ into a new thread. Current account, class, and board posting permissions still
 apply. Authors and signatures come from the uploading account, not the REP
 From field. Existing durable account/board content deduplication remains in use.
 
-Classic REP does not echo a unique export nonce. The operator must supply the
+Classic REP does not echo a unique export nonce. The uploader must supply the
 id for the packet actually used by the reader; the server cannot prove that a
 same-account id supplied by a caller belongs to those bytes. The BBS id in both
 the member filename and the message header must match that export. Server name
@@ -51,6 +51,32 @@ stopped; do not remove directories merely because an in-progress build has not
 registered them yet. Failed eviction cleanup is logged and may likewise need
 operator cleanup. These exceptional files are not covered by the eight-export
 artifact bound.
+
+## Uploading replies from telnet
+
+At the main menu, type `qwk-reply <export_id>` with the id shown by the QWK
+packet command (or supplied with the operator's packet). Once the server says
+"Ready for REP via ZMODEM", send exactly one `.REP` file using your terminal's
+ZMODEM sender. The id must belong to the logged-in account and the QWK packet
+used by your offline reader. The command reports accepted, duplicate, and
+rejected counts and up to 20 sanitized rejection subjects and reasons.
+
+This requires `qwk_enabled`, an enabled real account, and current `BOARD_POST`
+permission, including the normal per-board checks. The server checks account
+and export admission before transfer and again before import. It uses the
+per-account transfer-start budget; it does not require `FILE_UPLOAD` or
+`files_http_base` and never writes into the file library or its resumable
+upload checkpoints. Packet download/HTTP serving remains a separate feature.
+
+The archive stays in memory, capped at 8 MiB of actual received data (and its
+declared size, when supplied). Idle reads/writes time out after 60 seconds;
+the whole transfer times out after five minutes, even if data keeps arriving.
+Five Ctrl-X cancel. Cancelled, timed-out, malformed, incomplete, oversized,
+or multi-file batches discard all received bytes; import starts only after
+one complete file and batch termination. A bounded residue drain returns a
+connected caller to the main prompt. Interrupted REP transfers start again
+from byte zero. Shared archive validation, author signing, routing checks,
+and durable reply deduplication apply after the transfer.
 
 ## ZIP support and limits
 

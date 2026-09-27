@@ -3,7 +3,7 @@
 //! pointers, RBAC, and the shared dedup subsystem.
 //!
 //! Opt-in via config (`qwk_enabled`, default **off**), gating both surfaces:
-//! the telnet `qwk` command (see [`crate::telnet`]) and the ctl admin
+//! the telnet `qwk` / `qwk-reply` commands (see [`crate::telnet`]) and the ctl admin
 //! commands `qwk-build <login>` / `qwk-ingest <login> <path>` (see
 //! [`crate::ctl`]).
 //!
@@ -42,10 +42,13 @@
 //! directory (`<qwk_spool_dir>/<login>/<export_id>/`, immutable per export). The
 //! telnet surface mints one `files_http_base` handoff link per member (the
 //! raw members remain so those per-file links keep working). An HTTP route
-//! serving the `.QWK` directly and a zmodem transfer path are documented
+//! serving the `.QWK` directly and a QWK download via ZMODEM are documented
 //! follow-ups.
 //!
 //! # `.REP` ingest
+//!
+//! Telnet `qwk-reply <export_id>` receives one bounded REP archive via
+//! ZMODEM and calls the same provenance-bound importer as ctl.
 //!
 //! `qwk-ingest` accepts bounded STORE/DEFLATE REP archives with an explicit
 //! export id. Its legacy `.MSG` compatibility path parses an already-unzipped
@@ -80,6 +83,7 @@ use crate::nntp::group_articles;
 use crate::Shared;
 mod archive;
 pub use archive::ingest_rep_archive_for;
+pub(crate) use archive::preflight_rep_archive;
 use rabbithole_store_server::qwk::exports::{ExportReference, QwkExportsRepo};
 
 /// Most messages packed per conference per build (classic mail doors bound

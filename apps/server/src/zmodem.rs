@@ -72,6 +72,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::legacy_staging::{Lease, Offer, Protocol, Target};
 use crate::Shared;
 
+mod rep;
+pub(crate) use rep::receive_rep;
+
 /// Idle budget for one read or write during a transfer; a peer that goes
 /// quiet longer than this gets the session aborted (and, for uploads, its
 /// staging parked for resume).
