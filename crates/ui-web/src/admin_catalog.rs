@@ -948,6 +948,15 @@ pub const SECTIONS: &[Section] = &[
                     ),
                     item("federation_addr", "Address", ADDR_HELP_RESTART),
                     item(
+                        "federation_history_reoffer_secs",
+                        "Board history interval",
+                        "Seconds between history offers to each approved peer, recovering missed \
+                         posts, edits and deletions. Default 60; use 5–3600. Set 0 to stop periodic \
+                         offers; subscription catch-up stays enabled.",
+                    )
+                    .unit(Unit::Seconds)
+                    .zero("Periodic offers off"),
+                    item(
                         "federation_origin",
                         "This burrow\u{2019}s origin",
                         "The permanent name this burrow signs federated posts with. Set once \

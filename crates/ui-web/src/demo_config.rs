@@ -92,6 +92,7 @@ pub const DEMO_SCHEMA: &[(&str, &str, u8, u8)] = &[
     ("federation_enabled", "false", 1, 0),
     ("federation_origin", "", 0, 8),
     ("federation_addr", "0.0.0.0:4655", 0, 0),
+    ("federation_history_reoffer_secs", "60", 2, 1),
     ("s2s_grants_enabled", "false", 1, 1),
     ("s2s_pull_enabled", "false", 1, 1),
     ("s2s_max_concurrent", "2", 2, 1),
